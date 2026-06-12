@@ -1,6 +1,6 @@
 # DACS Community
 
-**Community-contributed tools, reference implementations, and integrations for the [DACS](https://github.com/DACS-Agent-commerce/DACS-Standard) agent-commerce standard.**
+**Community-contributed tools, reference implementations, integrations, and apps built on the [DACS](https://github.com/DACS-Agent-commerce/DACS-Standard) agent-commerce standard.**
 
 [![Standard](https://img.shields.io/badge/standard-DACS%20v0.1-2B36D9)](https://github.com/DACS-Agent-commerce/DACS-Standard)
 [![License: MIT](https://img.shields.io/badge/license-MIT-FF4808)](./LICENSE)
@@ -18,7 +18,7 @@ This repo operates under the model described in the standard's [ROADMAP, Part 2]
 
 | Directory | Contents |
 |---|---|
-| [`reference-implementations/`](./reference-implementations/) | Implementations of one or more DACS stages — full lifecycle or a single phase handler |
+| [`reference-implementations/`](./reference-implementations/) | Implementations of one or more DACS stages — full lifecycle, a single phase handler, or an application/product built on the standard |
 | [`tools/`](./tools/) | Developer tooling: validators, vector runners, bundle inspectors, codegen, debugging aids |
 | [`integrations/`](./integrations/) | Bridges to other stacks: payment-rail adapters (x402, AP2, ERC-20/SPL), identity/vetting method providers, substrate bindings |
 | [`examples/`](./examples/) | Worked end-to-end sessions, sample artifacts, tutorial material |

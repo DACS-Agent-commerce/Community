@@ -2,7 +2,7 @@
 
 The catalogue of community projects, in-tree and external. Conformance status values are defined in [CONTRIBUTING.md](./CONTRIBUTING.md#submission-requirements): `vector-tested` / `exercises-spec` / `prototype`. **Canonical** marks projects the steward has designated the reference for their niche.
 
-## Reference implementations
+## Reference implementations & apps
 
 | Project | Maintainer | DACS surface | Conformance | License | Status |
 |---|---|---|---|---|---|
