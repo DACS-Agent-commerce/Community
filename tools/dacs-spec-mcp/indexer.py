@@ -520,7 +520,7 @@ class DacsIndex:
         while i < n:
             line = self.lines[i]
             if not BARE_FENCE_RE.match(line):
-                # If lang-tagged fence (spec doesn't use any in SPECIFICATION.md
+                # If lang-tagged fence (the spec sources don't use any,
                 # but be safe), skip to its closer.
                 if ANY_FENCE_RE.match(line):
                     j = i + 1
@@ -1001,7 +1001,7 @@ class DacsIndex:
             return {"error": f"vector_file must be relative: '{vector_file}'"}
         try:
             target = (base / candidate).resolve()
-        except (OSError, RuntimeError) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             return {"error": f"vector_file resolution failed: {e}"}
         try:
             target.relative_to(base)
@@ -1037,7 +1037,7 @@ class DacsIndex:
             return {"error": f"fixture_path must be relative: '{fixture_path}'"}
         try:
             target = (base / candidate).resolve()
-        except (OSError, RuntimeError) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             return {"error": f"fixture_path resolution failed: {e}"}
         try:
             target.relative_to(base)

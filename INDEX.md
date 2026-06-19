@@ -12,7 +12,7 @@ The catalogue of community projects, in-tree and external. Conformance status va
 
 | Project | Maintainer | DACS surface | Conformance | License | Status |
 |---|---|---|---|---|---|
-| — | | | | | |
+| [dacs-spec-mcp](./tools/dacs-spec-mcp) | norgejbb-byte | Spec-reference MCP server (read/search/fetch only): §-sections, rule families, artifact schemas, the §14 conformance plan + vectors — served verbatim with `(file, line)` provenance from a pinned DACS-Standard checkout | n/a — reference tool; serves spec text verbatim (byte-equal self-test), not a conformance implementation | MIT | In-tree |
 
 ## Integrations
 
