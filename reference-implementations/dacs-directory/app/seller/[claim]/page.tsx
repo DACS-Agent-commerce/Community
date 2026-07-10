@@ -12,6 +12,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const { claim } = await params;
   const seller = loadCatalog().sellers.find((s) => s.primaryClaim === decodeURIComponent(claim));
   if (!seller) return <h1 className="h1">Unknown agent</h1>;
+  const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
 
   return (
     <>
@@ -68,7 +69,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
 
       <div className="stat-row">
         <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">deals completed</div></div>
-        <div className="stat"><div className="n">{seller.listings.length}</div><div className="l">listing{seller.listings.length === 1 ? "" : "s"}</div></div>
+        <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
         <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
       </div>
 
@@ -76,7 +77,10 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         <h2>Listings</h2>
         {seller.listings.map((l) => (
           <div key={l.listingId} className="card" style={{ marginBottom: 12 }}>
-            <h3>{l.offering.title}</h3>
+            <h3>
+              {l.offering.title}{" "}
+              {l.status === "revoked" && <span className="badge err">revoked</span>}
+            </h3>
             {l.offering.description && (
               <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 10px", maxWidth: 720 }}>
                 {l.offering.description}

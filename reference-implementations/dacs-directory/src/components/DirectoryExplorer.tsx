@@ -2,6 +2,7 @@
 /** Searchable, filterable agent directory — the §6.3.6 filters, in the UI. */
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { SellerRecord } from "@/src/catalog/types";
 import { CciChip } from "./Badge";
 import { railLabel, negotiationLabel, IDENTITY_TIERS, tierMeta } from "./labels";
@@ -26,21 +27,25 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
   const [category, setCategory] = useState<string | null>(null);
   const [goodRecord, setGoodRecord] = useState(false);
 
-  const rails = useMemo(() => [...new Set(sellers.flatMap(sellerRails))].sort(), [sellers]);
+  const availableSellers = useMemo(
+    () => activeCatalogSellers(sellers),
+    [sellers],
+  );
+  const rails = useMemo(() => [...new Set(availableSellers.flatMap(sellerRails))].sort(), [availableSellers]);
   // Top-level category segments, data-driven (no fixed taxonomy in the spec).
   const categories = useMemo(
-    () => [...new Set(sellers.flatMap(sellerCategories).map((c) => c.split(".")[0]))].sort(),
-    [sellers],
+    () => [...new Set(availableSellers.flatMap(sellerCategories).map((c) => c.split(".")[0]))].sort(),
+    [availableSellers],
   );
   const tierCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const s of sellers) counts[sellerTier(s)] = (counts[sellerTier(s)] ?? 0) + 1;
+    for (const s of availableSellers) counts[sellerTier(s)] = (counts[sellerTier(s)] ?? 0) + 1;
     return counts;
-  }, [sellers]);
+  }, [availableSellers]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return sellers.filter((s) => {
+    return availableSellers.filter((s) => {
       if (rail && !sellerRails(s).includes(rail)) return false;
       if (tier && sellerTier(s) !== tier) return false;
       if (category && !sellerCategories(s).some((c) => categoryMatches(c, category))) return false;
@@ -60,7 +65,7 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
       ].join(" ").toLowerCase();
       return hay.includes(needle);
     });
-  }, [sellers, q, rail, tier, category, goodRecord]);
+  }, [availableSellers, q, rail, tier, category, goodRecord]);
 
   return (
     <>
@@ -72,7 +77,7 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
           onChange={(e) => setQ(e.target.value)}
         />
         <span className="meta" style={{ marginLeft: "auto" }}>
-          {filtered.length} of {sellers.length} agent{sellers.length === 1 ? "" : "s"}
+          {filtered.length} of {availableSellers.length} agent{availableSellers.length === 1 ? "" : "s"}
         </span>
       </div>
 

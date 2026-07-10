@@ -3,6 +3,7 @@
  * MVP filters: category (dot-prefix), tag (repeatable), rail, cursor/limit.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { activeCatalogListings } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 
@@ -25,7 +26,9 @@ export async function GET(req: NextRequest) {
     s.primaryClaim,
     s.identityTier ?? (s.cci.length > 0 ? "verified" : "self-declared"),
   ]));
-  const all = catalog.sellers.flatMap((s) => s.listings);
+  // Discovery only advertises offers that remain active. Revoked listings stay
+  // available on the seller history/detail surfaces with an explicit status.
+  const all = activeCatalogListings(catalog);
   const filtered = all.filter((l) => {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;
     if (identityTier && tierOf.get(l.seller.primaryClaim) !== identityTier) return false;

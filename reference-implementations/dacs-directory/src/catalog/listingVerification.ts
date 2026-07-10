@@ -28,8 +28,14 @@ export async function verifyListing(raw: Record<string, unknown>): Promise<Verif
   if (!isListing(scope)) return null;
   const listing = scope as unknown as Listing;
   const signature = raw.signature;
-  if (!signature || typeof signature !== "object" || Array.isArray(signature)) return null;
-  const s = signature as Record<string, unknown>;
+  // Early SDK listings stored only the Ed25519 value. Their signer is still
+  // unambiguous because agentId is inside the signed scope and is also checked
+  // against the substrate owner by the indexer.
+  const s: Record<string, unknown> = typeof signature === "string"
+    ? { algorithm: "ed25519", signer: listing.agentId, value: signature }
+    : signature && typeof signature === "object" && !Array.isArray(signature)
+      ? signature as Record<string, unknown>
+      : {};
   if (
     s.algorithm !== "ed25519" ||
     typeof s.signer !== "string" ||
@@ -48,6 +54,20 @@ export async function verifyListing(raw: Record<string, unknown>): Promise<Verif
     return null;
   }
   return { listing, scope, contentHash: hash, signer: s.signer };
+}
+
+/** A bogus candidate must never shadow another valid owner-signed marker. */
+export async function hasValidListingRevocation(
+  candidateRefs: string[],
+  listing: VerifiedListing,
+  expectedVersion: number,
+  readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
+): Promise<boolean> {
+  for (const ref of candidateRefs) {
+    const candidate = await readCandidate(ref);
+    if (candidate && await verifyListingRevocation(candidate, listing, expectedVersion)) return true;
+  }
+  return false;
 }
 
 export function ownerClaim(owner: string | undefined): string | null {

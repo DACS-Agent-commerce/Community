@@ -4,6 +4,7 @@ import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
 import { verifyListing } from "./listingVerification.js";
+import type { DealRecord, RegisteredDeal } from "./types.js";
 
 const SEPARATORS: Record<string, string> = {
   "dacs-3-agreement": "dacs-agreement:v1:",
@@ -49,6 +50,39 @@ export function hasRequiredBundleSignatures(result: BundleVerification): boolean
     if (!party || !valid.has(party.primaryClaim)) return false;
   }
   return true;
+}
+
+/**
+ * Bind a catalog-submitted deal pointer to the identities and job id covered by
+ * the verified bundle signatures. Registration fields are routing hints only;
+ * they must never be allowed to reassign somebody else's bundle/reputation.
+ */
+export function bundleMatchesRegisteredDeal(
+  bundle: AttestationBundle | undefined,
+  deal: RegisteredDeal,
+  catalogSeller: string,
+): boolean {
+  if (!bundle || bundle.jobId !== deal.jobId) return false;
+  const buyers = bundle.parties.filter((p) => p.role === "buyer");
+  const sellers = bundle.parties.filter((p) => p.role === "seller");
+  return buyers.length === 1 && sellers.length === 1 &&
+    buyers[0].primaryClaim === deal.owners.buyer &&
+    sellers[0].primaryClaim === deal.owners.seller &&
+    sellers[0].primaryClaim === catalogSeller;
+}
+
+/** Keep at most one verified reputation record per signed job and bundle ref. */
+export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
+  const jobs = new Set<string>();
+  const refs = new Set<string>();
+  return deals.filter((deal) => {
+    if (!deal.refsVerified) return true;
+    const ref = deal.buyerBundleRef.toLowerCase();
+    if (jobs.has(deal.jobId) || refs.has(ref)) return false;
+    jobs.add(deal.jobId);
+    refs.add(ref);
+    return true;
+  });
 }
 
 export interface ResolvedArtifact {

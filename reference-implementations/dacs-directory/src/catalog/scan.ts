@@ -26,8 +26,8 @@ export interface ScannedArtifacts {
   deals: Map<string, RegisteredDeal & { sellerFromAgreement?: string }>;
   /** owner + programName → observed native address. */
   programs: Map<string, string>;
-  /** listing content hash → revocation marker address. */
-  revocations: Map<string, string>;
+  /** listing content hash → every observed revocation marker candidate. */
+  revocations: Map<string, string[]>;
   txsScanned: number;
   /** Highest tx id observed — the next pass's cursor. */
   highestTxId: number;
@@ -76,6 +76,16 @@ const didOf = (address: string): string =>
   `did:demos:agent:${address.replace(/^0x/, "")}`;
 const bindingKey = (owner: string, name: string): string =>
   `${owner.toLowerCase()}\n${name}`;
+
+export function addRevocationCandidate(
+  revocations: Map<string, string[]>,
+  listingHash: string,
+  address: string,
+): void {
+  const candidates = revocations.get(listingHash) ?? [];
+  if (!candidates.includes(address)) candidates.push(address);
+  revocations.set(listingHash, candidates);
+}
 
 /** Unauthenticated nodeCall (plain fetch — no demosdk in the scan path). */
 async function nodeCall(message: string, data: Record<string, unknown>): Promise<unknown> {
@@ -141,7 +151,7 @@ export async function scanChain(
 
   const listings = new Map<string, string>();
   const programs = new Map<string, string>();
-  const revocations = new Map<string, string>();
+  const revocations = new Map<string, string[]>();
   const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
   const sellerCopies = new Map<string, string>(); // jobId → seller owner
 
@@ -156,7 +166,7 @@ export async function scanChain(
       const listingHash = typeof read.data?.listingContentHash === "string"
         ? read.data.listingContentHash.toLowerCase()
         : null;
-      if (listingHash) revocations.set(listingHash, address);
+      if (listingHash) addRevocationCandidate(revocations, listingHash, address);
     } else if (name.startsWith("dacs5:bundle:seller:")) {
       sellerCopies.set(name.slice("dacs5:bundle:seller:".length), read.owner);
     } else if (name.startsWith("dacs5:bundle:")) {

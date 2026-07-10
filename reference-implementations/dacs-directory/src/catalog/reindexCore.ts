@@ -42,7 +42,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   //    the proof; this state is just the memory of where to look). First run
   //    backfills the full history.
   const state = loadScanState();
-  const needsBindingBackfill = state.schemaVersion !== 2;
+  const needsBindingBackfill = state.schemaVersion !== 3;
   const maxTxs = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const scan = await scanChain(null, {
     maxTxs,
@@ -58,10 +58,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const [jobId, deal] of scan.deals) state.deals[jobId] = deal;
   state.programs ??= {};
   for (const [key, address] of scan.programs) state.programs[key] = address;
+  if (needsBindingBackfill) state.revocations = {};
   state.revocations ??= {};
-  for (const [hash, address] of scan.revocations) state.revocations[hash] = address;
+  for (const [hash, addresses] of scan.revocations) {
+    const priorCandidates = state.revocations[hash];
+    const prior = Array.isArray(priorCandidates)
+      ? priorCandidates
+      : priorCandidates ? [priorCandidates] : [];
+    state.revocations[hash] = [...new Set([...addresses, ...prior])];
+  }
   state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
-  state.schemaVersion = 2;
+  state.schemaVersion = 3;
   saveScanState(state);
   log(
     `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +

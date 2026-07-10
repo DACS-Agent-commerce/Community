@@ -24,11 +24,13 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
-import { ownerClaim, verifyListing, verifyListingRevocation } from "./listingVerification.js";
+import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import { findProgramAddress, loadScanState } from "./store.js";
 import {
+  bundleMatchesRegisteredDeal,
   bundleCategory,
+  dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
   refsPassStrictPolicy,
   type ResolvedArtifact,
@@ -125,11 +127,16 @@ export async function indexRegistration(
       : 1;
     const validity = scope.validity as { notAfter?: unknown } | undefined;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
-    const revocationAddress = revocations[verified.contentHash];
-    const revocation = revocationAddress ? await readAnchor(revocationAddress) : null;
-    const revoked = revocation
-      ? await verifyListingRevocation(revocation, verified, version)
-      : false;
+    const storedCandidates = revocations[verified.contentHash];
+    const revocationAddresses = Array.isArray(storedCandidates)
+      ? storedCandidates
+      : storedCandidates ? [storedCandidates] : [];
+    const revoked = await hasValidListingRevocation(
+      revocationAddresses,
+      verified,
+      version,
+      readAnchor,
+    );
     listings.push({
       listingId,
       version,
@@ -155,7 +162,7 @@ export async function indexRegistration(
   }
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
-  const deals: DealRecord[] = [];
+  const dealCandidates: DealRecord[] = [];
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
   for (const deal of reg.deals ?? []) {
     const resolvedArtifacts: ResolvedArtifact[] = [];
@@ -187,10 +194,11 @@ export async function indexRegistration(
 
     const bundle = verification?.bundle;
     const bundleSignaturesVerified = verification ? hasRequiredBundleSignatures(verification) : false;
-    const strictRefsVerified = verification && bundleSignaturesVerified
+    const partyBindingVerified = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
+    const strictRefsVerified = verification && bundleSignaturesVerified && partyBindingVerified
       ? await refsPassStrictPolicy(verification, resolvedArtifacts)
       : false;
-    deals.push({
+    dealCandidates.push({
       ...deal,
       signatureVerified: bundleSignaturesVerified,
       refsVerified: strictRefsVerified,
@@ -200,6 +208,7 @@ export async function indexRegistration(
       verifiedAt: now,
     });
   }
+  const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
   const counted = deals.filter((d) => d.refsVerified);

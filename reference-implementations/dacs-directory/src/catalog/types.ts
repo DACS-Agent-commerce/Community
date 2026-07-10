@@ -137,12 +137,12 @@ export interface Catalog {
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  schemaVersion?: 2;
+  schemaVersion?: 3;
   lastSeenTxId: number;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
-  /** listing content hash → observed revocation marker address. */
-  revocations?: Record<string, string>;
+  /** listing content hash → every observed revocation marker candidate. */
+  revocations?: Record<string, string[] | string>;
   /** listing anchor address → owner address */
   listings: Record<string, string>;
   /** jobId → discovered deal */

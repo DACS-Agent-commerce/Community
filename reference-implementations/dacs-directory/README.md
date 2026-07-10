@@ -39,7 +39,11 @@ run with `npm test` and `npm run typecheck`.
 
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
-two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia).
+two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its listing
+uses the early SDK's compact signature encoding; the verifier accepts that encoding
+only after checking the same Ed25519 signature, signed scope, agent key, and anchor owner
+as current structured signature envelopes. Historical deals are displayed, but only
+strictly party-bound bundles with verified references contribute to reputation.
 
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
