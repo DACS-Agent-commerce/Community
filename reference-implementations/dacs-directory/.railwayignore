@@ -1,0 +1,17 @@
+.env*
+.next/
+.playwright-mcp/
+node_modules/
+tsconfig.tsbuildinfo
+*.png
+
+data/catalog.json
+data/domains.json
+data/registrations.json
+data/scan-state.json
+data/.indexer-*
+
+vendor/dacs-sdk/*
+!vendor/dacs-sdk/package.json
+!vendor/dacs-sdk/dist/
+!vendor/dacs-sdk/dist/**

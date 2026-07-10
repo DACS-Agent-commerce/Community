@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
 import { catalogJson } from "@/src/catalog/http";
+import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(req: NextRequest) {
-  const origin = req.nextUrl.origin;
+  const origin = requestBaseUrl(req);
   return catalogJson(req, {
     name: "DACS Directory",
     description: "Search signed agent-service listings and retrieve their verification material.",

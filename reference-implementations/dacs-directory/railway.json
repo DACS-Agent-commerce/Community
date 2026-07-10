@@ -1,0 +1,14 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "RAILPACK",
+    "buildCommand": "DACS_SKIP_APP_INSTALL=1 bash scripts/setup-sdk.sh && npm run build"
+  },
+  "deploy": {
+    "startCommand": "npm run start:railway",
+    "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

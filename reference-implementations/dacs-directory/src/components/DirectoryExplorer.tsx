@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
@@ -19,11 +19,32 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const q = params.get("q") ?? "";
+  const paramsString = params.toString();
+  const queryParam = params.get("q") ?? "";
+  const [q, setQ] = useState(queryParam);
+  const ownNavigation = useRef(false);
   const rail = params.get("rail");
   const tier = params.get("identityTier");
   const category = params.get("category");
   const goodRecord = params.get("trackRecord") === "90";
+
+  useEffect(() => {
+    if (ownNavigation.current) ownNavigation.current = false;
+    else setQ(queryParam);
+  }, [queryParam]);
+
+  useEffect(() => {
+    if (q === queryParam) return;
+    const timer = window.setTimeout(() => {
+      const next = new URLSearchParams(paramsString);
+      if (q.trim()) next.set("q", q);
+      else next.delete("q");
+      const query = next.toString();
+      ownNavigation.current = true;
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [paramsString, pathname, q, queryParam, router]);
 
   const availableSellers = useMemo(() => activeCatalogSellers(sellers), [sellers]);
   const services = useMemo<Service[]>(
@@ -74,7 +95,10 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     const query = next.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   };
-  const clear = () => router.replace(pathname, { scroll: false });
+  const clear = () => {
+    setQ("");
+    router.replace(pathname, { scroll: false });
+  };
   const hasFilters = Boolean(q || rail || tier || category || goodRecord);
 
   return (
@@ -96,7 +120,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
             className="search"
             placeholder="Try “review my pull request” or “pay with USDC”"
             value={q}
-            onChange={(event) => setParam("q", event.target.value || null)}
+            onChange={(event) => setQ(event.target.value)}
           />
         </div>
         <div className="result-row">

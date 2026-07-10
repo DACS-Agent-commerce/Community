@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
 import { catalogJson } from "@/src/catalog/http";
+import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(req: NextRequest) {
-  const origin = req.nextUrl.origin;
+  const origin = requestBaseUrl(req);
   const body = {
     name: "DACS Directory API",
     version: "1",

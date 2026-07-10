@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 
 import { directoryManifest, listingSummarySchema, openApiDocument } from "../src/catalog/contracts.js";
 import { catalogJson } from "../src/catalog/http.js";
+import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 
 test("directory manifest lets an agent discover every contract from the origin", () => {
   const origin = "https://directory.example";
@@ -40,4 +41,18 @@ test("catalog responses expose cache validators and honor conditional reads", as
   }), { ok: true });
   assert.equal(conditional.status, 304);
   assert.equal(await conditional.text(), "");
+});
+
+test("public links never expose an internal proxy origin", () => {
+  const prior = process.env.NEXT_PUBLIC_DIRECTORY_URL;
+  process.env.NEXT_PUBLIC_DIRECTORY_URL = "https://directory.example/";
+  try {
+    const request = new NextRequest("http://localhost:8080/api/dacs", {
+      headers: { "x-forwarded-host": "proxy.example", "x-forwarded-proto": "https" },
+    });
+    assert.equal(requestBaseUrl(request), "https://directory.example");
+  } finally {
+    if (prior === undefined) delete process.env.NEXT_PUBLIC_DIRECTORY_URL;
+    else process.env.NEXT_PUBLIC_DIRECTORY_URL = prior;
+  }
 });

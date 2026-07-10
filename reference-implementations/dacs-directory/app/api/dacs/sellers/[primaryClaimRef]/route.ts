@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
 import { catalogJson } from "@/src/catalog/http";
+import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(
   req: NextRequest,
@@ -15,6 +16,7 @@ export async function GET(
   const claim = decodeURIComponent(primaryClaimRef);
   const seller = loadCatalog().sellers.find((s) => s.primaryClaim === claim);
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
+  const origin = requestBaseUrl(req);
   return catalogJson(req, {
     listings: seller.listings,
     identity: { primaryClaim: seller.primaryClaim, displayName: seller.displayName, cci: seller.cci },
@@ -23,8 +25,8 @@ export async function GET(
   }, {
     lastModified: seller.lastIndexedAt,
     links: [
-      { href: `${req.nextUrl.origin}/seller/${encodeURIComponent(seller.primaryClaim)}`, rel: "alternate", type: "text/html" },
-      { href: `${req.nextUrl.origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+      { href: `${origin}/seller/${encodeURIComponent(seller.primaryClaim)}`, rel: "alternate", type: "text/html" },
+      { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],
   });
 }

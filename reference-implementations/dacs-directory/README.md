@@ -48,6 +48,37 @@ strictly party-bound bundles with verified references contribute to reputation.
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
 
+### Railway deployment
+
+The included `railway.json` builds the pinned SDK, performs the production Next build,
+checks `/api/health`, and starts the web app on Railway's injected `PORT`. The Railway
+start script seeds an empty data volume and refreshes the verified catalog every 15
+minutes (override with `DACS_INDEX_INTERVAL_SECONDS`).
+
+Attach a persistent volume at `/data` and set:
+
+```text
+DACS_DIRECTORY_DATA=/data
+DACS_TRUST_PROXY=1
+NEXT_PUBLIC_DIRECTORY_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}
+```
+
+Railway's public edge supplies `X-Real-IP`, so trusting the proxy is appropriate for a
+service exposed only through Railway networking. Set a strong `DACS_ADMIN_TOKEN` as a
+secret variable for the operational indexing endpoints.
+
+Until the pinned SDK is published as a package, deploy from an authorized checkout after
+`npm run setup` so the reviewed SDK build can be packaged without sending its 1.6 GB
+development dependency tree:
+
+```bash
+railway up . --no-gitignore
+```
+
+`.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
+vendor directory. GitHub autodeploys need equivalent private-SDK access before they can
+replace this CLI deployment path.
+
 ### Configuration
 
 | Variable | Required | Purpose |

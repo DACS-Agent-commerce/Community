@@ -4,6 +4,7 @@ import { loadCatalog } from "@/src/catalog/store";
 import { readAnchor } from "@/src/catalog/chain";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
+import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(
   req: NextRequest,
@@ -11,6 +12,7 @@ export async function GET(
 ) {
   const { listingId, version } = await params;
   const requestedSeller = req.nextUrl.searchParams.get("seller");
+  const origin = requestBaseUrl(req);
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
     .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
@@ -30,9 +32,9 @@ export async function GET(
   return catalogJson(req, raw, {
     lastModified: hit.catalogObservedAt,
     links: [
-      { href: `${req.nextUrl.origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
-      { href: `${req.nextUrl.origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
-      { href: `${req.nextUrl.origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+      { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+      { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+      { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],
   });
 }

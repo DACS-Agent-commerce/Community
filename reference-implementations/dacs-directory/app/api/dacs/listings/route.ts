@@ -7,6 +7,7 @@ import { activeCatalogListings } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
+import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -45,13 +46,14 @@ export async function GET(req: NextRequest) {
     cursor: cursor + limit < filtered.length ? String(cursor + limit) : undefined,
     total: filtered.length,
   };
-  const self = new URL(req.url);
+  const origin = requestBaseUrl(req);
+  const self = new URL(`${req.nextUrl.pathname}${req.nextUrl.search}`, origin);
   const links = [
     { href: self.toString(), rel: "self", type: "application/json" },
-    { href: `${req.nextUrl.origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+    { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
   ];
   if (body.cursor) {
-    const next = new URL(req.url);
+    const next = new URL(self);
     next.searchParams.set("cursor", body.cursor);
     links.push({ href: next.toString(), rel: "next", type: "application/json" });
   }
