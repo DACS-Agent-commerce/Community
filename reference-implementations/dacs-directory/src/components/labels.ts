@@ -8,6 +8,8 @@ export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "")
 /** "negotiate-fixed-price" → "fixed price" */
 export const negotiationLabel = (n: string) =>
   n.replace(/^negotiate-/, "").replace(/-/g, " ");
+export const pricingModelLabel = (negotiation: string[] | undefined) =>
+  negotiation?.length ? negotiation.map(negotiationLabel).join(", ") : "not stated";
 /** "deliver-attested-payload" → "attested payload" */
 export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
