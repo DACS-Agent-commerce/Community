@@ -52,6 +52,8 @@ export default function CatalogStatus() {
   return (
     <span
       className={`sync-chip ${cls}`}
+      role="status"
+      aria-live="polite"
       title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
         status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
       } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}

@@ -79,14 +79,15 @@ export default function VerifyDeal({
   buyerOwner: string;
   expectedSeller?: string;
 }) {
-  const [state, setState] = useState<"idle" | "running" | "done">("idle");
+  const [state, setState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [result, setResult] = useState<BundleVerification | null>(null);
-  const [technical, setTechnical] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    setState("running");
-    const resolvedArtifacts: ResolvedArtifact[] = [];
-    const verification = await verifyBundleCore(bundleRef, {
+    setState("running"); setError(null); setResult(null);
+    try {
+      const resolvedArtifacts: ResolvedArtifact[] = [];
+      const verification = await verifyBundleCore(bundleRef, {
       readArtifact: async (r) => {
         const raw = await fetchArtifact(`ref=${encodeURIComponent(r)}`);
         if (raw && r !== bundleRef) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
@@ -103,42 +104,64 @@ export default function VerifyDeal({
       },
       resolvePublicKey: async (did) => keyFromDid(did),
       verify: async (b, s, p) => ed25519Verify(b, s, publicKeyFromRaw(p)),
-    });
-    const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
-    const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
-    const expectedPartiesMatch = buyer === buyerOwner && (!expectedSeller || seller === expectedSeller);
-    const signaturesOk = hasRequiredBundleSignatures(verification);
-    const refsOk = signaturesOk
-      ? await refsPassStrictPolicy(verification, resolvedArtifacts)
-      : false;
-    const strict: BundleVerification = {
-      ...verification,
-      ok: verification.ok && expectedPartiesMatch && signaturesOk && refsOk,
-      reason: !expectedPartiesMatch
-        ? "bundle parties do not match the expected buyer/seller"
-        : !signaturesOk
-          ? "required buyer/seller signatures are missing or invalid"
-          : !refsOk
-            ? "one or more referenced artifact signatures are missing or invalid"
-            : verification.reason,
-    };
-    setResult(strict);
-    setState("done");
+      });
+      const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
+      const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
+      const expectedPartiesMatch = buyer === buyerOwner && (!expectedSeller || seller === expectedSeller);
+      const signaturesOk = hasRequiredBundleSignatures(verification);
+      const refsOk = signaturesOk ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
+      const strict: BundleVerification = {
+        ...verification,
+        ok: verification.ok && expectedPartiesMatch && signaturesOk && refsOk,
+        reason: !expectedPartiesMatch
+          ? "bundle parties do not match the expected buyer/seller"
+          : !signaturesOk
+            ? "required buyer/seller signatures are missing or invalid"
+            : !refsOk
+              ? "one or more referenced artifact signatures are missing or invalid"
+              : verification.reason,
+      };
+      setResult(strict);
+      setState("done");
+    } catch (cause) {
+      const message = cause instanceof TypeError
+        ? "The chain records could not be reached. Check the network and try again."
+        : (cause as Error).message || "The artifact version is unsupported or malformed.";
+      setError(message); setState("error");
+    }
   };
 
   return (
-    <div>
+    <div aria-live="polite">
       <button className="btn" onClick={run} disabled={state === "running"}>
         {state === "running" ? "Verifying in your browser…" : "Verify this deal in your browser"}
       </button>
+      {state === "running" && (
+        <ul className="progress-list" aria-label="Verification progress">
+          <li className="complete"><span aria-hidden>✓</span>Load the anchored bundle</li>
+          <li className="current"><span aria-hidden>●</span>Check signatures and referenced hashes</li>
+          <li><span aria-hidden>○</span>Produce a plain-language verdict</li>
+        </ul>
+      )}
+      {error && <div className="verification-summary err" role="alert"><h3>Could not verify</h3><p>{error}</p></div>}
       {result && (
         <>
-          <div className={`verdict ${result.ok ? "ok" : "err"}`}>
-            {result.ok
-              ? "✓ The signatures and referenced-record hashes are internally consistent."
-              : `✗ This deal does NOT check out — ${result.reason ?? "verification failed"}`}
+          <div className={`verification-summary ${result.ok ? "ok" : "err"}`}>
+            <h3>{result.ok ? "✓ Evidence is internally consistent" : "✗ Evidence failed verification"}</h3>
+            <p>{result.ok
+              ? "The required parties signed and every available referenced record matches the hashes in the bundle."
+              : result.reason ?? "One or more cryptographic checks failed."}</p>
+            <p className="mono">checked {new Date().toLocaleString()}</p>
           </div>
-          <table>
+          <ul className="trust-checks" aria-label="Plain-language verification results">
+            <li><span className={result.signatures.every((signature) => signature.verdict === "valid") ? "check ok" : "check"}>{result.signatures.every((signature) => signature.verdict === "valid") ? "✓" : "✗"}</span><div><strong>Party signatures</strong><p>Buyer and seller signatures must match the keys named in the bundle.</p></div></li>
+            <li><span className={result.refs.every((ref) => ref.verdict === "ok") ? "check ok" : "check"}>{result.refs.every((ref) => ref.verdict === "ok") ? "✓" : "✗"}</span><div><strong>Referenced records</strong><p>Agreement, payment, identity check, and original listing must remain unchanged.</p></div></li>
+            <li><span className={result.ok ? "check ok" : "check"}>{result.ok ? "✓" : "✗"}</span><div><strong>Expected parties</strong><p>The bundle must belong to the buyer and seller shown by this directory.</p></div></li>
+          </ul>
+          <details className="technical-disclosure">
+            <summary>Technical checks and identifiers</summary>
+            <div className="table-scroll" role="region" aria-label="Detailed verification checks" tabIndex={0}>
+            <table>
             <thead><tr><th>What we checked</th><th>Result</th></tr></thead>
             <tbody>
               {result.signatures.map((sig) => {
@@ -162,23 +185,25 @@ export default function VerifyDeal({
                     <td>
                       <strong>{label?.what ?? r.kind}</strong>{" "}
                       {good ? `— ${label?.means ?? "matches the chain record"}` : `— ${REF_FAIL[r.verdict] ?? r.verdict}`}
-                      {technical && <div className="mono meta" style={{ marginTop: 2 }}>{r.kind} · {r.id}</div>}
+                      <div className="mono meta" style={{ marginTop: 2 }}>{r.kind} · {r.id}</div>
                     </td>
                     <td><span className={`badge ${good ? "ok" : "err"}`}>{good ? "untampered ✓" : "problem ✗"}</span></td>
                   </tr>
                 );
               })}
             </tbody>
-          </table>
-          <p className="note">
+            </table>
+            </div>
+          </details>
+          <div className="card" style={{ marginTop: 14, background: "var(--bg-tinted)" }}>
+            <h3>What this verdict does not prove</h3>
+            <p className="note">
             These checks ran <em>in your browser</em>, but the records were fetched through this
             website because the Demos RPC is not browser-accessible. This proves internal
             signature/hash consistency; it does <strong>not</strong> independently prove that the
-            server returned the bytes currently stored at the claimed chain addresses.{" "}
-            <button className="copy-btn" onClick={() => setTechnical((t) => !t)}>
-              {technical ? "hide technical details" : "show technical details"}
-            </button>
-          </p>
+            server returned the bytes currently stored at the claimed chain addresses.
+            </p>
+          </div>
         </>
       )}
     </div>

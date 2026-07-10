@@ -48,19 +48,75 @@ strictly party-bound bundles with verified references contribute to reputation.
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
 
+### Railway deployment
+
+The included `railway.json` builds the pinned SDK, performs the production Next build,
+checks `/api/health`, and starts the web app on Railway's injected `PORT`. The Railway
+start script seeds an empty data volume and refreshes the verified catalog every 15
+minutes (override with `DACS_INDEX_INTERVAL_SECONDS`).
+
+Attach a persistent volume at `/data` and set:
+
+```text
+DACS_DIRECTORY_DATA=/data
+DACS_TRUST_PROXY=1
+NEXT_PUBLIC_DIRECTORY_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}
+```
+
+Railway's public edge supplies `X-Real-IP`, so trusting the proxy is appropriate for a
+service exposed only through Railway networking. Set a strong `DACS_ADMIN_TOKEN` as a
+secret variable for the operational indexing endpoints.
+
+For GitHub deployments from the Community monorepo, set the service root directory to
+`/reference-implementations/dacs-directory` and the Railway config file to
+`/reference-implementations/dacs-directory/railway.json`. Until the pinned SDK is
+published as a package, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
+fine-grained GitHub token scoped only to `DACS-Agent-commerce/dacs-sdk` with read-only
+Contents access. The build passes it to Git without writing it to the checkout or remote
+URL.
+
+An authorized local checkout can still be deployed with the compiled SDK while avoiding
+its 1.6 GB development dependency tree:
+
+```bash
+railway up . --no-gitignore
+```
+
+`.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
+vendor directory.
+
 ### Configuration
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
+| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for registrations, scan state, and the generated catalog |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
+| `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
+
+## Human and agent discovery
+
+The same catalog is exposed as a task-focused web interface and a linked machine
+contract. A client starting with only the directory origin can discover:
+
+- `/.well-known/agent.json` — directory capability card
+- `/.well-known/dacs-directory.json` — versioned DACS directory manifest
+- `/api/dacs` — linked API index
+- `/api/dacs/listings` — filterable, cursor-paginated active services
+- `/openapi.json` — OpenAPI 3.1 description
+- `/schemas/listing-summary.schema.json` — JSON Schema for catalog summaries
+- `/llms.txt` — supplemental plain-text orientation
+
+Catalog responses include validators, cache policy, and typed `Link` headers. Human
+service and seller pages expose canonical URLs and JSON alternates, while the dynamic
+sitemap includes the currently indexed catalog.
 
 ## Discovery — three channels
 

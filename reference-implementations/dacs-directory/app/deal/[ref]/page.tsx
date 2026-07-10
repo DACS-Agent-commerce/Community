@@ -1,5 +1,6 @@
 /** Deal explorer — the anchored bundle, raw, plus in-browser verification. */
 import Link from "next/link";
+import type { Metadata } from "next";
 import CopyText from "@/src/components/CopyText";
 import VerifyAttestation from "@/src/components/VerifyAttestation";
 import VerifyDeal from "@/src/components/VerifyDeal";
@@ -15,6 +16,15 @@ function txRefsOf(raw: Record<string, unknown> | null): Array<{ rail: string; tx
 }
 
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata({ params }: { params: Promise<{ ref: string }> }): Promise<Metadata> {
+  const { ref } = await params;
+  return {
+    title: "Deal evidence",
+    description: "Inspect and independently verify a DACS deal bundle.",
+    alternates: { canonical: `/deal/${encodeURIComponent(decodeURIComponent(ref))}` },
+  };
+}
 
 export default async function Deal({
   params,
@@ -44,11 +54,18 @@ export default async function Deal({
   } | null;
 
   const txRefs = txRefsOf(raw);
+  const outcome = typeof raw?.["outcome"] === "string" ? raw["outcome"] : null;
   return (
     <>
       <p className="meta"><Link href="/">← all agents</Link></p>
       <h1 className="h1">Deal bundle</h1>
       <div className="meta"><CopyText value={bundleRef} head={30} tail={8} /></div>
+      <div className="trust-strip" style={{ marginTop: 18 }} aria-label="Deal summary">
+        <div><strong>{jobId || "Unknown"}</strong><span>deal id</span></div>
+        <div><strong>{outcome ?? "Unknown"}</strong><span>outcome</span></div>
+        <div><strong>{txRefs.length}</strong><span>settlement references</span></div>
+        <div><strong>Ready</strong><span>browser verification</span></div>
+      </div>
       {txRefs.length > 0 && (
         <div className="badges" style={{ marginTop: 10 }}>
           {txRefs.map((t) => (
