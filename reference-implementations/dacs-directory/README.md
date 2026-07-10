@@ -36,7 +36,10 @@ npm run dev      # http://localhost:3400
 
 `setup` checks out the reviewed dacs-sdk revision pinned in
 `scripts/setup-sdk.sh`; no globally installed SDK is required. Tests and static checks
-run with `npm test` and `npm run typecheck`.
+run with `npm test` and `npm run typecheck`. The seed smoke test can be run alone
+with `npm run test:seed`; it uses pinned chain bytes for the shipped ReviewBot listing
+so CI can prove the starter seed renders at least one active listing without depending
+on a live full-chain scan.
 
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real

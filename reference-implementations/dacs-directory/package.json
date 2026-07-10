@@ -11,6 +11,7 @@
     "start": "next start -p ${PORT:-3400}",
     "start:railway": "bash scripts/start-railway.sh",
     "test": "tsx --test test/*.test.ts",
+    "test:seed": "tsx --test test/seed-smoke.test.ts",
     "index": "tsx src/catalog/reindex.ts",
     "typecheck": "tsc --noEmit"
   },
