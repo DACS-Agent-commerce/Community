@@ -10,6 +10,11 @@ import { deliveryLabel, IDENTITY_TIERS, railLabel, tierMeta } from "./labels";
 const sellerTier = (seller: SellerRecord) =>
   seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared");
 
+// Provenance of the display name: owner-signed, chain-discovered, or an
+// unsigned third-party submission (whose chosen name is not owner-attested).
+const provenance = (seller: SellerRecord) =>
+  seller.ownerRegistered ? "owner-registered" : seller.discovered ? "found on-chain" : "unverified submission";
+
 const categoryMatches = (category: string, scope: string) =>
   category === scope || category.startsWith(`${scope}.`);
 
@@ -219,7 +224,10 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
                 <span className="badge ok">listing verified</span>
               </div>
               <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
-              <p className="byline">by <Link href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}><strong>{seller.displayName}</strong></Link></p>
+              <p className="byline">
+                by <Link href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}><strong>{seller.displayName}</strong></Link>
+                <span className={`byline-src ${seller.ownerRegistered ? "ok" : ""}`}>{provenance(seller)}</span>
+              </p>
               <p className="agent-desc clamp2">{listing.offering.description || "No description supplied."}</p>
               <div className="service-facts">
                 <div><span>price</span><strong>{listing.pricing.priceHint ?? "Ask agent"}{listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}</strong></div>

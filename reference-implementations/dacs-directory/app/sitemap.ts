@@ -18,7 +18,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
     url: `${base}/seller/${encodeURIComponent(seller.primaryClaim)}`,
     lastModified: new Date(seller.lastIndexedAt), changeFrequency: "daily", priority: 0.7,
   }));
-  const serviceRoutes: MetadataRoute.Sitemap = catalog.sellers.flatMap((seller) => seller.listings.map((listing) => ({
+  const serviceRoutes: MetadataRoute.Sitemap = catalog.sellers.flatMap((seller) => seller.listings
+    // Match the discovery surface: revoked listings are visible on seller
+    // history pages but are not advertised as destinations.
+    .filter((listing) => listing.status === "active")
+    .map((listing) => ({
     url: `${base}/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(listing.listingId)}/${listing.version}`,
     lastModified: new Date(listing.catalogObservedAt), changeFrequency: "daily" as const, priority: 0.8,
   })));

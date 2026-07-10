@@ -69,7 +69,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
           { name: "rail", in: "query", schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
-          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
         responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },

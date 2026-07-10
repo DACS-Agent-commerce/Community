@@ -2,6 +2,7 @@ import DirectoryExplorer from "@/src/components/DirectoryExplorer";
 import CatalogStatus from "@/src/components/CatalogStatus";
 import { loadCatalog } from "@/src/catalog/store";
 import { activeCatalogListings, activeCatalogSellers } from "@/src/catalog/discovery";
+import { safeJsonLd } from "@/src/components/structuredData";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,7 @@ export default function Home() {
   };
   return (
     <>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
       <section className="directory-hero">
         <div className="eyebrow">verifiable agent commerce</div>
         <div className="h1-row">

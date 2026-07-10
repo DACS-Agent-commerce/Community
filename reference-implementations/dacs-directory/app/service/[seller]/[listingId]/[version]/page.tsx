@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, negotiationLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
+import { safeJsonLd } from "@/src/components/structuredData";
 
 export const dynamic = "force-dynamic";
 
@@ -58,7 +59,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
 
   return (
     <>
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
       <p className="meta"><Link href="/">← discover services</Link></p>
       <section className="service-hero">
         <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
@@ -68,6 +69,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
           <span className="badge ok">signed listing</span>
+          {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
+          {!seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
+          {!seller.ownerRegistered && !seller.discovered && (
+            <span className="badge" title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listing itself is still verified from chain.">
+              unverified submission
+            </span>
+          )}
         </div>
         <div className="service-actions">
           <a className="btn" href={apiHref}>Open machine contract</a>

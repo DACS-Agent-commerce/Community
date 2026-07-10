@@ -1,5 +1,23 @@
-export const directoryBaseUrl = (): string =>
-  (process.env.NEXT_PUBLIC_DIRECTORY_URL ?? "http://localhost:3400").replace(/\/$/, "");
+let warned = false;
+
+/**
+ * The directory's public origin for canonical URLs, sitemap, robots, llms.txt
+ * and Metadata. Request-bound routes should prefer requestBaseUrl below;
+ * these static/metadata surfaces cannot, so they need explicit configuration.
+ * Falling back to localhost is correct in dev but silently poisons canonical
+ * URLs and the sitemap in production — hence the one-time warning.
+ */
+export const directoryBaseUrl = (): string => {
+  const configured = process.env.NEXT_PUBLIC_DIRECTORY_URL;
+  if (!configured && process.env.NODE_ENV === "production" && !warned) {
+    warned = true;
+    console.warn(
+      "NEXT_PUBLIC_DIRECTORY_URL is not set: canonical URLs, the sitemap, robots.txt " +
+      "and llms.txt will advertise http://localhost:3400. Set it to the public origin.",
+    );
+  }
+  return (configured ?? "http://localhost:3400").replace(/\/$/, "");
+};
 
 export const requestBaseUrl = (req: { headers: Headers; nextUrl: URL }): string => {
   if (process.env.NEXT_PUBLIC_DIRECTORY_URL) return directoryBaseUrl();

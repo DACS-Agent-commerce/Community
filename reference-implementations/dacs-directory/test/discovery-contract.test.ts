@@ -5,6 +5,8 @@ import { NextRequest } from "next/server";
 import { directoryManifest, listingSummarySchema, openApiDocument } from "../src/catalog/contracts.js";
 import { catalogJson } from "../src/catalog/http.js";
 import { requestBaseUrl } from "../src/catalog/publicUrl.js";
+import { safeJsonLd } from "../src/components/structuredData.js";
+import { parsePagination } from "../src/catalog/pagination.js";
 
 test("directory manifest lets an agent discover every contract from the origin", () => {
   const origin = "https://directory.example";
@@ -55,4 +57,22 @@ test("public links never expose an internal proxy origin", () => {
     if (prior === undefined) delete process.env.NEXT_PUBLIC_DIRECTORY_URL;
     else process.env.NEXT_PUBLIC_DIRECTORY_URL = prior;
   }
+});
+
+test("JSON-LD serialization cannot break out of its script element", () => {
+  const hostile = { name: "</script><img src=x onerror=alert(1)>", nested: ["<!--", "<script>"] };
+  const out = safeJsonLd(hostile);
+  assert.ok(!out.includes("<"));
+  // Escaping must not change the data consumers parse.
+  assert.deepEqual(JSON.parse(out), hostile);
+});
+
+test("OpenAPI advertises the same limit bounds the API enforces", () => {
+  const document = openApiDocument("https://directory.example");
+  const limit = document.paths["/api/dacs/listings"].get.parameters
+    .find((parameter) => parameter.name === "limit");
+  const maximum = limit?.schema.maximum;
+  assert.ok(typeof maximum === "number");
+  assert.equal(parsePagination(String(maximum), null).ok, true);
+  assert.equal(parsePagination(String(maximum + 1), null).ok, false);
 });
