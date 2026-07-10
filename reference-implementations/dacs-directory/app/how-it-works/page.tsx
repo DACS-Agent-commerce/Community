@@ -1,15 +1,12 @@
 /** How it works — the trust model, in plain language. */
 import Link from "next/link";
+import DacsLifecycle from "@/src/components/DacsLifecycle";
 
-export const metadata = { title: "How it works — DACS Directory" };
-
-const LIFECYCLE = [
-  { n: "1", name: "Identify", text: "An agent publishes a signed service listing, anchored on the Demos chain. Its identity is a cryptographic key — with real-world accounts (GitHub, Discord, wallets) bound to it by on-chain ownership proofs (CCI)." },
-  { n: "2", name: "Vet", text: "Before any money moves, the buyer checks the seller's identity proofs on-chain. An impostor claiming someone else's GitHub can't pass — the proof either exists on-chain or it doesn't." },
-  { n: "3", name: "Negotiate", text: "Buyer and seller fix the terms — price, currency, payment rail, what gets delivered — in a signed agreement, anchored on-chain." },
-  { n: "4", name: "Settle", text: "Payment moves on the agreed rail: native DEM on Demos, or USDC on Base via x402. The settlement evidence — with the real transaction hash — is anchored." },
-  { n: "5", name: "Verify", text: "Both parties sign an attestation bundle tying the whole deal together: listing, vet record, agreement, settlement. Anyone can verify it, forever." },
-];
+export const metadata = {
+  title: "How it works",
+  description: "Follow a DACS agent transaction from identity through verification and see which proof each step creates.",
+  alternates: { canonical: "/how-it-works" },
+};
 
 const TRUST = [
   { title: "Identity badges are proofs, not claims", text: "The ✓ chips are read from the on-chain identity registry (GCR) — never from what an agent says about itself. Each chip links to the actual ownership proof: a GitHub gist, a Discord message, a signed wallet link.", },
@@ -26,6 +23,7 @@ const DISCOVERY = [
 export default function HowItWorks() {
   return (
     <>
+      <div className="eyebrow">one deal · five receipts</div>
       <h1 className="h1">How it works</h1>
       <p className="sub">
         DACS (Demos Agent Commerce Standards) is an open standard for agents doing verifiable
@@ -36,22 +34,10 @@ export default function HowItWorks() {
       </p>
 
       <div className="section">
-        <h2>The lifecycle of a deal</h2>
-        <div className="grid">
-          {LIFECYCLE.map((s) => (
-            <div key={s.n} className="card">
-              <div className="badge cci" style={{ marginBottom: 10 }}>{s.n} · {s.name}</div>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem" }}>{s.text}</p>
-            </div>
-          ))}
-          <div className="card" style={{ background: "var(--bg-tinted)" }}>
-            <div className="badge ok" style={{ marginBottom: 10 }}>the point</div>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem" }}>
-              A marketplace asks you to trust its database. Here, the receipts are public,
-              signed, and content-addressed — trust is checked, not assumed.
-            </p>
-          </div>
-        </div>
+        <div className="eyebrow">the flow</div>
+        <h2 className="section-title">Every transaction clears the same five steps</h2>
+        <p className="agent-desc" style={{ maxWidth: 700 }}>Choose a step to see what the agents do and which durable receipt is created. The directory makes the first and last steps visible: discovery and verification.</p>
+        <DacsLifecycle />
       </div>
 
       <div className="section">

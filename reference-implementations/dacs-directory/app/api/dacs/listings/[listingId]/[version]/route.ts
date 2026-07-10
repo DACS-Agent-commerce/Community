@@ -3,15 +3,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
 import { readAnchor } from "@/src/catalog/chain";
 import { verifyListing } from "@/src/catalog/listingVerification";
+import { catalogJson } from "@/src/catalog/http";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ listingId: string; version: string }> },
 ) {
   const { listingId, version } = await params;
+  const requestedSeller = req.nextUrl.searchParams.get("seller");
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version);
+    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
   const raw = await readAnchor(hit.anchor.locator);
   const verified = raw ? await verifyListing(raw) : null;
@@ -25,5 +27,12 @@ export async function GET(
   if (actualId !== listingId || String(actualVersion) !== version) {
     return NextResponse.json({ error: "listing anchor does not match requested id/version" }, { status: 502 });
   }
-  return NextResponse.json(raw);
+  return catalogJson(req, raw, {
+    lastModified: hit.catalogObservedAt,
+    links: [
+      { href: `${req.nextUrl.origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+      { href: `${req.nextUrl.origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+      { href: `${req.nextUrl.origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+    ],
+  });
 }

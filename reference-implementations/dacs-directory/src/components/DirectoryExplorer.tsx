@@ -1,197 +1,227 @@
 "use client";
-/** Searchable, filterable agent directory — the §6.3.6 filters, in the UI. */
+
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
-import type { SellerRecord } from "@/src/catalog/types";
-import { CciChip } from "./Badge";
-import { railLabel, negotiationLabel, IDENTITY_TIERS, tierMeta } from "./labels";
+import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
+import { deliveryLabel, IDENTITY_TIERS, railLabel, tierMeta } from "./labels";
 
-const sellerRails = (s: SellerRecord) => [
-  ...new Set(
-    s.listings.flatMap(
-      (l) => l.offering.rails ?? l.offering.tags.filter((t) => t.startsWith("pay-")),
-    ),
-  ),
-];
-const sellerTier = (s: SellerRecord) => s.identityTier ?? (s.cci.length > 0 ? "verified" : "self-declared");
-const sellerCategories = (s: SellerRecord) => s.listings.map((l) => l.offering.category);
-/** §10.5.4 category prefix matching: scope matches cat or cat starts with scope + "." */
-const categoryMatches = (cat: string, scope: string) =>
-  cat === scope || cat.startsWith(scope + ".");
+const sellerTier = (seller: SellerRecord) =>
+  seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared");
 
-export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[] }) {
-  const [q, setQ] = useState("");
-  const [rail, setRail] = useState<string | null>(null);
-  const [tier, setTier] = useState<string | null>(null);
-  const [category, setCategory] = useState<string | null>(null);
-  const [goodRecord, setGoodRecord] = useState(false);
+const categoryMatches = (category: string, scope: string) =>
+  category === scope || category.startsWith(`${scope}.`);
 
-  const availableSellers = useMemo(
-    () => activeCatalogSellers(sellers),
-    [sellers],
-  );
-  const rails = useMemo(() => [...new Set(availableSellers.flatMap(sellerRails))].sort(), [availableSellers]);
-  // Top-level category segments, data-driven (no fixed taxonomy in the spec).
-  const categories = useMemo(
-    () => [...new Set(availableSellers.flatMap(sellerCategories).map((c) => c.split(".")[0]))].sort(),
+type Service = { listing: ListingSummary; seller: SellerRecord };
+
+export default function DirectoryExplorer({ sellers, indexed }: { sellers: SellerRecord[]; indexed: boolean }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const q = params.get("q") ?? "";
+  const rail = params.get("rail");
+  const tier = params.get("identityTier");
+  const category = params.get("category");
+  const goodRecord = params.get("trackRecord") === "90";
+
+  const availableSellers = useMemo(() => activeCatalogSellers(sellers), [sellers]);
+  const services = useMemo<Service[]>(
+    () => availableSellers.flatMap((seller) => seller.listings
+      .filter((listing) => listing.status === "active")
+      .map((listing) => ({ listing, seller }))),
     [availableSellers],
+  );
+  const rails = useMemo(
+    () => [...new Set(services.flatMap(({ listing }) => listing.offering.rails ?? []))].sort(),
+    [services],
+  );
+  const categories = useMemo(
+    () => [...new Set(services.map(({ listing }) => listing.offering.category.split(".")[0]))].sort(),
+    [services],
   );
   const tierCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const s of availableSellers) counts[sellerTier(s)] = (counts[sellerTier(s)] ?? 0) + 1;
+    for (const { seller } of services) counts[sellerTier(seller)] = (counts[sellerTier(seller)] ?? 0) + 1;
     return counts;
-  }, [availableSellers]);
+  }, [services]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return availableSellers.filter((s) => {
-      if (rail && !sellerRails(s).includes(rail)) return false;
-      if (tier && sellerTier(s) !== tier) return false;
-      if (category && !sellerCategories(s).some((c) => categoryMatches(c, category))) return false;
-      if (goodRecord && !(s.reputation.completionRate !== null && s.reputation.completionRate >= 0.9)) return false;
+    return services.filter(({ listing, seller }) => {
+      if (rail && !(listing.offering.rails ?? []).includes(rail)) return false;
+      if (tier && sellerTier(seller) !== tier) return false;
+      if (category && !categoryMatches(listing.offering.category, category)) return false;
+      if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
       if (!needle) return true;
-      const hay = [
-        s.displayName, s.primaryClaim,
-        ...s.cci.map((b) => `${b.platform}:${b.handle}`),
-        ...s.listings.flatMap((l) => [
-          l.offering.title,
-          l.offering.description ?? "",
-          l.offering.category,
-          ...l.offering.tags,
-          ...(l.offering.rails ?? []),
-          ...(l.offering.delivery ?? []),
-        ]),
-      ].join(" ").toLowerCase();
-      return hay.includes(needle);
+      return [
+        listing.offering.title,
+        listing.offering.description ?? "",
+        listing.offering.category,
+        ...listing.offering.tags,
+        ...(listing.offering.rails ?? []),
+        ...(listing.offering.delivery ?? []),
+        seller.displayName,
+        ...seller.cci.map((claim) => `${claim.platform} ${claim.handle}`),
+      ].join(" ").toLowerCase().includes(needle);
     });
-  }, [availableSellers, q, rail, tier, category, goodRecord]);
+  }, [services, q, rail, tier, category, goodRecord]);
+
+  const setParam = (name: string, value: string | null) => {
+    const next = new URLSearchParams(params.toString());
+    if (value) next.set(name, value);
+    else next.delete(name);
+    const query = next.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  };
+  const clear = () => router.replace(pathname, { scroll: false });
+  const hasFilters = Boolean(q || rail || tier || category || goodRecord);
 
   return (
-    <>
-      <div className="toolbar">
-        <input
-          className="search"
-          placeholder="Search services, agents, identities…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        <span className="meta" style={{ marginLeft: "auto" }}>
-          {filtered.length} of {availableSellers.length} agent{availableSellers.length === 1 ? "" : "s"}
-        </span>
+    <section aria-labelledby="services-heading">
+      <div className="section-heading-row">
+        <div>
+          <div className="eyebrow">discover</div>
+          <h2 id="services-heading" className="section-title">Services ready to explore</h2>
+        </div>
+        <Link className="text-link" href="/how-it-works">How trust works <span aria-hidden>→</span></Link>
       </div>
 
-      <div className="facets">
-        <div className="facet-row">
-          <span className="facet-label">identity</span>
-          {IDENTITY_TIERS.map((t) => {
-            const n = tierCounts[t.id] ?? 0;
-            return (
-              <button key={t.id} title={t.hint} disabled={n === 0}
-                className={`badge ${t.chipClass} filter ${tier === t.id ? "active" : ""}`}
-                onClick={() => setTier(tier === t.id ? null : t.id)}>
-                {t.label} <span className="facet-count">{n}</span>
-              </button>
-            );
-          })}
+      <div className="discovery-panel">
+        <label htmlFor="directory-search" className="sr-only">Search agent services</label>
+        <div className="search-wrap">
+          <span aria-hidden className="search-icon">⌕</span>
+          <input
+            id="directory-search"
+            className="search"
+            placeholder="Try “review my pull request” or “pay with USDC”"
+            value={q}
+            onChange={(event) => setParam("q", event.target.value || null)}
+          />
         </div>
-        {categories.length > 0 && (
+        <div className="result-row">
+          <span className="meta" aria-live="polite">
+            {filtered.length} service{filtered.length === 1 ? "" : "s"}
+          </span>
+          {hasFilters && <button className="clear-button" type="button" onClick={clear}>Clear all filters</button>}
+        </div>
+
+        <div className="facets" aria-label="Filter services">
           <div className="facet-row">
-            <span className="facet-label">category</span>
-            {categories.map((c) => (
-              <button key={c} className={`badge filter ${category === c ? "active" : ""}`}
-                title={`Matches listings whose category is "${c}" or starts with "${c}." (§10.5.4 prefix rule)`}
-                onClick={() => setCategory(category === c ? null : c)}>
-                {c}
-              </button>
-            ))}
+            <span className="facet-label">identity</span>
+            {IDENTITY_TIERS.map((option) => {
+              const count = tierCounts[option.id] ?? 0;
+              const selected = tier === option.id;
+              return (
+                <button key={option.id} type="button" title={option.hint} disabled={count === 0}
+                  aria-pressed={selected}
+                  className={`badge ${option.chipClass} filter ${selected ? "active" : ""}`}
+                  onClick={() => setParam("identityTier", selected ? null : option.id)}>
+                  {option.label} <span className="facet-count">{count}</span>
+                </button>
+              );
+            })}
           </div>
-        )}
-        <div className="facet-row">
-          <span className="facet-label">pays in</span>
-          {rails.map((r) => (
-            <button key={r} className={`badge rail filter ${rail === r ? "active" : ""}`}
-              onClick={() => setRail(rail === r ? null : r)} title={r}>
-              {railLabel(r)}
+          {categories.length > 0 && (
+            <div className="facet-row">
+              <span className="facet-label">category</span>
+              {categories.map((option) => (
+                <button key={option} type="button" aria-pressed={category === option}
+                  className={`badge filter ${category === option ? "active" : ""}`}
+                  onClick={() => setParam("category", category === option ? null : option)}>
+                  {option}
+                </button>
+              ))}
+            </div>
+          )}
+          {rails.length > 0 && (
+            <div className="facet-row">
+              <span className="facet-label">payment</span>
+              {rails.map((option) => (
+                <button key={option} type="button" aria-pressed={rail === option}
+                  className={`badge rail filter ${rail === option ? "active" : ""}`}
+                  onClick={() => setParam("rail", rail === option ? null : option)} title={option}>
+                  {railLabel(option)}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="facet-row">
+            <span className="facet-label">record</span>
+            <button type="button" aria-pressed={goodRecord}
+              className={`badge filter ${goodRecord ? "ok active" : ""}`}
+              onClick={() => setParam("trackRecord", goodRecord ? null : "90")}>
+              90%+ completion
             </button>
-          ))}
-        </div>
-        <div className="facet-row">
-          <span className="facet-label">track record</span>
-          <button className={`badge ${goodRecord ? "ok" : ""} filter ${goodRecord ? "active" : ""}`}
-            title="Only agents with ≥90% completion across chain-verified deals (advisory reputationHint, §6.3.6 minCompletionRate — the verify pages are authoritative)"
-            onClick={() => setGoodRecord(!goodRecord)}>
-            90%+ completion
-          </button>
+          </div>
         </div>
       </div>
 
-      {filtered.length === 0 && (
-        <div className="card"><h3>No matches</h3><p className="meta">Try a different search, or clear the filters.</p></div>
+      {!indexed && services.length === 0 && (
+        <div className="empty-state" role="status">
+          <span className="empty-icon" aria-hidden>◎</span>
+          <h3>The catalog has not been indexed yet</h3>
+          <p>Once the first chain scan completes, verified services will appear here automatically.</p>
+          <div className="button-row">
+            <Link href="/how-it-works" className="btn secondary">See how discovery works</Link>
+            <Link href="/register" className="btn">List your service</Link>
+          </div>
+        </div>
       )}
-      <div className="grid">
-        {filtered.map((s) => {
-          const lead = s.listings[0];
-          const href = `/seller/${encodeURIComponent(s.primaryClaim)}`;
-          const web2 = s.cci.filter((b) => b.kind === "web2");
-          const t = tierMeta(sellerTier(s));
-          const negotiation = [
-            ...new Set(s.listings.flatMap((l) => l.offering.negotiation ?? [])),
-          ];
+      {indexed && services.length === 0 && (
+        <div className="empty-state" role="status">
+          <h3>No active services yet</h3>
+          <p>Agents appear through chain discovery or an owner-signed listing.</p>
+          <Link href="/register" className="btn">List the first service</Link>
+        </div>
+      )}
+      {services.length > 0 && filtered.length === 0 && (
+        <div className="empty-state" role="status">
+          <h3>No services match those filters</h3>
+          <p>Broaden the search or clear the active filters.</p>
+          <button className="btn secondary" type="button" onClick={clear}>Clear all filters</button>
+        </div>
+      )}
+
+      <div className="service-grid">
+        {filtered.map(({ listing, seller }) => {
+          const trust = tierMeta(sellerTier(seller));
+          const href = `/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(listing.listingId)}/${listing.version}`;
+          const jsonHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
           return (
-            // A <div>, not a link: the proof chips inside are links themselves
-            // and <a> cannot nest. The title carries the navigation.
-            <div key={s.primaryClaim} className="card agent-card">
-              <h3><Link href={href} className="card-title-link">{lead?.offering.title ?? s.displayName}</Link></h3>
-              <div className="byline">
-                by <strong>{s.displayName}</strong>
-                <span className={`byline-src ${s.ownerRegistered ? "ok" : ""}`}>
-                  {s.ownerRegistered
-                    ? "owner-registered"
-                    : s.discovered
-                      ? "found on-chain"
-                      : "unverified submission"}
-                </span>
+            <article key={`${seller.primaryClaim}/${listing.listingId}/${listing.version}`} className="card service-card">
+              <div className="service-card-topline">
+                <span className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</span>
+                <span className="badge ok">listing verified</span>
               </div>
-              {lead?.offering.description && (
-                <p className="agent-desc clamp2">{lead.offering.description}</p>
-              )}
+              <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
+              <p className="byline">by <Link href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}><strong>{seller.displayName}</strong></Link></p>
+              <p className="agent-desc clamp2">{listing.offering.description || "No description supplied."}</p>
+              <div className="service-facts">
+                <div><span>price</span><strong>{listing.pricing.priceHint ?? "Ask agent"}{listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}</strong></div>
+                <div><span>delivery</span><strong>{listing.offering.delivery?.[0] ? deliveryLabel(listing.offering.delivery[0]) : "Not stated"}</strong></div>
+              </div>
               <div className="card-meta">
                 <span className="meta-label">identity</span>
+                <span className="meta-chips"><span className={`badge ${trust.chipClass}`}>{trust.label}</span></span>
+                <span className="meta-label">payment</span>
                 <span className="meta-chips">
-                  <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
-                  {web2.map((b) => <CciChip key={b.ref} badge={b} />)}
+                  {(listing.offering.rails ?? []).map((value) => <span key={value} className="badge rail">{railLabel(value)}</span>)}
+                  {(listing.offering.rails ?? []).length === 0 && <span className="meta-empty">not stated</span>}
                 </span>
-
-                <span className="meta-label">pays in</span>
-                <span className="meta-chips">
-                  {sellerRails(s).map((r) => (
-                    <span key={r} className="badge rail" title={r}>{railLabel(r)}</span>
-                  ))}
-                </span>
-
-                <span className="meta-label">negotiation</span>
-                <span className="meta-chips">
-                  {negotiation.length > 0
-                    ? negotiation.map((n) => (
-                        <span key={n} className="badge" title={n}>{negotiationLabel(n)}</span>
-                      ))
-                    : <span className="meta-empty">not stated</span>}
-                </span>
-
-                <span className="meta-label">track record</span>
-                <span className="meta-chips">
-                  <span className={`badge ${s.reputation.completed > 0 ? "ok" : ""}`}>
-                    {s.reputation.completed}/{s.reputation.totalAgreements} deals
-                    {s.reputation.completionRate !== null && ` · ${Math.round(s.reputation.completionRate * 100)}%`}
-                  </span>
-                </span>
+                <span className="meta-label">record</span>
+                <span className="meta-chips"><span className={seller.reputation.completed ? "badge ok" : "badge"}>
+                  {seller.reputation.completed}/{seller.reputation.totalAgreements} verified deals
+                </span></span>
               </div>
-              <Link href={href} className="card-cta">view agent →</Link>
-            </div>
+              <div className="service-actions">
+                <Link href={href} className="btn">Explore service</Link>
+                <Link href={jsonHref} className="btn secondary mono" aria-label={`Open JSON contract for ${listing.offering.title}`}>JSON</Link>
+              </div>
+            </article>
           );
         })}
       </div>
-    </>
+    </section>
   );
 }

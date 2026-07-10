@@ -1,5 +1,7 @@
 /** Seller profile — identity with linked proofs, listings, and the deal ledger. */
 import Link from "next/link";
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import CopyText from "@/src/components/CopyText";
 import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
@@ -8,19 +10,36 @@ import { loadCatalog } from "@/src/catalog/store";
 export const dynamic = "force-dynamic";
 const EXPLORER = "https://explorer.demos.sh";
 
+const findSeller = (claim: string) =>
+  loadCatalog().sellers.find((seller) => seller.primaryClaim === decodeURIComponent(claim));
+
+export async function generateMetadata({ params }: { params: Promise<{ claim: string }> }): Promise<Metadata> {
+  const { claim } = await params;
+  const seller = findSeller(claim);
+  if (!seller) return { title: "Agent not found" };
+  return {
+    title: seller.displayName,
+    description: `${seller.displayName} offers ${seller.listings.length} verifiable DACS service${seller.listings.length === 1 ? "" : "s"}.`,
+    alternates: {
+      canonical: `/seller/${encodeURIComponent(seller.primaryClaim)}`,
+      types: { "application/json": `/api/dacs/sellers/${encodeURIComponent(seller.primaryClaim)}` },
+    },
+  };
+}
+
 export default async function Seller({ params }: { params: Promise<{ claim: string }> }) {
   const { claim } = await params;
-  const seller = loadCatalog().sellers.find((s) => s.primaryClaim === decodeURIComponent(claim));
-  if (!seller) return <h1 className="h1">Unknown agent</h1>;
+  const seller = findSeller(claim);
+  if (!seller) notFound();
   const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
+  const t = tierMeta(seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared"));
 
   return (
     <>
       <p className="meta"><Link href="/">← all agents</Link></p>
-      <h1 className="h1">
-        {seller.displayName}{" "}
-        {(() => { const t = tierMeta(seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared"));
-          return <span className={`badge ${t.chipClass}`} style={{ verticalAlign: "middle" }} title={t.hint}>{t.label}</span>; })()}{" "}
+      <h1 className="h1">{seller.displayName}</h1>
+      <div className="service-provider-row" aria-label="Agent trust summary">
+        <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
         {seller.ownerRegistered && <span className="badge ok" style={{ verticalAlign: "middle" }}>owner-registered</span>}{" "}
         {seller.discovered && <span className="badge" style={{ verticalAlign: "middle" }}>discovered on-chain</span>}{" "}
         {!seller.ownerRegistered && !seller.discovered && (
@@ -36,7 +55,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
             🌐 {d.replace(/^https?:\/\//, "")} ↗
           </a>
         ))}
-      </h1>
+      </div>
       <div className="meta">
         <CopyText value={seller.primaryClaim} head={34} tail={8} />
         {" · "}
@@ -78,7 +97,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         {seller.listings.map((l) => (
           <div key={l.listingId} className="card" style={{ marginBottom: 12 }}>
             <h3>
-              {l.offering.title}{" "}
+              <Link className="card-title-link" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>{l.offering.title}</Link>{" "}
               {l.status === "revoked" && <span className="badge err">revoked</span>}
             </h3>
             {l.offering.description && (
@@ -123,13 +142,17 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
               )}
             </div>
             <div className="meta">anchor <CopyText value={l.anchor.locator} head={24} tail={8} /></div>
+            <div className="service-actions">
+              <Link className="btn" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>Explore service</Link>
+              <Link className="btn secondary mono" href={`/api/dacs/listings/${encodeURIComponent(l.listingId)}/${l.version}?seller=${encodeURIComponent(seller.primaryClaim)}`}>JSON</Link>
+            </div>
           </div>
         ))}
       </div>
 
       <div className="section">
         <h2>Deal ledger</h2>
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <div className="card table-scroll" role="region" aria-label="Deal ledger" tabIndex={0} style={{ padding: 0 }}>
           <table>
             <thead>
               <tr><th>Deal</th><th>Rail</th><th>Completed</th><th>Catalog check</th><th></th></tr>

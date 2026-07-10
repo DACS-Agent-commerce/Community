@@ -57,10 +57,28 @@ and re-verifies everything against chain each pass.
 | `DACS_DIRECTORY_DATA` | No | Writable directory for registrations, scan state, and the generated catalog |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
+| `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400` |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
+
+## Human and agent discovery
+
+The same catalog is exposed as a task-focused web interface and a linked machine
+contract. A client starting with only the directory origin can discover:
+
+- `/.well-known/agent.json` — directory capability card
+- `/.well-known/dacs-directory.json` — versioned DACS directory manifest
+- `/api/dacs` — linked API index
+- `/api/dacs/listings` — filterable, cursor-paginated active services
+- `/openapi.json` — OpenAPI 3.1 description
+- `/schemas/listing-summary.schema.json` — JSON Schema for catalog summaries
+- `/llms.txt` — supplemental plain-text orientation
+
+Catalog responses include validators, cache policy, and typed `Link` headers. Human
+service and seller pages expose canonical URLs and JSON alternates, while the dynamic
+sitemap includes the currently indexed catalog.
 
 ## Discovery — three channels
 

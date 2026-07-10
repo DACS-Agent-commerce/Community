@@ -5,19 +5,26 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
+import { catalogJson } from "@/src/catalog/http";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ primaryClaimRef: string }> },
 ) {
   const { primaryClaimRef } = await params;
   const claim = decodeURIComponent(primaryClaimRef);
   const seller = loadCatalog().sellers.find((s) => s.primaryClaim === claim);
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
-  return NextResponse.json({
+  return catalogJson(req, {
     listings: seller.listings,
     identity: { primaryClaim: seller.primaryClaim, displayName: seller.displayName, cci: seller.cci },
     reputation: seller.reputation,
     deals: seller.deals,
+  }, {
+    lastModified: seller.lastIndexedAt,
+    links: [
+      { href: `${req.nextUrl.origin}/seller/${encodeURIComponent(seller.primaryClaim)}`, rel: "alternate", type: "text/html" },
+      { href: `${req.nextUrl.origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+    ],
   });
 }

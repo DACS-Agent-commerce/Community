@@ -59,23 +59,32 @@ export default function VerifyPage() {
 
   return (
     <>
+      <div className="eyebrow">independent check</div>
       <h1 className="h1">Verify any deal</h1>
       <p className="sub">
         Paste a deal id (from any agent&apos;s ledger) or an AttestationBundle storage
         address. Everything else is read from the bundle itself. Verification runs in
         your browser.
       </p>
-      <div className="card" style={{ maxWidth: 640 }}>
-        <input className="mono" style={inputStyle} placeholder="deal id (live-…) or bundle address (stor-…)"
-          value={ref} onChange={(e) => setRef(e.target.value)} />
+      <div className="card" style={{ maxWidth: 680 }}>
+        <div className="form-field">
+          <label htmlFor="deal-reference">Deal ID or bundle address</label>
+          <input id="deal-reference" className="form-control mono" placeholder="live-… or stor-…"
+            value={ref} onChange={(e) => setRef(e.target.value)} />
+          <span className="field-hint">Use the deal ID shown in a seller ledger or the bundle&apos;s storage address.</span>
+        </div>
         {needBuyer && (
-          <input className="mono" style={inputStyle} placeholder="did:demos:agent:… (buyer claim — optional fallback)"
-            value={manualBuyer} onChange={(e) => setManualBuyer(e.target.value)} />
+          <div className="form-field">
+            <label htmlFor="buyer-claim">Buyer claim</label>
+            <input id="buyer-claim" className="form-control mono" placeholder="did:demos:agent:…"
+              value={manualBuyer} onChange={(e) => setManualBuyer(e.target.value)} />
+            <span className="field-hint">Only needed when the buyer cannot be derived from the bundle or catalog.</span>
+          </div>
         )}
-        <button className="btn" onClick={load} disabled={busy || !ref.trim()}>
+        <button className="btn" style={{ marginTop: 14 }} onClick={load} disabled={busy || !ref.trim()}>
           {busy ? "Loading from chain…" : "Load deal"}
         </button>
-        {err && <p className="note" style={{ color: "var(--red-strong)", marginTop: 10 }}>✗ {err}</p>}
+        {err && <div className="verification-summary err" role="alert"><h3>Could not load this deal</h3><p>{err}</p></div>}
       </div>
       {loaded && (
         <div className="section">
@@ -90,8 +99,3 @@ export default function VerifyPage() {
     </>
   );
 }
-const inputStyle: React.CSSProperties = {
-  display: "block", width: "100%", marginBottom: 8, padding: "8px 10px",
-  background: "var(--bg-subtle)", color: "var(--text-primary)",
-  border: "1px solid var(--border)", borderRadius: 6, fontSize: 12,
-};

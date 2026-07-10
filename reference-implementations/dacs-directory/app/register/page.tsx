@@ -1,41 +1,29 @@
 "use client";
-/**
- * Create your listing — the manual path onto the directory, as easy as we
- * can make it: connect the wallet, describe the service in plain fields,
- * publish. The app builds the DACS Listing artifact, the wallet signs it
- * (§B.7 preimage) and anchors it on-chain; the catalog indexes it instantly.
- */
+
+import Link from "next/link";
 import { useState } from "react";
 import { useDemosWallet } from "@/src/components/useDemosWallet";
 
+const WALLET_URL = "https://chromewebstore.google.com/detail/demos-wallet/nefongcpmdahjaijjkihgieiamoahcoo";
 const RAIL_OPTIONS = [
-  { id: "pay-dem", label: "DEM (native, on Demos)" },
-  { id: "pay-x402", label: "USDC via x402 (Base Sepolia)" },
+  { id: "pay-dem", label: "DEM on Demos" },
+  { id: "pay-x402", label: "USDC via x402" },
 ];
-// DACS-4 §9.6 — "the v0.1 closed set". Delivery is deterministic: exactly
-// these three phases exist; anything else is non-conformant.
 const DELIVERY_OPTIONS = [
-  {
-    id: "deliver-attested-payload",
-    label: "Attested payload",
-    hint: "You produce a result (data, a review, a computation) with an attestation of its authenticity — the common choice for services.",
-  },
-  {
-    id: "deliver-storage-program",
-    label: "On-chain payload",
-    hint: "The deliverable itself is anchored on-chain (public, buyer-only, or encrypted to the buyer). Up to 128 KB, or hash-bound external.",
-  },
-  {
-    id: "deliver-entitlement",
-    label: "Entitlement / access grant",
-    hint: "You grant the buyer time-bound access to a service (API tier, subscription, quota).",
-  },
+  { id: "deliver-attested-payload", label: "Verified result", hint: "A result such as data, analysis, or code with an authenticity attestation." },
+  { id: "deliver-storage-program", label: "On-chain result", hint: "The deliverable is stored on-chain or bound to an external payload by hash." },
+  { id: "deliver-entitlement", label: "Access or entitlement", hint: "A time-bound API, subscription, quota, or access grant." },
 ];
+const SCREENS = ["Connect", "Describe", "Review", "Publish"];
 
-type Step = "form" | "signing" | "anchoring" | "confirming" | "done";
+type Screen = "connect" | "describe" | "review" | "publish" | "done";
+type PublishStep = "idle" | "building" | "signing" | "anchoring" | "confirming" | "registering" | "failed" | "complete";
 
 export default function Register() {
   const wallet = useDemosWallet();
+  const [screen, setScreen] = useState<Screen>("connect");
+  const [publishStep, setPublishStep] = useState<PublishStep>("idle");
+  const [failedAt, setFailedAt] = useState<PublishStep | null>(null);
   const [serviceId, setServiceId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -43,246 +31,216 @@ export default function Register() {
   const [category, setCategory] = useState("services.other");
   const [tags, setTags] = useState("");
   const [delivery, setDelivery] = useState(DELIVERY_OPTIONS[0].id);
-  const [step, setStep] = useState<Step>("form");
   const [status, setStatus] = useState<string | null>(null);
   const [profileUrl, setProfileUrl] = useState<string | null>(null);
 
   const claim = wallet.address ? `did:demos:agent:${wallet.address.replace(/^0x/, "")}` : null;
   const slug = serviceId.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const validDescription = name.trim() && description.trim() && slug && rails.length > 0 && delivery;
+  const activeIndex = screen === "connect" ? 0 : screen === "describe" ? 1 : screen === "review" ? 2 : 3;
 
   const publish = async () => {
-    if (!claim) return;
-    setStatus(null);
+    if (!claim || !validDescription) return;
+    setScreen("publish");
+    setStatus(null); setFailedAt(null);
+    let activeStep: PublishStep = "building";
     try {
-      // 1. Build everything server-side (artifact, signing message, anchor tx).
-      setStep("signing");
+      setPublishStep("building");
       const build = await fetch("/api/dacs/build-listing", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          claim, serviceId: slug, name: name.trim(), description: description.trim(),
-          rails, delivery: [delivery.trim()],
-          category: category.trim(), tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+          claim, serviceId: slug, name: name.trim(), description: description.trim(), rails,
+          delivery: [delivery], category: category.trim(),
+          tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
         }),
       });
-      const b = await build.json();
-      if (!build.ok) throw new Error(b.error);
+      const built = await build.json();
+      if (!build.ok) throw new Error(built.error);
 
-      // 2. Wallet signs the listing (§B.7: "dacs-listing:v1:" + content hash).
-      setStatus("Check your wallet — signing the listing…");
-      const signature = await wallet.sign(b.message);
-      if (!signature) throw new Error(wallet.error ?? "wallet declined to sign");
+      activeStep = "signing"; setPublishStep("signing");
+      setStatus("Approve the service listing in your wallet.");
+      const signature = await wallet.sign(built.message);
+      if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
       const signedListing = {
-        ...b.listing,
-        signature: {
-          algorithm: "ed25519",
-          signer: claim,
-          value: signature.replace(/^(0x)+/i, ""),
-        },
+        ...built.listing,
+        signature: { algorithm: "ed25519", signer: claim, value: signature.replace(/^(0x)+/i, "") },
       };
 
-      // 3. Wallet anchors it on-chain (storage-program transaction).
-      setStep("anchoring");
-      setStatus("Check your wallet — approving the on-chain anchor…");
-      const tx = b.tx;
-      tx.content.data[1].data = signedListing;
-      const sendRes = await wallet.send(tx);
-      if (!sendRes) throw new Error(wallet.error ?? "wallet declined the transaction");
+      activeStep = "anchoring"; setPublishStep("anchoring");
+      setStatus("Approve the on-chain anchor transaction.");
+      built.tx.content.data[1].data = signedListing;
+      const sent = await wallet.send(built.tx);
+      if (!sent) throw new Error(wallet.error ?? "The anchor transaction was declined.");
 
-      // 4. Confirm it's readable on-chain (block inclusion takes a moment).
-      setStep("confirming");
-      setStatus("Anchored — waiting for the chain to confirm…");
+      activeStep = "confirming"; setPublishStep("confirming");
+      setStatus("The transaction was sent. Waiting for the listing to become readable…");
       let confirmed = false;
-      for (let i = 0; i < 20; i++) {
-        const probe = await fetch(`/api/dacs/artifact?ref=${encodeURIComponent(b.anchorAddress)}`).then((r) => r.json());
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const probe = await fetch(`/api/dacs/artifact?ref=${encodeURIComponent(built.anchorAddress)}`).then((response) => response.json());
         if (probe.value) { confirmed = true; break; }
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((resolve) => setTimeout(resolve, 2500));
       }
-      if (!confirmed) throw new Error("anchor not visible on-chain after 50s — it may still confirm; retry indexing shortly");
+      if (!confirmed) throw new Error("The anchor is not visible yet. Your transaction may still confirm; retry publishing without re-entering the form.");
 
-      // 5. Owner-sign the catalog pointer set so existing registrations cannot
-      // be overwritten by third parties.
-      setStatus("Check your wallet — signing the catalog registration…");
-      const registrationSignature = await wallet.sign(b.registration.ownerSignature.message);
-      if (!registrationSignature) throw new Error(wallet.error ?? "wallet declined registration signing");
+      activeStep = "registering"; setPublishStep("registering");
+      setStatus("One final wallet signature connects this listing to the directory.");
+      const registrationSignature = await wallet.sign(built.registration.ownerSignature.message);
+      if (!registrationSignature) throw new Error(wallet.error ?? "The directory registration signature was declined.");
       const registration = {
-        ...b.registration,
-        ownerSignature: {
-          ...b.registration.ownerSignature,
-          signature: registrationSignature.replace(/^(0x)+/i, ""),
-        },
+        ...built.registration,
+        ownerSignature: { ...built.registration.ownerSignature, signature: registrationSignature.replace(/^(0x)+/i, "") },
       };
-      const regRes = await fetch("/api/dacs/register", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(registration),
+      const registered = await fetch("/api/dacs/register", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(registration),
       });
-      const regBody = await regRes.json();
-      if (!regRes.ok) throw new Error(regBody.error ?? "registration failed");
+      const registeredBody = await registered.json();
+      if (!registered.ok) throw new Error(registeredBody.error ?? "Directory registration failed.");
+
+      setPublishStep("complete");
+      setStatus("Your signed listing is anchored and queued for the next index pass.");
       setProfileUrl(`/seller/${encodeURIComponent(claim)}`);
-      setStep("done");
-      setStatus("Anchored and queued for the next catalog index pass.");
-    } catch (e) {
-      setStep("form");
-      setStatus(`✗ ${(e as Error).message}`);
+      setScreen("done");
+    } catch (error) {
+      setFailedAt(activeStep);
+      setPublishStep("failed");
+      setStatus((error as Error).message);
     }
   };
 
   return (
-    <>
-      <h1 className="h1">List your agent</h1>
-      <p className="sub">
-        Describe what your agent sells; we build the DACS listing, your wallet signs and
-        anchors it on-chain, and it appears in the directory immediately — verifiable by anyone.
-      </p>
+    <div className="form-shell">
+      <div className="eyebrow">seller journey</div>
+      <h1 className="h1">List a verifiable service</h1>
+      <p className="sub">Describe the outcome in plain language, preview exactly what buyers and agents will see, then sign and anchor it with your Demos wallet.</p>
 
-      {/* Step 1 — wallet */}
-      <div className="card" style={{ maxWidth: 680, marginBottom: 16, background: "var(--bg-tinted)" }}>
-        <h3>1 · Your agent&apos;s wallet</h3>
-        {wallet.address ? (
-          <div className="badges" style={{ marginTop: 8 }}>
-            <span className="badge ok">connected</span>
-            <span className="badge mono">{wallet.address.slice(0, 20)}…</span>
-          </div>
-        ) : wallet.available ? (
-          <button className="btn" style={{ marginTop: 8 }} onClick={wallet.connect} disabled={wallet.connecting}>
-            {wallet.connecting ? "Connecting… (check the wallet popup)" : "Connect Demos wallet"}
-          </button>
-        ) : wallet.detecting ? (
-          <p className="meta">Looking for the Demos wallet extension…</p>
-        ) : (
-          <p className="meta">Demos wallet extension not detected — it&apos;s required to sign and anchor your listing.</p>
-        )}
-        {wallet.error && <p className="note" style={{ color: "var(--red-strong)" }}>wallet: {wallet.error}</p>}
-      </div>
+      <ol className="form-stepper" aria-label="Listing progress">
+        {SCREENS.map((label, index) => <li key={label} className={index < activeIndex ? "done" : index === activeIndex ? "active" : ""} aria-current={index === activeIndex ? "step" : undefined}>{index + 1}. {label}</li>)}
+      </ol>
 
-      {/* Step 2 — the service, in plain fields */}
-      <div className="card" style={{ maxWidth: 680 }}>
-        <h3>2 · What are you selling?</h3>
-        <label className="meta">Listing title</label>
-        <input style={inp} placeholder="LLM code review for GitHub pull requests"
-          value={name} onChange={(e) => setName(e.target.value)} />
-
-        <label className="meta">Description — include your price and what the buyer receives</label>
-        <textarea style={{ ...inp, height: 96 }} maxLength={2000}
-          placeholder="1 DEM per review; delivered as a review posted on your PR within minutes."
-          value={description} onChange={(e) => setDescription(e.target.value)} />
-        <p className="note" style={{ marginTop: -8, marginBottom: 10 }}>{description.length}/2000</p>
-
-        <label className="meta">Service id — short slug, becomes part of the on-chain address</label>
-        <input className="mono" style={inp} placeholder="pr-review"
-          value={serviceId} onChange={(e) => setServiceId(e.target.value)} />
-        {slug && slug !== serviceId.trim() && <p className="note" style={{ marginTop: -8 }}>will be saved as <span className="mono">{slug}</span></p>}
-
-        <label className="meta">Category — dot-notation, helps buyers filter</label>
-        <input className="mono" style={inp} list="category-options"
-          value={category} onChange={(e) => setCategory(e.target.value)} />
-        <datalist id="category-options">
-          {["services.code-review", "services.inference", "services.research",
-            "data.finance", "data.sports", "services.other"].map((c) => <option key={c} value={c} />)}
-        </datalist>
-
-        <label className="meta">Tags — comma-separated (optional, max 16)</label>
-        <input className="mono" style={inp} placeholder="code-review, github, llm"
-          value={tags} onChange={(e) => setTags(e.target.value)} />
-
-        <label className="meta">How buyers pay</label>
-        <div className="badges" style={{ marginBottom: 12 }}>
-          {RAIL_OPTIONS.map((r) => (
-            <button key={r.id}
-              className={`badge rail filter ${rails.includes(r.id) ? "active" : ""}`}
-              onClick={() => setRails((cur) => cur.includes(r.id) ? cur.filter((x) => x !== r.id) : [...cur, r.id])}>
-              {r.label}
-            </button>
-          ))}
-        </div>
-
-        <label className="meta">How you deliver — one of the spec&apos;s three delivery phases (DACS-4 §9.6)</label>
-        <div style={{ display: "grid", gap: 8, margin: "6px 0 14px" }}>
-          {DELIVERY_OPTIONS.map((d) => (
-            <label key={d.id} className="card" style={{ padding: 12, cursor: "pointer",
-              borderColor: delivery === d.id ? "var(--accent-border)" : undefined,
-              background: delivery === d.id ? "var(--accent-soft)" : undefined }}>
-              <input type="radio" name="delivery" checked={delivery === d.id}
-                onChange={() => setDelivery(d.id)} style={{ marginRight: 8 }} />
-              <strong style={{ fontSize: "0.875rem" }}>{d.label}</strong>{" "}
-              <span className="mono" style={{ color: "var(--text-muted)" }}>{d.id}</span>
-              <p className="meta" style={{ marginTop: 4 }}>{d.hint}</p>
-            </label>
-          ))}
-        </div>
-
-        <button className="btn" onClick={publish}
-          disabled={!claim || step !== "form" || !slug || !name.trim() || !description.trim() || rails.length === 0 || !delivery.trim()}>
-          {step === "form" ? (claim ? "Sign & publish on-chain" : "Connect your wallet first")
-            : step === "signing" ? "Waiting for signature…"
-            : step === "anchoring" ? "Anchoring on-chain…"
-            : step === "confirming" ? "Confirming…" : "Published ✓"}
-        </button>
-        {status && <p className="note" style={{ marginTop: 12 }}>{status}</p>}
-        {step === "done" && profileUrl && (
-          <div className="verdict ok" style={{ marginTop: 14 }}>
-            ✓ Listed! <a href={profileUrl} style={{ textDecoration: "underline" }}>View your agent&apos;s profile →</a>
-          </div>
-        )}
-      </div>
-
-      <WellKnownFiles claim={claim} />
-
-      <p className="note" style={{ maxWidth: 680 }}>
-        Already anchored a listing with the SDK? It&apos;s probably in the directory already
-        (the chain scanner finds anchored listings automatically) — search for your agent, or
-        publish here with the same service id to update it.
-      </p>
-    </>
-  );
-}
-function WellKnownFiles({ claim }: { claim: string | null }) {
-  const [domain, setDomain] = useState("");
-  const [files, setFiles] = useState<Record<string, string> | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const generate = async () => {
-    if (!claim) return;
-    setBusy(true); setErr(null); setFiles(null);
-    const res = await fetch(`/api/dacs/wellknown-files?claim=${encodeURIComponent(claim)}&domain=${encodeURIComponent(domain.trim())}`);
-    const j = await res.json();
-    if (!res.ok) setErr(j.error);
-    else setFiles(j.files);
-    setBusy(false);
-  };
-  return (
-    <div className="card" style={{ maxWidth: 680, marginTop: 16 }}>
-      <h3>3 · Optional: be discoverable at your own domain (§6.3.5)</h3>
-      <p className="meta" style={{ margin: "6px 0 12px" }}>
-        We generate the two discovery files from chain state — host them at your domain,
-        then register the domain and any DACS catalog can find you.
-      </p>
-      <input className="mono" style={inp} placeholder="agent.example.com"
-        value={domain} onChange={(e) => setDomain(e.target.value)} />
-      <button className="btn" onClick={generate} disabled={busy || !claim || !domain.trim()}>
-        {busy ? "Generating from chain…" : "Generate my .well-known files"}
-      </button>
-      {err && <p className="note" style={{ color: "var(--red-strong)", marginTop: 10 }}>✗ {err}</p>}
-      {files && Object.entries(files).map(([path, content]) => (
-        <div key={path} style={{ marginTop: 14 }}>
-          <div className="meta mono" style={{ marginBottom: 4 }}>{path}</div>
-          <pre className="artifact" style={{ maxHeight: 220 }}>{content}</pre>
-        </div>
-      ))}
-      {files && (
-        <p className="note">
-          Host both files byte-exact (the indexHash cryptographically binds listings.json),
-          then submit your domain via the register-domain API or ask the catalog to crawl it.
-        </p>
+      {screen === "connect" && (
+        <section className="card" aria-labelledby="connect-heading">
+          <div className="eyebrow">step 1</div>
+          <h2 id="connect-heading" className="card-section-title">Connect the agent&apos;s wallet</h2>
+          <p className="agent-desc">The wallet proves ownership of the listing and anchors it on-chain. The directory never receives your private key.</p>
+          {wallet.address ? (
+            <>
+              <div className="badges"><span className="badge ok">connected</span><span className="badge mono">{wallet.address.slice(0, 22)}…</span></div>
+              <button className="btn" type="button" onClick={() => setScreen("describe")}>Continue</button>
+            </>
+          ) : wallet.available ? (
+            <button className="btn" type="button" onClick={wallet.connect} disabled={wallet.connecting}>{wallet.connecting ? "Connecting…" : "Connect Demos wallet"}</button>
+          ) : wallet.detecting ? (
+            <p className="meta" role="status">Looking for the wallet extension…</p>
+          ) : (
+            <div className="button-row"><a className="btn" href={WALLET_URL} target="_blank" rel="noreferrer">Install Demos wallet <span aria-hidden>↗</span></a><Link className="btn secondary" href="/how-it-works">Why a wallet?</Link></div>
+          )}
+          {wallet.error && <p className="verdict err" role="alert">{wallet.error}</p>}
+        </section>
       )}
+
+      {screen === "describe" && (
+        <section className="card" aria-labelledby="describe-heading">
+          <div className="eyebrow">step 2</div>
+          <h2 id="describe-heading" className="card-section-title">Describe the buyer&apos;s outcome</h2>
+          <div className="form-field"><label htmlFor="listing-title">Service title</label><input id="listing-title" className="form-control" maxLength={200} placeholder="LLM code review for GitHub pull requests" value={name} onChange={(event) => setName(event.target.value)} /></div>
+          <div className="form-field"><label htmlFor="listing-description">What the buyer receives</label><textarea id="listing-description" className="form-control" maxLength={2000} aria-describedby="description-hint" placeholder="A review posted on your pull request within minutes. Include the price or explain how the agent quotes." value={description} onChange={(event) => setDescription(event.target.value)} /><span id="description-hint" className="field-hint">{description.length}/2000 characters · include price, expected input, output, and timing.</span></div>
+          <div className="form-field"><label htmlFor="service-id">Service ID</label><input id="service-id" className="form-control mono" aria-describedby="service-id-hint" placeholder="pr-review" value={serviceId} onChange={(event) => setServiceId(event.target.value)} /><span id="service-id-hint" className="field-hint">Stable machine identifier. It will be saved as <span className="mono">{slug || "your-service-id"}</span>.</span></div>
+          <div className="form-field"><label htmlFor="category">Category</label><select id="category" className="form-control" value={category} onChange={(event) => setCategory(event.target.value)}><option value="services.code-review">Code review</option><option value="services.inference">AI inference</option><option value="services.research">Research</option><option value="data.finance">Financial data</option><option value="data.sports">Sports data</option><option value="services.other">Other service</option></select></div>
+          <div className="form-field"><label htmlFor="tags">Search tags</label><input id="tags" className="form-control" aria-describedby="tags-hint" placeholder="github, code-review, llm" value={tags} onChange={(event) => setTags(event.target.value)} /><span id="tags-hint" className="field-hint">Optional, comma separated, maximum 16.</span></div>
+
+          <fieldset className="form-field"><legend className="form-legend">Accepted payment</legend><div className="badges">{RAIL_OPTIONS.map((option) => <button key={option.id} type="button" aria-pressed={rails.includes(option.id)} className={`badge rail filter ${rails.includes(option.id) ? "active" : ""}`} onClick={() => setRails((current) => current.includes(option.id) ? current.filter((value) => value !== option.id) : [...current, option.id])}>{option.label}</button>)}</div></fieldset>
+          <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div></fieldset>
+
+          <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("connect")}>Back</button><button className="btn" type="button" disabled={!validDescription} onClick={() => setScreen("review")}>Review listing</button></div>
+        </section>
+      )}
+
+      {screen === "review" && (
+        <section className="card" aria-labelledby="review-heading">
+          <div className="eyebrow">step 3</div>
+          <h2 id="review-heading" className="card-section-title">Review before signing</h2>
+          <p className="agent-desc">This is the service card buyers will discover. The technical identifiers below become part of the signed artifact.</p>
+          <div className="card service-card" style={{ background: "var(--bg-subtle)" }}>
+            <div className="service-card-topline"><span className="eyebrow">{category.replaceAll(".", " / ")}</span><span className="badge ok">will be signed</span></div>
+            <h3>{name}</h3><p className="agent-desc">{description}</p>
+            <div className="badges">{rails.map((value) => <span className="badge rail" key={value}>{RAIL_OPTIONS.find((option) => option.id === value)?.label ?? value}</span>)}<span className="badge">{DELIVERY_OPTIONS.find((option) => option.id === delivery)?.label}</span></div>
+            <p className="meta mono">{slug} · {claim}</p>
+          </div>
+          <details className="technical-disclosure">
+            <summary>Preview the machine-readable listing</summary>
+            <pre className="artifact">{JSON.stringify({
+              listingId: slug, agentId: claim, name: name.trim(), description: description.trim(),
+              category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+              supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: rails,
+              supportedDelivery: [delivery],
+            }, null, 2)}</pre>
+          </details>
+          <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("describe")}>Edit details</button><button className="btn" type="button" onClick={publish}>Sign and publish</button></div>
+        </section>
+      )}
+
+      {(screen === "publish" || screen === "done") && (
+        <section className="card" aria-labelledby="publish-heading">
+          <div className="eyebrow">step 4</div>
+          <h2 id="publish-heading" className="card-section-title">Publish on-chain</h2>
+          <ul className="progress-list" aria-live="polite">
+            <Progress label="Build a conformant listing" state={progressState(publishStep, "building", failedAt)} />
+            <Progress label="Sign the listing" state={progressState(publishStep, "signing", failedAt)} />
+            <Progress label="Anchor it on-chain" state={progressState(publishStep, "anchoring", failedAt)} />
+            <Progress label="Confirm chain visibility" state={progressState(publishStep, "confirming", failedAt)} />
+            <Progress label="Register the catalog pointer" state={progressState(publishStep, "registering", failedAt)} />
+          </ul>
+          {status && <p className={publishStep === "failed" ? "verdict err" : publishStep === "complete" ? "verdict ok" : "note"} role={publishStep === "failed" ? "alert" : "status"}>{status}</p>}
+          {publishStep === "failed" && <div className="button-row"><button className="btn" type="button" onClick={publish}>Retry publish</button><button className="btn secondary" type="button" onClick={() => setScreen("review")}>Review details</button></div>}
+          {screen === "done" && profileUrl && <div className="button-row"><Link className="btn" href={profileUrl}>View seller profile</Link><Link className="btn secondary" href="/">Browse directory</Link></div>}
+        </section>
+      )}
+
+      {screen === "done" && <WellKnownFiles claim={claim} />}
     </div>
   );
 }
 
-const inp: React.CSSProperties = {
-  display: "block", width: "100%", margin: "4px 0 14px", padding: "8px 10px",
-  background: "var(--bg-subtle)", color: "var(--text-primary)",
-  border: "1px solid var(--border)", borderRadius: 6, fontSize: 13,
-  fontFamily: "inherit",
-};
+type ProgressState = "waiting" | "current" | "complete" | "failed";
+
+function progressState(current: PublishStep, target: PublishStep, failedAt: PublishStep | null): ProgressState {
+  const order: PublishStep[] = ["idle", "building", "signing", "anchoring", "confirming", "registering", "complete"];
+  if (current === "failed" && failedAt) {
+    const failedIndex = order.indexOf(failedAt);
+    const targetIndex = order.indexOf(target);
+    return targetIndex < failedIndex ? "complete" : targetIndex === failedIndex ? "failed" : "waiting";
+  }
+  const currentIndex = order.indexOf(current);
+  const targetIndex = order.indexOf(target);
+  return currentIndex > targetIndex ? "complete" : currentIndex === targetIndex ? "current" : "waiting";
+}
+
+function Progress({ label, state }: { label: string; state: ProgressState }) {
+  return <li className={state}><span aria-hidden>{state === "complete" ? "✓" : state === "current" ? "●" : state === "failed" ? "✗" : "○"}</span>{label}</li>;
+}
+
+function WellKnownFiles({ claim }: { claim: string | null }) {
+  const [domain, setDomain] = useState("");
+  const [files, setFiles] = useState<Record<string, string> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const generate = async () => {
+    if (!claim) return;
+    setBusy(true); setError(null); setFiles(null);
+    const response = await fetch(`/api/dacs/wellknown-files?claim=${encodeURIComponent(claim)}&domain=${encodeURIComponent(domain.trim())}`);
+    const body = await response.json();
+    if (!response.ok) setError(body.error); else setFiles(body.files);
+    setBusy(false);
+  };
+  return (
+    <section className="card" style={{ marginTop: 16 }} aria-labelledby="domain-heading">
+      <div className="eyebrow">optional</div><h2 id="domain-heading" className="card-section-title">Publish discovery files on your domain</h2>
+      <p className="agent-desc">This makes the same listing independently discoverable from your agent&apos;s own domain.</p>
+      <div className="form-field"><label htmlFor="agent-domain">Agent domain</label><input id="agent-domain" className="form-control mono" placeholder="agent.example.com" value={domain} onChange={(event) => setDomain(event.target.value)} /></div>
+      <button className="btn" type="button" onClick={generate} disabled={busy || !claim || !domain.trim()}>{busy ? "Generating…" : "Generate .well-known files"}</button>
+      {error && <p className="verdict err" role="alert">{error}</p>}
+      {files && Object.entries(files).map(([path, content]) => <details className="technical-disclosure" key={path}><summary className="mono">{path}</summary><pre className="artifact">{content}</pre></details>)}
+    </section>
+  );
+}
