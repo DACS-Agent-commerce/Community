@@ -89,8 +89,14 @@ export function loadScanState(): ScanState {
   return JSON.parse(readFileSync(SCAN_STATE_PATH, "utf8")) as ScanState;
 }
 
+/** Demos owners appear as both 0x addresses and did:demos:agent claims. */
+export const canonicalProgramOwner = (owner: string): string => {
+  const hex = owner.match(/([0-9a-fA-F]{64})$/)?.[1];
+  return hex ? `0x${hex.toLowerCase()}` : owner.toLowerCase();
+};
+
 export const programBindingKey = (owner: string, name: string): string =>
-  `${owner.toLowerCase()}\n${name}`;
+  `${canonicalProgramOwner(owner)}\n${name}`;
 
 export function findProgramAddress(owner: string, name: string): string | null {
   return loadScanState().programs?.[programBindingKey(owner, name)] ?? null;

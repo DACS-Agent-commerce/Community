@@ -56,6 +56,7 @@ and re-verifies everything against chain each pass.
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for registrations, scan state, and the generated catalog |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
+| `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,

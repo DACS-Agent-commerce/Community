@@ -15,6 +15,7 @@
  * Shape-defensive: the tx envelope is deep-walked for storage addresses
  * rather than assuming one schema (testnet payloads vary across versions).
  */
+import { programBindingKey } from "./store.js";
 import type { RegisteredDeal } from "./types.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -74,8 +75,6 @@ function collectStorageAddresses(value: unknown, out: Set<string>, depth = 0): v
 
 const didOf = (address: string): string =>
   `did:demos:agent:${address.replace(/^0x/, "")}`;
-const bindingKey = (owner: string, name: string): string =>
-  `${owner.toLowerCase()}\n${name}`;
 
 export function addRevocationCandidate(
   revocations: Map<string, string[]>,
@@ -159,7 +158,7 @@ export async function scanChain(
     const read = await readStorage(address);
     if (!read?.success || !read.programName || !read.owner) continue;
     const name = read.programName;
-    programs.set(bindingKey(read.owner, name), address);
+    programs.set(programBindingKey(read.owner, name), address);
     if (name.startsWith("dacs1:listing:")) {
       listings.set(address, read.owner);
     } else if (name.startsWith("dacs1-revoked:")) {
@@ -177,7 +176,7 @@ export async function scanChain(
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
   const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
   for (const [jobId, bundle] of bundleOwners) {
-    const agreementAddress = programs.get(bindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
+    const agreementAddress = programs.get(programBindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
     const agreement = agreementAddress ? await readStorage(agreementAddress) : null;
     const seller =
       (agreement?.data as { seller?: string } | undefined)?.seller ??
@@ -189,7 +188,7 @@ export async function scanChain(
       rail,
       buyerBundleRef: bundle.address,
       sellerBundleRef: sellerCopies.has(jobId)
-        ? programs.get(bindingKey(sellerCopies.get(jobId)!, `dacs5:bundle:seller:${jobId}`))
+        ? programs.get(programBindingKey(sellerCopies.get(jobId)!, `dacs5:bundle:seller:${jobId}`))
         : undefined,
       owners: { buyer: didOf(bundle.owner), seller: seller ?? "" },
       sellerFromAgreement: seller,

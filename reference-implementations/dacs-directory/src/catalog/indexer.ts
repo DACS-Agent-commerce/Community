@@ -25,6 +25,7 @@ import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCo
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import { findProgramAddress, loadScanState } from "./store.js";
 import {
@@ -137,6 +138,7 @@ export async function indexRegistration(
       version,
       readAnchor,
     );
+    const presentation = listingPresentation(scope);
     listings.push({
       listingId,
       version,
@@ -144,16 +146,15 @@ export async function indexRegistration(
       anchor: { kind: "storage-program", locator: anchor },
       seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
       offering: {
-        title: listing.name,
+        title: presentation.title,
         // Strip the [github:<login>] claim-tag (the interim identity carrier
         // until IdentityBundle lands — dacs-sdk#9); the badge shows the claim.
-        description: listing.description.replace(/\s*\[github:[^\]]+\]\s*/g, " ").trim(),
-        category: ((scope as { category?: string }).category) ?? "services.other",
-        tags: ((scope as { tags?: string[] }).tags) ?? [],
-        rails: listing.supportedPaymentRails,
-        delivery: listing.supportedDelivery,
-        negotiation:
-          ((scope as { supportedNegotiation?: string[] }).supportedNegotiation) ?? [],
+        description: presentation.description.replace(/\s*\[github:[^\]]+\]\s*/g, " ").trim(),
+        category: presentation.category,
+        tags: presentation.tags,
+        rails: presentation.rails,
+        delivery: presentation.delivery,
+        negotiation: presentation.negotiation,
       },
       pricing: {},
       status: revoked ? "revoked" : "active",

@@ -1,8 +1,38 @@
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 import { NextRequest, NextResponse } from "next/server";
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
+const MAX_BUCKETS = 4096;
+let requestsUntilSweep = 256;
+
+export function rateLimitClientKey(req: NextRequest): string | null {
+  const trustsProxy = process.env.DACS_TRUST_PROXY === "1" || process.env.DACS_TRUST_PROXY === "true";
+  if (!trustsProxy) return null;
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const candidate = forwarded || req.headers.get("x-real-ip")?.trim() || "";
+  return isIP(candidate) ? candidate : null;
+}
+
+function pruneBuckets(now: number): void {
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt <= now) buckets.delete(key);
+  }
+  while (buckets.size >= MAX_BUCKETS) {
+    const oldest = buckets.keys().next().value as string | undefined;
+    if (!oldest) break;
+    buckets.delete(oldest);
+  }
+  requestsUntilSweep = 256;
+}
+
+export function resetRateLimitState(): void {
+  buckets.clear();
+  requestsUntilSweep = 256;
+}
+
+export const rateLimitStateSize = (): number => buckets.size;
 
 /** Small per-process abuse brake. Deployments should also rate-limit at the edge. */
 export function rateLimit(
@@ -11,11 +41,17 @@ export function rateLimit(
   limit: number,
   windowMs = 60_000,
 ): NextResponse | null {
-  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  const client = forwarded || req.headers.get("x-real-ip") || "unknown";
+  const client = rateLimitClientKey(req);
+  // Without an explicitly trusted proxy there is no trustworthy client IP in
+  // the Web Request API. A shared fallback bucket would let one caller deny
+  // service to everyone, so direct deployments rely on the documented edge
+  // limiter plus the hard registry/input caps instead.
+  if (!client) return null;
   const key = `${scope}:${client}`;
   const now = Date.now();
   const prior = buckets.get(key);
+  requestsUntilSweep -= 1;
+  if ((!prior && buckets.size >= MAX_BUCKETS) || requestsUntilSweep <= 0) pruneBuckets(now);
   const bucket = !prior || prior.resetAt <= now
     ? { count: 0, resetAt: now + windowMs }
     : prior;

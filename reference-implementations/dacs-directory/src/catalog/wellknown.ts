@@ -45,6 +45,27 @@ interface ListingIndex {
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_REDIRECTS = 3;
 
+function ipv6Words(address: string): number[] | null {
+  let input = address.toLowerCase().split("%", 1)[0];
+  const dotted = input.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) {
+    const octets = dotted[2].split(".").map(Number);
+    if (octets.some((part) => part < 0 || part > 255)) return null;
+    input = `${dotted[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${
+      ((octets[2] << 8) | octets[3]).toString(16)
+    }`;
+  }
+  const halves = input.split("::");
+  if (halves.length > 2) return null;
+  const parseHalf = (half: string) => half ? half.split(":").map((word) => Number.parseInt(word, 16)) : [];
+  const left = parseHalf(halves[0]);
+  const right = halves.length === 2 ? parseHalf(halves[1]) : [];
+  if ([...left, ...right].some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)) return null;
+  if (halves.length === 1) return left.length === 8 ? left : null;
+  const zeros = 8 - left.length - right.length;
+  return zeros >= 1 ? [...left, ...Array<number>(zeros).fill(0), ...right] : null;
+}
+
 /** Reject non-global address ranges before every outbound well-known fetch. */
 export function isPrivateAddress(address: string): boolean {
   if (isIP(address) === 4) {
@@ -60,15 +81,23 @@ export function isPrivateAddress(address: string): boolean {
     );
   }
   if (isIP(address) === 6) {
-    const a = address.toLowerCase();
-    // IPv4-mapped (::ffff:a.b.c.d) — apply the v4 policy to the embedded
-    // address so mapped 10/172.16-31/192.168/100.64/… can't slip through.
-    const mapped = a.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (mapped) return isPrivateAddress(mapped[1]);
-    return (
-      a === "::" || a === "::1" || a.startsWith("fc") || a.startsWith("fd") ||
-      /^fe[89ab]/.test(a) || a.startsWith("ff")
-    );
+    const words = ipv6Words(address);
+    if (!words) return true;
+    // IPv4-mapped addresses inherit the embedded IPv4 policy regardless of
+    // whether the resolver renders the tail in dotted or hexadecimal form.
+    if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
+      return isPrivateAddress(
+        `${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`,
+      );
+    }
+    // Public IPv6 is global-unicast 2000::/3, excluding IETF/documentation
+    // assignments and transition space that can tunnel an unchecked IPv4.
+    if ((words[0] & 0xe000) !== 0x2000) return true;
+    if (words[0] === 0x2001 && (words[1] & 0xfe00) === 0) return true; // 2001::/23
+    if (words[0] === 0x2001 && words[1] === 0x0db8) return true; // documentation
+    if (words[0] === 0x2002) return true; // 6to4
+    if (words[0] === 0x3fff && (words[1] & 0xf000) === 0) return true; // documentation
+    return false;
   }
   return true;
 }
