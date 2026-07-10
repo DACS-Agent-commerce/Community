@@ -1,0 +1,12 @@
+node_modules/
+vendor/
+.next/
+data/catalog.json
+data/scan-state.json
+data/registrations.json
+data/domains.json
+data/.indexer-seed
+data/.indexer-mnemonic
+.playwright-mcp/
+*.png
+tsconfig.tsbuildinfo

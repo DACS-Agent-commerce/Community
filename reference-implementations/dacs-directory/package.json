@@ -1,0 +1,34 @@
+{
+  "name": "dacs-directory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DACS Directory — community catalog (§6.3.6 API), agent registry UI, and in-browser deal verification for the DACS agent-commerce standard.",
+  "license": "MIT",
+  "scripts": {
+    "setup": "bash scripts/setup-sdk.sh",
+    "dev": "next dev -p 3400",
+    "build": "next build",
+    "start": "next start -p 3400",
+    "test": "tsx --test test/*.test.ts",
+    "index": "tsx src/catalog/reindex.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^1.8.0",
+    "buffer": "^6.0.3",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
+  },
+  "type": "module"
+}
