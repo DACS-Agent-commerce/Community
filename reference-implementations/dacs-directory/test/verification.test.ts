@@ -87,6 +87,39 @@ test("strict ref policy rejects unsigned referenced artifacts", async () => {
   }]), false);
 });
 
+test("evidence ref must be signed by a bundle party", async () => {
+  const evidenceScope = { evidenceVersion: "1", jobId: "j" };
+  const message = Buffer.from(`dacs-evidence:v1:${contentHash(evidenceScope)}`, "utf8");
+  const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const evidence = { ...evidenceScope, signatures: [{ algorithm: "ed25519", signer: did, value }] };
+
+  const withParty = (partyClaim: string): BundleVerification => {
+    const v = result("completed", [
+      { party: "buyer", verdict: "valid" },
+      { party: "seller", verdict: "valid" },
+    ]);
+    v.refs = [{ kind: "dacs-4-evidence", id: "e", verdict: "ok" }];
+    v.bundle!.parties = [
+      { role: "buyer", primaryClaim: partyClaim, bundleHash: "b" },
+      { role: "seller", primaryClaim: "seller", bundleHash: "s" },
+    ];
+    return v;
+  };
+
+  // Signer is a party to the bundle → accepted.
+  assert.equal(
+    await refsPassStrictPolicy(withParty(did), [{ kind: "dacs-4-evidence", raw: evidence }]),
+    true,
+  );
+  // Valid signature, but the signer is a stranger to the deal → rejected.
+  assert.equal(
+    await refsPassStrictPolicy(withParty(`did:demos:agent:${"9".repeat(64)}`), [
+      { kind: "dacs-4-evidence", raw: evidence },
+    ]),
+    false,
+  );
+});
+
 test("indexer rejects a shape-valid listing with a fake signature", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({

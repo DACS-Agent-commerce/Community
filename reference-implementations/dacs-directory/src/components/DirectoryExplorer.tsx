@@ -141,7 +141,11 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
               <div className="byline">
                 by <strong>{s.displayName}</strong>
                 <span className={`byline-src ${s.ownerRegistered ? "ok" : ""}`}>
-                  {s.ownerRegistered ? "owner-registered" : s.discovered ? "found on-chain" : "registered"}
+                  {s.ownerRegistered
+                    ? "owner-registered"
+                    : s.discovered
+                      ? "found on-chain"
+                      : "unverified submission"}
                 </span>
               </div>
               {lead?.offering.description && (

@@ -56,9 +56,22 @@ export interface ResolvedArtifact {
   raw: Record<string, unknown>;
 }
 
-/** Signature validation layered on top of the SDK's shape/hash ref checks. */
+/**
+ * Signature validation layered on top of the SDK's shape/hash ref checks.
+ *
+ * `partyClaims` is the set of primaryClaims on the bundle. It binds signer
+ * IDENTITY (not just "some valid signature"):
+ *  - dacs-3-agreement: buyer AND seller (named in the artifact) must sign.
+ *  - dacs-4-evidence: settlement evidence is produced by the transacting
+ *    parties, so at least one signer must be a bundle party.
+ *  - dacs-2-verifyresult: the vetting record may be signed by an external
+ *    verifier not listed as a party, so we require a valid signature but do
+ *    NOT constrain the signer to the party set. Integrity is still anchored
+ *    by the parent bundle's hash-binding of this ref.
+ */
 export async function verifyReferencedArtifactSignature(
   artifact: ResolvedArtifact,
+  partyClaims: Set<string> = new Set(),
 ): Promise<boolean> {
   if (artifact.kind === "dacs-1-listing") return (await verifyListing(artifact.raw)) !== null;
   const separator = SEPARATORS[artifact.kind];
@@ -90,6 +103,9 @@ export async function verifyReferencedArtifactSignature(
     return typeof buyer === "string" && typeof seller === "string" &&
       validSigners.has(buyer) && validSigners.has(seller);
   }
+  if (artifact.kind === "dacs-4-evidence") {
+    return [...validSigners].some((s) => partyClaims.has(s));
+  }
   return true;
 }
 
@@ -99,7 +115,10 @@ export async function refsPassStrictPolicy(
 ): Promise<boolean> {
   if (!verification.ok || verification.refs.some((r) => r.verdict !== "ok")) return false;
   if (artifacts.length < verification.refs.length) return false;
-  const checks = await Promise.all(artifacts.map(verifyReferencedArtifactSignature));
+  const partyClaims = new Set((verification.bundle?.parties ?? []).map((p) => p.primaryClaim));
+  const checks = await Promise.all(
+    artifacts.map((a) => verifyReferencedArtifactSignature(a, partyClaims)),
+  );
   return checks.every(Boolean);
 }
 

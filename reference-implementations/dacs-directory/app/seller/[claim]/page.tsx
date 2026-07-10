@@ -22,6 +22,12 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
           return <span className={`badge ${t.chipClass}`} style={{ verticalAlign: "middle" }} title={t.hint}>{t.label}</span>; })()}{" "}
         {seller.ownerRegistered && <span className="badge ok" style={{ verticalAlign: "middle" }}>owner-registered</span>}{" "}
         {seller.discovered && <span className="badge" style={{ verticalAlign: "middle" }}>discovered on-chain</span>}{" "}
+        {!seller.ownerRegistered && !seller.discovered && (
+          <span className="badge" style={{ verticalAlign: "middle" }}
+                title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listings below are still verified from chain.">
+            unverified submission
+          </span>
+        )}{" "}
         {seller.wellKnownDomains?.map((d) => (
           <a key={d} className="badge cci linked" style={{ verticalAlign: "middle" }}
              href={(d.startsWith("http") ? d : `https://${d}`) + "/.well-known/agent.json"}

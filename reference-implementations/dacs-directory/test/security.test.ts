@@ -65,6 +65,12 @@ test("well-known URL policy rejects unsafe schemes and address ranges", async ()
   assert.equal(isPrivateAddress("169.254.169.254"), true);
   assert.equal(isPrivateAddress("10.0.0.1"), true);
   assert.equal(isPrivateAddress("::1"), true);
+  // IPv4-mapped forms must fall back to the v4 policy (rebinding hardening).
+  assert.equal(isPrivateAddress("::ffff:169.254.169.254"), true);
+  assert.equal(isPrivateAddress("::ffff:172.16.0.1"), true);
+  assert.equal(isPrivateAddress("::ffff:100.64.0.1"), true);
+  assert.equal(isPrivateAddress("::ffff:8.8.8.8"), false);
+  assert.equal(isPrivateAddress("2606:4700:4700::1111"), false);
   const result = await crawlDomain("https://127.0.0.1");
   assert.equal("error" in result, true);
 });

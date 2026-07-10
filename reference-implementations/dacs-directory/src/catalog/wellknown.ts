@@ -14,7 +14,9 @@
  */
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import type { LookupFunction } from "node:net";
 
 export interface WellKnownAgent {
   domain: string;
@@ -59,17 +61,33 @@ export function isPrivateAddress(address: string): boolean {
   }
   if (isIP(address) === 6) {
     const a = address.toLowerCase();
+    // IPv4-mapped (::ffff:a.b.c.d) — apply the v4 policy to the embedded
+    // address so mapped 10/172.16-31/192.168/100.64/… can't slip through.
+    const mapped = a.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) return isPrivateAddress(mapped[1]);
     return (
       a === "::" || a === "::1" || a.startsWith("fc") || a.startsWith("fd") ||
-      /^fe[89ab]/.test(a) || a.startsWith("ff") ||
-      a.startsWith("::ffff:127.") || a.startsWith("::ffff:10.") ||
-      a.startsWith("::ffff:192.168.") || a.startsWith("::ffff:169.254.")
+      /^fe[89ab]/.test(a) || a.startsWith("ff")
     );
   }
   return true;
 }
 
-async function validateOutboundUrl(raw: string): Promise<URL> {
+interface VettedUrl {
+  url: URL;
+  /** The specific resolved address the caller MUST connect to. */
+  ip: string;
+}
+
+/**
+ * Vet an outbound URL and PIN the address we will connect to. We resolve DNS,
+ * reject if any record is non-public, then hand back one vetted IP. Callers
+ * connect to that exact IP (via the node:https `lookup` hook below), which
+ * closes the DNS-rebinding window between this check and the socket connect
+ * (TOCTOU): a resolver cannot answer "public" here and "169.254.169.254" at
+ * fetch time, because fetch never re-resolves.
+ */
+async function validateOutboundUrl(raw: string): Promise<VettedUrl> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -86,7 +104,7 @@ async function validateOutboundUrl(raw: string): Promise<URL> {
   if (resolved.length === 0 || resolved.some((r) => isPrivateAddress(r.address))) {
     throw new Error("well-known URL resolves to a non-public address");
   }
-  return url;
+  return { url, ip: resolved[0].address };
 }
 
 export function normalizeSubmittedDomain(domain: string): string {
@@ -100,50 +118,92 @@ export function normalizeSubmittedDomain(domain: string): string {
   return url.origin;
 }
 
-async function readTextLimited(res: Response): Promise<string> {
-  const announced = Number(res.headers.get("content-length") ?? 0);
-  if (announced > MAX_RESPONSE_BYTES) throw new Error("response too large");
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new Error("response too large");
-    }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    all.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(all);
+/**
+ * Force the socket to the pre-vetted IP while TLS/SNI and the Host header stay
+ * the real hostname (so certificate validation is unaffected). This is what
+ * pins the connection to the address `validateOutboundUrl` approved.
+ */
+function pinnedLookup(ip: string): LookupFunction {
+  const family = isIP(ip) || 4;
+  return function (_hostname: string, options: unknown, callback?: unknown) {
+    const cb = (typeof options === "function" ? options : callback) as (
+      err: NodeJS.ErrnoException | null,
+      address: unknown,
+      family?: number,
+    ) => void;
+    const wantsAll =
+      typeof options === "object" && options !== null && (options as { all?: boolean }).all;
+    if (wantsAll) cb(null, [{ address: ip, family }], undefined);
+    else cb(null, ip, family);
+  } as unknown as LookupFunction;
+}
+
+interface RawResponse {
+  status: number;
+  location: string | null;
+  body: string;
+}
+
+/** Single GET to a vetted URL, connecting only to the pinned IP; size-capped. */
+function httpsGetPinned(url: URL, ip: string): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      url,
+      {
+        method: "GET",
+        lookup: pinnedLookup(ip),
+        servername: url.hostname,
+        headers: { accept: "application/json", host: url.host },
+        timeout: 15_000,
+      },
+      (res) => {
+        const announced = Number(res.headers["content-length"] ?? 0);
+        if (announced > MAX_RESPONSE_BYTES) {
+          res.destroy();
+          reject(new Error("response too large"));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            res.destroy();
+            reject(new Error("response too large"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const loc = res.headers.location;
+          resolve({
+            status: res.statusCode ?? 0,
+            location: Array.isArray(loc) ? loc[0] ?? null : loc ?? null,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | null> {
   try {
     let current = await validateOutboundUrl(url);
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-      const res = await fetch(current, {
-        signal: AbortSignal.timeout(15_000),
-        redirect: "manual",
-        headers: { accept: "application/json" },
-      });
+      const res = await httpsGetPinned(current.url, current.ip);
       if (res.status >= 300 && res.status < 400) {
-        const location = res.headers.get("location");
-        if (!location || redirects === MAX_REDIRECTS) return null;
-        current = await validateOutboundUrl(new URL(location, current).href);
+        if (!res.location || redirects === MAX_REDIRECTS) return null;
+        // Re-vet AND re-pin the redirect target before following it.
+        current = await validateOutboundUrl(new URL(res.location, current.url).href);
         continue;
       }
-      if (!res.ok) return null;
-      const raw = await readTextLimited(res);
-      return { body: JSON.parse(raw), raw };
+      if (res.status < 200 || res.status >= 300) return null;
+      return { body: JSON.parse(res.body), raw: res.body };
     }
     return null;
   } catch {

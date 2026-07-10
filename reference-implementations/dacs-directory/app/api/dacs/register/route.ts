@@ -10,6 +10,15 @@ import { parseRegistration } from "@/src/catalog/registration";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadRegistrations, saveRegistrations, withDataLock } from "@/src/catalog/store";
 
+// Hard caps bound the reindex cost: every stored registration is re-read and
+// re-verified from chain each pass (up to 32 anchors + 200 deals apiece), so
+// an unbounded file is a storage-amplification DoS. The per-IP rate limiter is
+// only advisory (x-forwarded-for is client-spoofable when directly exposed);
+// these caps are the real backstop. Owner-signed updates to existing entries
+// are always allowed — they replace, never grow the file.
+const MAX_REGISTRATIONS = 2000;
+const MAX_UNSIGNED_CANDIDATES = 200;
+
 export async function POST(req: NextRequest) {
   const blocked = rateLimit(req, "register", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
   if (blocked) return blocked;
@@ -41,6 +50,18 @@ export async function POST(req: NextRequest) {
         { error: "this agent is already registered — updates must be signed by its key" },
         { status: 403 },
       );
+    }
+    // New entries are bounded; owner-signed updates to existing entries are not.
+    if (!prior) {
+      if (regs.length >= MAX_REGISTRATIONS) {
+        return NextResponse.json({ error: "registration registry is at capacity" }, { status: 507 });
+      }
+      if (!ownerVerified && regs.filter((r) => !r.ownerSignature).length >= MAX_UNSIGNED_CANDIDATES) {
+        return NextResponse.json(
+          { error: "unsigned-submission capacity reached — sign the registration with the agent's key" },
+          { status: 507 },
+        );
+      }
     }
     if (idx >= 0) regs[idx] = body;
     else regs.push(body);
