@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import CounterpartyEvidenceRunner from "@/src/components/CounterpartyEvidenceRunner";
 import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
+import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
@@ -45,6 +47,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const identity = tierMeta(seller.identityTier ?? "self-declared");
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
+  const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
+  const isFixtureListing = listing.anchor.kind === "fixture";
+  const listingProfileLabel = isFixtureListing
+    ? "fixture listing"
+    : listing.artifactProfile === "dacs-v0.1"
+      ? "current DACS listing"
+      : "legacy SDK listing";
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -70,10 +79,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
-          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listing.artifactProfile === "dacs-v0.1" ? "current DACS listing" : "legacy SDK listing"}</span>
+          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingProfileLabel}</span>
           {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
-          {!seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
-          {!seller.ownerRegistered && !seller.discovered && (
+          {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
+          {isFixtureListing && <span className="badge">not chain anchored</span>}
+          {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
             <span className="badge" title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listing itself is still verified from chain.">
               unverified submission
             </span>
@@ -105,11 +115,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="trust-heading" className="card-section-title">Three different checks</h2>
           <ul className="trust-checks">
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
-            <li><span className="check ok">✓</span><div><strong>Listing</strong><p>Signature and chain anchor verified</p></div></li>
+            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
             <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed bundles passed strict verification</p></div></li>
           </ul>
         </aside>
       </div>
+
+      {isCounterpartyEvidenceDemo && <CounterpartyEvidenceRunner />}
 
       <details className="technical-disclosure">
         <summary>Technical listing details</summary>

@@ -1,0 +1,48 @@
+{
+  "catalogVersion": "1",
+  "generatedAt": 1783760400000,
+  "sellers": [
+    {
+      "primaryClaim": "did:demos:agent:counterparty-evidence-demo",
+      "discovered": false,
+      "displayName": "Counterparty Evidence Desk",
+      "identityTier": "self-declared",
+      "cci": [],
+      "listings": [
+        {
+          "listingId": "counterparty-evidence-receipt",
+          "version": 1,
+          "contentHash": "4b8d98726954bc1634bb0039fc52c96ae815c03e8bc9b7d88bef175273978f43",
+          "anchor": {
+            "kind": "fixture",
+            "locator": "fixture:counterparty-evidence-receipt"
+          },
+          "seller": {
+            "primaryClaim": "did:demos:agent:counterparty-evidence-demo",
+            "displayName": "Counterparty Evidence Desk"
+          },
+          "offering": {
+            "title": "Counterparty evidence receipt",
+            "description": "Fixture-backed evidence receipt for a public counterparty observation. It proves receipt integrity and authorship only, not source truth, compliance clearance, or payment readiness.",
+            "category": "services.counterparty-evidence",
+            "tags": ["counterparty", "evidence", "receipt", "no-spend"],
+            "rails": ["pay-x402"],
+            "delivery": ["deliver-attested-payload"],
+            "negotiation": ["negotiate-fixed-price"]
+          },
+          "pricing": {},
+          "status": "active",
+          "catalogObservedAt": 1783760400000
+        }
+      ],
+      "deals": [],
+      "reputation": {
+        "completed": 0,
+        "totalAgreements": 0,
+        "completionRate": null
+      },
+      "registeredAt": 1783760400000,
+      "lastIndexedAt": 1783760400000
+    }
+  ]
+}

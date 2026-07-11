@@ -14,6 +14,16 @@ const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declar
 const provenance = (seller: SellerRecord) =>
   seller.ownerRegistered ? "owner-registered" : seller.discovered ? "found on-chain" : "unverified submission";
 
+const listingTrustLabel = (listing: ListingSummary) =>
+  listing.anchor.kind === "fixture"
+    ? "fixture listing"
+    : listing.artifactProfile === "dacs-v0.1"
+      ? "current DACS listing"
+      : "legacy SDK listing";
+
+const listingProvenance = (seller: SellerRecord, listing: ListingSummary) =>
+  listing.anchor.kind === "fixture" ? "fixture catalog" : provenance(seller);
+
 const categoryMatches = (category: string, scope: string) =>
   category === scope || category.startsWith(`${scope}.`);
 
@@ -210,14 +220,12 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
             <article key={`${seller.primaryClaim}/${listing.listingId}/${listing.version}`} className="card service-card">
               <div className="service-card-topline">
                 <span className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</span>
-                <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>
-                  {listing.artifactProfile === "dacs-v0.1" ? "current DACS listing" : "legacy SDK listing"}
-                </span>
+                <span className={`badge ${listing.anchor.kind === "fixture" ? "" : "ok"}`}>{listingTrustLabel(listing)}</span>
               </div>
               <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
               <p className="byline">
                 by <Link href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}><strong>{seller.displayName}</strong></Link>
-                <span className={`byline-src ${seller.ownerRegistered ? "ok" : ""}`}>{provenance(seller)}</span>
+                <span className={`byline-src ${seller.ownerRegistered ? "ok" : ""}`}>{listingProvenance(seller, listing)}</span>
               </p>
               <p className="agent-desc clamp2">{listing.offering.description || "No description supplied."}</p>
               <div className="service-facts">

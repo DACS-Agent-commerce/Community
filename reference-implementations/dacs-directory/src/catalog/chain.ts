@@ -9,6 +9,7 @@
  * client's unrelated multichain dependency tree.
  */
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { readCounterpartyEvidenceFixtureAnchor } from "./counterpartyEvidence.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -28,6 +29,8 @@ export interface AnchorRecord {
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
+  const fixture = readCounterpartyEvidenceFixtureAnchor(address);
+  if (fixture) return { data: fixture };
   if (!/^stor-[0-9a-f]{40}$/.test(address)) return null;
   try {
     const res = await fetch(`${RPC}/storage-program/${address}`, {

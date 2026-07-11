@@ -1,0 +1,145 @@
+{
+  "schema": "dacs-community.counterparty-evidence-receipt.v0",
+  "conformanceStatus": "prototype",
+  "dacsSurface": [
+    "DACS-1 Identify: requester, attester, and subject identifiers",
+    "DACS-2 Vet: observed public-source evidence and limitations",
+    "DACS-5 Verify: receipt hash, signature, source hashes, and anchor reference"
+  ],
+  "claim": "Fixture attests that the listed agent produced a counterparty evidence receipt for the named subject from the included source observations. It does not certify compliance, sanctions clearance, source truth, or payment readiness.",
+  "jobId": "counterparty-evidence:microsoft-corporation:fixture:2026-07-08T12-20-00Z",
+  "requesterAgent": {
+    "id": "did:demos:agent:counterparty-buyer-demo",
+    "role": "buyer-agent"
+  },
+  "subject": {
+    "kind": "legal-entity",
+    "name": "MICROSOFT CORPORATION",
+    "identifiers": [
+      {
+        "scheme": "lei",
+        "value": "INR2EJN1ERAN0W5ZP974"
+      },
+      {
+        "scheme": "jurisdiction-registration",
+        "jurisdiction": "US-WA",
+        "value": "600 413 485"
+      }
+    ]
+  },
+  "subjectHash": "sha256:98e1aa598760688f618ac793b0c8bc73efa345d84e61a609402a29dc835b1391",
+  "sourceObservations": [
+    {
+      "sourceId": "gleif-lei-record",
+      "observedAt": "2026-07-08T12:18:40.000Z",
+      "sourceDescriptor": {
+        "kind": "live-captured-http-json",
+        "name": "GLEIF LEI API",
+        "url": "https://api.gleif.org/api/v1/lei-records?filter[entity.legalName]=Microsoft%20Corporation&page[size]=1",
+        "goldenCopyPublishDate": "2026-07-08T00:00:00Z"
+      },
+      "query": {
+        "legalName": "Microsoft Corporation",
+        "requestedLei": "INR2EJN1ERAN0W5ZP974"
+      },
+      "result": {
+        "status": "matched",
+        "observedLegalName": "MICROSOFT CORPORATION",
+        "observedLei": "INR2EJN1ERAN0W5ZP974",
+        "entityStatus": "ACTIVE",
+        "registrationStatus": "ISSUED",
+        "corroborationLevel": "FULLY_CORROBORATED",
+        "jurisdiction": "US-WA",
+        "registeredAs": "600 413 485"
+      },
+      "limitations": [
+        "Live-captured fixture from a public source; verifier checks this receipt, not the live source.",
+        "Legal entity match is evidence for this check only, not counterparty approval."
+      ],
+      "observationHash": "sha256:cac38095c18e17d9984eecbeefd613ffa3790650daab0c279d4fd7975b15808e"
+    },
+    {
+      "sourceId": "ofac-sdn-csv-exact-name",
+      "observedAt": "2026-07-08T12:19:05.000Z",
+      "sourceDescriptor": {
+        "kind": "live-captured-csv-digest",
+        "name": "OFAC SDN CSV",
+        "url": "https://www.treasury.gov/ofac/downloads/sdn.csv",
+        "contentHash": "sha256:1ae2e8bbd7439a9d0de1c318a8563aec646fd25b796ade317fd985b7df6d25cc",
+        "byteLength": 5592340
+      },
+      "query": {
+        "exactName": "MICROSOFT CORPORATION"
+      },
+      "result": {
+        "status": "not_found_in_fixture_exact_match",
+        "exactMatchCount": 0
+      },
+      "limitations": [
+        "Exact fixture string match only; this is not fuzzy sanctions screening.",
+        "A not-found observation is not sanctions clearance."
+      ],
+      "observationHash": "sha256:33050df77b9ef0f9c2c84cae370f57c3590a42d81e25b3c39f0314ad34e59553"
+    },
+    {
+      "sourceId": "sam-gov-exclusions",
+      "observedAt": "2026-07-08T12:19:30.000Z",
+      "sourceDescriptor": {
+        "kind": "declared-not-checked-source",
+        "name": "SAM.gov Exclusions API",
+        "url": "https://open.gsa.gov/api/exclusions-api/"
+      },
+      "query": {
+        "legalName": "MICROSOFT CORPORATION",
+        "lei": "INR2EJN1ERAN0W5ZP974"
+      },
+      "result": {
+        "status": "not_checked",
+        "reason": "No SAM.gov API key or source capture is included in this no-spend fixture."
+      },
+      "limitations": [
+        "This receipt explicitly records that SAM.gov exclusions were not checked."
+      ],
+      "observationHash": "sha256:d59e4adbdfea04cf8b9a51d47314a6567e944f449e971e2e7b48af73aa46e489"
+    }
+  ],
+  "sourceObservationSetHash": "sha256:a89ab73d8c6c52c0f932382b9f0303e117e0332a3541bffd2009489387524c98",
+  "demosAnchorRefs": [
+    {
+      "kind": "demos-testnet-anchor-ref-fixture",
+      "network": "demos-testnet",
+      "txHash": "demos:testnet:0000000000000000000000000000000000000000000000000000000000000c0e1",
+      "contentHash": "sha256:a89ab73d8c6c52c0f932382b9f0303e117e0332a3541bffd2009489387524c98",
+      "note": "Fixture anchor reference only; no live Demos write is claimed."
+    }
+  ],
+  "overallResult": {
+    "status": "evidence_collected_with_limits",
+    "checkedSources": [
+      "gleif-lei-record",
+      "ofac-sdn-csv-exact-name"
+    ],
+    "notCheckedSources": [
+      "sam-gov-exclusions"
+    ],
+    "limitations": [
+      "This receipt proves integrity and authorship of the included observations only.",
+      "This receipt does not prove source truth.",
+      "This receipt is not KYB certification.",
+      "This receipt is not sanctions clearance.",
+      "This receipt does not prove payment, settlement, onboarding approval, or production readiness."
+    ]
+  },
+  "freshness": {
+    "validFrom": "2026-07-08T12:18:40.000Z",
+    "validUntil": "2026-07-08T12:30:00.000Z"
+  },
+  "attestingAgent": {
+    "id": "did:demos:agent:counterparty-evidence-demo",
+    "keyAlg": "Ed25519",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAYzey4uB3DXleXtGk39UqyVvijWnHKxWFtNNwyyKqf7g=\n-----END PUBLIC KEY-----\n"
+  },
+  "issuedAt": "2026-07-08T12:20:00.000Z",
+  "receiptHash": "sha256:12a1d7114d5df2dde16fd97c602f9b761e16e8fa0b49e25a7b1500f640474e10",
+  "agentSignature": "yV4l0_fky-xG-QmFAqLvAOnW0bCQK9w91ytvEJowoFU9mECSfDAx83Uzfg-Y8LvLiMRrIOYExFPfZYJ31NtYCw"
+}
