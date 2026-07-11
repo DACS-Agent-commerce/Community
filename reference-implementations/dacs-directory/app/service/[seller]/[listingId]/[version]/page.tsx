@@ -5,6 +5,7 @@ import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
+import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const { seller, listing } = found;
   const identity = tierMeta("self-declared");
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
+  const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -78,11 +80,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           )}
         </div>
         <div className="service-actions">
-          {listing.publicEndpoint && <a className="btn" href={listing.publicEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
-          <a className={listing.publicEndpoint ? "btn secondary" : "btn"} href={apiHref}>View signed listing artifact</a>
+          {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>View signed listing artifact</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        <p className="note">{listing.publicEndpoint ? "The endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : "This seller has not published an engagement endpoint. Inspect the signed artifact before coordinating off-directory."}</p>
+        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory."}</p>
       </section>
 
       <div className="service-layout">

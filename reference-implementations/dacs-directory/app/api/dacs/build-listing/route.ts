@@ -18,13 +18,13 @@ import { deriveAnchorAddress, readAnchor } from "@/src/catalog/chain";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
+import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_RAILS = new Set(["pay-dem", "pay-x402"]);
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
-const versionReservations = new Map<string, { version: number; presentedAt: number; expiresAt: number }>();
 
 async function accountNonce(addressHex: string): Promise<number> {
   const res = await fetch(RPC + "/", {
@@ -42,14 +42,12 @@ async function accountNonce(addressHex: string): Promise<number> {
 }
 
 export async function POST(req: NextRequest) {
-  const cleanupAt = Date.now();
-  for (const [key, value] of versionReservations) if (value.expiresAt <= cleanupAt) versionReservations.delete(key);
   const blocked = rateLimit(req, "build-listing", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
   if (blocked) return blocked;
   const body = (await req.json().catch(() => null)) as {
     claim?: string; serviceId?: string; name?: string; description?: string;
     rails?: string[]; delivery?: string[]; category?: string; tags?: string[];
-    publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string; listingVersion?: number;
+    publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string;
     pricing?: {
       kind?: "fixed" | "negotiable" | "auction"; amount?: string; currency?: string; unit?: string;
       minPct?: number; maxPct?: number; selectionRule?: "lowest-price" | "highest-price" | "first-acceptable";
@@ -89,13 +87,10 @@ export async function POST(req: NextRequest) {
   const priorVersions = knownSeller?.listings
     .filter((l) => l.listingId === serviceId)
     .map((l) => l.version) ?? [];
-  const reservationKey = `${did}\0${serviceId}`;
-  const reservation = versionReservations.get(reservationKey);
-  const reservedVersions = [...versionReservations.entries()]
-    .filter(([key, value]) => key === reservationKey && value.expiresAt > Date.now())
-    .map(([, value]) => value.version);
-  const nextVersion = Math.max(0, ...priorVersions, ...reservedVersions) + 1;
-  const listingVersion = body.identitySignature ? Number(body.listingVersion) : nextVersion;
+  // Stateless by design: an unauthenticated first-stage request must not
+  // create mutable state that can block another publisher. Operators must
+  // serialize concurrent writes for one seller/listingId (README limitation).
+  const listingVersion = Math.max(0, ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -106,8 +101,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "tags must contain at most 16 values of 32 characters" }, { status: 400 });
   }
   const tags = (body.tags ?? []).map((t) => t.trim()).filter(Boolean);
-  if (body.publicEndpoint && !/^https:\/\//i.test(body.publicEndpoint)) {
-    return NextResponse.json({ error: "public endpoint must use HTTPS" }, { status: 400 });
+  const publicEndpoint = body.publicEndpoint ? safePublicEndpoint(body.publicEndpoint.trim()) : undefined;
+  if (body.publicEndpoint && !publicEndpoint) {
+    return NextResponse.json({ error: "public endpoint must be a safe HTTPS URL of at most 2048 characters" }, { status: 400 });
   }
   const pricingKind = body.pricing?.kind ?? "fixed";
   if (pricingKind !== "fixed" && pricingKind !== "negotiable" && pricingKind !== "auction") {
@@ -130,8 +126,11 @@ export async function POST(req: NextRequest) {
   // A current Listing embeds a separately signed IdentityBundle. The first
   // request returns that preimage; the second includes the wallet signature
   // and receives the final listing preimage + anchor transaction.
-  const identityPresentedAt = Number.isSafeInteger(body.identityPresentedAt)
-    ? Number(body.identityPresentedAt) : Date.now();
+  const serverNow = Date.now();
+  const identityPresentedAt = body.identitySignature ? Number(body.identityPresentedAt) : serverNow;
+  if (body.identitySignature && (
+    !Number.isSafeInteger(identityPresentedAt) || identityPresentedAt < serverNow - 15 * 60_000 || identityPresentedAt > serverNow + 60_000
+  )) return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
   const identityScope = {
     bundleVersion: "1",
     presentedBy: did,
@@ -140,11 +139,7 @@ export async function POST(req: NextRequest) {
   };
   const identityMessage = BUNDLE_SEPARATOR + contentHash(identityScope);
   if (!body.identitySignature) {
-    versionReservations.set(reservationKey, { version: listingVersion, presentedAt: identityPresentedAt, expiresAt: Date.now() + 15 * 60_000 });
-    return NextResponse.json({ identityMessage, identityPresentedAt, listingVersion });
-  }
-  if (!reservation || reservation.expiresAt < Date.now() || reservation.version !== listingVersion || reservation.presentedAt !== identityPresentedAt) {
-    return NextResponse.json({ error: "listing version reservation expired; restart the publish step" }, { status: 409 });
+    return NextResponse.json({ identityMessage, identityPresentedAt });
   }
   const identitySigHex = body.identitySignature.replace(/^(0x)+/i, "");
   if (!/^[0-9a-fA-F]{128}$/.test(identitySigHex)) {
@@ -201,7 +196,7 @@ export async function POST(req: NextRequest) {
         presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySigHex }] },
       },
       displayName: knownSeller?.displayName ?? body.name.trim(),
-      ...(body.publicEndpoint ? { publicEndpoint: body.publicEndpoint.trim() } : {}),
+      ...(publicEndpoint ? { publicEndpoint } : {}),
     },
     offering: { title: body.name.trim(), description: body.description.trim(), category, tags, deliverable },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
@@ -260,7 +255,6 @@ export async function POST(req: NextRequest) {
     deals: loadRegistrations().find((r) => r.primaryClaim === did)?.deals ?? [],
   };
   const signedAt = Date.now();
-  versionReservations.delete(reservationKey);
 
   return NextResponse.json({
     listing,

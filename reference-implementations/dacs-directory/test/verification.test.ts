@@ -112,6 +112,12 @@ test("listing verification accepts a current structured listing and verifies its
   assert.equal(verified?.profile, "dacs-v0.1");
   assert.equal(verified?.sellerClaim, did);
   assert.equal(await verifyListing({ ...signed, offering: { ...signed.offering, title: "tampered" } }), null);
+  const unsafeScope = { ...currentScope, seller: { ...currentScope.seller, publicEndpoint: "javascript:alert(1)" } };
+  const unsafeValue = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-listing:v1:${contentHash(unsafeScope)}`, "utf8"),
+    privateKeyFromSeed(seed),
+  )).toString("hex");
+  assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
 function result(outcome: string, signatures: BundleVerification["signatures"]): BundleVerification {

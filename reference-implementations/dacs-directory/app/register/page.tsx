@@ -82,7 +82,6 @@ export default function Register() {
           ...listingInput,
           identityPresentedAt: identityDraft.identityPresentedAt,
           identitySignature,
-          listingVersion: identityDraft.listingVersion,
         }),
       });
       const built = await build.json();

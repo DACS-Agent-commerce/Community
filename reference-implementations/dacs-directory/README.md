@@ -153,6 +153,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
+- **Listing versions are allocated from observed catalog state**, without a mutable
+  in-process lock. Publishers must serialize writes for one `seller + listingId` until
+  the substrate or SDK provides an atomic version allocator; concurrent publishers can
+  otherwise propose the same next version.
 
 ## DACS surface / conformance declaration
 

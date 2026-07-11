@@ -1,6 +1,7 @@
 import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
+import { safePublicEndpoint } from "./publicEndpoint.js";
 
 const SEPARATOR = "dacs-listing:v1:";
 
@@ -39,7 +40,8 @@ const CURRENT_LISTING_KEYS = new Set([
 function validPriceTerm(value: unknown): boolean {
   const term = record(value);
   return Boolean(term && typeof term.amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(term.amount) &&
-    Number.isFinite(Number(term.amount)) && Number(term.amount) > 0 && typeof term.currency === "string" && term.currency.length > 0);
+    Number.isFinite(Number(term.amount)) && Number(term.amount) > 0 && typeof term.currency === "string" && term.currency.length > 0 && term.currency.length <= 64 &&
+    (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
 }
 
 function currentListing(scope: Record<string, unknown>): {
@@ -71,7 +73,8 @@ function currentListing(scope: Record<string, unknown>): {
     scope.dacsVersion !== "1" || !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
     typeof scope.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(scope.listingId) ||
     [...Object.keys(scope)].some((key) => !CURRENT_LISTING_KEYS.has(key)) ||
-    typeof seller?.displayName !== "string" || seller.displayName.length > 200 || !sellerClaim || claims.length === 0 ||
+    typeof seller?.displayName !== "string" || seller.displayName.length > 200 ||
+    (seller.publicEndpoint !== undefined && !safePublicEndpoint(seller.publicEndpoint)) || !sellerClaim || claims.length === 0 ||
     !claims.some((claim) => claim.ref === sellerClaim) || !claims.some((claim) => claim.ref === signer) ||
     typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
     typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) || !record(offering.deliverable) ||

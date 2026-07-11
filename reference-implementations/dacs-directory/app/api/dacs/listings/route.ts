@@ -1,9 +1,9 @@
 /**
  * GET /api/dacs/listings — §6.3.6 catalog search endpoint.
- * Normative filters plus q/profile/identityTier directory extensions.
+ * Normative filters plus q/profile directory extensions.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { activeCatalogListings } from "@/src/catalog/discovery";
+import { activeCatalogListings, primaryClaimMatches } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
@@ -21,9 +21,6 @@ export async function GET(req: NextRequest) {
   const minRating = q.get("minRating");
   const query = q.get("q")?.trim().toLowerCase();
   const profile = q.get("profile");
-  // Catalog-side extension beyond §6.3.6: the §6.3.2.1 derived tier as a
-  // filter (institutional | verified | self-declared).
-  const identityTier = q.get("identityTier");
   const numericFilters: Array<[string, string | null, number, number]> = [
     ["priceMax", priceMax, 0, Number.POSITIVE_INFINITY],
     ["minCompletionRate", minCompletionRate, 0, 1],
@@ -38,9 +35,6 @@ export async function GET(req: NextRequest) {
   if (profile && profile !== "dacs-v0.1" && profile !== "legacy-sdk-v0.1") {
     return NextResponse.json({ error: "unsupported artifact profile" }, { status: 400 });
   }
-  if (identityTier && !["institutional", "verified", "self-declared"].includes(identityTier)) {
-    return NextResponse.json({ error: "unsupported identity tier" }, { status: 400 });
-  }
   const pagination = parsePagination(q.get("limit"), q.get("cursor"));
   if (!pagination.ok) {
     return NextResponse.json({ error: pagination.error }, { status: 400 });
@@ -48,19 +42,14 @@ export async function GET(req: NextRequest) {
   const { limit, cursor } = pagination;
 
   const catalog = loadCatalog();
-  const tierOf = new Map(catalog.sellers.map((s) => [
-    s.primaryClaim,
-    "self-declared",
-  ]));
   // Discovery only advertises offers that remain active. Revoked listings stay
   // available on the seller history/detail surfaces with an explicit status.
   const all = activeCatalogListings(catalog);
   const filtered = all.filter((l) => {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;
-    if (identityTier && tierOf.get(l.seller.primaryClaim) !== identityTier) return false;
     if (rail && !(l.offering.rails ?? []).includes(rail)) return false;
     if (profile && l.artifactProfile !== profile) return false;
-    if (primaryClaim && !l.seller.primaryClaim.toLowerCase().startsWith(primaryClaim.toLowerCase() + ":")) return false;
+    if (primaryClaim && !primaryClaimMatches(l.seller.primaryClaim, primaryClaim)) return false;
     if (credential) {
       const required = Array.isArray(l.buyerRequirement?.required)
         ? l.buyerRequirement.required as Array<Record<string, unknown>> : [];

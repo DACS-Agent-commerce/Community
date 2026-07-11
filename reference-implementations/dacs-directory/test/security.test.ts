@@ -3,6 +3,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 
 import { listingPresentation } from "../src/catalog/listingMetadata.js";
+import { safePublicEndpoint } from "../src/catalog/publicEndpoint.js";
 import { parsePagination } from "../src/catalog/pagination.js";
 import { parseRegistration } from "../src/catalog/registration.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
@@ -93,6 +94,14 @@ test("extensible listing metadata is normalized before catalog persistence", () 
   assert.deepEqual(hostile.rails, ["pay-dem"]);
   assert.equal(hostile.delivery.length, 16);
   assert.deepEqual(hostile.negotiation, []);
+});
+
+test("signed public endpoints are safe before they become browser links", () => {
+  assert.equal(safePublicEndpoint("javascript:alert(1)"), undefined);
+  assert.equal(safePublicEndpoint("data:text/html,hello"), undefined);
+  assert.equal(safePublicEndpoint("https://user:pass@example.com/a2a"), undefined);
+  assert.equal(safePublicEndpoint(`https://example.com/${"a".repeat(2048)}`), undefined);
+  assert.equal(safePublicEndpoint("https://agent.example/a2a"), "https://agent.example/a2a");
 });
 
 test("well-known URL policy rejects unsafe schemes and address ranges", async () => {

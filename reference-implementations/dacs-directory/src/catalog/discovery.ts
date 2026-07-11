@@ -12,3 +12,10 @@ export const activeCatalogSellers = (sellers: SellerRecord[]): SellerRecord[] =>
       listings: seller.listings.filter((listing) => listing.status === "active"),
     }))
     .filter((seller) => seller.listings.length > 0);
+
+/** Match either one exact canonical claim or a claim-scheme/prefix filter. */
+export function primaryClaimMatches(claim: string, filter: string): boolean {
+  const canonicalClaim = claim.toLowerCase();
+  const canonicalFilter = filter.toLowerCase();
+  return canonicalClaim === canonicalFilter || canonicalClaim.startsWith(canonicalFilter + ":");
+}

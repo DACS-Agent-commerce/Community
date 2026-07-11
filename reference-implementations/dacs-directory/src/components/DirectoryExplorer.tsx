@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
-import { deliveryLabel, IDENTITY_TIERS, pricingModelLabel, railLabel, tierMeta } from "./labels";
+import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "./labels";
 
 const sellerTier = (_seller: SellerRecord) => "self-declared";
 
@@ -28,7 +28,6 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
   const [q, setQ] = useState(queryParam);
   const ownNavigation = useRef(false);
   const rail = params.get("rail");
-  const tier = params.get("identityTier");
   const category = params.get("category");
   const goodRecord = params.get("trackRecord") === "90";
 
@@ -65,17 +64,10 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     () => [...new Set(services.map(({ listing }) => listing.offering.category))].sort(),
     [services],
   );
-  const tierCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const { seller } of services) counts[sellerTier(seller)] = (counts[sellerTier(seller)] ?? 0) + 1;
-    return counts;
-  }, [services]);
-
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return services.filter(({ listing, seller }) => {
       if (rail && !(listing.offering.rails ?? []).includes(rail)) return false;
-      if (tier && sellerTier(seller) !== tier) return false;
       if (category && !categoryMatches(listing.offering.category, category)) return false;
       if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
       if (!needle) return true;
@@ -92,7 +84,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         ...seller.cci.map((claim) => `${claim.platform} ${claim.handle}`),
       ].join(" ").toLowerCase().replaceAll("-", " ").includes(needle.replaceAll("-", " "));
     });
-  }, [services, q, rail, tier, category, goodRecord]);
+  }, [services, q, rail, category, goodRecord]);
 
   const setParam = (name: string, value: string | null) => {
     const next = new URLSearchParams(params.toString());
@@ -105,7 +97,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     setQ("");
     router.replace(pathname, { scroll: false });
   };
-  const hasFilters = Boolean(q || rail || tier || category || goodRecord);
+  const hasFilters = Boolean(q || rail || category || goodRecord);
 
   return (
     <section aria-labelledby="services-heading">
@@ -137,22 +129,6 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         </div>
 
         <div className="facets" aria-label="Filter services">
-          <div className="facet-row">
-            <span className="facet-label">identity</span>
-            {IDENTITY_TIERS.map((option) => {
-              const count = tierCounts[option.id] ?? 0;
-              const selected = tier === option.id;
-              if (count === 0) return null;
-              return (
-                <button key={option.id} type="button" title={option.hint} aria-label={`${option.label}: ${option.hint}`}
-                  aria-pressed={selected}
-                  className={`badge ${option.chipClass} filter ${selected ? "active" : ""}`}
-                  onClick={() => setParam("identityTier", selected ? null : option.id)}>
-                  {option.label} <span className="facet-count">{count}</span>
-                </button>
-              );
-            })}
-          </div>
           {categories.length > 0 && (
             <div className="facet-row">
               <span className="facet-label">category</span>

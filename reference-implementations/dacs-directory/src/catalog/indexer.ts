@@ -30,6 +30,7 @@ import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import { findProgramAddress, loadScanState } from "./store.js";
 import { deriveSellerReputation, flipOutcome } from "./reputation.js";
+import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -146,7 +147,7 @@ export async function indexRegistration(
       anchor: { kind: "storage-program", locator: anchor },
       seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
       artifactProfile: verified.profile,
-      publicEndpoint: typeof signedSeller?.publicEndpoint === "string" ? signedSeller.publicEndpoint : undefined,
+      publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {
         title: presentation.title,
         // Strip the [github:<login>] claim-tag (the interim identity carrier

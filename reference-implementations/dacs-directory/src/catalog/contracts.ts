@@ -65,7 +65,7 @@ export const directoryManifest = (origin: string) => ({
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "identityTier", "limit", "cursor"],
+  filters: ["category", "tag", "credential", "primaryClaim", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
 });
 
 export const openApiDocument = (origin: string) => ({
@@ -92,7 +92,6 @@ export const openApiDocument = (origin: string) => ({
           { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
           { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: ["dacs-v0.1", "legacy-sdk-v0.1"] } },
-          { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
