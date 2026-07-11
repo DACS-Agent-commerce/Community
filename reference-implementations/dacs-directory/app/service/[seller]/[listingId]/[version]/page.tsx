@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import CopyText from "@/src/components/CopyText";
-import { deliveryLabel, negotiationLabel, railLabel, tierMeta } from "@/src/components/labels";
+import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
 
@@ -89,10 +89,10 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <div className="eyebrow">the offer</div>
           <h2 id="offer-heading" className="card-section-title">What to expect</h2>
           <dl className="detail-list">
-            <div><dt>Price</dt><dd>{listing.pricing.priceHint ?? "Ask the agent"}{listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}</dd></div>
+            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.offering.negotiation)}</dd></div>
+            <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}` : "Not published"}</dd></div>
             <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
             <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>
-            <div><dt>Negotiation</dt><dd>{(listing.offering.negotiation ?? []).map(negotiationLabel).join(", ") || "Not stated"}</dd></div>
           </dl>
           {listing.offering.tags.length > 0 && <div className="badges">{listing.offering.tags.map((tag) => <span className="badge" key={tag}>{tag}</span>)}</div>}
         </section>
