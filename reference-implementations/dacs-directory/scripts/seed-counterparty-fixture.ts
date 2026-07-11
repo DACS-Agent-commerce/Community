@@ -1,15 +1,17 @@
-import { counterpartyEvidenceSellerRecord } from "../src/catalog/counterpartyEvidence.js";
-import { loadCatalog, saveCatalog } from "../src/catalog/store.js";
+import { upsertCounterpartyEvidenceSeller } from "../src/catalog/counterpartyEvidence.js";
+import { loadCatalog, loadFixtureSeeds, saveCatalog, saveFixtureSeeds, withDataLock } from "../src/catalog/store.js";
 
 const now = Date.now();
-const fixtureSeller = counterpartyEvidenceSellerRecord(now);
-const catalog = loadCatalog();
-const sellers = catalog.sellers.filter((seller) => seller.primaryClaim !== fixtureSeller.primaryClaim);
+await withDataLock("reindex", () => {
+  const seeds = loadFixtureSeeds();
+  saveFixtureSeeds([...seeds, "counterparty-evidence"]);
 
-saveCatalog({
-  catalogVersion: "1",
-  generatedAt: now,
-  sellers: [...sellers, fixtureSeller],
+  const catalog = loadCatalog();
+  saveCatalog({
+    catalogVersion: "1",
+    generatedAt: now,
+    sellers: upsertCounterpartyEvidenceSeller(catalog.sellers, now),
+  });
 });
 
-console.log(`seeded ${fixtureSeller.displayName} into DACS_DIRECTORY_DATA`);
+console.log("enabled and seeded Counterparty Evidence Desk into DACS_DIRECTORY_DATA");

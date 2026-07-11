@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { NextRequest } from "next/server";
@@ -97,6 +101,24 @@ test("counterparty fixture seed record exposes the runnable service", () => {
   assert.equal(seller.listings.length, 1);
   assert.equal(seller.listings[0]!.anchor.kind, "fixture");
   assert.equal(isCounterpartyEvidenceDemoListing(seller.primaryClaim, seller.listings[0]!), true);
+});
+
+test("counterparty fixture seed command persists the reindex marker", () => {
+  const dataDir = mkdtempSync(`${tmpdir()}/dacs-counterparty-fixture-`);
+  const appDir = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+  try {
+    execFileSync(process.execPath, ["--import", "tsx", "scripts/seed-counterparty-fixture.ts"], {
+      cwd: appDir,
+      env: { ...process.env, DACS_DIRECTORY_DATA: dataDir },
+      stdio: "pipe",
+    });
+    const seeds = JSON.parse(readFileSync(`${dataDir}/fixtures.json`, "utf8")) as unknown;
+    const catalog = JSON.parse(readFileSync(`${dataDir}/catalog.json`, "utf8")) as { sellers?: Array<{ primaryClaim?: string }> };
+    assert.deepEqual(seeds, ["counterparty-evidence"]);
+    assert.ok(catalog.sellers?.some((seller) => seller.primaryClaim === COUNTERPARTY_EVIDENCE_AGENT_ID));
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("counterparty fixture listing JSON path serves the machine contract", async () => {

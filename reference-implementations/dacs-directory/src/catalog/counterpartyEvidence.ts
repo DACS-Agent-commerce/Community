@@ -79,7 +79,7 @@ const TRUSTED_ATTESTER_KEYS: Record<string, string> = {
 };
 
 export const COUNTERPARTY_EVIDENCE_SERVICE_ID = "counterparty-evidence-receipt";
-export const COUNTERPARTY_EVIDENCE_AGENT_ID = "did:demos:agent:counterparty-evidence-demo";
+export const COUNTERPARTY_EVIDENCE_AGENT_ID = "did:demos:agent:6337b2e2e0770d795e5ed1a4dfd52ac95be28d69c72b1585b4d370cb22aa7fb8";
 export const COUNTERPARTY_EVIDENCE_LISTING_VERSION = 1;
 export const COUNTERPARTY_EVIDENCE_ANCHOR_LOCATOR = "fixture:counterparty-evidence-receipt";
 export const counterpartyEvidenceFixture = fixtureReceipt as unknown as CounterpartyEvidenceReceipt;
@@ -190,6 +190,14 @@ export function counterpartyEvidenceSellerRecord(now = Date.now()): SellerRecord
     registeredAt: now,
     lastIndexedAt: now,
   };
+}
+
+export function upsertCounterpartyEvidenceSeller(sellers: SellerRecord[], now = Date.now()): SellerRecord[] {
+  const fixtureSeller = counterpartyEvidenceSellerRecord(now);
+  return [
+    ...sellers.filter((seller) => seller.primaryClaim !== fixtureSeller.primaryClaim),
+    fixtureSeller,
+  ];
 }
 
 function unsignedReceipt(receipt: CounterpartyEvidenceReceipt): JsonValue {

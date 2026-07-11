@@ -7,9 +7,11 @@
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { scanChain } from "./scan";
 import { crawlDomains } from "./wellknown";
+import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import {
   loadCatalog,
   loadDomains,
+  loadFixtureSeeds,
   loadRegistrations,
   loadScanState,
   saveCatalog,
@@ -165,7 +167,16 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     sellers.push(record);
   }
 
-  saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers });
-  log(`catalog written: ${sellers.length} seller(s)`);
-  return { sellers: sellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
+  const generatedAt = Date.now();
+  const fixtureSeeds = loadFixtureSeeds();
+  const catalogSellers = fixtureSeeds.includes("counterparty-evidence")
+    ? upsertCounterpartyEvidenceSeller(sellers, generatedAt)
+    : sellers;
+  if (fixtureSeeds.includes("counterparty-evidence")) {
+    log("fixture: Counterparty Evidence Desk preserved");
+  }
+
+  saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+  log(`catalog written: ${catalogSellers.length} seller(s)`);
+  return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
 }

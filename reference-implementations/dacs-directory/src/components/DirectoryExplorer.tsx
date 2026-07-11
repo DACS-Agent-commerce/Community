@@ -220,7 +220,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
             <article key={`${seller.primaryClaim}/${listing.listingId}/${listing.version}`} className="card service-card">
               <div className="service-card-topline">
                 <span className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</span>
-                <span className={`badge ${listing.anchor.kind === "fixture" ? "" : "ok"}`}>{listingTrustLabel(listing)}</span>
+                <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingTrustLabel(listing)}</span>
               </div>
               <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
               <p className="byline">
