@@ -6,7 +6,10 @@ test("pricing labels describe the signed negotiation model without inventing an 
   assert.equal(pricingModelLabel(["negotiate-fixed-price"]), "fixed price");
   assert.equal(
     pricingModelLabel(["negotiate-rfq", "negotiate-sealed-bid"]),
-    "rfq, sealed bid",
+    "RFQ, sealed bid",
   );
-  assert.equal(pricingModelLabel(undefined), "not stated");
+  assert.equal(pricingModelLabel(undefined), "Not stated");
+  // A listing with supportedNegotiation: [] normalizes to an empty array,
+  // not undefined — it must read the same as an absent declaration.
+  assert.equal(pricingModelLabel([]), "Not stated");
 });

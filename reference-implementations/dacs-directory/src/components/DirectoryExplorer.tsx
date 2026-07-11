@@ -230,7 +230,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               </p>
               <p className="agent-desc clamp2">{listing.offering.description || "No description supplied."}</p>
               <div className="service-facts">
-                <div><span>pricing</span><strong>{pricingModelLabel(listing.offering.negotiation)}</strong></div>
+                <div><span>pricing</span><strong>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}` : pricingModelLabel(listing.offering.negotiation)}</strong></div>
                 <div><span>delivery</span><strong>{listing.offering.delivery?.[0] ? deliveryLabel(listing.offering.delivery[0]) : "Not stated"}</strong></div>
               </div>
               <div className="card-meta">

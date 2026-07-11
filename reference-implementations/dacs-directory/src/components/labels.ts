@@ -5,11 +5,14 @@ export const RAIL_LABELS: Record<string, string> = {
   "pay-evm-erc8183": "ERC-8183",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");
-/** "negotiate-fixed-price" → "fixed price" */
+/** "negotiate-fixed-price" → "fixed price"; acronym ids get proper casing. */
+export const NEGOTIATION_LABELS: Record<string, string> = {
+  "negotiate-rfq": "RFQ",
+};
 export const negotiationLabel = (n: string) =>
-  n.replace(/^negotiate-/, "").replace(/-/g, " ");
+  NEGOTIATION_LABELS[n] ?? n.replace(/^negotiate-/, "").replace(/-/g, " ");
 export const pricingModelLabel = (negotiation: string[] | undefined) =>
-  negotiation?.length ? negotiation.map(negotiationLabel).join(", ") : "not stated";
+  negotiation?.length ? negotiation.map(negotiationLabel).join(", ") : "Not stated";
 /** "deliver-attested-payload" → "attested payload" */
 export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
