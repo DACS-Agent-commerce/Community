@@ -31,12 +31,20 @@ export default function Register() {
   const [category, setCategory] = useState("services.other");
   const [tags, setTags] = useState("");
   const [delivery, setDelivery] = useState(DELIVERY_OPTIONS[0].id);
+  const [pricingKind, setPricingKind] = useState<"fixed" | "negotiable" | "auction">("fixed");
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("DEM");
+  const [unit, setUnit] = useState("per-job");
+  const [minPct, setMinPct] = useState("20");
+  const [maxPct, setMaxPct] = useState("20");
+  const [selectionRule, setSelectionRule] = useState<"lowest-price" | "highest-price" | "first-acceptable">("first-acceptable");
+  const [publicEndpoint, setPublicEndpoint] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [profileUrl, setProfileUrl] = useState<string | null>(null);
 
   const claim = wallet.address ? `did:demos:agent:${wallet.address.replace(/^0x/, "")}` : null;
   const slug = serviceId.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  const validDescription = name.trim() && description.trim() && slug && rails.length > 0 && delivery;
+  const validDescription = name.trim() && description.trim() && slug && rails.length > 0 && delivery && Number(amount) > 0 && currency.trim();
   const activeIndex = screen === "connect" ? 0 : screen === "describe" ? 1 : screen === "review" ? 2 : 3;
 
   const publish = async () => {
@@ -46,20 +54,40 @@ export default function Register() {
     let activeStep: PublishStep = "building";
     try {
       setPublishStep("building");
+      const listingInput = {
+        claim, serviceId: slug, name: name.trim(), description: description.trim(), rails,
+        delivery: [delivery], category: category.trim(), publicEndpoint: publicEndpoint.trim() || undefined,
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+        pricing: {
+          kind: pricingKind, amount: amount.trim(), currency: currency.trim(), unit: unit.trim() || undefined,
+          minPct: Number(minPct), maxPct: Number(maxPct), selectionRule,
+        },
+      };
+      const identityBuild = await fetch("/api/dacs/build-listing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(listingInput),
+      });
+      const identityDraft = await identityBuild.json();
+      if (!identityBuild.ok) throw new Error(identityDraft.error);
+
+      activeStep = "signing"; setPublishStep("signing");
+      setStatus("First, bind the seller identity to this listing.");
+      const identitySignature = await wallet.sign(identityDraft.identityMessage);
+      if (!identitySignature) throw new Error(wallet.error ?? "The identity presentation signature was declined.");
       const build = await fetch("/api/dacs/build-listing", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          claim, serviceId: slug, name: name.trim(), description: description.trim(), rails,
-          delivery: [delivery], category: category.trim(),
-          tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+          ...listingInput,
+          identityPresentedAt: identityDraft.identityPresentedAt,
+          identitySignature,
+          listingVersion: identityDraft.listingVersion,
         }),
       });
       const built = await build.json();
       if (!build.ok) throw new Error(built.error);
-
-      activeStep = "signing"; setPublishStep("signing");
-      setStatus("Approve the service listing in your wallet.");
+      setStatus("Now approve the complete structured listing.");
       const signature = await wallet.sign(built.message);
       if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
       const signedListing = {
@@ -147,9 +175,24 @@ export default function Register() {
           <div className="form-field"><label htmlFor="listing-description">What the buyer receives</label><textarea id="listing-description" className="form-control" maxLength={2000} aria-describedby="description-hint" placeholder="A review posted on your pull request within minutes. Include the price or explain how the agent quotes." value={description} onChange={(event) => setDescription(event.target.value)} /><span id="description-hint" className="field-hint">{description.length}/2000 characters · include price, expected input, output, and timing.</span></div>
           <div className="form-field"><label htmlFor="service-id">Service ID</label><input id="service-id" className="form-control mono" aria-describedby="service-id-hint" placeholder="pr-review" value={serviceId} onChange={(event) => setServiceId(event.target.value)} /><span id="service-id-hint" className="field-hint">Stable machine identifier. It will be saved as <span className="mono">{slug || "your-service-id"}</span>.</span></div>
           <div className="form-field"><label htmlFor="category">Category</label><select id="category" className="form-control" value={category} onChange={(event) => setCategory(event.target.value)}><option value="services.code-review">Code review</option><option value="services.inference">AI inference</option><option value="services.research">Research</option><option value="data.finance">Financial data</option><option value="data.sports">Sports data</option><option value="services.other">Other service</option></select></div>
-          <div className="form-field"><label htmlFor="tags">Search tags</label><input id="tags" className="form-control" aria-describedby="tags-hint" placeholder="github, code-review, llm" value={tags} onChange={(event) => setTags(event.target.value)} /><span id="tags-hint" className="field-hint">Optional, comma separated, maximum 16.</span></div>
+          <div className="form-field"><label htmlFor="tags">Search tags</label><input id="tags" className="form-control" aria-describedby="tags-hint" placeholder="github, code-review, llm" value={tags} onChange={(event) => setTags(event.target.value)} /><span id="tags-hint" className="field-hint">Optional, comma separated, maximum 16; each tag can be 32 characters.</span></div>
+          <div className="form-field"><label htmlFor="public-endpoint">Agent endpoint</label><input id="public-endpoint" className="form-control mono" type="url" placeholder="https://agent.example.com/a2a" value={publicEndpoint} onChange={(event) => setPublicEndpoint(event.target.value)} /><span className="field-hint">Optional HTTPS endpoint buyers and agents can use to begin negotiation.</span></div>
 
-          <fieldset className="form-field"><legend className="form-legend">Accepted payment</legend><div className="badges">{RAIL_OPTIONS.map((option) => <button key={option.id} type="button" aria-pressed={rails.includes(option.id)} className={`badge rail filter ${rails.includes(option.id) ? "active" : ""}`} onClick={() => setRails((current) => current.includes(option.id) ? current.filter((value) => value !== option.id) : [...current, option.id])}>{option.label}</button>)}</div></fieldset>
+          <fieldset className="form-field"><legend className="form-legend">Pricing model</legend><div className="badges">{(["fixed", "negotiable", "auction"] as const).map((kind) => <button key={kind} type="button" aria-pressed={pricingKind === kind} className={`badge filter ${pricingKind === kind ? "active" : ""}`} onClick={() => setPricingKind(kind)}>{kind === "negotiable" ? "negotiation" : kind}</button>)}</div></fieldset>
+          <div className="choice-grid">
+            <div className="form-field"><label htmlFor="price-amount">{pricingKind === "fixed" ? "Fixed amount" : pricingKind === "negotiable" ? "Negotiation centre" : "Reserve amount"}</label><input id="price-amount" className="form-control" inputMode="decimal" placeholder="1" value={amount} onChange={(event) => setAmount(event.target.value)} /></div>
+            <div className="form-field"><label htmlFor="price-currency">Currency or asset</label><input id="price-currency" className="form-control mono" maxLength={32} placeholder="DEM or usd-stablecoin" value={currency} onChange={(event) => setCurrency(event.target.value)} /></div>
+            <div className="form-field"><label htmlFor="price-unit">Unit</label><input id="price-unit" className="form-control" maxLength={64} placeholder="per-job" value={unit} onChange={(event) => setUnit(event.target.value)} /></div>
+          </div>
+          {pricingKind === "negotiable" && <div className="choice-grid">
+            <div className="form-field"><label htmlFor="price-min">Maximum discount (%)</label><input id="price-min" className="form-control" type="number" min="0" max="99" value={minPct} onChange={(event) => setMinPct(event.target.value)} /></div>
+            <div className="form-field"><label htmlFor="price-max">Maximum uplift (%)</label><input id="price-max" className="form-control" type="number" min="0" value={maxPct} onChange={(event) => setMaxPct(event.target.value)} /></div>
+          </div>}
+          {pricingKind === "auction" && <div className="form-field"><label htmlFor="selection-rule">Selection rule</label><select id="selection-rule" className="form-control" value={selectionRule} onChange={(event) => setSelectionRule(event.target.value as typeof selectionRule)}><option value="first-acceptable">First acceptable</option><option value="lowest-price">Lowest price</option><option value="highest-price">Highest price</option></select></div>}
+          {pricingKind === "negotiable" && <p className="field-hint">The signed RFQ allows up to 8 turns and a 5-minute session timeout.</p>}
+          {pricingKind === "auction" && <p className="field-hint">The signed sealed-envelope window closes 7 days after publication, followed by a 1-hour reveal window.</p>}
+
+          <fieldset className="form-field"><legend className="form-legend">Payment rail</legend><div className="badges">{RAIL_OPTIONS.map((option) => <button key={option.id} type="button" aria-pressed={rails.includes(option.id)} className={`badge rail filter ${rails.includes(option.id) ? "active" : ""}`} onClick={() => setRails([option.id])}>{option.label}</button>)}</div><span className="field-hint">The selected rail becomes the signed payment step and accepted rail.</span></fieldset>
           <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div></fieldset>
 
           <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("connect")}>Back</button><button className="btn" type="button" disabled={!validDescription} onClick={() => setScreen("review")}>Review listing</button></div>
@@ -164,16 +207,19 @@ export default function Register() {
           <div className="card service-card" style={{ background: "var(--bg-subtle)" }}>
             <div className="service-card-topline"><span className="eyebrow">{category.replaceAll(".", " / ")}</span><span className="badge ok">will be signed</span></div>
             <h3>{name}</h3><p className="agent-desc">{description}</p>
+            <div className="service-facts"><div><span>pricing</span><strong>{amount} {currency}{unit ? ` · ${unit}` : ""}</strong></div><div><span>model</span><strong>{pricingKind}{pricingKind === "negotiable" ? ` (-${minPct}% / +${maxPct}%)` : pricingKind === "auction" ? ` · ${selectionRule}` : ""}</strong></div></div>
             <div className="badges">{rails.map((value) => <span className="badge rail" key={value}>{RAIL_OPTIONS.find((option) => option.id === value)?.label ?? value}</span>)}<span className="badge">{DELIVERY_OPTIONS.find((option) => option.id === delivery)?.label}</span></div>
             <p className="meta mono">{slug} · {claim}</p>
           </div>
           <details className="technical-disclosure">
             <summary>Preview the machine-readable listing</summary>
             <pre className="artifact">{JSON.stringify({
-              listingId: slug, agentId: claim, name: name.trim(), description: description.trim(),
-              category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
-              supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: rails,
-              supportedDelivery: [delivery],
+              dacsVersion: "1", listingId: slug, listingVersion: "assigned at publish",
+              seller: { identity: "separately signed IdentityBundle", displayName: name.trim(), publicEndpoint: publicEndpoint || undefined },
+              offering: { title: name.trim(), description: description.trim(), category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), deliverable: delivery.replace("deliver-", "") },
+              buyerRequirement: { requirementVersion: "1", required: [] },
+              pricing: { kind: pricingKind, amount, currency, unit, ...(pricingKind === "negotiable" ? { minPct: Number(minPct), maxPct: Number(maxPct) } : {}), ...(pricingKind === "auction" ? { selectionRule } : {}) }, acceptedRails: rails,
+              pipeline: [pricingKind === "fixed" ? "negotiate-fixed-price" : pricingKind === "negotiable" ? "negotiate-rfq" : "negotiate-sealed-envelope", "commit-agreement", rails[0], delivery],
             }, null, 2)}</pre>
           </details>
           <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("describe")}>Edit details</button><button className="btn" type="button" onClick={publish}>Sign and publish</button></div>
@@ -185,8 +231,8 @@ export default function Register() {
           <div className="eyebrow">step 4</div>
           <h2 id="publish-heading" className="card-section-title">Publish on-chain</h2>
           <ul className="progress-list" aria-live="polite">
-            <Progress label="Build a conformant listing" state={progressState(publishStep, "building", failedAt)} />
-            <Progress label="Sign the listing" state={progressState(publishStep, "signing", failedAt)} />
+            <Progress label="Build the current DACS listing" state={progressState(publishStep, "building", failedAt)} />
+            <Progress label="Sign identity and listing" state={progressState(publishStep, "signing", failedAt)} />
             <Progress label="Anchor it on-chain" state={progressState(publishStep, "anchoring", failedAt)} />
             <Progress label="Confirm chain visibility" state={progressState(publishStep, "confirming", failedAt)} />
             <Progress label="Register the catalog pointer" state={progressState(publishStep, "registering", failedAt)} />

@@ -26,6 +26,10 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
+  for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
+    assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
+  }
 });
 
 test("catalog responses expose cache validators and honor conditional reads", async () => {

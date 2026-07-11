@@ -23,6 +23,7 @@ import {
   verifyListing,
 } from "../src/catalog/listingVerification.js";
 import { addRevocationCandidate } from "../src/catalog/scan.js";
+import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
@@ -57,6 +58,60 @@ test("listing verification accepts the legacy compact signature without weakenin
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   assert.ok(await verifyListing({ ...listing, signature: value }));
   assert.equal(await verifyListing({ ...listing, agentId: `did:demos:agent:${"9".repeat(64)}`, signature: value }), null);
+});
+
+test("listing verification accepts a current structured listing and verifies its IdentityBundle", async () => {
+  const identityScope = {
+    bundleVersion: "1",
+    presentedBy: did,
+    presentedAt: 1,
+    claims: [{ ref: did }],
+  };
+  const identitySignature = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
+    privateKeyFromSeed(seed),
+  )).toString("hex");
+  const currentScope = {
+    dacsVersion: "1",
+    listingVersion: 1,
+    listingId: "svc",
+    requiredCapabilities: ["SR-2"],
+    seller: {
+      identity: {
+        ...identityScope,
+        presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySignature }] },
+      },
+      displayName: "Service agent",
+      publicEndpoint: "https://agent.example/a2a",
+    },
+    offering: {
+      title: "Service",
+      description: "Description",
+      category: "services.test",
+      tags: ["test"],
+      deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+    },
+    buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "commit-agreement" },
+      { kind: "pay-dem", parameters: { rail: "pay-dem" } },
+      { kind: "deliver-attested-payload" },
+    ],
+    pricing: { kind: "fixed", price: { amount: "1", currency: "DEM", unit: "per-job" } },
+    acceptedRails: [{ railId: "pay-dem" }],
+    terms: {},
+    validity: { notBefore: 1 },
+  };
+  const value = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-listing:v1:${contentHash(currentScope)}`, "utf8"),
+    privateKeyFromSeed(seed),
+  )).toString("hex");
+  const signed = { ...currentScope, signature: { algorithm: "ed25519", signer: did, value } };
+  const verified = await verifyListing(signed);
+  assert.equal(verified?.profile, "dacs-v0.1");
+  assert.equal(verified?.sellerClaim, did);
+  assert.equal(await verifyListing({ ...signed, offering: { ...signed.offering, title: "tampered" } }), null);
 });
 
 function result(outcome: string, signatures: BundleVerification["signatures"]): BundleVerification {
@@ -132,6 +187,25 @@ test("verified reputation deals are unique by signed job and bundle reference", 
     { ...base, jobId: "unverified", refsVerified: false },
   ]);
   assert.deepEqual(records.map((deal) => deal.jobId), ["j", "unverified"]);
+});
+
+test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", () => {
+  const deal = (jobId: string, sellerOutcome: string): DealRecord => ({
+    jobId, rail: "pay-dem", buyerBundleRef: `stor-${jobId.padEnd(40, "a")}`,
+    owners: { buyer: "buyer", seller: "seller" }, signatureVerified: true, refsVerified: true,
+    reputationEligible: true, sellerOutcome, finalisedAt: 10, verifiedAt: 10,
+    bundleContentHash: jobId.padEnd(64, "b"),
+  });
+  const reputation = deriveSellerReputation([
+    deal("completed", "completed"),
+    deal("substrate", "failed-substrate"),
+    deal("other", "aborted-by-other"),
+  ], 0, 20);
+  assert.equal(reputation.totalAgreements, 3);
+  assert.equal(reputation.completionRate, 0.5);
+  assert.equal(reputation.counterpartyAdjustedCompletionRate, 1);
+  assert.equal(reputation.counterpartyFaultRate, 0.5);
+  assert.equal(flipOutcome("failed-perm"), "failed-counterparty");
 });
 
 test("strict ref policy rejects unsigned referenced artifacts", async () => {

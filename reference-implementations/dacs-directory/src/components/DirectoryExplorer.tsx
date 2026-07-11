@@ -7,8 +7,7 @@ import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
 import { deliveryLabel, IDENTITY_TIERS, pricingModelLabel, railLabel, tierMeta } from "./labels";
 
-const sellerTier = (seller: SellerRecord) =>
-  seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared");
+const sellerTier = (_seller: SellerRecord) => "self-declared";
 
 // Provenance of the display name: owner-signed, chain-discovered, or an
 // unsigned third-party submission (whose chosen name is not owner-attested).
@@ -63,7 +62,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     [services],
   );
   const categories = useMemo(
-    () => [...new Set(services.map(({ listing }) => listing.offering.category.split(".")[0]))].sort(),
+    () => [...new Set(services.map(({ listing }) => listing.offering.category))].sort(),
     [services],
   );
   const tierCounts = useMemo(() => {
@@ -87,9 +86,11 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         ...listing.offering.tags,
         ...(listing.offering.rails ?? []),
         ...(listing.offering.delivery ?? []),
+        ...(listing.offering.negotiation ?? []),
+        listing.pricing.kind ?? "",
         seller.displayName,
         ...seller.cci.map((claim) => `${claim.platform} ${claim.handle}`),
-      ].join(" ").toLowerCase().includes(needle);
+      ].join(" ").toLowerCase().replaceAll("-", " ").includes(needle.replaceAll("-", " "));
     });
   }, [services, q, rail, tier, category, goodRecord]);
 
@@ -141,8 +142,9 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
             {IDENTITY_TIERS.map((option) => {
               const count = tierCounts[option.id] ?? 0;
               const selected = tier === option.id;
+              if (count === 0) return null;
               return (
-                <button key={option.id} type="button" title={option.hint} disabled={count === 0}
+                <button key={option.id} type="button" title={option.hint} aria-label={`${option.label}: ${option.hint}`}
                   aria-pressed={selected}
                   className={`badge ${option.chipClass} filter ${selected ? "active" : ""}`}
                   onClick={() => setParam("identityTier", selected ? null : option.id)}>
@@ -158,7 +160,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
                 <button key={option} type="button" aria-pressed={category === option}
                   className={`badge filter ${category === option ? "active" : ""}`}
                   onClick={() => setParam("category", category === option ? null : option)}>
-                  {option}
+                  {option.replaceAll(".", " / ")}
                 </button>
               ))}
             </div>
@@ -175,14 +177,14 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               ))}
             </div>
           )}
-          <div className="facet-row">
+          {services.some(({ seller }) => seller.reputation.totalAgreements > 0) ? <div className="facet-row">
             <span className="facet-label">record</span>
             <button type="button" aria-pressed={goodRecord}
               className={`badge filter ${goodRecord ? "ok active" : ""}`}
               onClick={() => setParam("trackRecord", goodRecord ? null : "90")}>
               90%+ completion
             </button>
-          </div>
+          </div> : <div className="facet-row"><span className="facet-label">record</span><span className="badge">No current two-sided deal evidence yet</span></div>}
         </div>
       </div>
 
@@ -221,7 +223,9 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
             <article key={`${seller.primaryClaim}/${listing.listingId}/${listing.version}`} className="card service-card">
               <div className="service-card-topline">
                 <span className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</span>
-                <span className="badge ok">listing verified</span>
+                <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>
+                  {listing.artifactProfile === "dacs-v0.1" ? "current DACS listing" : "legacy SDK listing"}
+                </span>
               </div>
               <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
               <p className="byline">
@@ -235,7 +239,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               </div>
               <div className="card-meta">
                 <span className="meta-label">identity</span>
-                <span className="meta-chips"><span className={`badge ${trust.chipClass}`}>{trust.label}</span></span>
+                <span className="meta-chips"><span className={`badge ${trust.chipClass}`}>{trust.label}</span>{seller.cci.length > 0 && <span className="badge cci">{seller.cci.length} identity link{seller.cci.length === 1 ? "" : "s"}</span>}</span>
                 <span className="meta-label">payment</span>
                 <span className="meta-chips">
                   {(listing.offering.rails ?? []).map((value) => <span key={value} className="badge rail">{railLabel(value)}</span>)}
@@ -243,12 +247,12 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
                 </span>
                 <span className="meta-label">record</span>
                 <span className="meta-chips"><span className={seller.reputation.completed ? "badge ok" : "badge"}>
-                  {seller.reputation.completed}/{seller.reputation.totalAgreements} verified deals
+                  {seller.reputation.completed}/{seller.reputation.totalAgreements} strict bundles
                 </span></span>
               </div>
               <div className="service-actions">
                 <Link href={href} className="btn">Explore service</Link>
-                <Link href={jsonHref} className="btn secondary mono" aria-label={`Open JSON contract for ${listing.offering.title}`}>JSON</Link>
+                <Link href={jsonHref} className="btn secondary mono" aria-label={`Open signed listing artifact for ${listing.offering.title}`}>JSON</Link>
               </div>
             </article>
           );

@@ -32,7 +32,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const seller = findSeller(claim);
   if (!seller) notFound();
   const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
-  const t = tierMeta(seller.identityTier ?? (seller.cci.length > 0 ? "verified" : "self-declared"));
+  const t = tierMeta("self-declared");
 
   return (
     <>
@@ -65,13 +65,13 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
       </div>
       <div style={{ marginTop: 14 }}>
         {seller.cci.some((b) => b.kind === "web2") ? (
-          <ChipGroup label="verified identities">
+          <ChipGroup label="linked identities">
             {seller.cci.filter((b) => b.kind === "web2").map((b) => (
               <CciChip key={b.ref} badge={b} withProof />
             ))}
           </ChipGroup>
         ) : (
-          <ChipGroup label="verified identities">
+          <ChipGroup label="linked identities">
             <span className="meta-empty">none — this agent has not linked any identity on-chain</span>
           </ChipGroup>
         )}
@@ -82,12 +82,12 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         )}
       </div>
       <p className="note">
-        Read from the on-chain identity registry (CCI), never self-reported — names link to
-        profiles, <span className="mono">proof↗</span> opens the on-chain ownership proof.
+        These links are read from the on-chain identity registry rather than the listing.
+        They show account linkage, not a fresh DACS-2 identity-verification result.
       </p>
 
       <div className="stat-row">
-        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">deals completed</div></div>
+        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">strict bundles completed</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
         <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
       </div>
@@ -99,6 +99,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
             <h3>
               <Link className="card-title-link" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>{l.offering.title}</Link>{" "}
               {l.status === "revoked" && <span className="badge err">revoked</span>}
+              <span className={`badge ${l.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{l.artifactProfile === "dacs-v0.1" ? "current DACS" : "legacy SDK"}</span>
             </h3>
             {l.offering.description && (
               <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 10px", maxWidth: 720 }}>

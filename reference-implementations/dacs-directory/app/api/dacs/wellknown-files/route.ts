@@ -43,7 +43,9 @@ export async function GET(req: NextRequest) {
         title: l.offering.title,
         category: l.offering.category,
         tags: l.offering.tags,
+        ...(l.pricing.priceHint ? { priceHint: l.pricing.priceHint } : {}),
       },
+      status: l.status,
     });
   }
 
@@ -65,6 +67,19 @@ export async function GET(req: NextRequest) {
     {
       name: seller.displayName,
       description: seller.listings[0]?.offering.description ?? "",
+      url: `https://${domain}`,
+      version: "1.0.0",
+      protocolVersion: "0.3.0",
+      preferredTransport: "HTTP+JSON",
+      capabilities: { streaming: false, pushNotifications: false, stateTransitionHistory: false },
+      defaultInputModes: ["application/json", "text/plain"],
+      defaultOutputModes: ["application/json"],
+      skills: seller.listings.filter((listing) => listing.status === "active").map((listing) => ({
+        id: listing.listingId,
+        name: listing.offering.title,
+        description: listing.offering.description ?? "DACS service",
+        tags: listing.offering.tags,
+      })),
       dacs: {
         dacsVersion: "1",
         listings: {

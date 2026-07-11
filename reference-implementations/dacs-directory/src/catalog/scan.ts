@@ -159,13 +159,21 @@ export async function scanChain(
     if (!read?.success || !read.programName || !read.owner) continue;
     const name = read.programName;
     programs.set(programBindingKey(read.owner, name), address);
-    if (name.startsWith("dacs1:listing:")) {
+    const data = read.data as Record<string, unknown> | undefined;
+    const currentListing = data?.dacsVersion === "1" && typeof data.listingId === "string" && typeof data.listingVersion === "number";
+    const currentBundle = data?.bundleVersion === "1" && typeof data.jobId === "string" && Array.isArray(data.parties);
+    if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
       listings.set(address, read.owner);
     } else if (name.startsWith("dacs1-revoked:")) {
       const listingHash = typeof read.data?.listingContentHash === "string"
         ? read.data.listingContentHash.toLowerCase()
         : null;
       if (listingHash) addRevocationCandidate(revocations, listingHash, address);
+    } else if (currentBundle) {
+      const jobId = data!.jobId as string;
+      const role = data!.anchoredByRole;
+      if (role === "seller") sellerCopies.set(jobId, read.owner);
+      else bundleOwners.set(jobId, { address, owner: read.owner });
     } else if (name.startsWith("dacs5:bundle:seller:")) {
       sellerCopies.set(name.slice("dacs5:bundle:seller:".length), read.owner);
     } else if (name.startsWith("dacs5:bundle:")) {

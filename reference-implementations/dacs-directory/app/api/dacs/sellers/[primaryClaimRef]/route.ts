@@ -19,8 +19,20 @@ export async function GET(
   const origin = requestBaseUrl(req);
   return catalogJson(req, {
     listings: seller.listings,
-    identity: { primaryClaim: seller.primaryClaim, displayName: seller.displayName, cci: seller.cci },
-    reputation: seller.reputation,
+    identity: seller.identityBundle ?? {
+      profile: "legacy-sdk-v0.1",
+      primaryClaim: seller.primaryClaim,
+      assurance: "signing-key-only",
+      identityLinks: seller.cci,
+      limitation: "GCR identity links are not fresh DACS-2 verifiedBy results.",
+    },
+    reputation: {
+      profile: "dacs-5-scalar-derivation-v1",
+      ...seller.reputation,
+      observedTransactionalVolume: [],
+      transactionCountByCurrency: [],
+      limitation: "Two-sided reconciliation, perspective/fault metrics and neutral exclusions are applied. Rating and volume records are not yet resolved, so those fields remain null/empty.",
+    },
     deals: seller.deals,
   }, {
     lastModified: seller.lastIndexedAt,
