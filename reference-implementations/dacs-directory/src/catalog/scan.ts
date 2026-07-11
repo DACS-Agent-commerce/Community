@@ -152,22 +152,35 @@ export async function scanChain(
   const programs = new Map<string, string>();
   const revocations = new Map<string, string[]>();
   const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
-  const sellerCopies = new Map<string, string>(); // jobId → seller owner
+  const sellerCopies = new Map<string, Array<{ address: string; owner: string }>>(); // preserve competing candidates
+  const addSellerCopy = (jobId: string, address: string, owner: string) => {
+    const copies = sellerCopies.get(jobId) ?? [];
+    if (!copies.some((copy) => copy.address === address)) copies.push({ address, owner });
+    sellerCopies.set(jobId, copies);
+  };
 
   for (const address of addresses) {
     const read = await readStorage(address);
     if (!read?.success || !read.programName || !read.owner) continue;
     const name = read.programName;
     programs.set(programBindingKey(read.owner, name), address);
-    if (name.startsWith("dacs1:listing:")) {
+    const data = read.data as Record<string, unknown> | undefined;
+    const currentListing = data?.dacsVersion === "1" && typeof data.listingId === "string" && typeof data.listingVersion === "number";
+    const currentBundle = data?.bundleVersion === "1" && typeof data.jobId === "string" && Array.isArray(data.parties);
+    if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
       listings.set(address, read.owner);
     } else if (name.startsWith("dacs1-revoked:")) {
       const listingHash = typeof read.data?.listingContentHash === "string"
         ? read.data.listingContentHash.toLowerCase()
         : null;
       if (listingHash) addRevocationCandidate(revocations, listingHash, address);
+    } else if (currentBundle) {
+      const jobId = data!.jobId as string;
+      const role = data!.anchoredByRole;
+      if (role === "seller") addSellerCopy(jobId, address, read.owner);
+      else bundleOwners.set(jobId, { address, owner: read.owner });
     } else if (name.startsWith("dacs5:bundle:seller:")) {
-      sellerCopies.set(name.slice("dacs5:bundle:seller:".length), read.owner);
+      addSellerCopy(name.slice("dacs5:bundle:seller:".length), address, read.owner);
     } else if (name.startsWith("dacs5:bundle:")) {
       bundleOwners.set(name.slice("dacs5:bundle:".length), { address, owner: read.owner });
     }
@@ -178,18 +191,19 @@ export async function scanChain(
   for (const [jobId, bundle] of bundleOwners) {
     const agreementAddress = programs.get(programBindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
     const agreement = agreementAddress ? await readStorage(agreementAddress) : null;
-    const seller =
-      (agreement?.data as { seller?: string } | undefined)?.seller ??
-      (sellerCopies.has(jobId) ? didOf(sellerCopies.get(jobId)!) : undefined);
+    const sellerFromAgreement = (agreement?.data as { seller?: string } | undefined)?.seller;
+    const candidates = sellerCopies.get(jobId) ?? [];
+    const sellerCopy = sellerFromAgreement
+      ? candidates.find((copy) => didOf(copy.owner) === sellerFromAgreement)
+      : candidates.length === 1 ? candidates[0] : undefined;
+    const seller = sellerFromAgreement ?? (sellerCopy ? didOf(sellerCopy.owner) : undefined);
     const rail =
       ((agreement?.data as { price?: { rail?: string } } | undefined)?.price?.rail) ?? "unknown";
     deals.set(jobId, {
       jobId,
       rail,
       buyerBundleRef: bundle.address,
-      sellerBundleRef: sellerCopies.has(jobId)
-        ? programs.get(programBindingKey(sellerCopies.get(jobId)!, `dacs5:bundle:seller:${jobId}`))
-        : undefined,
+      sellerBundleRef: sellerCopy?.address,
       owners: { buyer: didOf(bundle.owner), seller: seller ?? "" },
       sellerFromAgreement: seller,
     });

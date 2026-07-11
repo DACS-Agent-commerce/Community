@@ -7,6 +7,7 @@ import { catalogJson } from "../src/catalog/http.js";
 import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
 import { parsePagination } from "../src/catalog/pagination.js";
+import { primaryClaimMatches } from "../src/catalog/discovery.js";
 
 test("directory manifest lets an agent discover every contract from the origin", () => {
   const origin = "https://directory.example";
@@ -16,7 +17,7 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.catalog, `${origin}/api/dacs/listings`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
   assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
-  assert.ok(manifest.filters.includes("identityTier"));
+  assert.ok(!manifest.filters.includes("identityTier"));
 });
 
 test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
@@ -26,6 +27,11 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
+  assert.ok(!filters.includes("identityTier"));
+  for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
+    assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
+  }
 });
 
 test("catalog responses expose cache validators and honor conditional reads", async () => {
@@ -75,4 +81,12 @@ test("OpenAPI advertises the same limit bounds the API enforces", () => {
   assert.ok(typeof maximum === "number");
   assert.equal(parsePagination(String(maximum), null).ok, true);
   assert.equal(parsePagination(String(maximum + 1), null).ok, false);
+});
+
+test("primaryClaim filtering accepts exact claims and canonical prefixes", () => {
+  const claim = `did:demos:agent:${"a".repeat(64)}`;
+  assert.equal(primaryClaimMatches(claim, claim), true);
+  assert.equal(primaryClaimMatches(claim, "did:demos:agent"), true);
+  assert.equal(primaryClaimMatches(claim, "did:demos:other"), false);
+  assert.equal(primaryClaimMatches(claim, `${claim}:extra`), false);
 });

@@ -16,16 +16,23 @@ export const listingSummarySchema = {
       type: "object", required: ["primaryClaim", "displayName"], additionalProperties: false,
       properties: { primaryClaim: { type: "string" }, displayName: { type: "string" } },
     },
+    artifactProfile: { enum: ["dacs-v0.1", "legacy-sdk-v0.1"] },
+    publicEndpoint: { type: "string", format: "uri" },
     offering: {
       type: "object", required: ["title", "category", "tags"],
       properties: {
         title: { type: "string" }, description: { type: "string" }, category: { type: "string" },
         tags: { type: "array", items: { type: "string" } }, rails: { type: "array", items: { type: "string" } },
         delivery: { type: "array", items: { type: "string" } }, negotiation: { type: "array", items: { type: "string" } },
+        deliverable: { type: "object" },
       },
     },
     pricing: {
-      type: "object", properties: { priceHint: { type: "string" }, currency: { type: "string" } },
+      type: "object", properties: {
+        kind: { enum: ["fixed", "negotiable", "auction"] }, priceHint: { type: "string" },
+        currency: { type: "string" }, unit: { type: "string" }, minPct: { type: "number" },
+        maxPct: { type: "number" }, selectionRule: { type: "string" },
+      },
     },
     status: { enum: ["active", "revoked"] },
     catalogObservedAt: { type: "integer" },
@@ -44,11 +51,21 @@ export const directoryManifest = (origin: string) => ({
   openapi: `${origin}/openapi.json`,
   schemas: { listingSummary: `${origin}/schemas/listing-summary.schema.json` },
   status: `${origin}/api/dacs/status`,
+  artifactProfiles: {
+    current: "dacs-v0.1",
+    compatibility: "legacy-sdk-v0.1",
+    missingProfileMeans: "legacy-sdk-v0.1",
+  },
+  maturity: {
+    listings: "current publisher and dual-profile reader",
+    identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
+    reputation: "DACS-5 scalar derivation; ratings and volume unresolved",
+  },
   verification: {
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "rail", "identityTier", "limit", "cursor"],
+  filters: ["category", "tag", "credential", "primaryClaim", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
 });
 
 export const openApiDocument = (origin: string) => ({
@@ -68,7 +85,13 @@ export const openApiDocument = (origin: string) => ({
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
           { name: "rail", in: "query", schema: { type: "string" } },
-          { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
+          { name: "credential", in: "query", schema: { type: "string" } },
+          { name: "primaryClaim", in: "query", schema: { type: "string" } },
+          { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
+          { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
+          { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
+          { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
+          { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: ["dacs-v0.1", "legacy-sdk-v0.1"] } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],

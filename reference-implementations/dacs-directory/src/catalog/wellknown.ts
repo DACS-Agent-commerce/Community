@@ -33,12 +33,15 @@ interface DacsBlock {
 }
 interface ListingIndex {
   indexVersion?: string;
+  generatedAt?: number;
   seller?: string;
   listings?: Array<{
     listingId?: string;
+    version?: number;
     contentHash?: string;
     anchor?: { kind?: string; locator?: string };
     summary?: { title?: string };
+    status?: "active" | "revoked";
   }>;
 }
 
@@ -252,7 +255,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   if (!card) return { domain, error: "no .well-known/agent.json" };
 
   const dacs = (card.body as { dacs?: DacsBlock })?.dacs;
-  if (!dacs?.listings?.indexUrl) return { domain, error: "agent.json has no dacs.listings block" };
+  if (dacs?.dacsVersion !== "1" || !dacs.listings?.indexUrl) return { domain, error: "agent.json has no supported dacs.listings block" };
 
   const index = await fetchJson(dacs.listings.indexUrl);
   if (!index) return { domain, error: `listings index unreachable (${dacs.listings.indexUrl})` };
@@ -265,6 +268,9 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   }
 
   const idx = index.body as ListingIndex;
+  if (idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
+    return { domain, error: "listings.json has an invalid version or generatedAt" };
+  }
   const seller = idx.seller;
   if (!seller || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
     return { domain, error: "listings.json has no canonical Demos seller claim" };
@@ -278,6 +284,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   for (const entry of idx.listings ?? []) {
     const locator = entry.anchor?.locator;
     if (
+      entry.status === "revoked" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       !locator || !/^stor-[0-9a-f]{40}$/.test(locator) ||
       !entry.contentHash || !/^[0-9a-fA-F]{64}$/.test(entry.contentHash)
     ) continue;

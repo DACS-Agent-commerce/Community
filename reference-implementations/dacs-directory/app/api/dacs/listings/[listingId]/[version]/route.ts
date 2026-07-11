@@ -24,7 +24,7 @@ export async function GET(
   }
   const actualId = typeof verified.scope.listingId === "string"
     ? verified.scope.listingId
-    : verified.listing.serviceId;
+    : verified.scope.serviceId;
   const actualVersion = verified.scope.listingVersion ?? verified.scope.version ?? 1;
   if (actualId !== listingId || String(actualVersion) !== version) {
     return NextResponse.json({ error: "listing anchor does not match requested id/version" }, { status: 502 });

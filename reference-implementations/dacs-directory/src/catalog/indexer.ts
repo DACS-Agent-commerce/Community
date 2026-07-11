@@ -16,6 +16,7 @@
  */
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 // verifyBundleCore has no pure subpath export (dacs-sdk#14) — vendor path.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
@@ -28,6 +29,8 @@ import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingV
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import { findProgramAddress, loadScanState } from "./store.js";
+import { deriveSellerReputation, flipOutcome } from "./reputation.js";
+import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -46,18 +49,8 @@ import type {
   SellerRecord,
 } from "./types.js";
 
-/** §6.3.2 tier-1 (authority-issued regulatory) schemes → "institutional". */
-const TIER1_SCHEMES = new Set(["lei", "finra-crd", "sam-uei", "fedramp", "cmmc", "naics"]);
-
-/**
- * §6.3.2.1 identity-tier derivation, catalog flavour: a CCI claim read from
- * the on-chain GCR counts as verified (the GCR validated it at write time).
- * Strict conformance keys on fresh DACS-2 verifiedBy results — dacs-sdk#9.
- */
-const deriveIdentityTier = (cci: CciBadge[]): IdentityTier =>
-  cci.some((b) => TIER1_SCHEMES.has(b.platform)) ? "institutional"
-  : cci.length > 0 ? "verified"
-  : "self-declared";
+/** GCR links do not include fresh DACS-2 VerifyResults, so they never elevate tier. */
+const deriveIdentityTier = (): IdentityTier => "self-declared";
 
 const keyFromDid = (did: string): Uint8Array | null => {
   const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
@@ -110,18 +103,21 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
+  let identityBundle: Record<string, unknown> | undefined;
   const revocations = loadScanState().revocations ?? {};
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
     const verified = await verifyListing(anchored.data);
     if (!verified) continue;
-    const { listing, scope } = verified;
-    if (listing.agentId !== reg.primaryClaim) continue;
+    const { scope } = verified;
+    if (verified.sellerClaim.toLowerCase() !== reg.primaryClaim.toLowerCase()) continue;
     if (ownerClaim(anchored.owner) !== reg.primaryClaim.toLowerCase()) continue;
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
     if (declaredHash && declaredHash !== verified.contentHash) continue;
-    const listingId = typeof scope.listingId === "string" ? scope.listingId : listing.serviceId;
+    const listingId = typeof scope.listingId === "string" ? scope.listingId
+      : typeof scope.serviceId === "string" ? scope.serviceId : "";
+    if (!listingId) continue;
     const rawVersion = scope.listingVersion ?? scope.version ?? 1;
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
@@ -139,12 +135,19 @@ export async function indexRegistration(
       readAnchor,
     );
     const presentation = listingPresentation(scope);
+    const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
+      ? scope.seller as Record<string, unknown> : null;
+    if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
+      identityBundle = signedSeller.identity as Record<string, unknown>;
+    }
     listings.push({
       listingId,
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
       seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
+      artifactProfile: verified.profile,
+      publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {
         title: presentation.title,
         // Strip the [github:<login>] claim-tag (the interim identity carrier
@@ -155,8 +158,13 @@ export async function indexRegistration(
         rails: presentation.rails,
         delivery: presentation.delivery,
         negotiation: presentation.negotiation,
+        deliverable: presentation.deliverable,
       },
-      pricing: {},
+      pricing: presentation.pricing,
+      buyerRequirement: scope.buyerRequirement && typeof scope.buyerRequirement === "object"
+        ? scope.buyerRequirement as Record<string, unknown> : undefined,
+      terms: scope.terms && typeof scope.terms === "object"
+        ? scope.terms as Record<string, unknown> : undefined,
       status: revoked ? "revoked" : "active",
       catalogObservedAt: now,
     });
@@ -165,45 +173,76 @@ export async function indexRegistration(
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
+  const listingsById = new Map(listings.map((l) => [l.listingId, l]));
   for (const deal of reg.deals ?? []) {
-    const resolvedArtifacts: ResolvedArtifact[] = [];
-    const verification = await verifyBundleCore(deal.buyerBundleRef, {
-      readArtifact: async (r) => {
-        const raw = await readAnchor(r);
-        if (raw && r !== deal.buyerBundleRef) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
-        return raw;
-      },
-      resolveRef: async (kind, jobId) => {
-        const name =
-          kind === "dacs-3-agreement"
-            ? sessionAnchorName.agreement(jobId)
-            : kind === "dacs-4-evidence"
-              ? sessionAnchorName.evidence(jobId)
-              : kind === "dacs-2-verifyresult"
-                ? sessionAnchorName.vet(jobId)
-                : null;
-        if (!name) return null;
-        const address = findProgramAddress(deal.owners.buyer, name) ??
-          deriveAnchorAddress(deal.owners.buyer, name); // legacy nonce-0 SDK fallback
-        const raw = await readAnchor(address);
-        if (raw) resolvedArtifacts.push({ kind, raw });
-        return raw;
-      },
-      resolvePublicKey: async (did) => keyFromDid(did),
-      verify,
-    }).catch(() => null);
+    const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
+      const resolvedArtifacts: ResolvedArtifact[] = [];
+      let rawBundle: Record<string, unknown> | null = null;
+      const verification = await verifyBundleCore(ref, {
+        readArtifact: async (r) => {
+          const raw = await readAnchor(r);
+          if (r === ref) rawBundle = raw;
+          if (raw && r !== ref) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
+          return raw;
+        },
+        resolveRef: async (kind, jobId) => {
+          const name = kind === "dacs-3-agreement" ? sessionAnchorName.agreement(jobId)
+            : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
+              : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
+          if (!name) return null;
+          const address = findProgramAddress(deal.owners.buyer, name) ?? deriveAnchorAddress(deal.owners.buyer, name);
+          const raw = await readAnchor(address);
+          if (raw) resolvedArtifacts.push({ kind, raw });
+          return raw;
+        },
+        resolvePublicKey: async (did) => keyFromDid(did),
+        verify,
+      }).catch(() => null);
+      const bundle = verification?.bundle;
+      const signaturesOk = verification ? hasRequiredBundleSignatures(verification) : false;
+      const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
+      const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
+        ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
+      return { verification, bundle, signaturesOk, refsOk, rawBundle };
+    };
 
-    const bundle = verification?.bundle;
-    const bundleSignaturesVerified = verification ? hasRequiredBundleSignatures(verification) : false;
-    const partyBindingVerified = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-    const strictRefsVerified = verification && bundleSignaturesVerified && partyBindingVerified
-      ? await refsPassStrictPolicy(verification, resolvedArtifacts)
-      : false;
+    const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
+    const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
+    const phaseFacts = (bundle: typeof buyerCopy.bundle) => JSON.stringify((bundle?.phaseSummary ?? []).map((phase) => ({
+      outcome: phase.outcome,
+      errorClass: (phase as unknown as { errorClass?: string }).errorClass,
+    })));
+    const divergent = Boolean(
+      buyerCopy.refsOk && sellerCopy?.refsOk &&
+      (flipOutcome(buyerCopy.bundle?.outcome) !== sellerCopy.bundle?.outcome || phaseFacts(buyerCopy.bundle) !== phaseFacts(sellerCopy.bundle)),
+    );
+    const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+    const bundle = authoritative.bundle;
+    const strictRefsVerified = authoritative.refsOk && !divergent;
+    const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
+    const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
+    if (signedBundleScope) {
+      delete signedBundleScope.signatures;
+      delete signedBundleScope.anchoredByRole;
+    }
+    const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
+    const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+    const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
+    const listingTerms = bundle ? listingsById.get(String(bundle.listingRef.listingId))?.terms : undefined;
+    const commitReached = (bundle?.phaseSummary ?? []).some((phase) => phase.kind === "commit-agreement" && phase.outcome === "ok");
+    const cancellationNeutral = (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
+      cancellation?.claimedPolicy === "pre-commit" && listingTerms?.cancellationPolicy === "pre-commit" && !commitReached;
     dealCandidates.push({
       ...deal,
-      signatureVerified: bundleSignaturesVerified,
+      signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
       outcome: bundle?.outcome,
+      sellerOutcome,
+      anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
+        ? bundle.anchoredByRole : undefined,
+      bundleContentHash: signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+      cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
@@ -212,8 +251,9 @@ export async function indexRegistration(
   const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
-  const counted = deals.filter((d) => d.refsVerified);
-  const completed = counted.filter((d) => d.outcome === "completed").length;
+  const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
+  const reputation = deriveSellerReputation(deals, 0, now);
+  const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
   const listingsWithHint = listings.map((l) => ({
@@ -222,10 +262,12 @@ export async function indexRegistration(
       const categoryDeals = counted.filter(
         (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
       );
-      const categoryCompleted = categoryDeals.filter((d) => d.outcome === "completed").length;
+      const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
+      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
       return {
         categoryScope: l.offering.category,
-        completionRate: categoryDeals.length ? categoryCompleted / categoryDeals.length : null,
+        completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
+        averageSellerRating: null,
         bundleCount: categoryDeals.length,
         windowStart,
         windowEnd,
@@ -244,15 +286,13 @@ export async function indexRegistration(
     primaryClaim: reg.primaryClaim,
     ownerRegistered,
     displayName: reg.displayName,
-    identityTier: deriveIdentityTier(cci),
+    identityTier: deriveIdentityTier(),
+    identityLinksPresent: cci.length > 0,
+    identityBundle,
     cci,
     listings: listingsWithHint,
     deals,
-    reputation: {
-      completed,
-      totalAgreements: counted.length,
-      completionRate: counted.length ? completed / counted.length : null,
-    },
+    reputation,
     registeredAt: prior?.registeredAt ?? now,
     lastIndexedAt: now,
   };

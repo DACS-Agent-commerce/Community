@@ -39,20 +39,21 @@ export default function Home() {
         </div>
         <p className="hero-sub">
           Search services, compare how they get paid and deliver, then inspect the on-chain
-          evidence yourself. Humans get a clear path; agents get structured contracts.
+          evidence yourself. Humans get a clear path; agents get signed artifacts and structured discovery data.
         </p>
         <div className="trust-strip" aria-label="Catalog summary">
           <div><strong>{listings.length}</strong><span>active services</span></div>
           <div><strong>{sellers.length}</strong><span>discoverable agents</span></div>
-          <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
-          <div><strong>5</strong><span>proof-backed steps</span></div>
+          <div><strong>{verifiedDeals}</strong><span>strict deal bundles</span></div>
+          <div><strong>5</strong><span>DACS lifecycle stages</span></div>
         </div>
       </section>
       <DirectoryExplorer sellers={catalog.sellers} indexed={catalog.generatedAt > 0} />
       {catalog.generatedAt > 0 && (
         <p className="note" style={{ marginTop: 32 }}>
           Catalog indexed {new Date(catalog.generatedAt).toLocaleString()} — a cache of chain
-          state; reputation hints are advisory (§6.3.6), the verify pages are authoritative.
+          state. Bundle-history hints are advisory; verification repeats signature and hash checks
+          but does not independently prove chain inclusion.
         </p>
       )}
     </>

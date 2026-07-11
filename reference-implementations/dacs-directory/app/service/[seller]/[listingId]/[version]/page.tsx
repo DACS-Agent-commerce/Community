@@ -5,6 +5,7 @@ import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
+import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 
 export const dynamic = "force-dynamic";
 
@@ -41,8 +42,9 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const found = findService(sellerClaim, listingId, version);
   if (!found) notFound();
   const { seller, listing } = found;
-  const identity = tierMeta(seller.identityTier ?? (seller.cci.length ? "verified" : "self-declared"));
+  const identity = tierMeta("self-declared");
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
+  const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -68,7 +70,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
-          <span className="badge ok">signed listing</span>
+          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listing.artifactProfile === "dacs-v0.1" ? "current DACS listing" : "legacy SDK listing"}</span>
           {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
           {!seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
           {!seller.ownerRegistered && !seller.discovered && (
@@ -78,10 +80,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           )}
         </div>
         <div className="service-actions">
-          <a className="btn" href={apiHref}>Open machine contract</a>
+          {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>View signed listing artifact</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        <p className="note">This directory does not invent a purchase button. The machine contract states the negotiation modes the seller actually supports.</p>
+        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory."}</p>
       </section>
 
       <div className="service-layout">
@@ -90,7 +93,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="offer-heading" className="card-section-title">What to expect</h2>
           <dl className="detail-list">
             <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.offering.negotiation)}</dd></div>
-            <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}` : "Not published"}</dd></div>
+            <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}${listing.pricing.unit ? ` · ${listing.pricing.unit}` : ""}` : "Not published"}</dd></div>
             <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
             <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>
           </dl>
@@ -101,9 +104,9 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <div className="eyebrow">trust at a glance</div>
           <h2 id="trust-heading" className="card-section-title">Three different checks</h2>
           <ul className="trust-checks">
-            <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity</strong><p>{seller.cci.length ? `${seller.cci.length} on-chain identity proof${seller.cci.length === 1 ? "" : "s"}` : "No linked identity proofs"}</p></div></li>
+            <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
             <li><span className="check ok">✓</span><div><strong>Listing</strong><p>Signature and chain anchor verified</p></div></li>
-            <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed verified deals</p></div></li>
+            <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed bundles passed strict verification</p></div></li>
           </ul>
         </aside>
       </div>
@@ -112,6 +115,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <summary>Technical listing details</summary>
         <div className="technical-body">
           <p><strong>Listing</strong> <span className="mono">{listing.listingId}@{listing.version}</span></p>
+          <p><strong>Artifact profile</strong> <span className="mono">{listing.artifactProfile ?? "legacy-sdk-v0.1"}</span></p>
           <p><strong>Seller claim</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
           <p><strong>Content hash</strong> <CopyText value={listing.contentHash} head={24} tail={8} /></p>
           <p><strong>Anchor</strong> <CopyText value={listing.anchor.locator} head={24} tail={8} /></p>

@@ -5,24 +5,24 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 **in-browser deal verification**.
 
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
-(see *Discovery — three channels* below) and picks up any anchored DACS listing or
-deal bundle by its self-describing storage-program name. Registration adds a display
+(see *Discovery — three channels* below) and picks up current structured listings and
+the pinned SDK's legacy artifacts through program-name and content-shape detection. Registration adds a display
 name and (when owner-signed) the "owner-registered" badge — it is never a gate.
 
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
-**cache of chain state** — every number it shows (identity badges, listings, reputation)
-is read from anchored, signed artifacts. The catalog's reputation figures are §6.3.6
-`reputationHint`s and remain advisory. “Verify yourself” repeats strict cryptographic
+**cache of chain state**. Listings and strict bundle-history figures come from signed
+artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
+The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
 checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | `GET /api/dacs/listings` (category/tag/rail filters, cursor pagination), `GET /api/dacs/listings/{id}/{version}`, `GET /api/dacs/sellers/{primaryClaimRef}` |
+| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings and explicitly labelled legacy SDK artifacts |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with a **pointer set** (primary claim + anchor addresses). Nothing in the payload is trusted: listings are read from chain and shape-validated, CCI badges resolved from the on-chain GCR, every offered bundle dereferenced and cryptographically verified before it counts |
-| Identity badges | DACS-1 / CCI | `resolveIdentity` against the Demos GCR (dacs-sdk #13) — GitHub/Discord/wallet claims are on-chain proofs, never self-reported |
-| Reputation | DACS-5 §10.5 | derived **only from chain-verified bundles**; served as `reputationHint` |
+| Identity links | DACS-1 / CCI | GCR account/wallet links are displayed as links; they do not elevate `identityTier` without a fresh resolved DACS-2 `verifiedBy` result |
+| Reputation derivation | DACS-5 §10.5 | strict bundle validation, two-sided reconciliation, seller perspective, fault metrics, neutral exclusions and deterministic bundle refs; unresolved ratings/volume stay null/empty |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
 ## Run it
@@ -149,17 +149,23 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   browser-verifiable proof or a CORS-safe independent read endpoint.
 - **Operational writes are protected**: production reindex/index-now calls require
   `DACS_ADMIN_TOKEN` as a Bearer token. Run indexing from cron/CI, not public UI.
-- **Wallet registration uses two signatures**: one over the Listing and one over the
-  catalog pointer/deal set. Registration remains catalog-side and non-normative.
+- **Wallet publication uses three signatures**: the embedded IdentityBundle presentation,
+  the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
+- **Listing versions are allocated from observed catalog state**, without a mutable
+  in-process lock. Publishers must serialize writes for one `seller + listingId` until
+  the substrate or SDK provides an atomic version allocator; concurrent publishers can
+  otherwise propose the same next version.
 
 ## DACS surface / conformance declaration
 
-`exercises-spec`: DACS-1 §6.3.6 (catalog endpoints + ListingSummary/ReputationHint
-shapes), DACS-1 CCI identity resolution, DACS-5 §10.4 verification (via the SDK's
-vector-tested `verifyBundleCore`), §10.5 reputation derivation. Non-normative; the
-catalog asserts nothing a client can't re-derive.
+`exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile reading,
+§6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. DACS-5 bundle
+signature/reference checks use the SDK's vector-tested `verifyBundleCore` plus stricter
+party policy. Full DACS-2 identity-tier resolution and DACS-5 rating/volume resolution
+are not yet claimed. The catalog explicitly labels compatibility artifacts
+and advisory computations.
 
 ## License
 

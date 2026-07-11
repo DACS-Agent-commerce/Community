@@ -46,6 +46,10 @@ export interface ListingSummary {
   contentHash: string;
   anchor: { kind: string; locator: string };
   seller: { primaryClaim: string; displayName: string };
+  /** Which signed artifact contract was verified at the anchor. */
+  artifactProfile?: "dacs-v0.1" | "legacy-sdk-v0.1";
+  /** Optional seller endpoint from a current-spec listing. */
+  publicEndpoint?: string;
   offering: {
     title: string;
     description?: string;
@@ -57,8 +61,20 @@ export interface ListingSummary {
     delivery?: string[];
     /** Negotiation modes the seller supports (from supportedNegotiation). */
     negotiation?: string[];
+    /** Current-spec structured deliverable. Absent on legacy SDK listings. */
+    deliverable?: Record<string, unknown>;
   };
-  pricing: { priceHint?: string; currency?: string };
+  pricing: {
+    kind?: "fixed" | "negotiable" | "auction";
+    priceHint?: string;
+    currency?: string;
+    unit?: string;
+    minPct?: number;
+    maxPct?: number;
+    selectionRule?: string;
+  };
+  buyerRequirement?: Record<string, unknown>;
+  terms?: Record<string, unknown>;
   status: "active" | "revoked";
   catalogObservedAt: number;
   reputationHint?: ReputationHint;
@@ -77,8 +93,8 @@ export interface ReputationHint {
 
 /**
  * §6.3.2.1 identity tier — derived, never self-reported (IT-1..IT-3).
- * Catalog derivation is from on-chain CCI claims (GCR-validated at write
- * time); full verifiedBy/IdentityBundle plumbing is the dacs-sdk#9 gap.
+ * Only fresh resolved DACS-2 `verifiedBy` results may elevate this value.
+ * GCR/CCI links are presented separately and never elevate the tier alone.
  */
 export type IdentityTier = "institutional" | "verified" | "self-declared";
 
@@ -104,6 +120,14 @@ export interface DealRecord extends RegisteredDeal {
   finalisedAt?: number;
   verifiedAt: number;
   category?: string;
+  /** Outcome interpreted from this catalog seller's perspective. */
+  sellerOutcome?: string;
+  anchoredByRole?: "buyer" | "seller" | "orchestrator";
+  bundleContentHash?: string;
+  /** True only when the outcome belongs to the current DACS-5 closed set. */
+  reputationEligible?: boolean;
+  /** Established ST-10 policy cancellation; neutral in fault denominators. */
+  cancellationNeutral?: boolean;
 }
 
 export interface SellerRecord {
@@ -117,6 +141,10 @@ export interface SellerRecord {
   displayName: string;
   /** §6.3.2.1 derived tier (see IdentityTier note above). */
   identityTier?: IdentityTier;
+  /** True when GCR exposes identity links; this is not DACS-2 verification. */
+  identityLinksPresent?: boolean;
+  /** Last verified current-spec IdentityBundle embedded by this seller. */
+  identityBundle?: Record<string, unknown>;
   cci: CciBadge[];
   listings: ListingSummary[];
   deals: DealRecord[];
@@ -124,6 +152,14 @@ export interface SellerRecord {
     completed: number;
     totalAgreements: number;
     completionRate: number | null;
+    counterpartyAdjustedCompletionRate?: number | null;
+    counterpartyFaultRate?: number | null;
+    averageBuyerRating?: number | null;
+    averageSellerRating?: number | null;
+    bundleRefs?: Array<{ kind: "dacs-5-bundle"; id: string; contentHash: string; anchor: { kind: "storage-program"; locator: string } }>;
+    windowStart?: number;
+    windowEnd?: number;
+    windowingBasis?: "finalisedAt" | "sr2-anchor-timestamp";
   };
   registeredAt: number;
   lastIndexedAt: number;

@@ -17,25 +17,25 @@ export const pricingModelLabel = (negotiation: string[] | undefined) =>
 export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
 
-/** §6.3.2.1 identity tiers, in trust order, with chip classes + hover copy. */
+/** DACS identity tiers. Elevation requires a fresh resolved DACS-2 VerifyResult. */
 export const IDENTITY_TIERS = [
   {
     id: "institutional",
-    label: "institutional",
+    label: "institutional verification",
     chipClass: "tier-institutional",
-    hint: "Holds a verified authority-issued regulatory identity (LEI, FINRA CRD, SAM UEI, FedRAMP, CMMC, NAICS) — §6.3.2.1",
+    hint: "A fresh DACS-2 result verifies an authority-issued regulatory identity.",
   },
   {
     id: "verified",
-    label: "verified",
+    label: "DACS-verified identity",
     chipClass: "tier-verified",
-    hint: "Has at least one identity claim verified on-chain (GitHub, Discord, wallet, DID) — §6.3.2.1. Derived from on-chain CCI claims, never self-reported.",
+    hint: "At least one identity claim has a fresh passing DACS-2 verification result.",
   },
   {
     id: "self-declared",
-    label: "self-declared",
+    label: "signing key only",
     chipClass: "tier-self",
-    hint: "No verified identity claims — only its signing key. §6.3.2.1",
+    hint: "The listing is signed, but no fresh DACS-2 identity verification has been resolved.",
   },
 ] as const;
 export type IdentityTierId = (typeof IDENTITY_TIERS)[number]["id"];
