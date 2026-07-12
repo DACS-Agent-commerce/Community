@@ -28,9 +28,11 @@ import { gcrGetIdentities } from "./gcr.js";
 import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
-import { findProgramAddress, loadScanState } from "./store.js";
-import { deriveSellerReputation, flipOutcome } from "./reputation.js";
+import { artifactAnchorTime, findProgramAddress, loadScanState } from "./store.js";
+import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -43,14 +45,10 @@ import {
 import type {
   CciBadge,
   DealRecord,
-  IdentityTier,
   ListingSummary,
   Registration,
   SellerRecord,
 } from "./types.js";
-
-/** GCR links do not include fresh DACS-2 VerifyResults, so they never elevate tier. */
-const deriveIdentityTier = (): IdentityTier => "self-declared";
 
 const keyFromDid = (did: string): Uint8Array | null => {
   const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
@@ -72,6 +70,7 @@ export async function indexRegistration(
   reg: Registration,
   prior?: SellerRecord,
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
+  resolveRecipe?: ResolveRecipe,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -103,7 +102,9 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
+  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown> }>();
   let identityBundle: Record<string, unknown> | undefined;
+  const identityBundles: Record<string, unknown>[] = [];
   const revocations = loadScanState().revocations ?? {};
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
@@ -139,6 +140,7 @@ export async function indexRegistration(
       ? scope.seller as Record<string, unknown> : null;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
       identityBundle = signedSeller.identity as Record<string, unknown>;
+      identityBundles.push(identityBundle);
     }
     listings.push({
       listingId,
@@ -168,6 +170,7 @@ export async function indexRegistration(
       status: revoked ? "revoked" : "active",
       catalogObservedAt: now,
     });
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
   }
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
@@ -175,6 +178,78 @@ export async function indexRegistration(
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
   const listingsById = new Map(listings.map((l) => [l.listingId, l]));
   for (const deal of reg.deals ?? []) {
+    const initial = await readAnchor(deal.buyerBundleRef);
+    if (initial?.bundleVersion === "1") {
+      const resolveListing = async (ref: Record<string, unknown>) => {
+        const id = String(ref.listingId ?? "");
+        const version = Number(ref.version ?? ref.listingVersion ?? 0);
+        const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
+        return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
+      };
+      const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+      const buyerGraph = await graphFor(deal.buyerBundleRef);
+      const sellerGraph = deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null;
+      const roleOf = (graph: EvidenceGraph | null, claim: string) => {
+        const parties = Array.isArray(graph?.bundle.parties) ? graph.bundle.parties as Array<Record<string, unknown>> : [];
+        return parties.find((party) => String(party.primaryClaim).toLowerCase() === claim.toLowerCase())?.role;
+      };
+      const binds = (graph: EvidenceGraph | null, expectedRole: "buyer" | "seller") => Boolean(
+        graph?.ok && graph.bundle.jobId === deal.jobId && graph.bundle.anchoredByRole === expectedRole &&
+        roleOf(graph, deal.owners.buyer) === "buyer" && roleOf(graph, reg.primaryClaim) === "seller",
+      );
+      const buyerOk = binds(buyerGraph, "buyer");
+      const sellerOk = binds(sellerGraph, "seller");
+      const phaseFacts = (graph: EvidenceGraph | null) => JSON.stringify(
+        (Array.isArray(graph?.bundle.phaseSummary) ? graph.bundle.phaseSummary : []).map((phase) => {
+          const item = phase as Record<string, unknown>; return { outcome: item.outcome, errorClass: item.errorClass };
+        }),
+      );
+      const divergent = buyerOk && sellerOk &&
+        (flipOutcome(String(buyerGraph.bundle.outcome)) !== sellerGraph!.bundle.outcome || phaseFacts(buyerGraph) !== phaseFacts(sellerGraph));
+      const authoritative = sellerOk ? sellerGraph! : buyerGraph;
+      const refsVerified = Boolean((sellerOk || buyerOk) && !divergent && authoritative?.refsVerified);
+      const sellerOutcome = authoritative === sellerGraph
+        ? String(authoritative?.bundle.outcome ?? "")
+        : flipOutcome(String(authoritative?.bundle.outcome ?? ""));
+      const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
+      const ratings = (authoritative?.ratings ?? []).filter((rating) =>
+        rating.jobId === deal.jobId && parties.some((party) => party.primaryClaim === rating.rater),
+      ).map((rating) => ({
+        rater: String(rating.rater), target: String(rating.target),
+        targetRole: rating.targetRole as "buyer" | "seller", value: Number(rating.value),
+        ratedAt: Number(rating.ratedAt),
+        contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
+      })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
+      const settlementTxIds = (authoritative?.artifacts ?? []).filter((artifact) => artifact.kind === "evidence")
+        .flatMap((artifact) => {
+          const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
+          const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
+          return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
+            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
+        });
+      const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
+        .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+      const cancellationNeutral = isNeutralCancellation(
+        sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
+      );
+      const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
+      dealCandidates.push({
+        ...deal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
+        outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
+        anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
+        bundleContentHash: authoritative?.bundleContentHash,
+        reputationEligible: refsVerified,
+        cancellationNeutral,
+        finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
+        anchorTimestamp: artifactAnchorTime(selectedLocator),
+        agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
+        ratings, settlementTxIds,
+        category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
+          ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
+        verifiedAt: now,
+      });
+      continue;
+    }
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
       let rawBundle: Record<string, unknown> | null = null;
@@ -229,9 +304,7 @@ export async function indexRegistration(
     const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = bundle ? listingsById.get(String(bundle.listingRef.listingId))?.terms : undefined;
-    const commitReached = (bundle?.phaseSummary ?? []).some((phase) => phase.kind === "commit-agreement" && phase.outcome === "ok");
-    const cancellationNeutral = (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
-      cancellation?.claimedPolicy === "pre-commit" && listingTerms?.cancellationPolicy === "pre-commit" && !commitReached;
+    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -244,6 +317,7 @@ export async function indexRegistration(
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
+      anchorTimestamp: artifactAnchorTime(authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef),
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
@@ -267,7 +341,7 @@ export async function indexRegistration(
       return {
         categoryScope: l.offering.category,
         completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
-        averageSellerRating: null,
+        averageSellerRating: deriveSellerReputation(categoryDeals, windowStart, windowEnd).averageSellerRating ?? null,
         bundleCount: categoryDeals.length,
         windowStart,
         windowEnd,
@@ -281,12 +355,15 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
+  const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
+  const identityTier = identityTiers.includes("institutional") ? "institutional"
+    : identityTiers.includes("verified") ? "verified" : "self-declared";
 
   return {
     primaryClaim: reg.primaryClaim,
     ownerRegistered,
     displayName: reg.displayName,
-    identityTier: deriveIdentityTier(),
+    identityTier,
     identityLinksPresent: cci.length > 0,
     identityBundle,
     cci,

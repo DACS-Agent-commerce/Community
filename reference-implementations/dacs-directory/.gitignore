@@ -7,6 +7,9 @@ data/registrations.json
 data/domains.json
 data/.indexer-seed
 data/.indexer-mnemonic
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
 .playwright-mcp/
 *.png
 tsconfig.tsbuildinfo

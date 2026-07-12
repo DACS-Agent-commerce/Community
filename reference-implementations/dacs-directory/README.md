@@ -21,15 +21,16 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings and explicitly labelled legacy SDK artifacts |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with a **pointer set** (primary claim + anchor addresses). Nothing in the payload is trusted: listings are read from chain and shape-validated, CCI badges resolved from the on-chain GCR, every offered bundle dereferenced and cryptographically verified before it counts |
-| Identity links | DACS-1 / CCI | GCR account/wallet links are displayed as links; they do not elevate `identityTier` without a fresh resolved DACS-2 `verifiedBy` result |
-| Reputation derivation | DACS-5 §10.5 | strict bundle validation, two-sided reconciliation, seller perspective, fault metrics, neutral exclusions and deterministic bundle refs; unresolved ratings/volume stay null/empty |
+| Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
+| Reputation derivation | DACS-5 §10.5 | strict evidence-graph validation, two-sided reconciliation, seller perspective, fault metrics, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
 ## Run it
 
 ```bash
 npm run setup    # one-time: vendors + builds dacs-sdk (not yet on npm), installs the app
-npm run index    # verify registrations against chain state → data/catalog.json
+npm run index    # verify registrations against chain state → SQLite catalog
 npm run dev      # http://localhost:3400
 ```
 
@@ -92,8 +93,11 @@ vendor directory.
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
-| `DACS_DIRECTORY_DATA` | No | Writable directory for registrations, scan state, and the generated catalog |
+| `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
+| `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
+| `DACS_SCAN_REPLAY_DEPTH` | No | Finalized transaction overlap replayed on every pass; defaults to `2` |
+| `DACS_RECIPE_POLICIES` | For tier elevation | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy fails closed to `self-declared` |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 
@@ -129,8 +133,10 @@ sitemap includes the currently indexed catalog.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-3. **Bundle-graph**: every verified deal names its counterparty, whose CCI record is
-   resolved and profiled.
+3. **Evidence graph**: current bundles recursively resolve and validate listings,
+   agreements, settlement evidence and amendment chains, composite/VerifyResult vet
+   records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
+   compatibility path.
 
 ## Architecture note: the web app is chain-fetch-only
 
@@ -153,6 +159,9 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
+- **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
+  elevate a tier unless its exact recipe version/method/availability/max-age policy is
+  present in `DACS_RECIPE_POLICIES`; missing policy fails closed.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
@@ -161,11 +170,12 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 ## DACS surface / conformance declaration
 
 `exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile reading,
-§6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. DACS-5 bundle
-signature/reference checks use the SDK's vector-tested `verifyBundleCore` plus stricter
-party policy. Full DACS-2 identity-tier resolution and DACS-5 rating/volume resolution
-are not yet claimed. The catalog explicitly labels compatibility artifacts
-and advisory computations.
+§6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. Current artifacts
+use directory-native, current-contract evidence-graph validation; the pinned SDK verifier
+is retained only for labelled legacy artifacts. DACS-2 tier derivation fails closed on
+unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
+settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
+computations remain advisory and independently reproducible from their refs.
 
 ## License
 

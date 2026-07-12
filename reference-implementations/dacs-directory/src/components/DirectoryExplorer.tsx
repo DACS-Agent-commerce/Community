@@ -7,7 +7,7 @@ import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "./labels";
 
-const sellerTier = (_seller: SellerRecord) => "self-declared";
+const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declared";
 
 // Provenance of the display name: owner-signed, chain-discovered, or an
 // unsigned third-party submission (whose chosen name is not owner-attested).
@@ -30,6 +30,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
   const rail = params.get("rail");
   const category = params.get("category");
   const goodRecord = params.get("trackRecord") === "90";
+  const identityTier = params.get("identityTier");
 
   useEffect(() => {
     if (ownNavigation.current) ownNavigation.current = false;
@@ -70,6 +71,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
       if (rail && !(listing.offering.rails ?? []).includes(rail)) return false;
       if (category && !categoryMatches(listing.offering.category, category)) return false;
       if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
+      if (identityTier && sellerTier(seller) !== identityTier) return false;
       if (!needle) return true;
       return [
         listing.offering.title,
@@ -84,7 +86,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         ...seller.cci.map((claim) => `${claim.platform} ${claim.handle}`),
       ].join(" ").toLowerCase().replaceAll("-", " ").includes(needle.replaceAll("-", " "));
     });
-  }, [services, q, rail, category, goodRecord]);
+  }, [services, q, rail, category, goodRecord, identityTier]);
 
   const setParam = (name: string, value: string | null) => {
     const next = new URLSearchParams(params.toString());
@@ -97,7 +99,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     setQ("");
     router.replace(pathname, { scroll: false });
   };
-  const hasFilters = Boolean(q || rail || category || goodRecord);
+  const hasFilters = Boolean(q || rail || category || goodRecord || identityTier);
 
   return (
     <section aria-labelledby="services-heading">
@@ -129,6 +131,15 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         </div>
 
         <div className="facets" aria-label="Filter services">
+          <div className="facet-row">
+            <span className="facet-label">identity</span>
+            {(["institutional", "verified", "self-declared"] as const).map((option) => {
+              const meta = tierMeta(option);
+              return <button key={option} type="button" aria-pressed={identityTier === option}
+                className={`badge filter ${meta.chipClass} ${identityTier === option ? "active" : ""}`}
+                onClick={() => setParam("identityTier", identityTier === option ? null : option)}>{meta.label}</button>;
+            })}
+          </div>
           {categories.length > 0 && (
             <div className="facet-row">
               <span className="facet-label">category</span>

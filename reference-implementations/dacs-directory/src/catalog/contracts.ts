@@ -59,13 +59,13 @@ export const directoryManifest = (origin: string) => ({
   maturity: {
     listings: "current publisher and dual-profile reader",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
-    reputation: "DACS-5 scalar derivation; ratings and volume unresolved",
+    reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
   },
   verification: {
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
+  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
 });
 
 export const openApiDocument = (origin: string) => ({
@@ -87,6 +87,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "rail", in: "query", schema: { type: "string" } },
           { name: "credential", in: "query", schema: { type: "string" } },
           { name: "primaryClaim", in: "query", schema: { type: "string" } },
+          { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
           { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
           { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },

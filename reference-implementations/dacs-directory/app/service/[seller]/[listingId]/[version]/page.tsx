@@ -42,7 +42,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const found = findService(sellerClaim, listingId, version);
   if (!found) notFound();
   const { seller, listing } = found;
-  const identity = tierMeta("self-declared");
+  const identity = tierMeta(seller.identityTier ?? "self-declared");
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
   const structuredData = {

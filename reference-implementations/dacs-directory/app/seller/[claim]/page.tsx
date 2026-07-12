@@ -32,7 +32,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const seller = findSeller(claim);
   if (!seller) notFound();
   const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
-  const t = tierMeta("self-declared");
+  const t = tierMeta(seller.identityTier ?? "self-declared");
 
   return (
     <>
