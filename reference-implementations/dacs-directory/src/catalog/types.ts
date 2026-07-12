@@ -91,6 +91,15 @@ export interface ReputationHint {
   computedAt: number;
 }
 
+export interface VerifiedRating {
+  rater: string;
+  target: string;
+  targetRole: "buyer" | "seller";
+  value: number;
+  ratedAt: number;
+  contentHash: string;
+}
+
 /**
  * §6.3.2.1 identity tier — derived, never self-reported (IT-1..IT-3).
  * Only fresh resolved DACS-2 `verifiedBy` results may elevate this value.
@@ -128,6 +137,14 @@ export interface DealRecord extends RegisteredDeal {
   reputationEligible?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
+  /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */
+  anchorTimestamp?: number;
+  /** Verified agreement price; only completed sessions contribute to volume. */
+  agreementPrice?: { amount: string; currency: string };
+  /** Signature/hash/session-bound DACS-5 ratings. */
+  ratings?: VerifiedRating[];
+  /** Settlement ids used for the SB-2 cross-job uniqueness gate. */
+  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number }>;
 }
 
 export interface SellerRecord {
@@ -150,12 +167,15 @@ export interface SellerRecord {
   deals: DealRecord[];
   reputation: {
     completed: number;
+    bundleCount?: number;
     totalAgreements: number;
     completionRate: number | null;
     counterpartyAdjustedCompletionRate?: number | null;
     counterpartyFaultRate?: number | null;
     averageBuyerRating?: number | null;
     averageSellerRating?: number | null;
+    observedTransactionalVolume?: Array<{ amount: string; currency: string }>;
+    transactionCountByCurrency?: Array<{ currency: string; count: number }>;
     bundleRefs?: Array<{ kind: "dacs-5-bundle"; id: string; contentHash: string; anchor: { kind: "storage-program"; locator: string } }>;
     windowStart?: number;
     windowEnd?: number;
@@ -173,8 +193,9 @@ export interface Catalog {
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  schemaVersion?: 3;
+  schemaVersion?: 4;
   lastSeenTxId: number;
+  lastChainTip?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
   /** listing content hash → every observed revocation marker candidate. */

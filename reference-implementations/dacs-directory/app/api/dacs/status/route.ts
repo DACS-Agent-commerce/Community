@@ -5,7 +5,7 @@
  * was last generated.
  */
 import { NextResponse } from "next/server";
-import { loadCatalog, loadScanState } from "@/src/catalog/store";
+import { indexerDiagnostics, loadCatalog, loadScanState } from "@/src/catalog/store";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -43,5 +43,6 @@ export async function GET() {
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,
+    indexer: indexerDiagnostics(),
   });
 }

@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  serverExternalPackages: ["better-sqlite3"],
   outputFileTracingRoot: new URL(".", import.meta.url).pathname,
   // Only the vendored SDK's pure canonical/crypto/verify modules are bundled;
   // the substrate client and its multichain tree are not application deps.

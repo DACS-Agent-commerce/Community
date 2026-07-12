@@ -9,8 +9,9 @@
  * client's unrelated multichain/bridge dependency tree.
  */
 import { reindexAll } from "./reindexCore.js";
+import { withDataLock } from "./store.js";
 
-reindexAll()
+withDataLock("reindex", () => reindexAll())
   .then(() => process.exit(0))
   .catch((e) => {
     console.error("reindex failed:", e?.message ?? e);

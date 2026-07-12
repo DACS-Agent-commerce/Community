@@ -17,7 +17,7 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.catalog, `${origin}/api/dacs/listings`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
   assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
-  assert.ok(!manifest.filters.includes("identityTier"));
+  assert.ok(manifest.filters.includes("identityTier"));
 });
 
 test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
@@ -28,7 +28,7 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
-  assert.ok(!filters.includes("identityTier"));
+  assert.ok(filters.includes("identityTier"));
   for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }

@@ -14,8 +14,14 @@ import {
   loadScanState,
   saveCatalog,
   saveScanState,
+  beginScanRun,
+  finishScanRun,
+  loadRetryableArtifacts,
+  recordArtifact,
+  recordArtifactFailure,
 } from "./store";
 import type { Registration } from "./types";
+import type { ResolveRecipe } from "./identityVerification";
 
 export interface ReindexSummary {
   sellers: number;
@@ -30,6 +36,7 @@ export interface ReindexOptions {
    * CLI/routes use the narrow authenticated fetch implementation in gcr.ts.
    */
   resolveIdentities?: ResolveIdentities;
+  resolveRecipe?: ResolveRecipe;
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
@@ -42,16 +49,27 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   //    the proof; this state is just the memory of where to look). First run
   //    backfills the full history.
   const state = loadScanState();
-  const needsBindingBackfill = state.schemaVersion !== 3;
-  const maxTxs = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
-  const scan = await scanChain(null, {
-    maxTxs,
-    sinceTxId: needsBindingBackfill ? 0 : state.lastSeenTxId,
-  });
+  const needsBindingBackfill = state.schemaVersion !== 4;
+  const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
+  const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
+  const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
+  const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
+  const sinceTxId = needsBindingBackfill ? 0 : Math.max(0, state.lastSeenTxId - overlap);
+  const runId = beginScanRun(sinceTxId);
+  let scan;
+  try {
+    scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts() });
+  } catch (error) {
+    finishScanRun(runId, { toTx: state.lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
   if (!scan.complete) {
+    finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
+      artifacts: scan.observations.length, rejected: scan.failures.length,
+      error: scan.scanError ?? `scan limit ${maxTxs} reached before cursor` });
     throw new Error(
-      `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; ` +
-      "increase the limit so the catalog cannot skip history",
+      scan.scanError ? `chain scan failed before reaching its cursor: ${scan.scanError}` :
+      `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
     );
   }
   for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
@@ -67,9 +85,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       : priorCandidates ? [priorCandidates] : [];
     state.revocations[hash] = [...new Set([...addresses, ...prior])];
   }
+  for (const observation of scan.observations) recordArtifact(observation);
+  for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
   state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
-  state.schemaVersion = 3;
+  state.lastChainTip = scan.chainTip;
+  state.schemaVersion = 4;
   saveScanState(state);
+  finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
+    artifacts: scan.observations.length, rejected: scan.failures.length });
   log(
     `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
       `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -132,7 +155,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const reg of allRegs) {
     const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
     log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
-    const record = await indexRegistration(reg, before, opts.resolveIdentities);
+    const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe);
     record.discovered = (reg as { discovered?: boolean }).discovered ?? false;
     record.wellKnownDomains = (reg as { wellKnownDomains?: string[] }).wellKnownDomains;
     log(
