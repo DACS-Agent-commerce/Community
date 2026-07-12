@@ -32,10 +32,17 @@ const PHASES = new Set([
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
-const CURRENT_LISTING_KEYS = new Set([
-  "dacsVersion", "listingVersion", "listingId", "requiredCapabilities", "seller", "offering",
-  "buyerRequirement", "pipeline", "pricing", "acceptedRails", "terms", "validity", "signature",
-]);
+// NOTE (open-world listing shape): the directory does NOT reject a listing that carries
+// unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
+// fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
+// newer-minor artifact correctly; SIG-5 (preserve-unknown) is the mechanism that makes that
+// safe — a verifier MAY ignore the *meaning* of unknown fields but MUST preserve them (it must
+// not strip them from the signed content). This validator only reads the recognised fields
+// below, so unknown fields are neither indexed nor interpreted, and verifyListing() hashes the
+// whole scope (contentHash) so they remain signature-bound — a field injected after signing
+// still fails the hash. A closed top-level
+// allowlist here would reject every listing produced under the first minor that adds a
+// top-level field, breaking forward compatibility.
 
 function validPriceTerm(value: unknown): boolean {
   const term = record(value);
@@ -72,7 +79,6 @@ function currentListing(scope: Record<string, unknown>): {
   if (
     scope.dacsVersion !== "1" || !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
     typeof scope.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(scope.listingId) ||
-    [...Object.keys(scope)].some((key) => !CURRENT_LISTING_KEYS.has(key)) ||
     typeof seller?.displayName !== "string" || seller.displayName.length > 200 ||
     (seller.publicEndpoint !== undefined && !safePublicEndpoint(seller.publicEndpoint)) || !sellerClaim || claims.length === 0 ||
     !claims.some((claim) => claim.ref === sellerClaim) || !claims.some((claim) => claim.ref === signer) ||
