@@ -20,6 +20,7 @@ import {
   type CounterpartyEvidenceReceipt,
   verifyCounterpartyEvidenceReceipt,
 } from "../src/catalog/counterpartyEvidence.js";
+import { readAnchor } from "../src/catalog/chain.js";
 
 function cloneReceipt(): CounterpartyEvidenceReceipt {
   return structuredClone(counterpartyEvidenceFixture);
@@ -137,4 +138,9 @@ test("counterparty fixture listing JSON path serves the machine contract", async
     if (priorDataDir === undefined) delete process.env.DACS_DIRECTORY_DATA;
     else process.env.DACS_DIRECTORY_DATA = priorDataDir;
   }
+});
+
+test("counterparty fixture is not exposed through generic chain reads", async () => {
+  const value = await readAnchor("fixture:counterparty-evidence-receipt");
+  assert.equal(value, null);
 });
