@@ -5,6 +5,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
+import { indexRegistration } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
@@ -220,6 +221,37 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   assert.equal(fallback.selectedLocator, fallbackFixture.locators.buyer);
   const reputation = deriveSellerReputation([dealRecord(fallbackDeal, fallback)], 0, 200);
   assert.equal(reputation.bundleRefs?.[0]?.anchor.locator, fallbackFixture.locators.buyer);
+});
+
+test("indexer reaches a valid current seller copy when the buyer anchor is unreadable", async () => {
+  const fixture = await vector("seller-fallback-job", 80);
+  maps.delete(fixture.locators.buyer);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const locatorValue = String(input).split("/").pop() ?? "";
+    const data = maps.get(locatorValue);
+    return new Response(JSON.stringify(data
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      : { success: false }), {
+      status: data ? 200 : 404,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const deal = registeredDeal("seller-fallback-job", fixture.locators.buyer, fixture.locators.seller);
+    const record = await indexRegistration({
+      primaryClaim: dids[1],
+      displayName: "seller",
+      listingAnchors: [fixture.locators.listing],
+      deals: [deal],
+    }, undefined, async () => { throw new Error("identity unavailable"); });
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].anchoredByRole, "seller");
+    assert.equal(record.reputation.bundleRefs?.[0]?.anchor.locator, fixture.locators.seller);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("current bundle shape requires registry pins, party hashes and unique phase indices", async () => {

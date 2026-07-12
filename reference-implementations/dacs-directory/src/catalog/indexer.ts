@@ -179,17 +179,20 @@ export async function indexRegistration(
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
   const listingsById = new Map(listings.map((l) => [l.listingId, l]));
   for (const deal of reg.deals ?? []) {
-    const initial = await readAnchor(deal.buyerBundleRef);
-    if (initial?.bundleVersion === "1") {
-      const resolveListing = async (ref: Record<string, unknown>) => {
-        const id = String(ref.listingId ?? "");
-        const version = Number(ref.version ?? ref.listingVersion ?? 0);
-        const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
-        return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
-      };
-      const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const buyerInitial = await readAnchor(deal.buyerBundleRef);
+    const resolveListing = async (ref: Record<string, unknown>) => {
+      const id = String(ref.listingId ?? "");
+      const version = Number(ref.version ?? ref.listingVersion ?? 0);
+      const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
+      return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
+    };
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const sellerCurrentProbe = buyerInitial?.bundleVersion === "1" || !deal.sellerBundleRef
+      ? null
+      : await graphFor(deal.sellerBundleRef);
+    if (buyerInitial?.bundleVersion === "1" || sellerCurrentProbe?.ok) {
       const buyerGraph = await graphFor(deal.buyerBundleRef);
-      const sellerGraph = deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null;
+      const sellerGraph = sellerCurrentProbe ?? (deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null);
       const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
         reconcileCurrentCopies(deal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
