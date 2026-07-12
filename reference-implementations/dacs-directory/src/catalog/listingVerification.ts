@@ -117,6 +117,7 @@ async function verifyIdentityPresentation(identity: Record<string, unknown>, sel
 
 /** Verify either the current normative Listing or the pinned SDK compatibility profile. */
 export async function verifyListing(raw: Record<string, unknown>): Promise<VerifiedListing | null> {
+  if (raw.signatures !== undefined) return null;
   const current = currentListing(raw);
   if (current) {
     const scope = { ...raw };

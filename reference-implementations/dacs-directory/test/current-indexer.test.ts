@@ -15,9 +15,9 @@ const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const maps = new Map<string, Obj>();
-const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result", signer: number, party = false) => {
+const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
-  const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:" };
+  const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
   const value = Buffer.from(await ed25519Sign(Buffer.from(prefixes[kind] + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
@@ -63,7 +63,7 @@ async function vector(jobId = "job-1", offset = 0) {
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
   return {
-    listing, buyerBundle, sellerBundle, agreement, rating,
+    listing, buyerBundle, sellerBundle, agreement, evidence, rating,
     locators: { listing: at(1), agreement: at(2), evidence: at(3), rating: at(4), buyer: at(5), seller: at(6) },
   };
 }
@@ -97,16 +97,262 @@ function dealRecord(
   };
 }
 
+const resignBundle = async (scope: Obj): Promise<Obj> => ({
+  ...scope,
+  signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)],
+  anchoredByRole: "buyer",
+});
+
 test("current evidence graph verifies full references and rejects cross-job ratings", async () => {
-  const { listing, rating, locators } = await vector();
+  const { listing, buyerBundle: bundle, agreement, evidence, rating, locators } = await vector();
   assert.ok(await verifyListing(listing), "listing fixture must verify");
   const graph = await buildCurrentEvidenceGraph(locators.buyer, { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, true, graph.reason); assert.equal(graph.ratings.length, 1);
-  maps.set(locators.rating, { ...rating, jobId: "replayed" });
-  const replay = await buildCurrentEvidenceGraph(locators.buyer, { read: async (at) => maps.get(at) ?? null,
-    resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
+  const ratingScope = signedScope(rating, "rating");
+  maps.set(locator(4), { ...ratingScope, signature: await sign(ratingScope, "rating", 1) });
+  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(forgedRater.ok, false);
+
+  const wrongTargetRoleScope = { ...ratingScope, targetRole: "buyer" };
+  const wrongTargetRole = {
+    ...wrongTargetRoleScope,
+    signature: await sign(wrongTargetRoleScope, "rating", 0),
+  };
+  maps.set(locator(4), wrongTargetRole);
+  const wrongTargetRoleBundle = signedScope(bundle, "bundle");
+  wrongTargetRoleBundle.ratingRefs = [ref(locator(4), wrongTargetRole, "rating")];
+  maps.set(locator(5), await resignBundle(wrongTargetRoleBundle));
+  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(mismatchedTargetRole.ok, false);
+  maps.set(locator(4), rating);
+
+  const linkedPhase = signedScope(bundle, "bundle");
+  linkedPhase.phaseSummary = [{
+    index: 2,
+    kind: "settle",
+    outcome: "ok",
+    attestationRef: (bundle.settlementEvidence as unknown[])[0],
+  }];
+  maps.set(locator(5), await resignBundle(linkedPhase));
+  const linked = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(linked.ok, true, linked.reason);
+
+  maps.set(locator(5), { ...bundle, signatures: [...(bundle.signatures as unknown[]), null] });
+  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(malformedSignature.ok, false);
+
+  maps.set(locator(5), { ...bundle, signature: null });
+  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(ambiguousBundleSignature.ok, false);
+
+  const wrongAlgorithmSignatures = (bundle.signatures as Obj[]).map((signature, index) =>
+    index === 0 ? { ...signature, algorithm: "ecdsa-secp256k1" } : signature);
+  maps.set(locator(5), { ...bundle, signatures: wrongAlgorithmSignatures });
+  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(wrongAlgorithm.ok, false);
+
+  const missingRequiredArray = signedScope(bundle, "bundle");
+  delete missingRequiredArray.settlementEvidence;
+  maps.set(locator(5), await resignBundle(missingRequiredArray));
+  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(missingRefs.ok, false);
+  assert.equal(missingRefs.reason, "invalid current DACS-5 bundle shape");
+
+  const unsupportedAmendment = signedScope(bundle, "bundle");
+  unsupportedAmendment.amendments = [{}];
+  maps.set(locator(5), await resignBundle(unsupportedAmendment));
+  const amendment = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(amendment.ok, false);
+  assert.equal(amendment.reason, "invalid current DACS-5 bundle shape");
+
+  const invalidRatingRefs = signedScope(bundle, "bundle");
+  invalidRatingRefs.ratingRefs = "not-an-array";
+  maps.set(locator(5), await resignBundle(invalidRatingRefs));
+  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(invalidRatings.ok, false);
+
+  const duplicateTopLevel = signedScope(bundle, "bundle");
+  duplicateTopLevel.ratingRefs = [
+    ...(bundle.ratingRefs as unknown[]),
+    (bundle.ratingRefs as unknown[])[0],
+  ];
+  maps.set(locator(5), await resignBundle(duplicateTopLevel));
+  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(duplicateRefs.ok, true, duplicateRefs.reason);
+  assert.equal(duplicateRefs.ratings.length, 1);
+
+  const orphanedPhase = signedScope(bundle, "bundle");
+  orphanedPhase.phaseSummary = [{
+    index: 2,
+    kind: "settle",
+    outcome: "ok",
+    attestationRef: {
+      anchor: { kind: "storage-program", locator: locator(99) },
+      contentHash: "a".repeat(64),
+    },
+  }];
+  maps.set(locator(5), await resignBundle(orphanedPhase));
+  const orphaned = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(orphaned.ok, false);
+  assert.equal(orphaned.reason, "phase attestation reference is outside the verified graph");
+
+  const malformedEvidenceScope = signedScope(evidence, "evidence");
+  malformedEvidenceScope.amendmentRefs = "not-an-array";
+  const malformedEvidence = {
+    ...malformedEvidenceScope,
+    signature: await sign(malformedEvidenceScope, "evidence", 1),
+  };
+  maps.set(locator(3), malformedEvidence);
+  const malformedEvidenceBundle = signedScope(bundle, "bundle");
+  malformedEvidenceBundle.settlementEvidence = [ref(locator(3), malformedEvidence, "evidence")];
+  maps.set(locator(5), await resignBundle(malformedEvidenceBundle));
+  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(badEvidenceRefs.ok, false);
+
+  const ambiguousEvidenceScope = signedScope(evidence, "evidence");
+  ambiguousEvidenceScope.signatures = [null];
+  const ambiguousEvidence = {
+    ...ambiguousEvidenceScope,
+    signature: await sign(ambiguousEvidenceScope, "evidence", 1),
+  };
+  maps.set(locator(3), ambiguousEvidence);
+  const ambiguousEvidenceBundle = signedScope(bundle, "bundle");
+  ambiguousEvidenceBundle.settlementEvidence = [ref(locator(3), ambiguousEvidence, "evidence")];
+  maps.set(locator(5), await resignBundle(ambiguousEvidenceBundle));
+  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(ambiguousContainers.ok, false);
+
+  const conflictingNestedScope = signedScope(evidence, "evidence");
+  conflictingNestedScope.supersedesEvidenceRef = {
+    anchor: { kind: "storage-program", locator: locator(3) },
+    contentHash: "a".repeat(64),
+  };
+  const conflictingNestedEvidence = {
+    ...conflictingNestedScope,
+    signature: await sign(conflictingNestedScope, "evidence", 1),
+  };
+  maps.set(locator(3), conflictingNestedEvidence);
+  const conflictingNestedBundle = signedScope(bundle, "bundle");
+  conflictingNestedBundle.settlementEvidence = [ref(locator(3), conflictingNestedEvidence, "evidence")];
+  maps.set(locator(5), await resignBundle(conflictingNestedBundle));
+  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(conflictingNested.ok, false);
+  assert.equal(conflictingNested.reason, "settlement evidence chain failed");
+  maps.set(locator(3), evidence);
+
+  const malformedCompositeScope: Obj = {
+    recordVersion: "1",
+    jobId: "job-1",
+    evaluatedParty: dids[1],
+    overallDecision: "pass",
+    freshness: "not-an-array",
+    dealSpecific: [],
+  };
+  const malformedComposite = {
+    ...malformedCompositeScope,
+    signature: await sign(malformedCompositeScope, "composite", 0),
+  };
+  maps.set(locator(6), malformedComposite);
+  const malformedCompositeBundle = signedScope(bundle, "bundle");
+  malformedCompositeBundle.vetRecords = [ref(locator(6), malformedComposite, "composite")];
+  maps.set(locator(5), await resignBundle(malformedCompositeBundle));
+  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(badCompositeRefs.ok, false);
+
+  const crossJobAgreementScope = { ...signedScope(agreement, "agreement"), jobId: "another-job" };
+  const crossJobAgreement = {
+    ...crossJobAgreementScope,
+    signatures: [
+      await sign(crossJobAgreementScope, "agreement", 0, true),
+      await sign(crossJobAgreementScope, "agreement", 1, true),
+    ],
+  };
+  maps.set(locator(2), crossJobAgreement);
+  const crossJobAgreementBundle = signedScope(bundle, "bundle");
+  crossJobAgreementBundle.agreementRef = ref(locator(2), crossJobAgreement, "agreement");
+  maps.set(locator(5), await resignBundle(crossJobAgreementBundle));
+  const crossJob = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(crossJob.ok, false);
+  assert.equal(crossJob.reason, "agreement belongs to another job");
+
+  maps.set(locator(5), bundle);
+  maps.set(locator(2), { ...agreement, signatures: [...(agreement.signatures as unknown[]), null] });
+  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(malformedAgreementSignature.ok, false);
+  maps.set(locator(2), agreement);
+  maps.set(locator(4), { ...rating, jobId: "replayed" });
+  const replay = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(replay.ok, false);
+});
+
+test("current evidence graph resolves VerifyResult authority attestations", async () => {
+  const { listing, buyerBundle: bundle } = await vector();
+  const attestation = { authority: "registry", status: "active" };
+  maps.set(locator(7), attestation);
+  const verifyResultScope: Obj = {
+    resultVersion: "1",
+    scheme: "lei",
+    identifier: "123",
+    recipeVersion: 1,
+    method: "consensus-backed-proxy",
+    decision: "pass",
+    reason: "found",
+    attestation: ref(locator(7), attestation, "attestation"),
+    fetchedAt: 10,
+    verifiedAt: 20,
+  };
+  const verifyResult = {
+    ...verifyResultScope,
+    signature: await sign(verifyResultScope, "verify-result", 0),
+  };
+  maps.set(locator(8), verifyResult);
+  const compositeScope: Obj = {
+    recordVersion: "1",
+    jobId: "job-1",
+    evaluatedParty: dids[1],
+    freshness: [ref(locator(8), verifyResult, "verify-result", { recipeVersion: 1 })],
+    supplementary: [],
+    dealSpecific: [],
+    overallDecision: "pass",
+  };
+  const composite = {
+    ...compositeScope,
+    signature: await sign(compositeScope, "composite", 0),
+  };
+  maps.set(locator(6), composite);
+  const scope = signedScope(bundle, "bundle");
+  scope.vetRecords = [ref(locator(6), composite, "composite")];
+  maps.set(locator(5), await resignBundle(scope));
+
+  const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(graph.ok, true, graph.reason);
+  assert.equal(graph.artifacts.some((artifact) => artifact.kind === "attestation"), true);
+
+  maps.set(locator(7), { ...attestation, status: "tampered" });
+  const tampered = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(tampered.ok, false);
+  assert.equal(tampered.reason, "VerifyResult attestation reference failed");
 });
 
 test("current evidence graph caps attacker-controlled transitive work", async () => {

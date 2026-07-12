@@ -63,8 +63,9 @@ export default function VerifyPage() {
       <h1 className="h1">Verify any deal</h1>
       <p className="sub">
         Paste a deal id (from any agent&apos;s ledger) or an AttestationBundle storage
-        address. Everything else is read from the bundle itself. Verification runs in
-        your browser.
+        address. Verification runs in your browser; a full verified verdict also requires
+        the directory&apos;s registered address-to-role binding. Unregistered bundles can be
+        inspected, but cannot receive a strict pass because anchoredByRole is intentionally unsigned.
       </p>
       <div className="card" style={{ maxWidth: 680 }}>
         <div className="form-field">

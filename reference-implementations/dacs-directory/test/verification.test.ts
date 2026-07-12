@@ -10,10 +10,13 @@ import {
 } from "@kynesyslabs/dacs/crypto";
 
 import {
+  bundleMatchesRegisteredAnchor,
   bundleMatchesRegisteredDeal,
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
+  registeredAnchorRole,
   refsPassStrictPolicy,
+  verifyReferencedArtifactSignature,
 } from "../src/catalog/bundlePolicy.js";
 import { activeCatalogListings, activeCatalogSellers } from "../src/catalog/discovery.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
@@ -29,6 +32,8 @@ import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBun
 
 const seed = Uint8Array.from(Buffer.alloc(32, 7));
 const did = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
+const buyerSeed = Uint8Array.from(Buffer.alloc(32, 8));
+const buyerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(buyerSeed))).toString("hex")}`;
 
 const listing = {
   listingId: "svc",
@@ -50,6 +55,7 @@ test("listing verification requires a valid signer-bound envelope", async () => 
   assert.ok(await verifyListing(signed));
   assert.equal(await verifyListing({ ...signed, name: "tampered" }), null);
   assert.equal(await verifyListing({ ...listing, signature: "deadbeef" }), null);
+  assert.equal(await verifyListing({ ...signed, signatures: [null] }), null);
   assert.equal(ownerClaim(`0x${did.slice(-64)}`), did);
 });
 
@@ -130,6 +136,7 @@ function result(outcome: string, signatures: BundleVerification["signatures"]): 
       bundleVersion: "1",
       jobId: "j",
       outcome,
+      anchoredByRole: "buyer",
       listingRef: { listingId: "svc", version: 1, contentHash: "h" },
       agreementRef: { kind: "dacs-3-agreement", id: "a", contentHash: "h" },
       parties: [
@@ -146,13 +153,104 @@ function result(outcome: string, signatures: BundleVerification["signatures"]): 
   };
 }
 
-test("strict bundle policy rejects one-sided completed bundles", () => {
-  assert.equal(hasRequiredBundleSignatures(result("completed", [{ party: "buyer", verdict: "valid" }])), false);
-  assert.equal(hasRequiredBundleSignatures(result("completed", [
+const rawBundleSignatures = (verification: BundleVerification, algorithm = "ed25519") =>
+  verification.signatures.map((signature) => ({
+    algorithm,
+    party: signature.party,
+    value: "cryptographically-verified-by-fixture",
+  }));
+const strictSigners = (verification: BundleVerification, raw: unknown = rawBundleSignatures(verification)) =>
+  hasRequiredBundleSignatures(verification, { signatures: raw });
+
+test("strict bundle signer policy rejects malformed roles and binds aborts to their anchor", () => {
+  assert.equal(strictSigners(result("completed", [{ party: "buyer", verdict: "valid" }])), false);
+  assert.equal(strictSigners(result("completed", [
     { party: "buyer", verdict: "valid" },
     { party: "seller", verdict: "valid" },
   ])), true);
-  assert.equal(hasRequiredBundleSignatures(result("aborted-by-other", [{ party: "buyer", verdict: "valid" }])), true);
+  assert.equal(strictSigners(result("aborted-by-other", [{ party: "buyer", verdict: "valid" }])), true);
+  assert.equal(strictSigners(result("aborted-by-self", [{ party: "buyer", verdict: "valid" }])), true);
+  assert.equal(strictSigners(result("aborted-by-other", [{ party: "seller", verdict: "valid" }])), false);
+  assert.equal(strictSigners(result("aborted-by-other", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ])), true);
+  assert.equal(strictSigners(result("banana", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ])), false);
+
+  const duplicateRole = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  duplicateRole.bundle!.parties.push({ role: "seller", primaryClaim: "other-seller", bundleHash: "o" });
+  assert.equal(strictSigners(duplicateRole), false);
+
+  const duplicateOrchestrator = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+    { party: "orchestrator-1", verdict: "valid" },
+  ]);
+  duplicateOrchestrator.bundle!.parties.push(
+    { role: "orchestrator", primaryClaim: "orchestrator-1", bundleHash: "o1" },
+    { role: "orchestrator", primaryClaim: "orchestrator-2", bundleHash: "o2" },
+  );
+  assert.equal(strictSigners(duplicateOrchestrator), false);
+
+  const missingOrchestratorSignature = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  missingOrchestratorSignature.bundle!.parties.push(
+    { role: "orchestrator", primaryClaim: "orchestrator", bundleHash: "o" },
+  );
+  assert.equal(strictSigners(missingOrchestratorSignature), false);
+  const fullyOrchestrated = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+    { party: "orchestrator", verdict: "valid" },
+  ]);
+  fullyOrchestrated.bundle!.parties.push(
+    { role: "orchestrator", primaryClaim: "orchestrator", bundleHash: "o" },
+  );
+  assert.equal(strictSigners(fullyOrchestrated), true);
+
+  const buyerAlsoOrchestrates = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  buyerAlsoOrchestrates.bundle!.parties.push({ role: "orchestrator", primaryClaim: "buyer", bundleHash: "b" });
+  assert.equal(strictSigners(buyerAlsoOrchestrates), true);
+
+  const unknownRole = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  unknownRole.bundle!.parties.push({ role: "auditor", primaryClaim: "auditor", bundleHash: "a" });
+  assert.equal(strictSigners(unknownRole), false);
+
+  const key = "a".repeat(64);
+  const sameIdentity = result("completed", [
+    { party: `did:demos:agent:${key}`, verdict: "valid" },
+    { party: `0x${key.toUpperCase()}`, verdict: "valid" },
+  ]);
+  sameIdentity.bundle!.parties = [
+    { role: "buyer", primaryClaim: `did:demos:agent:${key}`, bundleHash: "b" },
+    { role: "seller", primaryClaim: `0x${key.toUpperCase()}`, bundleHash: "s" },
+  ];
+  assert.equal(strictSigners(sameIdentity), false);
+
+  const valid = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  assert.equal(strictSigners(valid, rawBundleSignatures(valid, "ecdsa-secp256k1")), false);
+  assert.equal(strictSigners(valid, [...rawBundleSignatures(valid), null]), false);
+  assert.equal(hasRequiredBundleSignatures(valid, {
+    signatures: rawBundleSignatures(valid),
+    signature: null,
+  }), false);
 });
 
 test("reputation binding requires the submitted job and seller to match the signed bundle", () => {
@@ -173,6 +271,33 @@ test("reputation binding requires the submitted job and seller to match the sign
     bundleMatchesRegisteredDeal(verification.bundle, { ...deal, owners: { ...deal.owners, buyer: "other" } }, "seller"),
     false,
   );
+  const key = "a".repeat(64);
+  verification.bundle!.parties = [
+    { role: "buyer", primaryClaim: `did:demos:agent:${key}`, bundleHash: "b" },
+    { role: "seller", primaryClaim: `0x${key}`, bundleHash: "s" },
+  ];
+  assert.equal(bundleMatchesRegisteredDeal(verification.bundle, {
+    ...deal,
+    owners: { buyer: `did:demos:agent:${key}`, seller: `0x${key}` },
+  }, `0x${key}`), false);
+});
+
+test("unhashed anchor role must match the registered copy address", () => {
+  const verification = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  assert.equal(bundleMatchesRegisteredAnchor(
+    verification.bundle, "stor-buyer", "stor-buyer", "stor-seller",
+  ), true);
+  verification.bundle!.anchoredByRole = "seller";
+  assert.equal(bundleMatchesRegisteredAnchor(
+    verification.bundle, "stor-buyer", "stor-buyer", "stor-seller",
+  ), false);
+  assert.equal(bundleMatchesRegisteredAnchor(
+    verification.bundle, "stor-unknown", "stor-buyer", "stor-seller",
+  ), false);
+  assert.equal(registeredAnchorRole("stor-seller", "stor-buyer", undefined), null);
 });
 
 test("verified reputation deals are unique by signed job and bundle reference", () => {
@@ -214,16 +339,121 @@ test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", 
   assert.equal(flipOutcome("failed-perm"), "failed-counterparty");
 });
 
-test("strict ref policy rejects unsigned referenced artifacts", async () => {
+test("strict ref policy binds positional kinds, hashes, and unique references", async () => {
+  const signature = async (prefix: string, scope: Record<string, unknown>, signer: string, signingSeed: Uint8Array) => ({
+    algorithm: "ed25519",
+    signer,
+    value: Buffer.from(await ed25519Sign(
+      Buffer.from(`${prefix}${contentHash(scope)}`, "utf8"),
+      privateKeyFromSeed(signingSeed),
+    )).toString("hex"),
+  });
+  const agreementScope = { jobId: "j", buyer: buyerDid, seller: did };
+  const agreement = {
+    ...agreementScope,
+    signatures: [
+      await signature("dacs-agreement:v1:", agreementScope, buyerDid, buyerSeed),
+      await signature("dacs-agreement:v1:", agreementScope, did, seed),
+    ],
+  };
+  const evidenceScope = { evidenceVersion: "1", jobId: "j" };
+  const evidence = {
+    ...evidenceScope,
+    signature: await signature("dacs-evidence:v1:", evidenceScope, did, seed),
+  };
+  const signedListing = {
+    ...listing,
+    signature: await signature("dacs-listing:v1:", listing, did, seed),
+  };
   const verification = result("completed", [
-    { party: "buyer", verdict: "valid" },
-    { party: "seller", verdict: "valid" },
+    { party: buyerDid, verdict: "valid" },
+    { party: did, verdict: "valid" },
   ]);
-  verification.refs = [{ kind: "dacs-4-evidence", id: "e", verdict: "ok" }];
-  assert.equal(await refsPassStrictPolicy(verification, [{
+  verification.bundle!.parties = [
+    { role: "buyer", primaryClaim: buyerDid, bundleHash: "b" },
+    { role: "seller", primaryClaim: did, bundleHash: "s" },
+  ];
+  verification.bundle!.agreementRef = {
+    kind: "dacs-3-agreement", id: "agreement-j", contentHash: contentHash(agreementScope),
+  };
+  verification.bundle!.settlementEvidence = [{
+    kind: "dacs-4-evidence", id: "evidence-j", contentHash: contentHash(evidenceScope),
+  }];
+  verification.bundle!.phaseSummary = [{
+    index: 0,
+    kind: "settle",
+    outcome: "ok",
+    attestationRef: verification.bundle!.settlementEvidence[0],
+  }];
+  verification.bundle!.listingRef.contentHash = contentHash(listing);
+  verification.refs = [
+    { kind: "dacs-3-agreement", id: "agreement-j", verdict: "ok" },
+    { kind: "dacs-4-evidence", id: "evidence-j", verdict: "ok" },
+    { kind: "dacs-1-listing", id: "svc", verdict: "ok" },
+  ];
+  const artifacts = [
+    { kind: "dacs-3-agreement", raw: agreement },
+    { kind: "dacs-4-evidence", raw: evidence },
+    { kind: "dacs-1-listing", raw: signedListing },
+  ];
+  assert.equal(await refsPassStrictPolicy(verification, artifacts), true);
+
+  const substituted = structuredClone(verification);
+  substituted.bundle!.agreementRef.kind = "dacs-2-verifyresult";
+  substituted.refs[0].kind = "dacs-2-verifyresult";
+  assert.equal(await refsPassStrictPolicy(substituted, [
+    { ...artifacts[0], kind: "dacs-2-verifyresult" },
+    ...artifacts.slice(1),
+  ]), false);
+
+  const duplicated = structuredClone(verification);
+  duplicated.bundle!.settlementEvidence.push({
+    kind: "dacs-4-evidence", id: "evidence-j-copy", contentHash: contentHash(evidenceScope),
+  });
+  duplicated.refs.splice(2, 0, { kind: "dacs-4-evidence", id: "evidence-j-copy", verdict: "ok" });
+  assert.equal(await refsPassStrictPolicy(duplicated, [
+    artifacts[0], artifacts[1], artifacts[1], artifacts[2],
+  ]), false);
+
+  const unsupported = structuredClone(verification) as BundleVerification & {
+    bundle: NonNullable<BundleVerification["bundle"]> & { ratingRefs: unknown[] };
+  };
+  unsupported.bundle.ratingRefs = [{ kind: "dacs-5-rating", id: "rating-j", contentHash: "f".repeat(64) }];
+  assert.equal(await refsPassStrictPolicy(unsupported, artifacts), false);
+
+  const orphanedPhaseRef = structuredClone(verification);
+  orphanedPhaseRef.bundle!.phaseSummary[0].attestationRef = {
+    kind: "dacs-4-evidence", id: "unverified-evidence", contentHash: "e".repeat(64),
+  };
+  assert.equal(await refsPassStrictPolicy(orphanedPhaseRef, artifacts), false);
+
+  const optionalPhaseRef = structuredClone(verification);
+  delete (optionalPhaseRef.bundle!.phaseSummary[0] as unknown as Record<string, unknown>).attestationRef;
+  assert.equal(await refsPassStrictPolicy(optionalPhaseRef, artifacts), true);
+
+  const crossJob = structuredClone(verification);
+  crossJob.bundle!.jobId = "another-job";
+  assert.equal(await refsPassStrictPolicy(crossJob, artifacts), false);
+
+  const crossParty = structuredClone(verification);
+  crossParty.bundle!.parties[0].primaryClaim = `did:demos:agent:${"9".repeat(64)}`;
+  assert.equal(await refsPassStrictPolicy(crossParty, artifacts), false);
+});
+
+test("strict ref policy rejects unsigned referenced artifacts", async () => {
+  assert.equal(await verifyReferencedArtifactSignature({
     kind: "dacs-4-evidence",
     raw: { evidenceVersion: "1", jobId: "j" },
-  }]), false);
+  }, new Set(["buyer", "seller"])), false);
+  assert.equal(await verifyReferencedArtifactSignature({
+    kind: "dacs-4-evidence",
+    raw: {
+      evidenceVersion: "1",
+      jobId: "j",
+      signature: { algorithm: "ed25519", signer: "buyer", value: "not-reached" },
+      signatures: [null],
+    },
+  }, new Set(["buyer", "seller"])), false);
 });
 
 test("evidence ref must be signed by a bundle party", async () => {
@@ -232,29 +462,15 @@ test("evidence ref must be signed by a bundle party", async () => {
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const evidence = { ...evidenceScope, signatures: [{ algorithm: "ed25519", signer: did, value }] };
 
-  const withParty = (partyClaim: string): BundleVerification => {
-    const v = result("completed", [
-      { party: "buyer", verdict: "valid" },
-      { party: "seller", verdict: "valid" },
-    ]);
-    v.refs = [{ kind: "dacs-4-evidence", id: "e", verdict: "ok" }];
-    v.bundle!.parties = [
-      { role: "buyer", primaryClaim: partyClaim, bundleHash: "b" },
-      { role: "seller", primaryClaim: "seller", bundleHash: "s" },
-    ];
-    return v;
-  };
-
   // Signer is a party to the bundle → accepted.
   assert.equal(
-    await refsPassStrictPolicy(withParty(did), [{ kind: "dacs-4-evidence", raw: evidence }]),
+    await verifyReferencedArtifactSignature({ kind: "dacs-4-evidence", raw: evidence }, new Set([did, "seller"])),
     true,
   );
   // Valid signature, but the signer is a stranger to the deal → rejected.
   assert.equal(
-    await refsPassStrictPolicy(withParty(`did:demos:agent:${"9".repeat(64)}`), [
-      { kind: "dacs-4-evidence", raw: evidence },
-    ]),
+    await verifyReferencedArtifactSignature({ kind: "dacs-4-evidence", raw: evidence },
+      new Set([`did:demos:agent:${"9".repeat(64)}`, "seller"])),
     false,
   );
 });

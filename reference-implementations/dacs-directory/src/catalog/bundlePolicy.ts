@@ -3,6 +3,7 @@ import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
+import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
 import type { DealRecord, RegisteredDeal } from "./types.js";
 
@@ -33,23 +34,48 @@ function keyFor(claim: string): ReturnType<typeof publicKeyFromRaw> | null {
   }
 }
 
-export function hasRequiredBundleSignatures(result: BundleVerification): boolean {
+export function hasRequiredBundleSignatures(result: BundleVerification, rawBundle: unknown): boolean {
   const bundle = result.bundle;
-  if (!bundle) return false;
+  if (!bundle || !rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) return false;
+  const raw = rawBundle as Record<string, unknown>;
+  const rawSignatures = raw.signatures;
+  if (raw.signature !== undefined || !Array.isArray(rawSignatures) ||
+      rawSignatures.length !== result.signatures.length) return false;
+  for (let index = 0; index < rawSignatures.length; index++) {
+    const value = rawSignatures[index];
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const signature = value as Record<string, unknown>;
+    if (signature.algorithm !== "ed25519" || signature.party !== result.signatures[index].party ||
+        typeof signature.value !== "string" || signature.value.length === 0) return false;
+  }
   const valid = new Set(result.signatures.filter((s) => s.verdict === "valid").map((s) => s.party));
-  if (result.signatures.some((s) => s.verdict !== "valid")) return false;
-  const partyClaims = new Set(bundle.parties.map((p) => p.primaryClaim));
-  if ([...valid].some((s) => !partyClaims.has(s))) return false;
-  if (bundle.outcome === "aborted-by-self" || bundle.outcome === "aborted-by-other") {
-    return valid.size === 1;
-  }
-  const requiredRoles = new Set(["buyer", "seller"]);
-  if (bundle.parties.some((p) => p.role === "orchestrator")) requiredRoles.add("orchestrator");
-  for (const role of requiredRoles) {
-    const party = bundle.parties.find((p) => p.role === role);
-    if (!party || !valid.has(party.primaryClaim)) return false;
-  }
-  return true;
+  return bundleSignerPolicy(bundle, valid, result.signatures.length > 0 &&
+    result.signatures.every((signature) => signature.verdict === "valid"));
+}
+
+/** Return the role registered for this exact copy address, if the directory knows it. */
+export function registeredAnchorRole(
+  bundleRef: string,
+  buyerBundleRef: unknown,
+  sellerBundleRef: unknown,
+): "buyer" | "seller" | null {
+  const ref = bundleRef.toLowerCase();
+  return typeof buyerBundleRef === "string" && buyerBundleRef.toLowerCase() === ref
+    ? "buyer"
+    : typeof sellerBundleRef === "string" && sellerBundleRef.toLowerCase() === ref
+      ? "seller"
+      : null;
+}
+
+/** Bind the unhashed per-copy role to the address the directory registered for it. */
+export function bundleMatchesRegisteredAnchor(
+  bundle: { anchoredByRole?: unknown } | undefined,
+  bundleRef: string,
+  buyerBundleRef: unknown,
+  sellerBundleRef: unknown,
+): boolean {
+  const expectedRole = registeredAnchorRole(bundleRef, buyerBundleRef, sellerBundleRef);
+  return expectedRole !== null && bundle?.anchoredByRole === expectedRole;
 }
 
 /**
@@ -66,6 +92,7 @@ export function bundleMatchesRegisteredDeal(
   const buyers = bundle.parties.filter((p) => p.role === "buyer");
   const sellers = bundle.parties.filter((p) => p.role === "seller");
   return buyers.length === 1 && sellers.length === 1 &&
+    demosSigningIdentity(buyers[0].primaryClaim) !== demosSigningIdentity(sellers[0].primaryClaim) &&
     buyers[0].primaryClaim === deal.owners.buyer &&
     sellers[0].primaryClaim === deal.owners.seller &&
     sellers[0].primaryClaim === catalogSeller;
@@ -88,6 +115,44 @@ export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
 export interface ResolvedArtifact {
   kind: string;
   raw: Record<string, unknown>;
+}
+
+interface ExpectedArtifact {
+  kind: string;
+  id: string;
+  contentHash: string;
+}
+
+function expectedArtifacts(verification: BundleVerification): ExpectedArtifact[] | null {
+  const bundle = verification.bundle;
+  const extended = bundle as unknown as Record<string, unknown> | undefined;
+  // The pinned compatibility SDK does not resolve or report amendments/ratings.
+  // A nonempty set must fail closed here instead of receiving a partial "strict"
+  // verdict. The current-profile evidence graph resolves ratingRefs separately.
+  if (!bundle || bundle.agreementRef.kind !== "dacs-3-agreement" ||
+      bundle.settlementEvidence.some((ref) => ref.kind !== "dacs-4-evidence") ||
+      bundle.vetRecords.some((ref) => ref.kind !== "dacs-2-verifyresult") ||
+      [extended?.amendments, extended?.ratingRefs].some((refs) => refs !== undefined &&
+        (!Array.isArray(refs) || refs.length > 0))) return null;
+  const expected: ExpectedArtifact[] = [
+    { kind: "dacs-3-agreement", id: bundle.agreementRef.id, contentHash: bundle.agreementRef.contentHash },
+    ...bundle.settlementEvidence.map((ref) => ({ kind: "dacs-4-evidence", id: ref.id, contentHash: ref.contentHash })),
+    ...bundle.vetRecords.map((ref) => ({ kind: "dacs-2-verifyresult", id: ref.id, contentHash: ref.contentHash })),
+    { kind: "dacs-1-listing", id: String(bundle.listingRef.listingId), contentHash: bundle.listingRef.contentHash },
+  ];
+  const ids = new Set(expected.map((ref) => `${ref.kind}\n${ref.id}`));
+  const hashes = new Set(expected.map((ref) => ref.contentHash));
+  if (ids.size !== expected.length || hashes.size !== expected.length) return null;
+  const topLevelRefs = new Set(expected.slice(1, -1).map((ref) => `${ref.kind}\n${ref.id}\n${ref.contentHash}`));
+  const phases = bundle.phaseSummary as unknown as Array<Record<string, unknown>>;
+  for (const phase of phases) {
+    if (phase.attestationRef === undefined) continue;
+    const back = phase.attestationRef;
+    if (!back || typeof back !== "object" || Array.isArray(back)) return null;
+    const ref = back as Record<string, unknown>;
+    if (!topLevelRefs.has(`${ref.kind}\n${ref.id}\n${ref.contentHash}`)) return null;
+  }
+  return expected;
 }
 
 /**
@@ -113,11 +178,13 @@ export async function verifyReferencedArtifactSignature(
   const raw = artifact.raw;
   const scope = { ...stripSignature(raw) };
   delete scope.signatures;
-  const entries = Array.isArray(raw.signatures)
-    ? raw.signatures
+  const hasPlural = raw.signatures !== undefined;
+  const hasSingular = raw.signature !== undefined;
+  if (hasPlural === hasSingular) return false;
+  const entries = hasPlural
+    ? Array.isArray(raw.signatures) ? raw.signatures : []
     : raw.signature && typeof raw.signature === "object" && !Array.isArray(raw.signature)
-      ? [raw.signature]
-      : [];
+      ? [raw.signature] : [];
   if (entries.length === 0) return false;
   const validSigners = new Set<string>();
   const message = Buffer.from(separator + contentHash(scope), "utf8");
@@ -148,7 +215,27 @@ export async function refsPassStrictPolicy(
   artifacts: ResolvedArtifact[],
 ): Promise<boolean> {
   if (!verification.ok || verification.refs.some((r) => r.verdict !== "ok")) return false;
-  if (artifacts.length < verification.refs.length) return false;
+  const expected = expectedArtifacts(verification);
+  if (!expected || artifacts.length !== expected.length || verification.refs.length !== expected.length) return false;
+  const bundleBuyers = verification.bundle?.parties.filter((party) => party.role === "buyer") ?? [];
+  const bundleSellers = verification.bundle?.parties.filter((party) => party.role === "seller") ?? [];
+  if (bundleBuyers.length !== 1 || bundleSellers.length !== 1) return false;
+  for (let index = 0; index < expected.length; index++) {
+    const want = expected[index];
+    const ref = verification.refs[index];
+    const artifact = artifacts[index];
+    if (ref.kind !== want.kind || ref.id !== want.id || artifact.kind !== want.kind) return false;
+    if ((artifact.kind === "dacs-3-agreement" || artifact.kind === "dacs-4-evidence") &&
+        artifact.raw.jobId !== verification.bundle?.jobId) return false;
+    if (artifact.kind === "dacs-3-agreement" &&
+        (artifact.raw.buyer !== bundleBuyers[0].primaryClaim ||
+         artifact.raw.seller !== bundleSellers[0].primaryClaim)) return false;
+    try {
+      if (contentHash(stripSignature(artifact.raw)) !== want.contentHash) return false;
+    } catch {
+      return false;
+    }
+  }
   const partyClaims = new Set((verification.bundle?.parties ?? []).map((p) => p.primaryClaim));
   const checks = await Promise.all(
     artifacts.map((a) => verifyReferencedArtifactSignature(a, partyClaims)),
