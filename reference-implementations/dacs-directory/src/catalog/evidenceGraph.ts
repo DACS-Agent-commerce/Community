@@ -28,6 +28,7 @@ const rec = (value: unknown): Record<string, unknown> | null =>
 const arr = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value) ? value.map(rec).filter(Boolean) as Record<string, unknown>[] : [];
 const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+const MAX_GRAPH_ARTIFACTS = 64;
 const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= 65_536;
 const priceTermOk = (value: unknown): boolean => {
   const price = rec(value); const amount = String(price?.amount ?? "");
@@ -110,7 +111,7 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   const raw = await deps.read(bundleLocator);
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
-  if (!raw || !withinArtifactLimit(raw) || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || arr(raw.phaseSummary).length !== raw.phaseSummary.length || arr(raw.phaseSummary).some((phase) => typeof phase.kind !== "string" || typeof phase.outcome !== "string") || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
@@ -132,6 +133,7 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   } else if (!abort) return { ...fail("non-abort bundle has no agreement"), signaturesVerified };
   for (const [kind, refs] of [["evidence", raw.settlementEvidence], ["composite", raw.vetRecords], ["rating", raw.ratingRefs]] as Array<[ArtifactKind, unknown]>) {
     for (const ref of Array.isArray(refs) ? refs : []) {
+      if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
       const resolved = await resolveRef(kind, ref, deps); if (!resolved) return { ...fail(`${kind} reference failed`), signaturesVerified };
       if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
       if (kind === "rating" && (!parties.some((party) => party.primaryClaim === resolved.raw.rater) || !parties.some((party) => party.primaryClaim === resolved.raw.target))) return { ...fail("rating party binding failed"), signaturesVerified };
@@ -142,9 +144,11 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   // Resolve the transitive evidence graph, not only the bundle's first-level
   // pointers. Cycles and duplicate refs collapse by locator+kind.
   const seen = new Set(artifacts.map((artifact) => `${artifact.kind}\n${artifact.locator}`));
+  let graphLimitExceeded = false;
   const addNested = async (kind: ArtifactKind, value: unknown): Promise<boolean> => {
     if (!isCurrentRef(value)) return false;
     const key = `${kind}\n${value.anchor.locator}`; if (seen.has(key)) return true;
+    if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
     const nested = await resolveRef(kind, value, deps); if (!nested) return false;
     if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
     if (kind === "evidence" && !parties.some((party) => party.primaryClaim === rec(nested.raw.signature)?.signer)) return false;
@@ -154,18 +158,19 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     const artifact = artifacts[index];
     if (artifact.kind === "composite") {
       for (const key of ["freshness", "dealSpecific"] as const) for (const value of Array.isArray(artifact.raw[key]) ? artifact.raw[key] as unknown[] : []) {
-        if (!(await addNested("verify-result", value))) return { ...fail("nested VerifyResult reference failed"), signaturesVerified };
+        if (!(await addNested("verify-result", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "nested VerifyResult reference failed"), signaturesVerified };
       }
     }
     if (artifact.kind === "evidence") {
       for (const value of Array.isArray(artifact.raw.amendmentRefs) ? artifact.raw.amendmentRefs as unknown[] : []) {
-        if (!(await addNested("evidence", value))) return { ...fail("settlement amendment reference failed"), signaturesVerified };
+        if (!(await addNested("evidence", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement amendment reference failed"), signaturesVerified };
       }
       for (const key of ["supersedesEvidenceRef", "amendsEvidenceRef"] as const) if (artifact.raw[key] !== undefined && !(await addNested("evidence", artifact.raw[key]))) {
-        return { ...fail("settlement evidence chain failed"), signaturesVerified };
+        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement evidence chain failed"), signaturesVerified };
       }
     }
   }
+  if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);

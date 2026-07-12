@@ -29,7 +29,7 @@ import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingV
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import { artifactAnchorTime, findProgramAddress, loadScanState } from "./store.js";
-import { deriveSellerReputation, flipOutcome } from "./reputation.js";
+import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
@@ -227,6 +227,11 @@ export async function indexRegistration(
           return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
             .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
         });
+      const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
+        .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+      const cancellationNeutral = isNeutralCancellation(
+        sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
+      );
       const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
       dealCandidates.push({
         ...deal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
@@ -234,6 +239,7 @@ export async function indexRegistration(
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
         reputationEligible: refsVerified,
+        cancellationNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
@@ -298,9 +304,7 @@ export async function indexRegistration(
     const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = bundle ? listingsById.get(String(bundle.listingRef.listingId))?.terms : undefined;
-    const commitReached = (bundle?.phaseSummary ?? []).some((phase) => phase.kind === "commit-agreement" && phase.outcome === "ok");
-    const cancellationNeutral = (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
-      cancellation?.claimedPolicy === "pre-commit" && listingTerms?.cancellationPolicy === "pre-commit" && !commitReached;
+    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,

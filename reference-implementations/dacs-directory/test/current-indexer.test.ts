@@ -4,7 +4,7 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { deriveSellerReputation } from "../src/catalog/reputation.js";
+import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import type { DealRecord } from "../src/catalog/types.js";
 
@@ -67,6 +67,21 @@ test("current evidence graph verifies full references and rejects cross-job rati
   assert.equal(replay.ok, false);
 });
 
+test("current evidence graph caps attacker-controlled transitive work", async () => {
+  const { listing, bundle, rating } = await vector();
+  const scope = signedScope(bundle, "bundle");
+  scope.ratingRefs = Array.from({ length: 65 }, (_, index) => ({
+    anchor: { kind: "storage-program", locator: locator(100 + index) },
+    contentHash: artifactHash(rating, "rating"),
+  }));
+  const oversized = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "seller" };
+  maps.set(locator(5), oversized);
+  const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? rating,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(graph.ok, false);
+  assert.equal(graph.reason, "evidence graph exceeds size limit");
+});
+
 test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction uniqueness", () => {
   const base: DealRecord = { jobId: "a", rail: "pay-dem", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
@@ -76,6 +91,13 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
   assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+});
+
+test("current pre-commit policy cancellations are reputation-neutral", () => {
+  assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
+    { cancellationPolicy: "pre-commit" }, [{ kind: "negotiate-fixed-price", outcome: "ok" }]), true);
+  assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
+    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-agreement", outcome: "ok" }]), false);
 });
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {

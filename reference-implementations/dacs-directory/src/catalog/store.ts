@@ -15,8 +15,16 @@ const LEGACY = {
   domains: join(DATA_DIR, "domains.json"),
 };
 
-mkdirSync(DATA_DIR, { recursive: true });
-const db = new Database(DB_PATH);
+let db: Database.Database;
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+  db = new Database(DB_PATH);
+} catch (error) {
+  throw new Error(
+    `DACS directory storage could not be opened at ${DB_PATH}; configure DACS_DIRECTORY_DATA to a writable persistent volume`,
+    { cause: error },
+  );
+}
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = FULL");
 db.pragma("busy_timeout = 10000");

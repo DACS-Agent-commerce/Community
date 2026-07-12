@@ -13,6 +13,23 @@ export function flipOutcome(outcome: string | undefined): string | undefined {
   return outcome;
 }
 
+export function isNeutralCancellation(
+  sellerOutcome: string | undefined,
+  cancellation: unknown,
+  listingTerms: unknown,
+  phaseSummary: unknown,
+): boolean {
+  const marker = cancellation && typeof cancellation === "object" && !Array.isArray(cancellation)
+    ? cancellation as Record<string, unknown> : undefined;
+  const terms = listingTerms && typeof listingTerms === "object" && !Array.isArray(listingTerms)
+    ? listingTerms as Record<string, unknown> : undefined;
+  const phases = Array.isArray(phaseSummary) ? phaseSummary.filter((phase): phase is Record<string, unknown> =>
+    Boolean(phase && typeof phase === "object" && !Array.isArray(phase))) : [];
+  const commitReached = phases.some((phase) => phase.kind === "commit-agreement" && phase.outcome === "ok");
+  return (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
+    marker?.claimedPolicy === "pre-commit" && terms?.cancellationPolicy === "pre-commit" && !commitReached;
+}
+
 /**
  * DACS-5 scalar derivation over already signature/reference-verified,
  * seller-perspective records. Reconciliation and divergence exclusion happen
@@ -58,7 +75,6 @@ export function deriveSellerReputation(
     if (!prior || rating.ratedAt > prior.ratedAt || (rating.ratedAt === prior.ratedAt && rating.contentHash > prior.contentHash)) ratingByDirection.set(key, rating);
   }
   const sellerRatings = [...ratingByDirection.values()].filter((rating) => rating.targetRole === "seller").map((rating) => rating.value);
-  const buyerRatings = [...ratingByDirection.values()].filter((rating) => rating.targetRole === "buyer").map((rating) => rating.value);
   const completedWithPrice = scoped.filter((deal) => deal.sellerOutcome === "completed" && deal.agreementPrice);
   const amounts = new Map<string, string[]>();
   for (const deal of completedWithPrice) {
@@ -76,7 +92,9 @@ export function deriveSellerReputation(
     completionRate: partyFaultDenominator > 0 ? completed / partyFaultDenominator : null,
     counterpartyAdjustedCompletionRate: blameDenominator > 0 ? completed / blameDenominator : null,
     counterpartyFaultRate: partyFaultDenominator > 0 ? counterpartyFault / partyFaultDenominator : null,
-    averageBuyerRating: buyerRatings.length ? buyerRatings.reduce((a, b) => a + b, 0) / buyerRatings.length : null,
+    // This catalog record is seller-scoped. Buyer-side sessions are not part
+    // of its input set, so surfacing a buyer rating here would invent signal.
+    averageBuyerRating: null,
     averageSellerRating: sellerRatings.length ? sellerRatings.reduce((a, b) => a + b, 0) / sellerRatings.length : null,
     observedTransactionalVolume,
     transactionCountByCurrency,
