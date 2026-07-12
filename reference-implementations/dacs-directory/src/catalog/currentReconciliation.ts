@@ -19,7 +19,7 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
     for (const phase of phases) {
       const index = phase.index;
       if (!Number.isSafeInteger(index) || Number(index) < 0 || byIndex.has(Number(index))) return null;
-      byIndex.set(Number(index), { outcome: phase.outcome, errorClass: phase.errorClass });
+      byIndex.set(Number(index), { outcome: phase.outcome, errorClass: phase.errorClass, kind: phase.kind });
     }
     return byIndex;
   };
@@ -28,7 +28,7 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
   if (!a || !b || a.size !== b.size) return true;
   for (const [index, facts] of a) {
     const other = b.get(index);
-    if (!other || facts.outcome !== other.outcome || facts.errorClass !== other.errorClass) return true;
+    if (!other || facts.outcome !== other.outcome || facts.errorClass !== other.errorClass || facts.kind !== other.kind) return true;
   }
   return false;
 }
