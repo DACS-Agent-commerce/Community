@@ -31,6 +31,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import { artifactAnchorTime, findProgramAddress, loadScanState } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
@@ -189,28 +190,8 @@ export async function indexRegistration(
       const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
       const buyerGraph = await graphFor(deal.buyerBundleRef);
       const sellerGraph = deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null;
-      const roleOf = (graph: EvidenceGraph | null, claim: string) => {
-        const parties = Array.isArray(graph?.bundle.parties) ? graph.bundle.parties as Array<Record<string, unknown>> : [];
-        return parties.find((party) => String(party.primaryClaim).toLowerCase() === claim.toLowerCase())?.role;
-      };
-      const binds = (graph: EvidenceGraph | null, expectedRole: "buyer" | "seller") => Boolean(
-        graph?.ok && graph.bundle.jobId === deal.jobId && graph.bundle.anchoredByRole === expectedRole &&
-        roleOf(graph, deal.owners.buyer) === "buyer" && roleOf(graph, reg.primaryClaim) === "seller",
-      );
-      const buyerOk = binds(buyerGraph, "buyer");
-      const sellerOk = binds(sellerGraph, "seller");
-      const phaseFacts = (graph: EvidenceGraph | null) => JSON.stringify(
-        (Array.isArray(graph?.bundle.phaseSummary) ? graph.bundle.phaseSummary : []).map((phase) => {
-          const item = phase as Record<string, unknown>; return { outcome: item.outcome, errorClass: item.errorClass };
-        }),
-      );
-      const divergent = buyerOk && sellerOk &&
-        (flipOutcome(String(buyerGraph.bundle.outcome)) !== sellerGraph!.bundle.outcome || phaseFacts(buyerGraph) !== phaseFacts(sellerGraph));
-      const authoritative = sellerOk ? sellerGraph! : buyerGraph;
-      const refsVerified = Boolean((sellerOk || buyerOk) && !divergent && authoritative?.refsVerified);
-      const sellerOutcome = authoritative === sellerGraph
-        ? String(authoritative?.bundle.outcome ?? "")
-        : flipOutcome(String(authoritative?.bundle.outcome ?? ""));
+      const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
+        reconcileCurrentCopies(deal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
       const ratings = (authoritative?.ratings ?? []).filter((rating) =>
         rating.jobId === deal.jobId && parties.some((party) => party.primaryClaim === rating.rater),
@@ -232,7 +213,6 @@ export async function indexRegistration(
       const cancellationNeutral = isNeutralCancellation(
         sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
       );
-      const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
       dealCandidates.push({
         ...deal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
@@ -283,13 +263,12 @@ export async function indexRegistration(
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
     const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
-    const phaseFacts = (bundle: typeof buyerCopy.bundle) => JSON.stringify((bundle?.phaseSummary ?? []).map((phase) => ({
-      outcome: phase.outcome,
-      errorClass: (phase as unknown as { errorClass?: string }).errorClass,
-    })));
     const divergent = Boolean(
       buyerCopy.refsOk && sellerCopy?.refsOk &&
-      (flipOutcome(buyerCopy.bundle?.outcome) !== sellerCopy.bundle?.outcome || phaseFacts(buyerCopy.bundle) !== phaseFacts(sellerCopy.bundle)),
+      buyerCopy.bundle && sellerCopy.bundle && currentBundleCopiesDiverge(
+        buyerCopy.bundle as unknown as Record<string, unknown>,
+        sellerCopy.bundle as unknown as Record<string, unknown>,
+      ),
     );
     const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
@@ -305,6 +284,7 @@ export async function indexRegistration(
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = bundle ? listingsById.get(String(bundle.listingRef.listingId))?.terms : undefined;
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
+    const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -317,7 +297,7 @@ export async function indexRegistration(
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
-      anchorTimestamp: artifactAnchorTime(authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef),
+      anchorTimestamp: artifactAnchorTime(selectedLocator),
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
