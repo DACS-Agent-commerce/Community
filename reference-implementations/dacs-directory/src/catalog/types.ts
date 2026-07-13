@@ -39,6 +39,8 @@ export interface RegisteredDeal {
   owners: { buyer: string; seller: string };
 }
 
+export type ArtifactProfile = "dacs-v0.1" | "legacy-sdk-v0.1" | "fixture-listing";
+
 /** §6.3.6 ListingSummary (subset the MVP populates; shape per spec). */
 export interface ListingSummary {
   listingId: string;
@@ -47,7 +49,7 @@ export interface ListingSummary {
   anchor: { kind: string; locator: string };
   seller: { primaryClaim: string; displayName: string };
   /** Which signed artifact contract was verified at the anchor. */
-  artifactProfile?: "dacs-v0.1" | "legacy-sdk-v0.1";
+  artifactProfile?: ArtifactProfile;
   /** Optional seller endpoint from a current-spec listing. */
   publicEndpoint?: string;
   offering: {

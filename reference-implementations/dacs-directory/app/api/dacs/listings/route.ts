@@ -8,6 +8,7 @@ import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
+import { artifactProfiles } from "@/src/catalog/contracts";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -33,7 +34,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `${name} is outside its allowed range` }, { status: 400 });
     }
   }
-  if (profile && profile !== "dacs-v0.1" && profile !== "legacy-sdk-v0.1") {
+  if (profile && !(artifactProfiles as readonly string[]).includes(profile)) {
     return NextResponse.json({ error: "unsupported artifact profile" }, { status: 400 });
   }
   if (identityTier && !["institutional", "verified", "self-declared"].includes(identityTier)) {

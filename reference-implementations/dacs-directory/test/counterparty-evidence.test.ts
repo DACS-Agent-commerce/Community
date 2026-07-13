@@ -101,6 +101,7 @@ test("counterparty fixture seed record exposes the runnable service", () => {
   assert.equal(seller.primaryClaim, COUNTERPARTY_EVIDENCE_AGENT_ID);
   assert.equal(seller.listings.length, 1);
   assert.equal(seller.listings[0]!.anchor.kind, "fixture");
+  assert.equal(seller.listings[0]!.artifactProfile, "fixture-listing");
   assert.equal(isCounterpartyEvidenceDemoListing(seller.primaryClaim, seller.listings[0]!), true);
 });
 

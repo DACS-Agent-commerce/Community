@@ -1,3 +1,5 @@
+export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
+
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
@@ -16,7 +18,7 @@ export const listingSummarySchema = {
       type: "object", required: ["primaryClaim", "displayName"], additionalProperties: false,
       properties: { primaryClaim: { type: "string" }, displayName: { type: "string" } },
     },
-    artifactProfile: { enum: ["dacs-v0.1", "legacy-sdk-v0.1"] },
+    artifactProfile: { enum: artifactProfiles },
     publicEndpoint: { type: "string", format: "uri" },
     offering: {
       type: "object", required: ["title", "category", "tags"],
@@ -130,6 +132,7 @@ export const directoryManifest = (origin: string) => ({
   artifactProfiles: {
     current: "dacs-v0.1",
     compatibility: "legacy-sdk-v0.1",
+    fixture: "fixture-listing",
     missingProfileMeans: "legacy-sdk-v0.1",
   },
   maturity: {
@@ -168,7 +171,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
           { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
-          { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: ["dacs-v0.1", "legacy-sdk-v0.1"] } },
+          { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: artifactProfiles } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],

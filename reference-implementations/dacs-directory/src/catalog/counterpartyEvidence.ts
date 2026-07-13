@@ -164,6 +164,7 @@ export function counterpartyEvidenceSellerRecord(now = Date.now()): SellerRecord
       version: COUNTERPARTY_EVIDENCE_LISTING_VERSION,
       contentHash: COUNTERPARTY_EVIDENCE_LISTING_CONTENT_HASH,
       anchor: { kind: "fixture", locator: COUNTERPARTY_EVIDENCE_ANCHOR_LOCATOR },
+      artifactProfile: "fixture-listing",
       seller: {
         primaryClaim: COUNTERPARTY_EVIDENCE_AGENT_ID,
         displayName: "Counterparty Evidence Desk",
