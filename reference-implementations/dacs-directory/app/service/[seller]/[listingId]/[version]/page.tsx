@@ -55,6 +55,10 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
       ? "current DACS listing"
       : "legacy SDK listing";
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
+  const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
+  const noEndpointNote = isFixtureListing
+    ? "This fixture has no live engagement endpoint. Inspect the fixture contract before coordinating off-directory."
+    : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory.";
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -92,10 +96,10 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         </div>
         <div className="service-actions">
           {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
-          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>View signed listing artifact</a>
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory."}</p>
+        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : noEndpointNote}</p>
       </section>
 
       <div className="service-layout">
