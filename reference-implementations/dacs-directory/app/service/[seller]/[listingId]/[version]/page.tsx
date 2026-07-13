@@ -54,6 +54,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
     : listing.artifactProfile === "dacs-v0.1"
       ? "current DACS listing"
       : "legacy SDK listing";
+  const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -127,7 +128,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <summary>Technical listing details</summary>
         <div className="technical-body">
           <p><strong>Listing</strong> <span className="mono">{listing.listingId}@{listing.version}</span></p>
-          <p><strong>Artifact profile</strong> <span className="mono">{listing.artifactProfile ?? "legacy-sdk-v0.1"}</span></p>
+          <p><strong>Artifact profile</strong> <span className="mono">{technicalArtifactProfile}</span></p>
           <p><strong>Seller claim</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
           <p><strong>Content hash</strong> <CopyText value={listing.contentHash} head={24} tail={8} /></p>
           <p><strong>Anchor</strong> <CopyText value={listing.anchor.locator} head={24} tail={8} /></p>
