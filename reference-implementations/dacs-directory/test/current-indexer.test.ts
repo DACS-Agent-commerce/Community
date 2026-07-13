@@ -304,6 +304,38 @@ test("current evidence graph verifies full references and rejects cross-job rati
   assert.equal(replay.ok, false);
 });
 
+test("current evidence graph accepts a verified vet record as its phase attestation", async () => {
+  const { listing, buyerBundle: bundle } = await vector();
+  const compositeScope: Obj = {
+    recordVersion: "1",
+    jobId: "job-1",
+    evaluatedParty: dids[1],
+    freshness: [],
+    supplementary: [],
+    dealSpecific: [],
+    overallDecision: "pass",
+  };
+  const composite = {
+    ...compositeScope,
+    signature: await sign(compositeScope, "composite", 0),
+  };
+  maps.set(locator(6), composite);
+
+  const scope = signedScope(bundle, "bundle");
+  scope.vetRecords = [ref(locator(6), composite, "composite")];
+  scope.phaseSummary = [{
+    index: 2,
+    kind: "vet-credentials",
+    outcome: "ok",
+    attestationRef: (scope.vetRecords as unknown[])[0],
+  }];
+  maps.set(locator(5), await resignBundle(scope));
+
+  const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(graph.ok, true, graph.reason);
+});
+
 test("current evidence graph resolves VerifyResult authority attestations", async () => {
   const { listing, buyerBundle: bundle } = await vector();
   const attestation = { authority: "registry", status: "active" };

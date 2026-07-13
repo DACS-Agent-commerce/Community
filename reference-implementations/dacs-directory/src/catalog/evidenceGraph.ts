@@ -240,7 +240,7 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     }
   }
   const verifiedPhaseRefs = new Set(artifacts.filter((artifact) => artifact.ref &&
-    (artifact.kind === "evidence" || artifact.kind === "verify-result")).map((artifact) =>
+    (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
   for (const phase of arr(raw.phaseSummary)) {
     if (phase.attestationRef === undefined) continue;
