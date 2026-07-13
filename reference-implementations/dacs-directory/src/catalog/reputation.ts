@@ -1,5 +1,12 @@
 import type { DealRecord, SellerRecord } from "./types.js";
 
+// §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
+// is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
+// so two conforming implementations could emit different receipt bytes. Compare the raw UTF-8
+// bytes directly to implement the specified ordering.
+const byteOrder = (a: string, b: string): number =>
+  Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+
 const CURRENT_OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate",
   "aborted-by-self", "aborted-by-other",
@@ -69,7 +76,7 @@ export function deriveSellerReputation(
       kind: "storage-program" as const,
       locator: deal.anchoredByRole === "buyer" ? deal.buyerBundleRef : deal.sellerBundleRef ?? deal.buyerBundleRef,
     },
-  })).sort((a, b) => a.contentHash.localeCompare(b.contentHash));
+  })).sort((a, b) => byteOrder(a.contentHash, b.contentHash));
   const ratingByDirection = new Map<string, NonNullable<DealRecord["ratings"]>[number]>();
   for (const deal of scoped) for (const rating of deal.ratings ?? []) {
     if (rating.target.toLowerCase() !== deal.owners.seller.toLowerCase() || rating.rater.toLowerCase() === rating.target.toLowerCase()) continue;
@@ -85,9 +92,9 @@ export function deriveSellerReputation(
     amounts.set(price.currency, [...(amounts.get(price.currency) ?? []), price.amount]);
   }
   const observedTransactionalVolume = [...amounts].map(([currency, values]) => ({ currency, amount: sumDecimals(values) }))
-    .sort((a, b) => a.currency.localeCompare(b.currency));
+    .sort((a, b) => byteOrder(a.currency, b.currency));
   const transactionCountByCurrency = [...amounts].map(([currency, values]) => ({ currency, count: values.length }))
-    .sort((a, b) => a.currency.localeCompare(b.currency));
+    .sort((a, b) => byteOrder(a.currency, b.currency));
   return {
     completed,
     bundleCount: scoped.length,

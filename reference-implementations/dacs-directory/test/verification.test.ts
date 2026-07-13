@@ -607,3 +607,21 @@ test("listing verification is open-world: an unknown additive top-level field is
   const injected = { ...baseScope, futureListingField: { evil: true }, signature: { algorithm: "ed25519", signer: did, value: baseValue } };
   assert.equal(await verifyListing(injected), null, "field injected after signing must fail the whole-scope hash");
 });
+
+test("DACS-5 determinism receipt orders arrays by byte order, not locale collation (§10.5.3(2))", () => {
+  const deal = (jobId: string): DealRecord => ({
+    jobId, rail: "pay-dem", buyerBundleRef: `stor-${jobId.padEnd(40, "a")}`,
+    owners: { buyer: "buyer", seller: "seller" }, signatureVerified: true, refsVerified: true,
+    reputationEligible: true, sellerOutcome: "completed", finalisedAt: 10, verifiedAt: 10,
+    bundleContentHash: jobId.padEnd(64, "b"), agreementPrice: { amount: "1", currency: jobId[0] },
+  });
+  // 'Z' (0x5A) sorts BEFORE 'a' (0x61) in byte order, but AFTER it under typical ICU locale
+  // collation — so this input distinguishes the specified comparator (byte-order, §10.5.3(2))
+  // from `localeCompare`. Under the old comparator, bundleRefs[0] would start with 'a'.
+  const rep = deriveSellerReputation([deal("Zjob"), deal("ajob")], 0, 20);
+  assert.ok(rep.bundleRefs);
+  assert.equal(rep.bundleRefs[0].contentHash[0], "Z");
+  assert.equal(rep.bundleRefs[1].contentHash[0], "a");
+  assert.deepEqual(rep.observedTransactionalVolume?.map(({ currency }) => currency), ["Z", "a"]);
+  assert.deepEqual(rep.transactionCountByCurrency?.map(({ currency }) => currency), ["Z", "a"]);
+});
