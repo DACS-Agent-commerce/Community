@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import test from "node:test";
@@ -124,7 +124,9 @@ test("counterparty fixture seed command persists the reindex marker", () => {
 
 test("counterparty fixture listing JSON path serves the machine contract", async () => {
   const priorDataDir = process.env.DACS_DIRECTORY_DATA;
-  process.env.DACS_DIRECTORY_DATA = fileURLToPath(new URL("./fixtures/counterparty-directory", import.meta.url));
+  const dataDir = mkdtempSync(`${tmpdir()}/dacs-counterparty-directory-`);
+  copyFileSync(fileURLToPath(new URL("./fixtures/counterparty-directory/catalog.json", import.meta.url)), `${dataDir}/catalog.json`);
+  process.env.DACS_DIRECTORY_DATA = dataDir;
   try {
     const { GET: getListingContract } = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
     const response = await getListingContract(
@@ -137,6 +139,7 @@ test("counterparty fixture listing JSON path serves the machine contract", async
   } finally {
     if (priorDataDir === undefined) delete process.env.DACS_DIRECTORY_DATA;
     else process.env.DACS_DIRECTORY_DATA = priorDataDir;
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
