@@ -65,7 +65,10 @@ export function deriveSellerReputation(
     kind: "dacs-5-bundle" as const,
     id: deal.jobId,
     contentHash: deal.bundleContentHash!,
-    anchor: { kind: "storage-program" as const, locator: deal.sellerBundleRef ?? deal.buyerBundleRef },
+    anchor: {
+      kind: "storage-program" as const,
+      locator: deal.anchoredByRole === "buyer" ? deal.buyerBundleRef : deal.sellerBundleRef ?? deal.buyerBundleRef,
+    },
   })).sort((a, b) => a.contentHash.localeCompare(b.contentHash));
   const ratingByDirection = new Map<string, NonNullable<DealRecord["ratings"]>[number]>();
   for (const deal of scoped) for (const rating of deal.ratings ?? []) {

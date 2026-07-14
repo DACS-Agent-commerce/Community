@@ -28,6 +28,8 @@ const rec = (value: unknown): Record<string, unknown> | null =>
 const arr = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value) ? value.map(rec).filter(Boolean) as Record<string, unknown>[] : [];
 const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+const PHASE_OUTCOMES = new Set(["ok", "fail"]);
+const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
 const MAX_GRAPH_ARTIFACTS = 64;
 const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= 65_536;
 const priceTermOk = (value: unknown): boolean => {
@@ -111,11 +113,13 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   const raw = await deps.read(bundleLocator);
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
-  if (!raw || !withinArtifactLimit(raw) || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || arr(raw.phaseSummary).length !== raw.phaseSummary.length || arr(raw.phaseSummary).some((phase) => typeof phase.kind !== "string" || typeof phase.outcome !== "string") || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  const phases = arr(raw?.phaseSummary);
+  const phaseIndexes = phases.map((phase) => phase.index);
+  if (!raw || !withinArtifactLimit(raw) || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
-      parties.some((party) => !["buyer", "seller", "orchestrator"].includes(String(party.role)) || typeof party.primaryClaim !== "string")) return fail("invalid or duplicate bundle parties");
+      parties.some((party) => !["buyer", "seller", "orchestrator"].includes(String(party.role)) || typeof party.primaryClaim !== "string" || !/^[0-9a-f]{64}$/.test(normalizedHash(party.bundleHash)))) return fail("invalid or duplicate bundle parties");
   const requiredRoles = new Set(["buyer", "seller"]); if (parties.some((party) => party.role === "orchestrator")) requiredRoles.add("orchestrator");
   const validParties = new Set(signatures.filter((sig) => verifyBundleSignature(raw, sig)).map((sig) => sig.party));
   const abort = raw.outcome === "aborted-by-self" || raw.outcome === "aborted-by-other";
