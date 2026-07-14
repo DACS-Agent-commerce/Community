@@ -254,7 +254,46 @@ test("indexer reaches a valid current seller copy when the buyer anchor is unrea
   }
 });
 
-test("current bundle shape requires registry pins, party hashes and unique phase indices", async () => {
+test("indexer never retries a malformed current seller copy as legacy", async () => {
+  const fixture = await vector("malformed-current-job", 120);
+  maps.delete(fixture.locators.buyer);
+  const sellerScope = signedScope(fixture.sellerBundle, "bundle");
+  sellerScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+  maps.set(fixture.locators.seller, {
+    ...sellerScope,
+    signatures: [await sign(sellerScope, "bundle", 0, true), await sign(sellerScope, "bundle", 1, true)],
+    anchoredByRole: "seller",
+  });
+  const reads = new Map<string, number>();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const locatorValue = String(input).split("/").pop() ?? "";
+    reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
+    const data = maps.get(locatorValue);
+    return new Response(JSON.stringify(data
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      : { success: false }), {
+      status: data ? 200 : 404,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const deal = registeredDeal("malformed-current-job", fixture.locators.buyer, fixture.locators.seller);
+    const record = await indexRegistration({
+      primaryClaim: dids[1],
+      displayName: "seller",
+      listingAnchors: [fixture.locators.listing],
+      deals: [deal],
+    }, undefined, async () => { throw new Error("identity unavailable"); });
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, false);
+    assert.equal(reads.get(fixture.locators.seller), 1, "current seller bundle must not reach the legacy verifier");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("current bundle shape requires registry pins, party hashes and valid unique phase facts", async () => {
   const rejects = async (jobId: string, offset: number, mutate: (scope: Obj) => void) => {
     const fixture = await vector(jobId, offset);
     const scope = signedScope(fixture.buyerBundle, "bundle");
@@ -279,6 +318,12 @@ test("current bundle shape requires registry pins, party hashes and unique phase
       { index: 2, kind: "settle", outcome: "ok" },
       { index: 2, kind: "deliver", outcome: "ok" },
     ];
+  });
+  await rejects("invalid-phase-outcome", 90, (scope) => {
+    scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+  });
+  await rejects("invalid-phase-error-class", 100, (scope) => {
+    scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "banana" }];
   });
 });
 

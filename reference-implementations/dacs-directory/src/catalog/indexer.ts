@@ -190,7 +190,10 @@ export async function indexRegistration(
     const sellerCurrentProbe = buyerInitial?.bundleVersion === "1" || !deal.sellerBundleRef
       ? null
       : await graphFor(deal.sellerBundleRef);
-    if (buyerInitial?.bundleVersion === "1" || sellerCurrentProbe?.ok) {
+    // Profile selection is based on the signed format discriminator, not on
+    // whether verification succeeds. A malformed current bundle must fail in
+    // the current verifier instead of being retried by the legacy verifier.
+    if (buyerInitial?.bundleVersion === "1" || sellerCurrentProbe?.bundle.bundleVersion === "1") {
       const buyerGraph = await graphFor(deal.buyerBundleRef);
       const sellerGraph = sellerCurrentProbe ?? (deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null);
       const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =

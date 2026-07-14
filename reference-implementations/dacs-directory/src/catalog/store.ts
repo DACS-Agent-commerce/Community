@@ -18,16 +18,33 @@ const LEGACY = {
 let db: Database.Database;
 try {
   mkdirSync(DATA_DIR, { recursive: true });
-  db = new Database(DB_PATH);
+  // The constructor timeout installs SQLite's busy handler before any PRAGMA
+  // or schema work. Setting busy_timeout only after journal_mode is too late:
+  // two fresh processes can otherwise race while the database enters WAL mode.
+  db = new Database(DB_PATH, { timeout: 10_000 });
 } catch (error) {
   throw new Error(
     `DACS directory storage could not be opened at ${DB_PATH}; configure DACS_DIRECTORY_DATA to a writable persistent volume`,
     { cause: error },
   );
 }
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = FULL");
 db.pragma("busy_timeout = 10000");
+// SQLite can return SQLITE_BUSY immediately while changing journal mode even
+// with a busy handler installed. Retry that one-time transition explicitly so
+// concurrent workers starting against a fresh database converge on WAL.
+const walDeadline = Date.now() + 10_000;
+const walRetrySignal = new Int32Array(new SharedArrayBuffer(4));
+for (;;) {
+  try {
+    db.pragma("journal_mode = WAL");
+    break;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (!code.startsWith("SQLITE_BUSY") || Date.now() >= walDeadline) throw error;
+    Atomics.wait(walRetrySignal, 0, 0, 25);
+  }
+}
+db.pragma("synchronous = FULL");
 db.pragma("foreign_keys = ON");
 db.exec(`
   CREATE TABLE IF NOT EXISTS kv_state (
