@@ -22,6 +22,7 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.humanUrl, origin);
   assert.equal(manifest.agentCard, `${origin}/.well-known/agent.json`);
   assert.equal(manifest.catalog, `${origin}/api/dacs/listings`);
+  assert.equal(manifest.inspectService, `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
   assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
   assert.ok(manifest.filters.includes("identityTier"));
@@ -32,8 +33,12 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(document.openapi, "3.1.0");
   assert.ok(document.paths["/api/dacs/listings"]);
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
+  assert.ok(document.paths["/api/dacs/inspect-service/{listingId}/{version}"]);
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  assert.equal(listingSummarySchema.properties.inspection.properties.artifactType.const, "directory-service-profile");
+  assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
+  assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
   assert.ok(filters.includes("identityTier"));
   for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {

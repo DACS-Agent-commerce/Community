@@ -4,6 +4,7 @@ import { loadCatalog } from "@/src/catalog/store";
 import { readAnchor } from "@/src/catalog/chain";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
+import { inspectServicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(
@@ -34,6 +35,7 @@ export async function GET(
     links: [
       { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
       { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+      { href: `${origin}${inspectServicePath(hit)}`, rel: "service-inspection", type: "application/json" },
       { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],
   });

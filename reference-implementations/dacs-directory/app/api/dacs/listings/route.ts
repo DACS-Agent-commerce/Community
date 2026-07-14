@@ -8,6 +8,7 @@ import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
+import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -83,13 +84,15 @@ export async function GET(req: NextRequest) {
     }
     return true;
   });
-  const page = filtered.slice(cursor, cursor + limit);
+  const origin = requestBaseUrl(req);
+  const page = filtered
+    .slice(cursor, cursor + limit)
+    .map((listing) => withDirectoryInspectionAffordance(listing));
   const body = {
     listings: page,
     cursor: cursor + limit < filtered.length ? String(cursor + limit) : undefined,
     total: filtered.length,
   };
-  const origin = requestBaseUrl(req);
   const self = new URL(`${req.nextUrl.pathname}${req.nextUrl.search}`, origin);
   const links = [
     { href: self.toString(), rel: "self", type: "application/json" },
