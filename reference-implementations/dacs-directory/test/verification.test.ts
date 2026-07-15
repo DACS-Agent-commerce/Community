@@ -345,3 +345,49 @@ test("indexer rejects a shape-valid listing with a fake signature", async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("listing verification is open-world: an unknown additive top-level field is accepted (SIG-5 / §11.1.2 additivity, older-reads-newer)", async () => {
+  const identityScope = {
+    bundleVersion: "1", presentedBy: did, presentedAt: 1, claims: [{ ref: did }],
+  };
+  const identitySignature = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
+    privateKeyFromSeed(seed),
+  )).toString("hex");
+  const baseScope = {
+    dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
+    seller: {
+      identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySignature }] } },
+      displayName: "Service agent", publicEndpoint: "https://agent.example/a2a",
+    },
+    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
+    pipeline: [
+      { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
+      { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" },
+    ],
+    pricing: { kind: "fixed", price: { amount: "1", currency: "DEM", unit: "per-job" } },
+    acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+  };
+  // A field a FUTURE spec minor might add at the top level (unknown to this reader).
+  const forwardScope = { ...baseScope, futureListingField: { addedInMinor: "0.3", note: "reader must tolerate" } };
+
+  // (1) Accept: the unknown field is part of the signed scope (contentHash covers the whole object),
+  // so the signature verifies and the listing is accepted as the dacs-v0.1 profile. A closed
+  // top-level allowlist would (wrongly) reject this.
+  const acceptValue = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-listing:v1:${contentHash(forwardScope)}`, "utf8"), privateKeyFromSeed(seed),
+  )).toString("hex");
+  const accepted = await verifyListing({ ...forwardScope, signature: { algorithm: "ed25519", signer: did, value: acceptValue } });
+  assert.ok(accepted, "unknown additive top-level field must be tolerated (open-world)");
+  assert.equal(accepted?.profile, "dacs-v0.1");
+
+  // (2) Bind: an unknown field INJECTED AFTER signing (signature computed over baseScope,
+  // field bolted on afterward) MUST be rejected — the whole-scope hash catches it. This proves the
+  // open-world relaxation did NOT weaken signature binding.
+  const baseValue = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-listing:v1:${contentHash(baseScope)}`, "utf8"), privateKeyFromSeed(seed),
+  )).toString("hex");
+  const injected = { ...baseScope, futureListingField: { evil: true }, signature: { algorithm: "ed25519", signer: did, value: baseValue } };
+  assert.equal(await verifyListing(injected), null, "field injected after signing must fail the whole-scope hash");
+});
