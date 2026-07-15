@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { NextRequest } from "next/server";
 
 import { POST } from "../app/api/dacs/counterparty-evidence/run/route.js";
@@ -114,8 +115,15 @@ test("counterparty fixture seed command persists the reindex marker", () => {
       env: { ...process.env, DACS_DIRECTORY_DATA: dataDir },
       stdio: "pipe",
     });
-    const seeds = JSON.parse(readFileSync(`${dataDir}/fixtures.json`, "utf8")) as unknown;
-    const catalog = JSON.parse(readFileSync(`${dataDir}/catalog.json`, "utf8")) as { sellers?: Array<{ primaryClaim?: string }> };
+    const db = new Database(`${dataDir}/directory.sqlite`);
+    const readState = (key: string) => {
+      const row = db.prepare("SELECT value_json FROM kv_state WHERE key = ?").get(key) as { value_json: string } | undefined;
+      assert.ok(row);
+      return JSON.parse(row.value_json) as unknown;
+    };
+    const seeds = readState("fixtures");
+    const catalog = readState("catalog") as { sellers?: Array<{ primaryClaim?: string }> };
+    db.close();
     assert.deepEqual(seeds, ["counterparty-evidence"]);
     assert.ok(catalog.sellers?.some((seller) => seller.primaryClaim === COUNTERPARTY_EVIDENCE_AGENT_ID));
   } finally {
