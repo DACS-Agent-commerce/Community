@@ -47,12 +47,23 @@ export function deriveSellerReputation(
   windowStart = 0,
   windowEnd = Date.now(),
 ): SellerRecord["reputation"] {
-  let scoped = deals.filter((deal) =>
+  const eligible = deals.filter((deal) =>
     deal.refsVerified && deal.reputationEligible &&
-    typeof (deal.anchorTimestamp ?? deal.finalisedAt) === "number" &&
-    (deal.anchorTimestamp ?? deal.finalisedAt)! >= windowStart && (deal.anchorTimestamp ?? deal.finalisedAt)! <= windowEnd &&
     CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
   );
+  // A determinism receipt declares one timestamp basis for its entire input
+  // set. Use SR-2 anchor time only when it is available for every eligible
+  // record; otherwise fall back to finalisedAt uniformly and exclude records
+  // that cannot be evaluated on that honest basis.
+  const useAnchorTimestamps = eligible.length > 0 &&
+    eligible.every((deal) => typeof deal.anchorTimestamp === "number");
+  const timestampOf = (deal: DealRecord) => useAnchorTimestamps
+    ? deal.anchorTimestamp
+    : deal.finalisedAt;
+  let scoped = eligible.filter((deal) => {
+    const timestamp = timestampOf(deal);
+    return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
+  });
   // SB-2: a settlement transaction reused across jobs contributes once, at
   // its earliest evidence observation. Deterministic jobId breaks exact ties.
   const settlementOwner = new Map<string, DealRecord>();
@@ -91,10 +102,15 @@ export function deriveSellerReputation(
     const price = deal.agreementPrice!;
     amounts.set(price.currency, [...(amounts.get(price.currency) ?? []), price.amount]);
   }
-  const observedTransactionalVolume = [...amounts].map(([currency, values]) => ({ currency, amount: sumDecimals(values) }))
-    .sort((a, b) => byteOrder(a.currency, b.currency));
-  const transactionCountByCurrency = [...amounts].map(([currency, values]) => ({ currency, count: values.length }))
-    .sort((a, b) => byteOrder(a.currency, b.currency));
+  // A malformed member must not fabricate a zero total or a matching count.
+  // Omit the affected currency entirely; current verified price terms never
+  // reach this branch, but the fail-closed behavior protects future callers.
+  const currencyTotals = [...amounts].flatMap(([currency, values]) => {
+    const amount = sumDecimals(values);
+    return amount === null ? [] : [{ currency, amount, count: values.length }];
+  }).sort((a, b) => byteOrder(a.currency, b.currency));
+  const observedTransactionalVolume = currencyTotals.map(({ currency, amount }) => ({ currency, amount }));
+  const transactionCountByCurrency = currencyTotals.map(({ currency, count }) => ({ currency, count }));
   return {
     completed,
     bundleCount: scoped.length,
@@ -111,20 +127,20 @@ export function deriveSellerReputation(
     bundleRefs,
     windowStart,
     windowEnd,
-    windowingBasis: scoped.some((deal) => deal.anchorTimestamp !== undefined) ? "sr2-anchor-timestamp" : "finalisedAt",
+    windowingBasis: useAnchorTimestamps ? "sr2-anchor-timestamp" : "finalisedAt",
   };
 }
 
 /** Exact non-negative decimal addition without binary floating-point drift. */
-function sumDecimals(values: string[]): string {
+function sumDecimals(values: string[]): string | null {
   let scale = 0;
   const parsed = values.map((value) => {
-    if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+    if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
     const [whole, fraction = ""] = value.split(".");
     scale = Math.max(scale, fraction.length);
     return { whole, fraction };
   });
-  if (parsed.some((value) => !value)) return "0";
+  if (parsed.some((value) => !value)) return null;
   const total = parsed.reduce((sum, value) => sum + BigInt(value!.whole + value!.fraction.padEnd(scale, "0")), 0n);
   const digits = total.toString().padStart(scale + 1, "0");
   if (!scale) return digits;
