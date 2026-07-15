@@ -263,6 +263,19 @@ export interface IndexerDiagnosticsOptions {
   deadLetterLocator?: string;
 }
 
+export interface PublicScanRun {
+  id: number;
+  started_at: number;
+  finished_at: number | null;
+  from_tx: number;
+  to_tx: number | null;
+  chain_tip: number | null;
+  txs_scanned: number;
+  artifacts_observed: number;
+  rejected: number;
+  status: "running" | "complete" | "failed";
+}
+
 export interface IndexerDiagnostics {
   storage: "sqlite-wal";
   artifacts: Record<string, number>;
@@ -277,7 +290,7 @@ export interface IndexerDiagnostics {
     hasMore: boolean;
     items: PublicDeadLetterDiagnostic[];
   };
-  lastRun: Record<string, unknown> | null;
+  lastRun: PublicScanRun | null;
 }
 
 interface DeadLetterRow {
@@ -297,7 +310,10 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
   const limit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(100, requestedLimit)) : 20;
   const locator = options.deadLetterLocator;
   const artifacts = db.prepare("SELECT status, COUNT(*) count FROM artifacts GROUP BY status").all() as Array<{ status: string; count: number }>;
-  const lastRun = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as Record<string, unknown> | undefined;
+  // The operator-only error column may contain raw RPC failures or internal
+  // URLs. Keep the public status projection explicit so it cannot leak.
+  const lastRun = db.prepare(`SELECT id,started_at,finished_at,from_tx,to_tx,chain_tip,
+    txs_scanned,artifacts_observed,rejected,status FROM scan_runs ORDER BY id DESC LIMIT 1`).get() as PublicScanRun | undefined;
   const activeJoin = "FROM dead_letters dl INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'";
   const deadLetters = (db.prepare(`SELECT COUNT(*) count ${activeJoin}`).get() as { count: number }).count;
   const counts = db.prepare(`SELECT dl.error_code, COUNT(*) count ${activeJoin} GROUP BY dl.error_code`).all() as Array<{ error_code: string; count: number }>;

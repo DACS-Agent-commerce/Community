@@ -33,6 +33,11 @@ test("status diagnostics query is bounded and locator-specific", () => {
 });
 
 test("dead-letter diagnostics are safe, bounded, filterable, and recoverable", () => {
+  const scanRun = store.beginScanRun(0);
+  store.finishScanRun(scanRun, {
+    toTx: 0, txs: 0, artifacts: 0, rejected: 0,
+    error: "connect ECONNREFUSED https://private-rpc.internal:443/raw-path",
+  });
   store.recordArtifactFailure(locator("1"), "unknown", "STORAGE_UNREADABLE", "secret upstream hostname", 1);
   store.recordArtifactFailure(locator("2"), "bundle", "RAW_/private/path", "secret stack trace", 1);
   store.recordArtifactFailure(locator("3"), "unknown", "STORAGE_UNREADABLE", "another raw error", 1);
@@ -46,7 +51,9 @@ test("dead-letter diagnostics are safe, bounded, filterable, and recoverable", (
   assert.equal(bounded.deadLetterDiagnostics.byCode.INDEXER_REJECTED, 1);
   assert.equal(bounded.deadLetterDiagnostics.byKind.unknown, 2);
   assert.equal(bounded.deadLetterDiagnostics.byKind.bundle, 1);
-  assert.doesNotMatch(JSON.stringify(bounded.deadLetterDiagnostics), /secret|private\/path|stack trace/);
+  assert.equal(bounded.lastRun?.status, "failed");
+  assert.ok(bounded.lastRun && !("error" in bounded.lastRun));
+  assert.doesNotMatch(JSON.stringify(bounded), /secret|private[-/]rpc|private\/path|raw-path|ECONNREFUSED|stack trace/);
 
   const filtered = store.indexerDiagnostics({ deadLetterLocator: locator("2") });
   assert.equal(filtered.deadLetterDiagnostics.returned, 1);

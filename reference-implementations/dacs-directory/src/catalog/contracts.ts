@@ -57,6 +57,24 @@ export const deadLetterDiagnosticSchema = {
   },
 } as const;
 
+export const indexerScanRunSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "started_at", "finished_at", "from_tx", "to_tx", "chain_tip", "txs_scanned", "artifacts_observed", "rejected", "status"],
+  properties: {
+    id: { type: "integer", minimum: 1 },
+    started_at: { type: "integer", minimum: 0 },
+    finished_at: { type: ["integer", "null"], minimum: 0 },
+    from_tx: { type: "integer", minimum: 0 },
+    to_tx: { type: ["integer", "null"], minimum: 0 },
+    chain_tip: { type: ["integer", "null"], minimum: 0 },
+    txs_scanned: { type: "integer", minimum: 0 },
+    artifacts_observed: { type: "integer", minimum: 0 },
+    rejected: { type: "integer", minimum: 0 },
+    status: { enum: ["running", "complete", "failed"] },
+  },
+} as const;
+
 export const catalogStatusSchema = {
   type: "object",
   required: ["generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "indexer"],
@@ -92,7 +110,7 @@ export const catalogStatusSchema = {
             items: { type: "array", maxItems: 100, items: { $ref: "#/components/schemas/DeadLetterDiagnostic" } },
           },
         },
-        lastRun: { type: ["object", "null"] },
+        lastRun: { anyOf: [{ $ref: "#/components/schemas/IndexerScanRun" }, { type: "null" }] },
       },
     },
   },
@@ -192,6 +210,7 @@ export const openApiDocument = (origin: string) => ({
   components: { schemas: {
     ListingSummary: listingSummarySchema,
     DeadLetterDiagnostic: deadLetterDiagnosticSchema,
+    IndexerScanRun: indexerScanRunSchema,
     CatalogStatus: catalogStatusSchema,
   } },
 });

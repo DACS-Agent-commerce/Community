@@ -6,6 +6,7 @@ import {
   catalogStatusSchema,
   deadLetterDiagnosticSchema,
   directoryManifest,
+  indexerScanRunSchema,
   listingSummarySchema,
   openApiDocument,
 } from "../src/catalog/contracts.js";
@@ -44,6 +45,8 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(status.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/CatalogStatus");
   assert.ok(catalogStatusSchema.properties.indexer.properties.deadLetterDiagnostics);
   assert.equal(deadLetterDiagnosticSchema.properties.retryState.const, "exhausted");
+  assert.equal(indexerScanRunSchema.additionalProperties, false);
+  assert.ok(!("error" in indexerScanRunSchema.properties));
 });
 
 test("catalog responses expose cache validators and honor conditional reads", async () => {
