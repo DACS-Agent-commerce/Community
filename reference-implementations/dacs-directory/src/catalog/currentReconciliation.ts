@@ -64,7 +64,7 @@ export function reconcileCurrentCopies(
     buyerOk && sellerOk && currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph!.bundle),
   );
   const authoritative = sellerOk ? sellerGraph! : buyerGraph;
-  const refsVerified = Boolean((sellerOk || buyerOk) && !divergent && authoritative.refsVerified);
+  const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
   const sellerOutcome = authoritative === sellerGraph
     ? String(authoritative.bundle.outcome ?? "")
     : flipOutcome(String(authoritative.bundle.outcome ?? ""));

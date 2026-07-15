@@ -514,13 +514,14 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   );
   assert.equal(fallback.buyerOk, true);
   assert.equal(fallback.sellerOk, false);
-  assert.equal(fallback.refsVerified, true);
+  assert.equal(fallback.refsVerified, false, "#255 requires authoritative absence before one-copy attribution");
   assert.equal(fallback.selectedLocator, fallbackFixture.locators.buyer);
   const reputation = deriveSellerReputation([dealRecord(fallbackDeal, fallback)], 0, 200);
-  assert.equal(reputation.bundleRefs?.[0]?.anchor.locator, fallbackFixture.locators.buyer);
+  assert.equal(reputation.bundleCount, 0);
+  assert.deepEqual(reputation.bundleRefs, []);
 });
 
-test("indexer reaches a valid current seller copy when the buyer anchor is unreadable", async () => {
+test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
   const fixture = await vector("seller-fallback-job", 80);
   maps.delete(fixture.locators.buyer);
   const originalFetch = globalThis.fetch;
@@ -543,9 +544,10 @@ test("indexer reaches a valid current seller copy when the buyer anchor is unrea
       deals: [deal],
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals.length, 1);
-    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].refsVerified, false);
     assert.equal(record.deals[0].anchoredByRole, "seller");
-    assert.equal(record.reputation.bundleRefs?.[0]?.anchor.locator, fixture.locators.seller);
+    assert.equal(record.reputation.bundleCount, 0);
+    assert.deepEqual(record.reputation.bundleRefs, []);
   } finally {
     globalThis.fetch = originalFetch;
   }
