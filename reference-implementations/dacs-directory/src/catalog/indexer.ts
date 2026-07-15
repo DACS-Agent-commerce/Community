@@ -260,7 +260,10 @@ export async function indexRegistration(
         verify,
       }).catch(() => null);
       const bundle = verification?.bundle;
-      const signaturesOk = verification ? hasRequiredBundleSignatures(verification) : false;
+      const signaturesOk = verification ? hasRequiredBundleSignatures(
+        verification,
+        rawBundle,
+      ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
       const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
         ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;

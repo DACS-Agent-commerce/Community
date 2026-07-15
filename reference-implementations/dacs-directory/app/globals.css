@@ -404,6 +404,7 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .progress-list li.failed { color: var(--red-strong); font-weight: 700; }
 .verification-summary { margin: 16px 0; padding: 20px; border-radius: var(--radius-card); border: 1px solid; }
 .verification-summary.ok { background: var(--green-soft); border-color: var(--green-border); color: var(--green-strong); }
+.verification-summary.limited { background: var(--cyan-soft); border-color: var(--cyan-border); color: var(--cyan-strong); }
 .verification-summary.err { background: var(--red-soft); border-color: var(--red-border); color: var(--red-strong); }
 .verification-summary h3 { font-size: 1.1rem; }
 .verification-summary p { margin-top: 4px; font-size: 0.84rem; }
