@@ -616,6 +616,27 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
 });
 
+test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {
+  const record = (jobId: string, values: Partial<DealRecord>): DealRecord => ({
+    jobId, rail: "pay-dem", buyerBundleRef: locator(150 + Number(jobId)),
+    owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true,
+    refsVerified: true, reputationEligible: true, sellerOutcome: "completed",
+    verifiedAt: 1, bundleContentHash: jobId.repeat(64).slice(0, 64), ...values,
+  });
+  const out = deriveSellerReputation([
+    record("1", { anchorTimestamp: 100, finalisedAt: 300, agreementPrice: { amount: "9", currency: "DEM" } }),
+    record("2", { finalisedAt: 100, agreementPrice: { amount: "1", currency: "DEM" } }),
+    record("3", { finalisedAt: 100, agreementPrice: { amount: "not-a-decimal", currency: "DEM" } }),
+    record("4", { finalisedAt: 100, agreementPrice: { amount: 1 as unknown as string, currency: "DEM" } }),
+    record("5", { finalisedAt: 100, agreementPrice: { amount: "2.5", currency: "USDC" } }),
+  ], 0, 200);
+
+  assert.equal(out.windowingBasis, "finalisedAt");
+  assert.equal(out.bundleCount, 4, "the anchor-only in-window record must be excluded on the uniform fallback basis");
+  assert.deepEqual(out.observedTransactionalVolume, [{ currency: "USDC", amount: "2.5" }]);
+  assert.deepEqual(out.transactionCountByCurrency, [{ currency: "USDC", count: 1 }]);
+});
+
 test("current pre-commit policy cancellations are reputation-neutral", () => {
   assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
     { cancellationPolicy: "pre-commit" }, [{ kind: "negotiate-fixed-price", outcome: "ok" }]), true);

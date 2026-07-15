@@ -17,6 +17,7 @@ import {
   registeredAnchorRole,
   refsPassStrictPolicy,
   verifyReferencedArtifactSignature,
+  verifiedListingTerms,
 } from "../src/catalog/bundlePolicy.js";
 import { activeCatalogListings, activeCatalogSellers } from "../src/catalog/discovery.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
@@ -454,6 +455,46 @@ test("strict ref policy rejects unsigned referenced artifacts", async () => {
       signatures: [null],
     },
   }, new Set(["buyer", "seller"])), false);
+});
+
+test("legacy cancellation terms come only from the exact hash/version-pinned listing", () => {
+  const pinnedScope = {
+    ...listing,
+    terms: { cancellationPolicy: "pre-commit" },
+  };
+  const verification = result("aborted-by-self", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+  ]);
+  verification.bundle!.listingRef = {
+    listingId: "svc",
+    version: 1,
+    contentHash: contentHash(pinnedScope),
+  };
+  const pinnedArtifact = {
+    kind: "dacs-1-listing",
+    raw: { ...pinnedScope, signature: "verified-by-strict-policy" },
+  };
+  assert.deepEqual(
+    verifiedListingTerms(verification, [pinnedArtifact], true),
+    { cancellationPolicy: "pre-commit" },
+  );
+
+  const laterVersion = {
+    ...pinnedScope,
+    listingVersion: 2,
+    terms: { cancellationPolicy: "non-refundable" },
+    signature: "verified-by-strict-policy",
+  };
+  assert.equal(verifiedListingTerms(verification, [{ kind: "dacs-1-listing", raw: laterVersion }], true), undefined);
+  const malformedVersionScope = { ...pinnedScope, listingVersion: "2" };
+  const malformedVersionVerification = structuredClone(verification);
+  malformedVersionVerification.bundle!.listingRef.contentHash = contentHash(malformedVersionScope);
+  assert.equal(verifiedListingTerms(malformedVersionVerification, [{
+    kind: "dacs-1-listing",
+    raw: { ...malformedVersionScope, signature: "verified-by-strict-policy" },
+  }], true), undefined);
+  assert.equal(verifiedListingTerms(verification, [pinnedArtifact], false), undefined);
 });
 
 test("evidence ref must be signed by a bundle party", async () => {

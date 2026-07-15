@@ -40,6 +40,7 @@ import {
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
   refsPassStrictPolicy,
+  verifiedListingTerms,
   type ResolvedArtifact,
 } from "./bundlePolicy.js";
 
@@ -177,7 +178,6 @@ export async function indexRegistration(
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
-  const listingsById = new Map(listings.map((l) => [l.listingId, l]));
   for (const deal of reg.deals ?? []) {
     const buyerInitial = await readAnchor(deal.buyerBundleRef);
     const resolveListing = async (ref: Record<string, unknown>) => {
@@ -267,7 +267,7 @@ export async function indexRegistration(
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
       const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
         ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      return { verification, bundle, signaturesOk, refsOk, rawBundle };
+      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
@@ -291,7 +291,11 @@ export async function indexRegistration(
     const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
     const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
-    const listingTerms = bundle ? listingsById.get(String(bundle.listingRef.listingId))?.terms : undefined;
+    const listingTerms = verifiedListingTerms(
+      authoritative.verification,
+      authoritative.resolvedArtifacts,
+      strictRefsVerified,
+    );
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
     dealCandidates.push({
