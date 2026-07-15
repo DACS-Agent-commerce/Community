@@ -17,6 +17,7 @@ The catalogue of community projects, in-tree and external. Conformance status va
 |---|---|---|---|---|---|
 | [dacs-spec-mcp](./tools/dacs-spec-mcp) | norgejbb-byte | Spec-reference MCP server (read/search/fetch only): §-sections, rule families, artifact schemas, the §14 conformance plan + vectors — served verbatim with `(file, line)` provenance from a pinned DACS-Standard checkout | n/a — reference tool; serves spec text verbatim (byte-equal self-test), not a conformance implementation | MIT | In-tree |
 | [dacs-drift](https://github.com/cX3po/pathos-dacs-ref/blob/main/dacs-drift.mts) | PATH-OS Labs | Conformance/drift checker for DACS-5 §10.4 AttestationBundle signed-scope hashes (v0.1 R5-1 anchoredByRole-excluded form), against an expected-hash manifest or the DACS-Standard golden hashes. Point it at an implementation's bundle fixtures; reports conform/drift for the §10.4 hash surface | `vector-tested` — reproduces the DACS-Standard golden bundle hashes; checks §10.4 AttestationBundle hash conformance | MIT | External |
+| [pathos-dacs partner kit](https://github.com/cX3po/pathos-dacs-ref/tree/main/conformance/partner-kit) | PATH-OS Labs | Self-contained Node ≥18 sanity runner for JCS canonical form (§B.2), signature domain separation (§B.7), DACS-4 `evidenceHash`, and DACS-5 §10.4.1/R5-1 signed-scope drift | `exercises-spec` — runs 49/49 kit-local sanity vectors reproduced from the independent reference implementation; non-normative and not a full DACS conformance certification | MIT | External |
 
 ## Integrations
 
