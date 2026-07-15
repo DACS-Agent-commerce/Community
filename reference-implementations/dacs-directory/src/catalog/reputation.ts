@@ -135,7 +135,7 @@ export function deriveSellerReputation(
 function sumDecimals(values: string[]): string | null {
   let scale = 0;
   const parsed = values.map((value) => {
-    if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+    if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
     const [whole, fraction = ""] = value.split(".");
     scale = Math.max(scale, fraction.length);
     return { whole, fraction };

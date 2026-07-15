@@ -487,6 +487,13 @@ test("legacy cancellation terms come only from the exact hash/version-pinned lis
     signature: "verified-by-strict-policy",
   };
   assert.equal(verifiedListingTerms(verification, [{ kind: "dacs-1-listing", raw: laterVersion }], true), undefined);
+  const malformedVersionScope = { ...pinnedScope, listingVersion: "2" };
+  const malformedVersionVerification = structuredClone(verification);
+  malformedVersionVerification.bundle!.listingRef.contentHash = contentHash(malformedVersionScope);
+  assert.equal(verifiedListingTerms(malformedVersionVerification, [{
+    kind: "dacs-1-listing",
+    raw: { ...malformedVersionScope, signature: "verified-by-strict-policy" },
+  }], true), undefined);
   assert.equal(verifiedListingTerms(verification, [pinnedArtifact], false), undefined);
 });
 

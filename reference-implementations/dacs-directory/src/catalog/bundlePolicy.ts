@@ -256,9 +256,13 @@ export function verifiedListingTerms(
   const scope = stripSignature(artifact.raw) as Record<string, unknown>;
   const listingId = typeof scope.listingId === "string" ? scope.listingId
     : typeof scope.serviceId === "string" ? scope.serviceId : "";
-  const rawVersion = scope.listingVersion ?? scope.version ?? 1;
-  const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
-    ? rawVersion : 1;
+  const rawVersion = scope.listingVersion !== undefined ? scope.listingVersion : scope.version;
+  const version = rawVersion === undefined
+    ? 1
+    : typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
+      ? rawVersion
+      : null;
+  if (version === null) return undefined;
   try {
     if (listingId !== ref.listingId || version !== ref.version || contentHash(scope) !== ref.contentHash) return undefined;
   } catch {

@@ -627,11 +627,12 @@ test("DACS-5 uses one window basis and omits malformed currency aggregates", () 
     record("1", { anchorTimestamp: 100, finalisedAt: 300, agreementPrice: { amount: "9", currency: "DEM" } }),
     record("2", { finalisedAt: 100, agreementPrice: { amount: "1", currency: "DEM" } }),
     record("3", { finalisedAt: 100, agreementPrice: { amount: "not-a-decimal", currency: "DEM" } }),
-    record("4", { finalisedAt: 100, agreementPrice: { amount: "2.5", currency: "USDC" } }),
+    record("4", { finalisedAt: 100, agreementPrice: { amount: 1 as unknown as string, currency: "DEM" } }),
+    record("5", { finalisedAt: 100, agreementPrice: { amount: "2.5", currency: "USDC" } }),
   ], 0, 200);
 
   assert.equal(out.windowingBasis, "finalisedAt");
-  assert.equal(out.bundleCount, 3, "the anchor-only in-window record must be excluded on the uniform fallback basis");
+  assert.equal(out.bundleCount, 4, "the anchor-only in-window record must be excluded on the uniform fallback basis");
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "USDC", amount: "2.5" }]);
   assert.deepEqual(out.transactionCountByCurrency, [{ currency: "USDC", count: 1 }]);
 });
