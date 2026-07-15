@@ -4,14 +4,19 @@
  * cursor, the chain's latest tx id (live nodeCall), and when the catalog
  * was last generated.
  */
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { indexerDiagnostics, loadCatalog, loadScanState } from "@/src/catalog/store";
+import { parseStatusDiagnosticsQuery } from "@/src/catalog/statusDiagnostics";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const diagnosticsQuery = parseStatusDiagnosticsQuery(req.nextUrl.searchParams);
+  if (!diagnosticsQuery.ok) {
+    return NextResponse.json({ error: diagnosticsQuery.error }, { status: 400 });
+  }
   const catalog = loadCatalog();
   const scan = loadScanState();
 
@@ -43,6 +48,9 @@ export async function GET() {
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,
-    indexer: indexerDiagnostics(),
+    indexer: indexerDiagnostics({
+      deadLetterLimit: diagnosticsQuery.deadLetterLimit,
+      deadLetterLocator: diagnosticsQuery.deadLetterLocator,
+    }),
   });
 }

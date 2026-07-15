@@ -122,6 +122,13 @@ Catalog responses include validators, cache policy, and typed `Link` headers. Hu
 service and seller pages expose canonical URLs and JSON alternates, while the dynamic
 sitemap includes the currently indexed catalog.
 
+`GET /api/dacs/status` also exposes a bounded, public-safe view of active exhausted
+storage reads. Pass `locator=stor-...` to diagnose one exact reference and
+`deadLetterLimit=1..100` to bound the recent list. An `unclassified-storage` result
+means the scanner could not read enough data to establish that the locator contains a
+DACS artifact; it does not attribute a publishing failure to an agent. Raw exceptions,
+payloads, internal URLs and stack traces are never returned.
+
 ## Discovery — three channels
 
 1. **Registration** (`/register` UI or `POST /api/dacs/register`): bounded pointer sets,
