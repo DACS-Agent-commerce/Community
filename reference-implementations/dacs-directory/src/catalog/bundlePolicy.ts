@@ -243,6 +243,32 @@ export async function refsPassStrictPolicy(
   return checks.every(Boolean);
 }
 
+/** Resolve cancellation terms only from the exact listing pinned by a strict legacy bundle. */
+export function verifiedListingTerms(
+  verification: BundleVerification | null | undefined,
+  artifacts: ResolvedArtifact[],
+  refsVerified: boolean,
+): Record<string, unknown> | undefined {
+  const ref = verification?.bundle?.listingRef;
+  if (!refsVerified || !ref) return undefined;
+  const artifact = artifacts.find((candidate) => candidate.kind === "dacs-1-listing");
+  if (!artifact) return undefined;
+  const scope = stripSignature(artifact.raw) as Record<string, unknown>;
+  const listingId = typeof scope.listingId === "string" ? scope.listingId
+    : typeof scope.serviceId === "string" ? scope.serviceId : "";
+  const rawVersion = scope.listingVersion ?? scope.version ?? 1;
+  const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
+    ? rawVersion : 1;
+  try {
+    if (listingId !== ref.listingId || version !== ref.version || contentHash(scope) !== ref.contentHash) return undefined;
+  } catch {
+    return undefined;
+  }
+  return scope.terms && typeof scope.terms === "object" && !Array.isArray(scope.terms)
+    ? scope.terms as Record<string, unknown>
+    : undefined;
+}
+
 export function bundleCategory(
   bundle: AttestationBundle | undefined,
   categoriesByListing: Map<string, string>,
