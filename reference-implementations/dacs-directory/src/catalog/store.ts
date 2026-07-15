@@ -96,6 +96,7 @@ db.exec(`
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS dead_letters_recent_idx ON dead_letters(last_seen_at DESC, locator);
 `);
 
 const readLegacy = <T>(path: string, fallback: T): T =>
@@ -171,30 +172,61 @@ export interface ArtifactObservation {
   locator: string; kind: string; profile: string; owner?: string; contentHash?: string;
   observedAt: number; anchorTime?: number; status?: string; data?: Record<string, unknown>;
 }
-export function recordArtifact(observation: ArtifactObservation): void {
+
+type StoredArtifactObservation = Omit<ArtifactObservation, "owner" | "contentHash" | "anchorTime" | "status"> & {
+  contentHash: string | null; owner: string | null; anchorTime: number | null; status: string; dataJson: string | null;
+};
+
+const recordArtifactTransaction = db.transaction((observation: StoredArtifactObservation) => {
   db.prepare(`INSERT INTO artifacts(locator, kind, profile, owner, content_hash, observed_at, anchor_time, status, data_json)
     VALUES (@locator,@kind,@profile,@owner,@contentHash,@observedAt,@anchorTime,@status,@dataJson)
     ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind, profile=excluded.profile, owner=excluded.owner,
       content_hash=COALESCE(excluded.content_hash,artifacts.content_hash), observed_at=excluded.observed_at,
       anchor_time=COALESCE(excluded.anchor_time,artifacts.anchor_time), status=excluded.status,
-      data_json=COALESCE(excluded.data_json,artifacts.data_json), error_code=NULL, error_message=NULL`)
-    .run({ ...observation, contentHash: observation.contentHash ?? null, owner: observation.owner ?? null,
-      anchorTime: observation.anchorTime ?? null, status: observation.status ?? "observed",
-      dataJson: observation.data ? JSON.stringify(observation.data) : null });
+      data_json=COALESCE(excluded.data_json,artifacts.data_json), error_code=NULL, error_message=NULL,
+      retry_count=0, next_retry_at=NULL`)
+    .run(observation);
+  // A readable observation is the recovery event for this locator. Keep the
+  // active queue truthful and ensure a later transient failure starts at one.
+  db.prepare("DELETE FROM dead_letters WHERE locator = ?").run(observation.locator);
+});
+
+export function recordArtifact(observation: ArtifactObservation): void {
+  recordArtifactTransaction({ ...observation, contentHash: observation.contentHash ?? null,
+    owner: observation.owner ?? null, anchorTime: observation.anchorTime ?? null,
+    status: observation.status ?? "observed", dataJson: observation.data ? JSON.stringify(observation.data) : null });
 }
+
+const recordArtifactFailureTransaction = db.transaction(
+  (locator: string, kind: string, code: string, message: string, maxRetries: number) => {
+    const prior = db.prepare("SELECT retry_count,kind FROM artifacts WHERE locator = ?").get(locator) as { retry_count: number; kind: string } | undefined;
+    const attempts = (prior?.retry_count ?? 0) + 1;
+    const failureKind = kind === "unknown" && prior?.kind && prior.kind !== "unknown" ? prior.kind : kind;
+    const dead = attempts >= maxRetries;
+    const now = Date.now();
+    const next = dead ? null : now + Math.min(60 * 60_000, 2 ** attempts * 5_000);
+    const storedCode = code.slice(0, 100);
+    const storedMessage = message.slice(0, 1000);
+    db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
+      VALUES (?,?,?,? ,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
+      error_message=excluded.error_message,retry_count=excluded.retry_count,next_retry_at=excluded.next_retry_at`)
+      .run(locator, failureKind, "unknown", now, dead ? "dead-letter" : "retry", storedCode, storedMessage, attempts, next);
+    if (dead) {
+      db.prepare(`INSERT INTO dead_letters(locator,kind,error_code,error_message,attempts,first_seen_at,last_seen_at)
+        VALUES (?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind,error_code=excluded.error_code,
+        error_message=excluded.error_message,attempts=excluded.attempts,last_seen_at=excluded.last_seen_at`)
+        .run(locator, failureKind, storedCode, storedMessage, attempts, now, now);
+    } else {
+      // Repair any legacy mismatch where a locator is retryable but still has
+      // a stale row in the exhausted queue.
+      db.prepare("DELETE FROM dead_letters WHERE locator = ?").run(locator);
+    }
+  },
+);
+
 export function recordArtifactFailure(locator: string, kind: string, code: string, message: string, maxRetries = 5): void {
-  const prior = db.prepare("SELECT retry_count FROM artifacts WHERE locator = ?").get(locator) as { retry_count: number } | undefined;
-  const attempts = (prior?.retry_count ?? 0) + 1;
-  const dead = attempts >= maxRetries;
-  const next = dead ? null : Date.now() + Math.min(60 * 60_000, 2 ** attempts * 5_000);
-  db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
-    VALUES (?,?,?,? ,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
-    error_message=excluded.error_message,retry_count=excluded.retry_count,next_retry_at=excluded.next_retry_at`)
-    .run(locator, kind, "unknown", Date.now(), dead ? "dead-letter" : "retry", code, message.slice(0, 1000), attempts, next);
-  if (dead) db.prepare(`INSERT INTO dead_letters(locator,kind,error_code,error_message,attempts,first_seen_at,last_seen_at)
-    VALUES (?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET error_code=excluded.error_code,error_message=excluded.error_message,
-    attempts=excluded.attempts,last_seen_at=excluded.last_seen_at`)
-    .run(locator, kind, code, message.slice(0, 1000), attempts, Date.now(), Date.now());
+  const retries = Number.isSafeInteger(maxRetries) && maxRetries >= 1 ? maxRetries : 5;
+  recordArtifactFailureTransaction(locator, kind, code, message, retries);
 }
 export const loadRetryableArtifacts = (now = Date.now()): string[] =>
   (db.prepare("SELECT locator FROM artifacts WHERE status='retry' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
@@ -209,9 +241,108 @@ export function finishScanRun(id: number, values: { toTx: number; chainTip?: num
     .run(Date.now(), values.toTx, values.chainTip ?? null, values.txs, values.artifacts, values.rejected,
       values.error ? "failed" : "complete", values.error ?? null, id);
 }
-export function indexerDiagnostics(): Record<string, unknown> {
+const PUBLIC_FAILURES: Record<string, string> = {
+  STORAGE_UNREADABLE: "The storage program could not be read after repeated attempts. Confirm the locator exists and is publicly readable before retrying.",
+};
+const DACS_ARTIFACT_KINDS = new Set(["listing", "listing-revocation", "bundle", "agreement", "evidence", "verify-result", "composite", "rating"]);
+
+export interface PublicDeadLetterDiagnostic {
+  locator: string;
+  kind: string;
+  classification: "dacs-artifact" | "unclassified-storage";
+  code: string;
+  message: string;
+  attempts: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  retryState: "exhausted";
+}
+
+export interface IndexerDiagnosticsOptions {
+  deadLetterLimit?: number;
+  deadLetterLocator?: string;
+}
+
+export interface IndexerDiagnostics {
+  storage: "sqlite-wal";
+  artifacts: Record<string, number>;
+  deadLetters: number;
+  deadLetterDiagnostics: {
+    scope: "storage-read";
+    total: number;
+    byCode: Record<string, number>;
+    byKind: Record<string, number>;
+    query: { locator: string | null; limit: number };
+    returned: number;
+    hasMore: boolean;
+    items: PublicDeadLetterDiagnostic[];
+  };
+  lastRun: Record<string, unknown> | null;
+}
+
+interface DeadLetterRow {
+  locator: string; kind: string; error_code: string; attempts: number;
+  first_seen_at: number; last_seen_at: number;
+}
+
+const publicFailure = (code: string): { code: string; message: string } =>
+  PUBLIC_FAILURES[code]
+    ? { code, message: PUBLIC_FAILURES[code] }
+    : { code: "INDEXER_REJECTED", message: "The indexer could not process this storage reference. Contact the directory operator with the locator." };
+const publicKind = (kind: string): string =>
+  /^[a-z][a-z0-9-]{0,63}$/.test(kind) ? kind : "unknown";
+
+const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOptions): IndexerDiagnostics => {
+  const requestedLimit = options.deadLetterLimit ?? 20;
+  const limit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(100, requestedLimit)) : 20;
+  const locator = options.deadLetterLocator;
   const artifacts = db.prepare("SELECT status, COUNT(*) count FROM artifacts GROUP BY status").all() as Array<{ status: string; count: number }>;
   const lastRun = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as Record<string, unknown> | undefined;
-  const deadLetters = (db.prepare("SELECT COUNT(*) count FROM dead_letters").get() as { count: number }).count;
-  return { storage: "sqlite-wal", artifacts: Object.fromEntries(artifacts.map((row) => [row.status, row.count])), deadLetters, lastRun: lastRun ?? null };
+  const activeJoin = "FROM dead_letters dl INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'";
+  const deadLetters = (db.prepare(`SELECT COUNT(*) count ${activeJoin}`).get() as { count: number }).count;
+  const counts = db.prepare(`SELECT dl.error_code, COUNT(*) count ${activeJoin} GROUP BY dl.error_code`).all() as Array<{ error_code: string; count: number }>;
+  const byCode: Record<string, number> = {};
+  for (const row of counts) {
+    const code = publicFailure(row.error_code).code;
+    byCode[code] = (byCode[code] ?? 0) + row.count;
+  }
+  const kindCounts = db.prepare(`SELECT dl.kind, COUNT(*) count ${activeJoin} GROUP BY dl.kind`).all() as Array<{ kind: string; count: number }>;
+  const byKind: Record<string, number> = {};
+  for (const row of kindCounts) {
+    const kind = publicKind(row.kind);
+    byKind[kind] = (byKind[kind] ?? 0) + row.count;
+  }
+  const where = locator ? " WHERE dl.locator = ?" : "";
+  const statement = db.prepare(`SELECT dl.locator,dl.kind,dl.error_code,dl.attempts,dl.first_seen_at,dl.last_seen_at
+    ${activeJoin}${where} ORDER BY dl.last_seen_at DESC, dl.locator ASC LIMIT ?`);
+  const rows = (locator ? statement.all(locator, limit + 1) : statement.all(limit + 1)) as DeadLetterRow[];
+  const hasMore = rows.length > limit;
+  const items = rows.slice(0, limit).map((row): PublicDeadLetterDiagnostic => {
+    const failure = publicFailure(row.error_code);
+    const kind = publicKind(row.kind);
+    return {
+      locator: row.locator,
+      kind,
+      classification: DACS_ARTIFACT_KINDS.has(kind) ? "dacs-artifact" : "unclassified-storage",
+      ...failure,
+      attempts: row.attempts,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      retryState: "exhausted",
+    };
+  });
+  return {
+    storage: "sqlite-wal",
+    artifacts: Object.fromEntries(artifacts.map((row) => [row.status, row.count])),
+    deadLetters,
+    deadLetterDiagnostics: {
+      scope: "storage-read", total: deadLetters, byCode, byKind,
+      query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
+    },
+    lastRun: lastRun ?? null,
+  };
+});
+
+export function indexerDiagnostics(options: IndexerDiagnosticsOptions = {}): IndexerDiagnostics {
+  return readIndexerDiagnostics(options);
 }

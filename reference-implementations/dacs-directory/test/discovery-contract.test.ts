@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { directoryManifest, listingSummarySchema, openApiDocument } from "../src/catalog/contracts.js";
+import {
+  catalogStatusSchema,
+  deadLetterDiagnosticSchema,
+  directoryManifest,
+  listingSummarySchema,
+  openApiDocument,
+} from "../src/catalog/contracts.js";
 import { catalogJson } from "../src/catalog/http.js";
 import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
@@ -32,6 +38,12 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }
+  const status = document.paths["/api/dacs/status"].get;
+  assert.deepEqual(status.parameters.map((parameter) => parameter.name), ["deadLetterLimit", "locator"]);
+  assert.equal(status.parameters[0].schema.maximum, 100);
+  assert.equal(status.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/CatalogStatus");
+  assert.ok(catalogStatusSchema.properties.indexer.properties.deadLetterDiagnostics);
+  assert.equal(deadLetterDiagnosticSchema.properties.retryState.const, "exhausted");
 });
 
 test("catalog responses expose cache validators and honor conditional reads", async () => {
