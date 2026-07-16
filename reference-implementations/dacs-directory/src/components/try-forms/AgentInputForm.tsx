@@ -31,7 +31,7 @@ const files = (value: unknown): SourceFile[] =>
   arr(value).map((file) => ({ path: String(rec(file).path ?? ""), content: String(rec(file).content ?? "") }));
 
 export type AgentInputFormProps = {
-  agent: AgentCard & { fields?: unknown };
+  agent: AgentCard;
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
   errors: FieldErrors;
@@ -49,15 +49,18 @@ export default function AgentInputForm(props: AgentInputFormProps) {
   const { agent } = props;
   const schema = parseAgentFieldSchema(agent);
   const note = agentSafetyNote(agent.name);
+  // Precedence: the nine bespoke forms know their agents best; the gateway's
+  // published input schema renders any NEW agent; JSON is the last resort.
+  const builtin = hasBuiltinForm(agent.name);
   return (
     <div className="agent-form">
       {note && <p className="agent-form-note">{note}</p>}
-      {schema
-        ? <SchemaForm {...props} schema={schema} />
-        : hasBuiltinForm(agent.name)
-          ? <BuiltinForm {...props} />
+      {builtin
+        ? <BuiltinForm {...props} />
+        : schema
+          ? <SchemaForm {...props} schema={schema} />
           : <p className="field-hint">This agent has not published a form schema yet — use the advanced JSON input below.</p>}
-      <AdvancedJson {...props} always={!schema && !hasBuiltinForm(agent.name)} />
+      <AdvancedJson {...props} always={!schema && !builtin} />
     </div>
   );
 }
@@ -412,11 +415,16 @@ function ComplianceForm({ value, onChange, errors, gatewayErrors }: AgentInputFo
             onChange={(event) => onChange({ ...value, name: event.target.value })} />
         </FieldRow>
       )}
-      <FieldRow id="comp-country" label="Country" required error={errors.country} gatewayError={gatewayErrors.country}
-        help="ISO code, e.g. GB.">
+      <FieldRow id="comp-country" label="Country (optional)" error={errors.country} gatewayError={gatewayErrors.country}
+        help="ISO code, e.g. GB — narrows the screening; leave blank to search without one.">
         <input id="comp-country" className="form-control mono" value={String(value.country ?? "")} placeholder="GB"
           aria-invalid={Boolean(errors.country)}
-          onChange={(event) => onChange({ ...value, country: event.target.value })} />
+          onChange={(event) => {
+            const country = event.target.value;
+            const next = { ...value };
+            if (country.trim() === "") delete next.country; else next.country = country;
+            onChange(next);
+          }} />
       </FieldRow>
       <FieldRow id="comp-aliases" label="Aliases" error={errors.aliases} gatewayError={gatewayErrors.aliases}
         help="Optional alternate names, one per row.">

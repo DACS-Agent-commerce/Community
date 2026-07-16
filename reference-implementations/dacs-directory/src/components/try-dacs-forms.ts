@@ -9,7 +9,11 @@
  */
 import type { AgentCard } from "./try-dacs-contract.js";
 
-/** A future catalog-published field description (agents[].fields). */
+/**
+ * A renderable field derived from the gateway's published input schema. The
+ * gateway describes fields as { name, type, required, description } (plus
+ * optional enum/min/max); this normalizes them for the generic form renderer.
+ */
 export type AgentFieldSchema = {
   key: string;
   label: string;
@@ -33,7 +37,7 @@ export const ORACLE_DEFAULT_PARAMS: Record<string, Record<string, string>> = {
 };
 export const DD_KINDS = ["npm-package", "crypto-token"] as const;
 export const COMPLIANCE_KINDS = ["person", "entity", "wallet"] as const;
-export const EVAL_CHECKS = ["content-includes", "content-regex", "min-length"] as const;
+export const EVAL_CHECKS = ["content-includes", "regex-match", "min-length"] as const;
 export const ACCOUNT_KINDS = ["operating", "reserve", "payroll"] as const;
 
 export const KNOWN_FORM_AGENTS = [
@@ -48,28 +52,42 @@ const str = (value: unknown): string => typeof value === "string" ? value : "";
 const num = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
+const SCHEMA_KINDS: Record<string, AgentFieldSchema["kind"]> = {
+  string: "text",
+  text: "textarea",
+  number: "number",
+  integer: "number",
+  boolean: "checkbox",
+  enum: "select",
+};
+
+const labelFromName = (name: string): string =>
+  name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
+
 /**
- * Parse a future catalog field schema if the gateway publishes one. Anything
- * malformed yields null so the caller falls back to the built-in descriptor
- * (or the Advanced JSON editor for unknown agents).
+ * Parse the gateway's published input schema (agents[].input as
+ * { name, type, required, description }[]) into renderable fields. Fields the
+ * generic renderer cannot represent (objects, arrays, unknown types) yield
+ * null so the caller falls back to the built-in form or the Advanced JSON
+ * editor — a partially-rendered schema would silently drop required input.
  */
-export function parseAgentFieldSchema(agent: AgentCard & { fields?: unknown }): AgentFieldSchema[] | null {
-  if (!Array.isArray(agent.fields) || agent.fields.length === 0) return null;
+export function parseAgentFieldSchema(agent: AgentCard & { input?: unknown }): AgentFieldSchema[] | null {
+  if (!Array.isArray(agent.input) || agent.input.length === 0) return null;
   const fields: AgentFieldSchema[] = [];
-  for (const value of agent.fields) {
+  for (const value of agent.input) {
     const field = rec(value);
-    const kind = field.kind;
-    if (typeof field.key !== "string" || !field.key.trim()) return null;
-    if (typeof field.label !== "string" || !field.label.trim()) return null;
-    if (kind !== "text" && kind !== "number" && kind !== "checkbox" && kind !== "select" && kind !== "textarea") return null;
-    if (kind === "select" && (!Array.isArray(field.options) || field.options.some((option) => typeof option !== "string"))) return null;
+    if (typeof field.name !== "string" || !field.name.trim()) return null;
+    const kind = SCHEMA_KINDS[String(field.type)];
+    if (!kind) return null;
+    const options = Array.isArray(field.enum) ? field.enum : undefined;
+    if (kind === "select" && (!options || options.some((option) => typeof option !== "string"))) return null;
     fields.push({
-      key: field.key,
-      label: field.label,
+      key: field.name,
+      label: labelFromName(field.name),
       kind,
       required: field.required === true,
-      help: typeof field.help === "string" ? field.help : undefined,
-      options: Array.isArray(field.options) ? field.options as string[] : undefined,
+      help: typeof field.description === "string" ? field.description : undefined,
+      options: options as string[] | undefined,
       min: num(field.min),
       max: num(field.max),
     });
@@ -108,7 +126,7 @@ export function initialAgentInput(name: string): Record<string, unknown> {
     case "sec-audit":
       return { files: [{ path: "", content: "" }] };
     case "compliance":
-      return { kind: "entity", name: "", country: "" };
+      return { kind: "entity", name: "" };
     default:
       return {};
   }
@@ -116,6 +134,19 @@ export function initialAgentInput(name: string): Record<string, unknown> {
 
 export function blankCriterion(): Record<string, unknown> {
   return { id: "", kind: "mechanical", weight: 1, description: "", test: { check: "content-includes", needle: "" } };
+}
+
+/**
+ * Switching a criterion's mechanical check swaps its parameters: needle for
+ * content-includes / regex-match, minChars for min-length. Stale parameters
+ * from the previous check must not be submitted (probed live: min-length
+ * without minChars silently scores "length < min undefined").
+ */
+export function criterionCheckChange(test: Record<string, unknown>, check: string): Record<string, unknown> {
+  if (check === "min-length") {
+    return { check, minChars: typeof test.minChars === "number" ? test.minChars : 1 };
+  }
+  return { check, needle: typeof test.needle === "string" ? test.needle : "" };
 }
 
 /** Repeatable-row helpers (pure; unit-tested). */
@@ -127,7 +158,9 @@ export function removeRow<T>(rows: T[], index: number, minimum = 0): T[] {
   return rows.filter((_, i) => i !== index);
 }
 
-const URL_PATTERN = /^https?:\/\/[^\s]+\.[^\s]+/i;
+// Gateway-valid targets include bare hosts (example.com) as well as full
+// URLs; local validation must not reject what the gateway accepts.
+const URL_PATTERN = /^(https?:\/\/)?[^\s/]+\.[^\s]{2,}/i;
 
 /**
  * Advisory local validation: immediate feedback only. Keys are dotted paths
@@ -188,7 +221,16 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
         if (weight === undefined || weight <= 0) errors[`rubric.criteria.${index}.weight`] = "Positive weight required.";
         if (!str(criterion.description).trim()) errors[`rubric.criteria.${index}.description`] = "Describe what this criterion checks.";
         const test = rec(criterion.test);
-        if (!str(test.needle).trim() && str(test.check) !== "min-length") errors[`rubric.criteria.${index}.test.needle`] = "Required — the text the mechanical check looks for.";
+        if (str(test.check) === "min-length") {
+          const minChars = num(test.minChars);
+          if (minChars === undefined || !Number.isInteger(minChars) || minChars < 1) {
+            errors[`rubric.criteria.${index}.test.minChars`] = "Required — the minimum character count this check enforces.";
+          }
+        } else if (!str(test.needle).trim()) {
+          errors[`rubric.criteria.${index}.test.needle`] = str(test.check) === "regex-match"
+            ? "Required — the regular expression the check matches."
+            : "Required — the text the mechanical check looks for.";
+        }
       });
       break;
     }
@@ -214,7 +256,7 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
       break;
     }
     case "site-auditor": {
-      if (!URL_PATTERN.test(str(input.url).trim())) errors.url = "Enter a full URL, e.g. https://example.com.";
+      if (!URL_PATTERN.test(str(input.url).trim())) errors.url = "Enter a site to audit, e.g. https://example.com or example.com.";
       const samples = num(input.samples);
       if (samples === undefined || !Number.isInteger(samples) || samples < 1 || samples > 5) errors.samples = "Between 1 and 5 samples.";
       break;
@@ -229,7 +271,9 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
       if (!(COMPLIANCE_KINDS as readonly string[]).includes(str(input.kind))) errors.kind = "Pick person, entity, or wallet.";
       if (input.kind === "wallet") requireText("walletAddress", input.walletAddress, "Required — the wallet address to screen.");
       else requireText("name", input.name, "Required — the full legal name to screen.");
-      requireText("country", input.country, "Required — an ISO country code, e.g. GB.");
+      if (input.country !== undefined && typeof input.country !== "string") {
+        errors.country = "Country must be an ISO code string, e.g. GB.";
+      }
       const aliases = input.aliases;
       if (aliases !== undefined && (!Array.isArray(aliases) || aliases.some((alias) => typeof alias !== "string"))) {
         errors.aliases = "Aliases must be a list of names.";

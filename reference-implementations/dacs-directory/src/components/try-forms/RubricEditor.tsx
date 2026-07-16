@@ -1,6 +1,6 @@
 "use client";
 
-import { addRow, blankCriterion, removeRow, EVAL_CHECKS, type FieldErrors } from "../try-dacs-forms.js";
+import { addRow, blankCriterion, criterionCheckChange, removeRow, EVAL_CHECKS, type FieldErrors } from "../try-dacs-forms.js";
 
 type Criterion = Record<string, unknown>;
 const rec = (value: unknown): Record<string, unknown> =>
@@ -70,18 +70,29 @@ export default function RubricEditor({
               <div className="form-field try-field">
                 <label htmlFor={`${idPrefix}-check-${index}`}>Mechanical check</label>
                 <select id={`${idPrefix}-check-${index}`} className="form-control" value={String(test.check ?? EVAL_CHECKS[0])}
-                  onChange={(event) => updateTest(index, { check: event.target.value })}>
+                  onChange={(event) => update(index, { test: criterionCheckChange(rec(criteria[index]?.test), event.target.value) })}>
                   {EVAL_CHECKS.map((check) => <option key={check} value={check}>{check}</option>)}
                 </select>
                 <span className="field-hint">How EvalBot mechanically verifies this criterion.</span>
               </div>
-              <div className="form-field try-field">
-                <label htmlFor={`${idPrefix}-needle-${index}`}>Check text{String(test.check ?? "content-includes") !== "min-length" && <span className="required-mark" title="Required">*</span>}</label>
-                <input id={`${idPrefix}-needle-${index}`} className="form-control mono" value={String(test.needle ?? "")}
-                  placeholder="Introduction" aria-invalid={Boolean(fieldError(`${base}.test.needle`))}
-                  onChange={(event) => updateTest(index, { needle: event.target.value })} />
-                {fieldError(`${base}.test.needle`) && <span className="field-error" role="alert">{fieldError(`${base}.test.needle`)}</span>}
-              </div>
+              {String(test.check ?? "content-includes") === "min-length" ? (
+                <div className="form-field try-field">
+                  <label htmlFor={`${idPrefix}-minchars-${index}`}>Minimum characters<span className="required-mark" title="Required">*</span></label>
+                  <input id={`${idPrefix}-minchars-${index}`} className="form-control" type="number" min={1} step={1}
+                    value={typeof test.minChars === "number" ? test.minChars : ""}
+                    aria-invalid={Boolean(fieldError(`${base}.test.minChars`))}
+                    onChange={(event) => updateTest(index, { minChars: event.target.value === "" ? undefined : Number(event.target.value) })} />
+                  {fieldError(`${base}.test.minChars`) && <span className="field-error" role="alert">{fieldError(`${base}.test.minChars`)}</span>}
+                </div>
+              ) : (
+                <div className="form-field try-field">
+                  <label htmlFor={`${idPrefix}-needle-${index}`}>{String(test.check) === "regex-match" ? "Pattern" : "Check text"}<span className="required-mark" title="Required">*</span></label>
+                  <input id={`${idPrefix}-needle-${index}`} className="form-control mono" value={String(test.needle ?? "")}
+                    placeholder={String(test.check) === "regex-match" ? "a.c" : "Introduction"} aria-invalid={Boolean(fieldError(`${base}.test.needle`))}
+                    onChange={(event) => updateTest(index, { needle: event.target.value })} />
+                  {fieldError(`${base}.test.needle`) && <span className="field-error" role="alert">{fieldError(`${base}.test.needle`)}</span>}
+                </div>
+              )}
             </div>
           </div>
         );

@@ -37,7 +37,7 @@ type Plan = {
 };
 
 const EXPLORER = "https://explorer.demos.sh";
-const AGENT_TIMEOUT_MS = 35_000;
+const AGENT_TIMEOUT_MS = 120_000;
 const RECEIPT_WATCH_TIMEOUT_MS = 2 * 60_000;
 
 function compact(value: unknown, head = 18, tail = 8): string {
@@ -194,6 +194,7 @@ export default function TryDacs() {
   const [receiptMessage, setReceiptMessage] = useState("");
   const runAbort = useRef<AbortController | null>(null);
   const receiptAbort = useRef<AbortController | null>(null);
+  const procurementJobRef = useRef<ProcurementJob | null>(null);
 
   useEffect(() => {
     fetch(`${BUTLER}/demo/butler/agents`)
@@ -211,6 +212,8 @@ export default function TryDacs() {
     const timer = setInterval(update, 100);
     return () => clearInterval(timer);
   }, [phase, receiptPolling, runStartedAt]);
+
+  useEffect(() => { procurementJobRef.current = procurementJob; }, [procurementJob]);
 
   useEffect(() => () => {
     runAbort.current?.abort();
@@ -232,13 +235,13 @@ export default function TryDacs() {
     [plan, inputValue],
   );
   const inputIsValid = Object.keys(localErrors).length === 0;
-  // A pollable receipt completes on confirmation. The synchronous LIVE-ANCHOR
-  // shape carries its full evidence (digest, anchor, txRef) in the run
-  // response and exposes no status URL, so its reported status is final here;
-  // the wording below stays explicit that chain anchoring continues gateway-side.
+  // Verification completes only on evidence: a confirmed receipt (or no
+  // receipt advertised at all). A synchronous broadcast-only attestation has
+  // no status URL to poll, so its confirmation is UNKNOWN in this browser —
+  // the Verify phase stays visibly pending rather than claiming completion.
   const verificationComplete = phase === "done" && (selected?.name === "procurement-butler"
     ? procurementAccepted
-    : receipt === null || receipt.status === "confirmed" || (!receipt.statusUrl && receipt.status !== "failed"));
+    : receipt === null || receipt.status === "confirmed");
   const parsedInput = inputValue;
   const resultPayload = selected?.name === "procurement-butler" ? result : record(result).result;
   const resultFields = Object.keys(record(resultPayload));
@@ -253,21 +256,23 @@ export default function TryDacs() {
       ? { state: "complete", summary: plan.butler.label, detail: plan.butler.rationale }
       : { state: "pending", summary: "No specialist selected yet" },
     phase === "running"
-      ? { state: "active", summary: `Specialist running · ${elapsedLabel(elapsedMs)}`, detail: `Bounded by a ${plan?.butler.selectedAgent === "procurement-butler" ? "12-minute full-flow" : "35-second specialist"} deadline.` }
+      ? { state: "active", summary: `Specialist running · ${elapsedLabel(elapsedMs)}`, detail: `Bounded by a ${plan?.butler.selectedAgent === "procurement-butler" ? "12-minute full-flow" : "2-minute specialist"} deadline.` }
       : phase === "done"
         ? { state: "complete", summary: specialistDurationMs === undefined ? "Specialist result returned" : `Result returned in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
         : phase === "error"
           ? { state: "warning", summary: "Execution stopped safely", detail: error }
-          : parsedInput
-            ? { state: "complete", summary: `Input validated · ${Object.keys(parsedInput).length} fields`, detail: Object.keys(parsedInput).join(", ") || "Empty bounded input object" }
-            : { state: "pending", summary: "Waiting for valid job details" },
+          : plan && inputIsValid
+            ? { state: "complete", summary: `Input ready · ${Object.keys(parsedInput).length} field${Object.keys(parsedInput).length === 1 ? "" : "s"}`, detail: Object.keys(parsedInput).join(", ") || "Empty bounded input object" }
+            : plan
+              ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention` }
+              : { state: "pending", summary: "Waiting for valid job details" },
     selected?.name === "procurement-butler" && phase === "done"
       ? { state: procurementAccepted ? "complete" : "warning", summary: procurementAccepted ? "Full evidence bundle accepted" : "Verification incomplete", detail: `${procurementJob?.events.length ?? 0} lifecycle events recorded` }
       : receipt
         ? {
-            state: receipt.status === "confirmed" || (!receipt.statusUrl && receipt.status !== "failed") ? "complete" : receipt.status === "failed" ? "warning" : "active",
-            summary: `Receipt ${receipt.status}${!receipt.statusUrl && receipt.status === "broadcast" ? " · anchoring continues on the gateway" : ""}`,
-            detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)}` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}`,
+            state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active",
+            summary: `Receipt ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (no status endpoint; anchoring continues on the gateway)" : ""}`,
+            detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — verify on the explorer` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}`,
           }
         : phase === "done"
           ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt." }
@@ -365,6 +370,10 @@ export default function TryDacs() {
     const controller = new AbortController();
     runAbort.current = controller;
     setPhase("running"); setError(""); setResult(undefined); setReceipt(null); setReceiptMessage("");
+    // Clear any prior job before a fresh start so a failed start can never
+    // offer resuming a stale job (ref set synchronously: the catch below may
+    // run before the state-sync effect).
+    setProcurementJob(null); procurementJobRef.current = null;
     setGatewayFieldErrors({});
     setSubmittedSummary(summarizeAgentInput(plan.butler.selectedAgent, parsed));
     setRunStartedAt(Date.now()); setElapsedMs(0);
@@ -406,16 +415,7 @@ export default function TryDacs() {
         }
         const started = parseProcurementJob(startBody);
         setProcurementJob(started);
-        let current = started;
-        while (current.status === "running" && Date.now() < deadline) {
-          await waitWithSignal(Math.min(2_000, Math.max(0, deadline - Date.now())), controller.signal);
-          const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, { signal: controller.signal }, deadline);
-          if (!poll.ok) throw new Error(message(pollBody));
-          current = parseProcurementJob(pollBody); setProcurementJob(current);
-        }
-        if (current.status === "failed") throw new Error(current.error ?? "the full procurement flow failed safely");
-        if (current.status !== "complete") throw new Error("the full procurement flow is still running; reload shortly to inspect it");
-        setResult(current.result); setPhase("done");
+        await followProcurementJob(started, controller, deadline);
         return;
       }
       const { response: res, body } = await fetchJsonWithTimeout(`${BUTLER}/demo/butler`, {
@@ -435,7 +435,52 @@ export default function TryDacs() {
       }
     } catch (cause) {
       const cancelled = (cause as Error).name === "AbortError";
-      setError(cancelled ? "Run cancelled in this browser. No result was accepted; you can retry the same bounded job." : (cause as Error).message);
+      const liveProcurement = plan.butler.selectedAgent === "procurement-butler" && procurementJobRef.current !== null;
+      setError(cancelled
+        ? liveProcurement
+          ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
+          : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
+        : (cause as Error).message);
+      setPhase("error");
+    } finally {
+      if (runAbort.current === controller) runAbort.current = null;
+    }
+  }
+
+  /**
+   * Follow an already-started procurement job to completion. Used by the
+   * initial run and by "Resume status" after the user stops watching — the
+   * job id is retained so resuming NEVER creates a second job or payment.
+   */
+  async function followProcurementJob(initial: ProcurementJob, controller: AbortController, deadline: number) {
+    let current = initial;
+    while (current.status === "running" && Date.now() < deadline) {
+      await waitWithSignal(Math.min(2_000, Math.max(0, deadline - Date.now())), controller.signal);
+      const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, { signal: controller.signal }, deadline);
+      if (!poll.ok) throw new Error(message(pollBody));
+      current = parseProcurementJob(pollBody); setProcurementJob(current);
+    }
+    if (current.status === "failed") throw new Error(current.error ?? "the full procurement flow failed safely");
+    if (current.status !== "complete") throw new Error("the full procurement flow is still running; use Resume status to keep following it");
+    setResult(current.result); setPhase("done");
+  }
+
+  /** Resume following the existing procurement job (never a new purchase). */
+  async function resumeProcurement() {
+    const job = procurementJobRef.current;
+    if (!job) return;
+    runAbort.current?.abort();
+    const controller = new AbortController();
+    runAbort.current = controller;
+    setPhase("running"); setError("");
+    setRunStartedAt(Date.now()); setElapsedMs(0);
+    try {
+      await followProcurementJob(job, controller, Date.now() + 12 * 60_000);
+    } catch (cause) {
+      const cancelled = (cause as Error).name === "AbortError";
+      setError(cancelled
+        ? "Stopped watching in this browser. The gateway is still completing this procurement job — resume below to keep following it; no second purchase will be started."
+        : (cause as Error).message);
       setPhase("error");
     } finally {
       if (runAbort.current === controller) runAbort.current = null;
@@ -505,8 +550,17 @@ export default function TryDacs() {
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              <div><strong>{plan.butler.label} stopped safely</strong><small>The same validated fixture is still available.</small></div>
-              <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); }}>Choose another agent</button><button className="btn try-primary" onClick={runAgent}>Retry this agent <span>→</span></button></div>
+              {plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
+                <>
+                  <div><strong>Watching stopped — the procurement job is still live on the gateway</strong><small>Job {procurementJob.id} was not cancelled; resuming follows the same job and never starts a second purchase.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>
+                </>
+              ) : (
+                <>
+                  <div><strong>{plan.butler.label} stopped safely</strong><small>Your entered job details are still available.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); }}>Choose another agent</button><button className="ghost-btn" onClick={() => setPhase("ready")}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry this agent <span>→</span></button></div>
+                </>
+              )}
             </div>
           ) : plan && phase === "ready" && selected ? (
             <div className="job-box">
@@ -519,8 +573,8 @@ export default function TryDacs() {
               </div>
             </div>
           ) : phase === "running" && plan?.butler.selectedAgent === "procurement-butler" ? (
-            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING · {elapsedLabel(elapsedMs)}</div><small>Keep this page open — chain confirmations appear here live.</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Cancel this run</button></div></div>
-          ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 35s deadline</small>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}</div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
+            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING · {elapsedLabel(elapsedMs)}</div><small>Keep this page open — chain confirmations appear here live.</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
+          ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 2-minute deadline</small>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}</div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
           : null}
         </div>
 

@@ -34,7 +34,13 @@ const acceptedReport = {
 };
 
 test("accepts the published Butler catalog contract", () => {
-  assert.deepEqual(parseAgentCatalog({ agents: [agent] }), [agent]);
+  // mode/input are optional gateway schema fields, passed through (undefined
+  // when the catalog does not publish them).
+  assert.deepEqual(parseAgentCatalog({ agents: [agent] }), [{ ...agent, mode: undefined, input: undefined }]);
+  const withSchema = { ...agent, mode: "sync", input: [{ name: "url", type: "string", required: true }] };
+  const parsed = parseAgentCatalog({ agents: [withSchema] })[0];
+  assert.equal(parsed.mode, "sync");
+  assert.deepEqual(parsed.input, withSchema.input);
 });
 
 test("rejects catalog drift instead of rendering invented fallbacks", () => {

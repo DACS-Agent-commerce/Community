@@ -5,6 +5,10 @@ export type AgentCard = {
   tags: string[];
   exampleGoal: string;
   exampleInput: Record<string, unknown>;
+  /** Optional gateway-published execution mode (passed through verbatim). */
+  mode?: string;
+  /** Optional gateway-published input field schema (name/type/required/description). */
+  input?: unknown;
 };
 
 export type ProcurementEvent = {
@@ -83,7 +87,7 @@ export class AgentInputError extends Error {
 }
 
 export const PROCUREMENT_TIMEOUT_MESSAGE = "The full procurement flow exceeded its 12-minute deadline.";
-export const AGENT_TIMEOUT_MESSAGE = "The specialist did not respond within 35 seconds. You can retry or cancel safely.";
+export const AGENT_TIMEOUT_MESSAGE = "The specialist did not respond within 2 minutes. You can retry or cancel safely.";
 
 export function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -176,6 +180,10 @@ export function parseAgentCatalog(value: unknown): AgentCard[] {
       tags: agent.tags,
       exampleGoal: requiredString(agent.exampleGoal, `${path}.exampleGoal`),
       exampleInput: requiredRecord(agent.exampleInput, `${path}.exampleInput`),
+      // Pass the gateway's own schema surface through untouched; the form
+      // layer decides whether it can render it (and falls back safely).
+      mode: optionalString(agent.mode, `${path}.mode`),
+      input: agent.input,
     };
   });
 }

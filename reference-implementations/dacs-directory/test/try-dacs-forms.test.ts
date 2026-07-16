@@ -6,6 +6,7 @@ import {
   addRow,
   blankCriterion,
   complianceKindChange,
+  criterionCheckChange,
   flattenInputKeys,
   hasBuiltinForm,
   initialAgentInput,
@@ -71,6 +72,8 @@ test("forms produce the exact expected gateway input objects", () => {
 
   const compliance = { kind: "entity", name: "Example Holdings Ltd", country: "GB" };
   assert.deepEqual(validateAgentInput("compliance", compliance), {});
+  // Country is optional at the gateway; omitting it stays locally valid.
+  assert.deepEqual(validateAgentInput("compliance", { kind: "entity", name: "Example Holdings Ltd" }), {});
 });
 
 test("conditional compliance fields switch between name and walletAddress", () => {
@@ -88,6 +91,7 @@ test("conditional compliance fields switch between name and walletAddress", () =
   // Validation matches the gateway's authoritative rule ("kind=wallet requires walletAddress").
   assert.ok(validateAgentInput("compliance", { kind: "wallet", country: "GB" }).walletAddress);
   assert.ok(validateAgentInput("compliance", { kind: "person", country: "GB" }).name);
+  assert.ok(validateAgentInput("compliance", { kind: "person", name: "A", country: 42 }).country, "non-string country is still flagged");
 });
 
 test("oracle product change resets params to the product defaults", () => {
@@ -111,6 +115,8 @@ test("repeatable rows add and remove with a minimum floor", () => {
 
 test("invalid URLs, budgets, sample counts, and thresholds are blocked locally", () => {
   assert.ok(validateAgentInput("site-auditor", { url: "not-a-url", samples: 1 }).url);
+  // Bare hosts are accepted by the gateway and must pass locally.
+  assert.deepEqual(validateAgentInput("site-auditor", { url: "example.com", samples: 1 }), {});
   assert.ok(validateAgentInput("site-auditor", { url: "https://example.com", samples: 0 }).samples);
   assert.ok(validateAgentInput("site-auditor", { url: "https://example.com", samples: 6 }).samples);
   assert.ok(validateAgentInput("site-auditor", { url: "https://example.com", samples: 2.5 }).samples);
@@ -158,25 +164,57 @@ test("switching agents resets incompatible state", () => {
   // Blank defaults are not the example fixtures: examples are opt-in.
   assert.equal(site.url, "");
   assert.equal((compliance as { name?: string }).name, "");
+  assert.ok(!("country" in compliance), "optional country starts absent, not as an empty string");
 });
 
-test("a future catalog field schema is consumed when published, with safe fallback", () => {
+test("the gateway's published input schema is consumed, with safe fallback", () => {
+  // The companion gateway publishes agents[].input as
+  // { name, type, required, description } entries.
   const published = card("future-agent", {
-    fields: [
-      { key: "region", label: "Region", kind: "select", required: true, options: ["eu", "us"] },
-      { key: "depth", label: "Depth", kind: "number", min: 1, max: 5 },
+    mode: "sync",
+    input: [
+      { name: "region", type: "enum", required: true, enum: ["eu", "us"], description: "Deployment region" },
+      { name: "maxDepth", type: "number", min: 1, max: 5 },
+      { name: "dryRun", type: "boolean" },
     ],
   });
   const schema = parseAgentFieldSchema(published);
-  assert.equal(schema?.length, 2);
-  assert.equal(schema?.[0].kind, "select");
-  assert.deepEqual(schema?.[0].options, ["eu", "us"]);
+  assert.equal(schema?.length, 3);
+  assert.deepEqual(schema?.[0], { key: "region", label: "Region", kind: "select", required: true, help: "Deployment region", options: ["eu", "us"], min: undefined, max: undefined });
+  assert.equal(schema?.[1].kind, "number");
+  assert.equal(schema?.[1].label, "Max Depth");
+  assert.equal(schema?.[2].kind, "checkbox");
 
-  // Malformed or absent schemas yield null so the caller falls back.
+  // Unrepresentable or absent schemas yield null so the caller falls back —
+  // a partially rendered schema would silently drop required input.
   assert.equal(parseAgentFieldSchema(card("x")), null);
-  assert.equal(parseAgentFieldSchema(card("x", { fields: [] })), null);
-  assert.equal(parseAgentFieldSchema(card("x", { fields: [{ key: "k", label: "L", kind: "mystery" }] })), null);
-  assert.equal(parseAgentFieldSchema(card("x", { fields: [{ key: "", label: "L", kind: "text" }] })), null);
+  assert.equal(parseAgentFieldSchema(card("x", { input: [] })), null);
+  assert.equal(parseAgentFieldSchema(card("x", { input: [{ name: "blob", type: "object" }] })), null);
+  assert.equal(parseAgentFieldSchema(card("x", { input: [{ name: "", type: "string" }] })), null);
+});
+
+test("EvalBot checks match the gateway contract and swap parameters cleanly", () => {
+  // Live-probed: the gateway executes content-includes, regex-match, and
+  // min-length; min-length without minChars silently scores against
+  // "min undefined", so the form must require it.
+  assert.ok(validateAgentInput("evalbot", {
+    deliverable: { content: "abc" },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "len", kind: "mechanical", weight: 1, description: "long", test: { check: "min-length" } }] },
+  })["rubric.criteria.0.test.minChars"]);
+  assert.deepEqual(validateAgentInput("evalbot", {
+    deliverable: { content: "abc" },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "len", kind: "mechanical", weight: 1, description: "long", test: { check: "min-length", minChars: 2 } }] },
+  }), {});
+  assert.deepEqual(validateAgentInput("evalbot", {
+    deliverable: { content: "abc" },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "rx", kind: "mechanical", weight: 1, description: "match", test: { check: "regex-match", needle: "a.c" } }] },
+  }), {});
+
+  // Switching check kinds swaps parameters — stale ones are never submitted.
+  const toMinLength = criterionCheckChange({ check: "content-includes", needle: "Introduction" }, "min-length");
+  assert.deepEqual(toMinLength, { check: "min-length", minChars: 1 });
+  const backToText = criterionCheckChange(toMinLength, "regex-match");
+  assert.deepEqual(backToText, { check: "regex-match", needle: "" });
 });
 
 test("submission summaries state the actual values being sent", () => {
