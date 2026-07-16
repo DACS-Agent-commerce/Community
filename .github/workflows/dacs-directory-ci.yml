@@ -1,0 +1,59 @@
+name: dacs-directory CI
+
+# Validates the DACS Directory reference implementation on every PR and on
+# pushes to main. Scoped by path so unrelated repo changes don't trigger it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "reference-implementations/dacs-directory/**"
+      - ".github/workflows/dacs-directory-ci.yml"
+  pull_request:
+    paths:
+      - "reference-implementations/dacs-directory/**"
+      - ".github/workflows/dacs-directory-ci.yml"
+
+# Cancel superseded runs for the same ref to save runner minutes.
+concurrency:
+  group: dacs-directory-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck · test · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reference-implementations/dacs-directory
+    env:
+      # The SDK dependency tree emits patch-level engine requirements above
+      # Node 20.10; the app is validated on Node 22.
+      NODE_VERSION: "22"
+      # Keeps canonical URLs / sitemap deterministic during the build instead
+      # of falling back to localhost (which the build warns about).
+      NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.local
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Vendor + build the pinned dacs-sdk, install app deps
+        # The vendored dacs-sdk is a private repo; setup-sdk.sh authenticates
+        # the nested clone with DACS_SDK_GITHUB_TOKEN when present. Add a
+        # read-only token (repo secret) with access to DACS-Agent-commerce/dacs-sdk
+        # or this step fails at the clone. The default GITHUB_TOKEN cannot read
+        # sibling private repos.
+        env:
+          DACS_SDK_GITHUB_TOKEN: ${{ secrets.DACS_SDK_GITHUB_TOKEN }}
+        run: npm run setup
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (includes seed smoke)
+        run: npm test
+
+      - name: Production build
+        run: npm run build
