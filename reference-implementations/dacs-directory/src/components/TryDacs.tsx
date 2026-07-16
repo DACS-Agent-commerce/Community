@@ -1,43 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  ButlerContractError,
+  parseAgentCatalog,
+  parseButlerRun,
+  parseProcurementJob,
+  procurementEvidence,
+  record,
+  type AgentCard,
+  type ProcurementEvent,
+  type ProcurementJob,
+} from "./try-dacs-contract.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
 
-type AgentCard = {
-  name: string;
-  label: string;
-  summary: string;
-  tags: string[];
-  exampleGoal: string;
-  exampleInput: Record<string, unknown>;
-};
 type Plan = {
   butler: { selectedAgent: string; label: string; rationale: string; selectionEngine: string; alternatives: string[] };
   proposedInput: Record<string, unknown>;
   inputNote: string;
 };
-type ProcurementEvent = {
-  phase: string;
-  label: string;
-  at: string;
-  txRef?: string;
-  anchorRef?: string;
-};
-type ProcurementJob = {
-  id: string;
-  status: "running" | "complete" | "failed";
-  phase: string;
-  events: ProcurementEvent[];
-  result?: unknown;
-  error?: string;
-};
 
 const EXPLORER = "https://explorer.demos.sh";
-
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
 
 function compact(value: unknown, head = 18, tail = 8): string {
   const text = String(value ?? "");
@@ -46,6 +30,7 @@ function compact(value: unknown, head = 18, tail = 8): string {
 
 function ProcurementReport({ value, events }: { value: unknown; events: ProcurementEvent[] }) {
   const report = record(value);
+  const evidence = procurementEvidence(report);
   const decision = record(report.decision);
   const winner = record(decision.winner);
   const settlement = record(report.settlement);
@@ -55,44 +40,52 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
   const audit = record(delivery.report);
   const evaluation = record(report.evaluation);
   const ruling = record(evaluation.ruling);
-  const bundle = record(report.bundleVerification);
-  const reconciliation = record(report.reconciliation);
   const anchors = record(report.anchors);
   const candidates = Array.isArray(decision.candidates) ? decision.candidates.map(record) : [];
   const findings = Array.isArray(audit.findings) ? audit.findings.map(record) : [];
   const transactions = Array.isArray(report.transactions) ? report.transactions.map(record) : [];
   const paymentHash = String(settlement.txHash ?? "");
+  const acceptedClass = evidence.overallAccepted ? "success-text" : "error-text";
+  const acceptanceLabel = evidence.overallAccepted ? "Settled & accepted" : "Verification incomplete";
+  const verificationLabel = evidence.overallAccepted ? "accepted" : "not accepted";
+  const evaluationLabel = evidence.rulingAccepted && evidence.rulingValid
+    ? "accept · signature valid"
+    : `${String(ruling.verdict ?? "not reported")} · ${evidence.rulingValid ? "signature valid" : "signature unverified"}`;
+
+  function check(label: string, detail: string, ok: boolean) {
+    return <div className={ok ? "" : "failed-check"}><i>{ok ? "✓" : "!"}</i><span>{label}<strong>{detail}</strong></span></div>;
+  }
 
   return (
     <div className="proc-report">
       <div className="proc-summary">
-        <div><span>OUTCOME</span><strong className="success-text">Settled &amp; accepted</strong></div>
-        <div><span>SELECTED SELLER</span><strong>{String(winner.provider ?? "Security Audit Seller")}</strong></div>
-        <div><span>PRICE</span><strong>{String(settlement.amountDem ?? winner.price ?? "1")} DEM</strong></div>
-        <div><span>PAYMENT RAIL</span><strong>{String(settlement.rail ?? "pay-dem")}</strong></div>
+        <div><span>OUTCOME</span><strong className={acceptedClass}>{acceptanceLabel}</strong></div>
+        <div><span>SELECTED SELLER</span><strong>{String(winner.provider ?? "not reported")}</strong></div>
+        <div><span>PRICE</span><strong>{String(settlement.amountDem ?? settlement.amount ?? winner.price ?? "not reported")}{settlement.amountDem !== undefined || settlement.amount !== undefined || winner.price !== undefined ? " DEM" : ""}</strong></div>
+        <div><span>PAYMENT RAIL</span><strong>{String(settlement.rail ?? "not reported")}</strong></div>
       </div>
 
-      <section className="proc-panel payment-panel">
-        <div className="proc-panel-head"><div><span>REAL PAYMENT</span><h3>Demos settlement transaction</h3></div><span className="badge ok">broadcast &amp; verified</span></div>
-        <a className="tx-link" href={`${EXPLORER}/tx/${paymentHash}`} target="_blank" rel="noreferrer">
+      <section className={`proc-panel payment-panel ${evidence.paymentRecorded ? "" : "unverified-panel"}`}>
+        <div className="proc-panel-head"><div><span>REAL PAYMENT</span><h3>Demos settlement transaction</h3></div><span className={`badge ${evidence.paymentRecorded ? "ok" : "err"}`}>{evidence.paymentRecorded ? "broadcast & recorded" : "evidence missing"}</span></div>
+        {paymentHash ? <a className="tx-link" href={`${EXPLORER}/tx/${paymentHash}`} target="_blank" rel="noreferrer">
           <span><small>PAYMENT TX</small><code>{paymentHash}</code></span><b>View on explorer ↗</b>
-        </a>
+        </a> : <div className="tx-link missing-evidence"><span><small>PAYMENT TX</small><code>not reported</code></span></div>}
         <div className="party-row"><span>payer <code>{compact(settlement.payer)}</code></span><i>→</i><span>seller <code>{compact(settlement.payee)}</code></span></div>
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>LIVE NEGOTIATION</span><h3>Buyer and Auditor agreed over L2PS</h3></div><span className="badge ok">dual-signed</span></div>
+        <div className="proc-panel-head"><div><span>LIVE NEGOTIATION</span><h3>Buyer and Auditor agreement over L2PS</h3></div><span className={`badge ${evidence.negotiationSigned ? "ok" : "err"}`}>{evidence.negotiationSigned ? "dual-signed" : "signatures missing"}</span></div>
         <div className="verify-grid">
-          <div><i>✓</i><span>Protocol<strong>{String(negotiation.protocol ?? "dacs-rfq/1")}</strong></span></div>
-          <div><i>✓</i><span>Audit tier<strong>{String(terms.tier ?? "quick")}</strong></span></div>
-          <div><i>✓</i><span>Turnaround<strong>{String(terms.deadline ?? "standard")}</strong></span></div>
-          <div><i>✓</i><span>Agreed price<strong>{String(terms.price ?? settlement.amountDem ?? "—")} DEM</strong></span></div>
+          {check("Protocol", String(negotiation.protocol ?? "not reported"), Boolean(negotiation.protocol))}
+          {check("Audit tier", String(terms.tier ?? "not reported"), Boolean(terms.tier))}
+          {check("Turnaround", String(terms.deadline ?? "not reported"), Boolean(terms.deadline))}
+          {check("Agreed price", terms.price !== undefined || settlement.amountDem !== undefined ? `${String(terms.price ?? settlement.amountDem)} DEM` : "not reported", terms.price !== undefined || settlement.amountDem !== undefined)}
         </div>
         <details className="anchor-details"><summary>Signed negotiation transcript and agreement hash</summary><pre>{JSON.stringify(negotiation, null, 2)}</pre></details>
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>PROCUREMENT REPORT</span><h3>Why this seller was selected</h3></div><span className="badge ok">{String(decision.outcome ?? "awarded")}</span></div>
+        <div className="proc-panel-head"><div><span>PROCUREMENT REPORT</span><h3>Why this seller was selected</h3></div><span className={`badge ${decision.outcome ? "ok" : "err"}`}>{String(decision.outcome ?? "not reported")}</span></div>
         <div className="candidate-table">
           <div className="candidate-row candidate-head"><span>Provider</span><span>Price</span><span>Rail</span><span>Decision</span></div>
           {candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.listingId}-${index}`}><span><strong>{String(candidate.provider ?? "candidate")}</strong><small>{compact(candidate.listingId, 12, 6)}</small></span><span>{String(candidate.askPrice ?? "—")} DEM</span><span>{String(candidate.chosenRail ?? "—")}</span><span className={candidate.excluded ? "muted-text" : "success-text"}>{candidate.excluded ? String(candidate.excluded) : "selected ✓"}</span></div>)}
@@ -100,22 +93,22 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>DELIVERED REPORT</span><h3>Security audit findings</h3></div><span className="badge ok">{findings.length} finding{findings.length === 1 ? "" : "s"}</span></div>
-        {findings.length ? <div className="finding-list">{findings.map((finding, index) => <article key={`${finding.id}-${index}`}><span className={`severity ${String(finding.severity ?? "info").toLowerCase()}`}>{String(finding.severity ?? "info")}</span><div><strong>{String(finding.ruleId ?? finding.id ?? "Finding")}</strong><p>{String(finding.rationale ?? "Attested source finding")}</p><code>{String(finding.file ?? "file")}:{String(finding.line ?? "?")}</code></div></article>)}</div> : <p className="empty-report">The verified report found no matching issues in the posted fixture.</p>}
+        <div className="proc-panel-head"><div><span>DELIVERED REPORT</span><h3>Security audit findings</h3></div><span className={`badge ${evidence.deliveryVerified ? "ok" : "err"}`}>{evidence.deliveryVerified ? `${findings.length} finding${findings.length === 1 ? "" : "s"} · verified` : "delivery unverified"}</span></div>
+        {findings.length ? <div className="finding-list">{findings.map((finding, index) => <article key={`${finding.id}-${index}`}><span className={`severity ${String(finding.severity ?? "info").toLowerCase()}`}>{String(finding.severity ?? "info")}</span><div><strong>{String(finding.ruleId ?? finding.id ?? "Finding")}</strong><p>{String(finding.rationale ?? "Attested source finding")}</p><code>{String(finding.file ?? "file")}:{String(finding.line ?? "?")}</code></div></article>)}</div> : <p className="empty-report">{evidence.deliveryVerified ? "The verified report found no matching issues in the posted fixture." : "No verified security report was returned."}</p>}
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>VERIFICATION</span><h3>Independent acceptance checks</h3></div><span className="badge ok">accepted</span></div>
+        <div className="proc-panel-head"><div><span>VERIFICATION</span><h3>Independent acceptance checks</h3></div><span className={`badge ${evidence.overallAccepted ? "ok" : "err"}`}>{verificationLabel}</span></div>
         <div className="verify-grid">
-          <div><i>✓</i><span>Delivery hash<strong>matched report</strong></span></div>
-          <div><i>✓</i><span>Buyer + seller bundles<strong>{bundle.ok === false || reconciliation.reconciled === false ? "failed" : "reconciled"}</strong></span></div>
-          <div><i>✓</i><span>EvalBot ruling<strong>{String(ruling.verdict ?? "accept")}</strong></span></div>
-          <div><i>✓</i><span>Ruling signature<strong>{evaluation.rulingValid === false ? "invalid" : "valid"}</strong></span></div>
+          {check("Delivery evidence", evidence.deliveryVerified ? "verified" : "unverified", evidence.deliveryVerified)}
+          {check("Buyer + seller bundles", evidence.bundlesVerified ? "verified" : "unverified", evidence.bundlesVerified)}
+          {check("Reconciliation", evidence.reconciled ? "reconciled" : "not reconciled", evidence.reconciled)}
+          {check("EvalBot ruling", evaluationLabel, evidence.rulingAccepted && evidence.rulingValid)}
         </div>
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>ON-CHAIN RECEIPTS</span><h3>Every DACS artifact and transaction</h3></div><span className="badge ok">{transactions.length} records</span></div>
+        <div className="proc-panel-head"><div><span>ON-CHAIN RECEIPTS</span><h3>Every DACS artifact and transaction</h3></div><span className={`badge ${transactions.length ? "ok" : "err"}`}>{transactions.length} records</span></div>
         <div className="receipt-list">{transactions.map((transaction, index) => {
           const txRef = String(transaction.txRef ?? "");
           const anchorRef = String(transaction.address ?? "");
@@ -159,12 +152,17 @@ export default function TryDacs() {
   useEffect(() => {
     fetch(`${BUTLER}/demo/butler/agents`)
       .then((res) => res.ok ? res.json() : Promise.reject(new Error("catalog unavailable")))
-      .then((body: { agents: AgentCard[] }) => setAgents(body.agents))
-      .catch(() => setError("The live agent network is temporarily unavailable."));
+      .then((body: unknown) => setAgents(parseAgentCatalog(body)))
+      .catch((cause: unknown) => setError(cause instanceof ButlerContractError
+        ? cause.message
+        : "The live agent network is temporarily unavailable."));
   }, []);
 
   const selected = useMemo(() => agents.find((agent) => agent.name === plan?.butler.selectedAgent), [agents, plan]);
   const activeIndex = phase === "idle" ? 0 : phase === "planning" ? 2 : phase === "ready" ? 2 : phase === "running" ? 3 : phase === "done" ? 4 : -1;
+  const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
+    ? procurementEvidence(result).overallAccepted
+    : false;
 
   async function runAgent() {
     if (!plan) return;
@@ -190,17 +188,18 @@ export default function TryDacs() {
         const start = await fetch(`${BUTLER}/demo/procurement`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
         });
-        const started = await start.json() as ProcurementJob;
-        if (!start.ok) throw new Error(message(started));
+        const startBody: unknown = await start.json();
+        if (!start.ok) throw new Error(message(startBody));
+        const started = parseProcurementJob(startBody);
         setProcurementJob(started);
         const deadline = Date.now() + 12 * 60_000;
         let current = started;
         while (current.status === "running" && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 2_000));
           const poll = await fetch(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`);
-          const body = await poll.json() as ProcurementJob;
-          if (!poll.ok) throw new Error(message(body));
-          current = body; setProcurementJob(current);
+          const pollBody: unknown = await poll.json();
+          if (!poll.ok) throw new Error(message(pollBody));
+          current = parseProcurementJob(pollBody); setProcurementJob(current);
         }
         if (current.status === "failed") throw new Error(current.error ?? "the full procurement flow failed safely");
         if (current.status !== "complete") throw new Error("the full procurement flow is still running; reload shortly to inspect it");
@@ -211,9 +210,9 @@ export default function TryDacs() {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ goal, agent: plan.butler.selectedAgent, input: parsed }),
       });
-      const body = await res.json();
+      const body: unknown = await res.json();
       if (!res.ok) throw new Error(message(body));
-      setResult(body); setPhase("done");
+      setResult(parseButlerRun(body)); setPhase("done");
     } catch (cause) {
       setError((cause as Error).message); setPhase("error");
     }
@@ -286,7 +285,7 @@ export default function TryDacs() {
         </aside>
       </section>
 
-      {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className="badge ok">completed</span><h2>{selected?.label ?? "Agent"} result</h2></div><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); }}>Try another goal</button></div>{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
+      {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className={`badge ${selected?.name === "procurement-butler" && !procurementAccepted ? "err" : "ok"}`}>{selected?.name === "procurement-butler" ? (procurementAccepted ? "verified" : "verification incomplete") : "completed"}</span><h2>{selected?.label ?? "Agent"} result</h2></div><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); }}>Try another goal</button></div>{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
 
       <section className="try-agents"><div className="try-section-head"><div><span>WHAT YOU CAN TEST</span><h2>Nine bounded agent demonstrations</h2></div><p>Each test uses a safe, validated fixture. The Butler supervises execution; it does not invent arbitrary jobs or access private data.</p></div><div className="try-agent-grid">{agents.slice(0, 6).map((agent, index) => <button key={agent.name} onClick={() => useExample(agent)}><span>0{index + 1}</span><strong>{agent.label}</strong><p>{agent.exampleGoal}</p><i>Select this agent →</i></button>)}</div></section>
     </div>
