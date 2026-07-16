@@ -9,6 +9,7 @@ import {
   parseAgentInput,
   parseButlerRun,
   parseProcurementJob,
+  parseReceiptEnvelope,
   procurementEvidence,
 } from "../src/components/try-dacs-contract.js";
 
@@ -76,6 +77,35 @@ test("rejects malformed procurement and general Butler responses", () => {
   );
 });
 
+test("parses the asynchronous output receipt lifecycle without hiding the agent result", () => {
+  const outputAttestation = {
+    receiptId: "receipt-1",
+    statusUrl: "/demo/butler/receipts/receipt-1",
+    status: "queued",
+    attempts: 1,
+    createdAt: "2026-07-16T08:00:00.000Z",
+    updatedAt: "2026-07-16T08:00:00.000Z",
+    digest: "abc123",
+    anchorAddress: "stor-abc123",
+    note: "queued for nonce-safe anchoring",
+  } as const;
+  const run = parseButlerRun({
+    butler: { selectedAgent: "evalbot", label: "EvalBot" },
+    result: { accepted: true },
+    execution: { requestId: "request-1", durationMs: 1_800 },
+    outputAttestation,
+  });
+  assert.deepEqual(run.result, { accepted: true });
+  assert.equal(run.execution?.durationMs, 1_800);
+  assert.equal(run.outputAttestation?.status, "queued");
+
+  assert.equal(parseReceiptEnvelope({ outputAttestation: { ...outputAttestation, status: "confirmed", txRef: "tx-1" } }).txRef, "tx-1");
+  assert.throws(
+    () => parseReceiptEnvelope({ outputAttestation: { ...outputAttestation, status: "mystery" } }),
+    ButlerContractError,
+  );
+});
+
 test("only accepts JSON objects as editable agent input", () => {
   assert.deepEqual(parseAgentInput({ budgetDem: 5 }), { budgetDem: 5 });
   for (const value of [null, [], "text", 5, true]) {
@@ -116,6 +146,21 @@ test("aborts a procurement request and body read when its deadline expires", asy
     fetchJsonBeforeDeadline("https://agents.example/demo/procurement/job-1", undefined, Date.now() + 20, headersFirstFetch),
     new RegExp(PROCUREMENT_TIMEOUT_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
+});
+
+test("propagates an explicit browser cancellation into a bounded request", async () => {
+  const browser = new AbortController();
+  const hangingFetch: typeof fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+  });
+  const request = fetchJsonBeforeDeadline(
+    "https://agents.example/demo/butler",
+    { signal: browser.signal },
+    Date.now() + 10_000,
+    hangingFetch,
+  );
+  browser.abort();
+  await assert.rejects(request, (error: unknown) => error instanceof DOMException && error.name === "AbortError");
 });
 
 test("only reports acceptance when every explicit verification signal is present", () => {

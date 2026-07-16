@@ -36,6 +36,28 @@ export type ProcurementEvidence = {
   overallAccepted: boolean;
 };
 
+export type ReceiptStatus = "queued" | "anchoring" | "broadcast" | "confirmed" | "failed";
+
+export type OutputReceipt = {
+  receiptId: string;
+  statusUrl: string;
+  status: ReceiptStatus;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+  digest: string;
+  anchorAddress: string;
+  txRef?: string;
+  error?: string;
+  note: string;
+};
+
+export type ButlerRun = Record<string, unknown> & {
+  result: unknown;
+  execution?: { requestId: string; durationMs: number };
+  outputAttestation?: OutputReceipt;
+};
+
 export class ButlerContractError extends Error {
   constructor(path: string, expectation: string) {
     super(`Butler gateway returned an invalid ${path}; expected ${expectation}`);
@@ -51,6 +73,7 @@ export class AgentInputError extends Error {
 }
 
 export const PROCUREMENT_TIMEOUT_MESSAGE = "The full procurement flow exceeded its 12-minute deadline.";
+export const AGENT_TIMEOUT_MESSAGE = "The specialist did not respond within 35 seconds. You can retry or cancel safely.";
 
 export function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -74,6 +97,11 @@ function optionalString(value: unknown, path: string): string | undefined {
   return requiredString(value, path);
 }
 
+function requiredNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new ButlerContractError(path, "a finite number");
+  return value;
+}
+
 export function parseAgentInput(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new AgentInputError();
   return value as Record<string, unknown>;
@@ -84,10 +112,15 @@ export async function fetchJsonBeforeDeadline<T = unknown>(
   init: RequestInit | undefined,
   deadlineMs: number,
   fetcher: typeof fetch = fetch,
+  timeoutMessage = PROCUREMENT_TIMEOUT_MESSAGE,
 ): Promise<{ response: Response; body: T }> {
   const remainingMs = deadlineMs - Date.now();
-  if (remainingMs <= 0) throw new Error(PROCUREMENT_TIMEOUT_MESSAGE);
+  if (remainingMs <= 0) throw new Error(timeoutMessage);
   const controller = new AbortController();
+  const externalSignal = init?.signal;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   let deadlineExpired = false;
   const timer = setTimeout(() => {
     deadlineExpired = true;
@@ -98,11 +131,22 @@ export async function fetchJsonBeforeDeadline<T = unknown>(
     const body = await response.json() as T;
     return { response, body };
   } catch (cause) {
-    if (deadlineExpired) throw new Error(PROCUREMENT_TIMEOUT_MESSAGE);
+    if (deadlineExpired) throw new Error(timeoutMessage);
     throw cause;
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
+}
+
+export function fetchJsonWithTimeout<T = unknown>(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+  timeoutMessage: string,
+  fetcher: typeof fetch = fetch,
+): Promise<{ response: Response; body: T }> {
+  return fetchJsonBeforeDeadline(input, init, Date.now() + timeoutMs, fetcher, timeoutMessage);
 }
 
 export function parseAgentCatalog(value: unknown): AgentCard[] {
@@ -154,13 +198,49 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
   };
 }
 
-export function parseButlerRun(value: unknown): Record<string, unknown> {
+function parseOutputReceipt(value: unknown, path: string): OutputReceipt {
+  const receipt = requiredRecord(value, path);
+  if (receipt.status !== "queued" && receipt.status !== "anchoring" && receipt.status !== "broadcast" && receipt.status !== "confirmed" && receipt.status !== "failed") {
+    throw new ButlerContractError(`${path}.status`, '"queued", "anchoring", "broadcast", "confirmed", or "failed"');
+  }
+  return {
+    receiptId: requiredString(receipt.receiptId, `${path}.receiptId`),
+    statusUrl: requiredString(receipt.statusUrl, `${path}.statusUrl`),
+    status: receipt.status,
+    attempts: requiredNumber(receipt.attempts, `${path}.attempts`),
+    createdAt: requiredString(receipt.createdAt, `${path}.createdAt`),
+    updatedAt: requiredString(receipt.updatedAt, `${path}.updatedAt`),
+    digest: requiredString(receipt.digest, `${path}.digest`),
+    anchorAddress: requiredString(receipt.anchorAddress, `${path}.anchorAddress`),
+    txRef: optionalString(receipt.txRef, `${path}.txRef`),
+    error: optionalString(receipt.error, `${path}.error`),
+    note: requiredString(receipt.note, `${path}.note`),
+  };
+}
+
+export function parseReceiptEnvelope(value: unknown): OutputReceipt {
+  const response = requiredRecord(value, "receipt response");
+  return parseOutputReceipt(response.outputAttestation, "receipt response.outputAttestation");
+}
+
+export function parseButlerRun(value: unknown): ButlerRun {
   const response = requiredRecord(value, "Butler response");
   const butler = requiredRecord(response.butler, "Butler response.butler");
   requiredString(butler.selectedAgent, "Butler response.butler.selectedAgent");
   requiredString(butler.label, "Butler response.butler.label");
   if (!("result" in response)) throw new ButlerContractError("Butler response.result", "an agent result");
-  return response;
+  let execution: ButlerRun["execution"];
+  if (response.execution !== undefined) {
+    const rawExecution = requiredRecord(response.execution, "Butler response.execution");
+    execution = {
+      requestId: requiredString(rawExecution.requestId, "Butler response.execution.requestId"),
+      durationMs: requiredNumber(rawExecution.durationMs, "Butler response.execution.durationMs"),
+    };
+  }
+  const outputAttestation = response.outputAttestation === undefined
+    ? undefined
+    : parseOutputReceipt(response.outputAttestation, "Butler response.outputAttestation");
+  return { ...response, result: response.result, execution, outputAttestation };
 }
 
 export function procurementEvidence(value: unknown): ProcurementEvidence {

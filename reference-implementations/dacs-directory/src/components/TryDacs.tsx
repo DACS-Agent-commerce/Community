@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AGENT_TIMEOUT_MESSAGE,
   ButlerContractError,
   fetchJsonBeforeDeadline,
+  fetchJsonWithTimeout,
   parseAgentCatalog,
   parseAgentInput,
   parseButlerRun,
   parseProcurementJob,
+  parseReceiptEnvelope,
   procurementEvidence,
   record,
   type AgentCard,
+  type OutputReceipt,
   type ProcurementEvent,
   type ProcurementJob,
 } from "./try-dacs-contract.js";
@@ -24,10 +28,26 @@ type Plan = {
 };
 
 const EXPLORER = "https://explorer.demos.sh";
+const AGENT_TIMEOUT_MS = 35_000;
+const RECEIPT_WATCH_TIMEOUT_MS = 2 * 60_000;
 
 function compact(value: unknown, head = 18, tail = 8): string {
   const text = String(value ?? "");
   return text.length > head + tail + 1 ? `${text.slice(0, head)}…${text.slice(-tail)}` : text;
+}
+
+function elapsedLabel(ms: number): string {
+  return ms < 10_000 ? `${(ms / 1_000).toFixed(1)}s` : `${Math.floor(ms / 1_000)}s`;
+}
+
+function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));
+    const timer = setTimeout(done, ms);
+    function done() { signal.removeEventListener("abort", aborted); resolve(); }
+    function aborted() { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); }
+    signal.addEventListener("abort", aborted, { once: true });
+  });
 }
 
 function ProcurementReport({ value, events }: { value: unknown; events: ProcurementEvent[] }) {
@@ -150,6 +170,13 @@ export default function TryDacs() {
   const [result, setResult] = useState<unknown>();
   const [procurementJob, setProcurementJob] = useState<ProcurementJob | null>(null);
   const [error, setError] = useState("");
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [receipt, setReceipt] = useState<OutputReceipt | null>(null);
+  const [receiptPolling, setReceiptPolling] = useState(false);
+  const [receiptMessage, setReceiptMessage] = useState("");
+  const runAbort = useRef<AbortController | null>(null);
+  const receiptAbort = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetch(`${BUTLER}/demo/butler/agents`)
@@ -160,7 +187,25 @@ export default function TryDacs() {
         : "The live agent network is temporarily unavailable."));
   }, []);
 
+  useEffect(() => {
+    if (!runStartedAt || (phase !== "running" && !receiptPolling)) return;
+    const update = () => setElapsedMs(Date.now() - runStartedAt);
+    update();
+    const timer = setInterval(update, 100);
+    return () => clearInterval(timer);
+  }, [phase, receiptPolling, runStartedAt]);
+
+  useEffect(() => () => {
+    runAbort.current?.abort();
+    receiptAbort.current?.abort();
+  }, []);
+
   const selected = useMemo(() => agents.find((agent) => agent.name === plan?.butler.selectedAgent), [agents, plan]);
+  const execution = record(record(result).execution);
+  const specialistDurationMs = typeof execution.durationMs === "number" ? execution.durationMs : undefined;
+  const receiptElapsedMs = receipt
+    ? Math.max(0, (receipt.status === "confirmed" || receipt.status === "failed" ? Date.parse(receipt.updatedAt) : Date.now()) - Date.parse(receipt.createdAt))
+    : 0;
   const activeIndex = phase === "idle" ? 0 : phase === "planning" ? 2 : phase === "ready" ? 2 : phase === "running" ? 3 : phase === "done" ? 4 : -1;
   const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
     ? procurementEvidence(result).overallAccepted
@@ -170,6 +215,73 @@ export default function TryDacs() {
     catch { return false; }
   }, [input]);
 
+  async function watchReceipt(initial: OutputReceipt) {
+    receiptAbort.current?.abort();
+    const controller = new AbortController();
+    receiptAbort.current = controller;
+    setReceiptPolling(true); setReceiptMessage("");
+    let current = initial;
+    const deadline = Date.now() + RECEIPT_WATCH_TIMEOUT_MS;
+    try {
+      while (current.status !== "confirmed" && current.status !== "failed") {
+        if (Date.now() >= deadline) {
+          setReceiptMessage("Receipt confirmation is taking longer than two minutes. The result is safe; you can check again without rerunning the agent.");
+          return;
+        }
+        await waitWithSignal(Math.min(1_500, deadline - Date.now()), controller.signal);
+        const { response, body } = await fetchJsonBeforeDeadline(
+          new URL(current.statusUrl, `${BUTLER}/`),
+          { signal: controller.signal },
+          deadline,
+          fetch,
+          "Receipt status checking exceeded two minutes.",
+        );
+        if (!response.ok) throw new Error(message(body));
+        current = parseReceiptEnvelope(body);
+        setReceipt(current);
+      }
+      if (current.status === "failed") setReceiptMessage(current.error ?? "Receipt anchoring failed safely. Retry will reuse the same receipt and wallet queue.");
+    } catch (cause) {
+      if ((cause as Error).name !== "AbortError") setReceiptMessage((cause as Error).message);
+    } finally {
+      if (receiptAbort.current === controller) {
+        receiptAbort.current = null;
+        setReceiptPolling(false);
+      }
+    }
+  }
+
+  async function retryReceipt() {
+    if (!receipt) return;
+    try {
+      let next = receipt;
+      if (receipt.status === "failed") {
+        const { response, body } = await fetchJsonWithTimeout(
+          new URL(`${receipt.statusUrl}/retry`, `${BUTLER}/`),
+          { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+          15_000,
+          "The receipt retry request timed out.",
+        );
+        if (!response.ok) throw new Error(message(body));
+        next = parseReceiptEnvelope(body);
+        setReceipt(next);
+      }
+      void watchReceipt(next);
+    } catch (cause) {
+      setReceiptMessage((cause as Error).message);
+    }
+  }
+
+  function cancelRun() {
+    runAbort.current?.abort();
+  }
+
+  function cancelReceiptWatch() {
+    receiptAbort.current?.abort();
+    setReceiptPolling(false);
+    setReceiptMessage("Stopped checking in this browser. The gateway will continue nonce-safe anchoring in the background.");
+  }
+
   async function runAgent() {
     if (!plan) return;
     let parsed: Record<string, unknown>;
@@ -178,7 +290,11 @@ export default function TryDacs() {
       setError(cause instanceof SyntaxError ? "The job details are not valid JSON yet." : (cause as Error).message);
       return;
     }
-    setPhase("running"); setError(""); setResult(undefined);
+    runAbort.current?.abort(); receiptAbort.current?.abort();
+    const controller = new AbortController();
+    runAbort.current = controller;
+    setPhase("running"); setError(""); setResult(undefined); setReceipt(null); setReceiptMessage("");
+    setRunStartedAt(Date.now()); setElapsedMs(0);
     try {
       if (plan.butler.selectedAgent === "procurement-butler") {
         const deadline = Date.now() + 12 * 60_000;
@@ -187,7 +303,7 @@ export default function TryDacs() {
         // verifies the signed DACS-1 artifact before negotiation.
         const request = { ...parsed };
         try {
-          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>("/api/dacs/listings?rail=pay-dem&limit=100", undefined, deadline);
+          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>("/api/dacs/listings?rail=pay-dem&limit=100", { signal: controller.signal }, deadline);
           if (catalog.ok) {
             const auditor = body.listings?.find((item) => item.listingId === "audit-negotiator" && item.offering?.negotiation?.includes("rfq") && /auditor/i.test(item.offering?.title ?? ""));
             const ref = auditor?.anchor?.locator;
@@ -195,15 +311,15 @@ export default function TryDacs() {
           }
         } catch { /* gateway will derive and verify the configured Auditor slot */ }
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: controller.signal,
         }, deadline);
         if (!start.ok) throw new Error(message(startBody));
         const started = parseProcurementJob(startBody);
         setProcurementJob(started);
         let current = started;
         while (current.status === "running" && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, Math.max(0, deadline - Date.now()))));
-          const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, undefined, deadline);
+          await waitWithSignal(Math.min(2_000, Math.max(0, deadline - Date.now())), controller.signal);
+          const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, { signal: controller.signal }, deadline);
           if (!poll.ok) throw new Error(message(pollBody));
           current = parseProcurementJob(pollBody); setProcurementJob(current);
         }
@@ -212,19 +328,29 @@ export default function TryDacs() {
         setResult(current.result); setPhase("done");
         return;
       }
-      const res = await fetch(`${BUTLER}/demo/butler`, {
+      const { response: res, body } = await fetchJsonWithTimeout(`${BUTLER}/demo/butler`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ goal, agent: plan.butler.selectedAgent, input: parsed }),
-      });
-      const body: unknown = await res.json();
+        signal: controller.signal,
+      }, AGENT_TIMEOUT_MS, AGENT_TIMEOUT_MESSAGE);
       if (!res.ok) throw new Error(message(body));
-      setResult(parseButlerRun(body)); setPhase("done");
+      const completed = parseButlerRun(body);
+      setResult(completed); setPhase("done");
+      if (completed.outputAttestation) {
+        setReceipt(completed.outputAttestation);
+        void watchReceipt(completed.outputAttestation);
+      }
     } catch (cause) {
-      setError((cause as Error).message); setPhase("error");
+      const cancelled = (cause as Error).name === "AbortError";
+      setError(cancelled ? "Run cancelled in this browser. No result was accepted; you can retry the same bounded job." : (cause as Error).message);
+      setPhase("error");
+    } finally {
+      if (runAbort.current === controller) runAbort.current = null;
     }
   }
 
   function useExample(agent: AgentCard) {
+    runAbort.current?.abort(); receiptAbort.current?.abort();
     setGoal(agent.exampleGoal);
     setPlan({
       butler: {
@@ -238,7 +364,7 @@ export default function TryDacs() {
       inputNote: "This starts from the agent's safe fixture. The gateway applies specialist validation before execution.",
     });
     setInput(JSON.stringify(agent.exampleInput, null, 2));
-    setResult(undefined); setProcurementJob(null); setPhase("ready"); setError("");
+    setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); setPhase("ready"); setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -259,14 +385,19 @@ export default function TryDacs() {
             <div className="bubble butler"><span>Butler</span><p>Welcome. Pick one of our test agents below and I’ll walk you through exactly what it does and what DACS verifies.</p></div>
             {goal && phase !== "idle" && <div className="bubble human"><span>You</span><p>{goal}</p></div>}
             {plan && <div className="bubble butler"><span>Butler</span><p><strong>{plan.butler.label}</strong> is ready. {plan.butler.rationale}</p><div className="reasoning-chip">{plan.butler.selectionEngine}</div></div>}
-            {phase === "done" && <div className="bubble butler"><span>Butler</span><p>The specialist finished. The result below is now ready to inspect; DACS keeps the recommendation, execution and verification boundaries visible.</p></div>}
+            {phase === "done" && <div className="bubble butler"><span>Butler</span><p>The specialist finished. Its result is ready now; the separate receipt status below shows any on-chain anchoring still completing in the background.</p></div>}
             {error && <div className="bubble error"><span>Stopped safely</span><p>{error}</p></div>}
           </div>
 
-          {phase === "idle" || phase === "error" ? (
+          {phase === "idle" || (phase === "error" && !plan) ? (
             <div className="agent-picker">
               <div className="picker-head"><strong>Choose a test agent</strong><span>{agents.length} available</span></div>
               <div className="picker-grid">{agents.map((agent) => <button key={agent.name} onClick={() => useExample(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{agent.summary}</small></div><i>→</i></button>)}</div>
+            </div>
+          ) : phase === "error" && plan ? (
+            <div className="job-box recovery-box">
+              <div><strong>{plan.butler.label} stopped safely</strong><small>The same validated fixture is still available.</small></div>
+              <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); }}>Choose another agent</button><button className="btn try-primary" onClick={runAgent}>Retry this agent <span>→</span></button></div>
             </div>
           ) : plan && phase === "ready" ? (
             <div className="job-box">
@@ -275,8 +406,8 @@ export default function TryDacs() {
               <div className="job-actions"><button className="ghost-btn" onClick={() => setPhase("idle")}>Start over</button><button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid}>Run this agent <span>→</span></button></div>
             </div>
           ) : phase === "running" && plan?.butler.selectedAgent === "procurement-butler" ? (
-            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING</div><small>Keep this page open — chain confirmations appear here live.</small></div><div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div></div>
-          ) : phase === "running" ? <div className="job-box working-box"><span className="live-pulse" /> Specialist is working…</div>
+            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING · {elapsedLabel(elapsedMs)}</div><small>Keep this page open — chain confirmations appear here live.</small></div><div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Cancel this run</button></div></div>
+          ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 35s deadline</small></div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
           : null}
         </div>
 
@@ -291,7 +422,7 @@ export default function TryDacs() {
         </aside>
       </section>
 
-      {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className={`badge ${selected?.name === "procurement-butler" && !procurementAccepted ? "err" : "ok"}`}>{selected?.name === "procurement-butler" ? (procurementAccepted ? "verified" : "verification incomplete") : "completed"}</span><h2>{selected?.label ?? "Agent"} result</h2></div><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); }}>Try another goal</button></div>{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
+      {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className={`badge ${selected?.name === "procurement-butler" && !procurementAccepted ? "err" : "ok"}`}>{selected?.name === "procurement-butler" ? (procurementAccepted ? "verified" : "verification incomplete") : "completed"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another goal</button></div>{receipt && <div className={`receipt-status receipt-${receipt.status}`}><div><span className={receiptPolling ? "live-pulse" : "receipt-dot"} /><strong>On-chain receipt: {receipt.status}</strong><small>{receipt.note} · {elapsedLabel(receiptElapsedMs)} · attempt {receipt.attempts}/3</small>{receiptMessage && <p>{receiptMessage}</p>}</div><div className="receipt-actions">{receipt.txRef && <a className="ghost-btn" href={`${EXPLORER}/tx/${receipt.txRef}`} target="_blank" rel="noreferrer">View transaction ↗</a>}{receiptPolling ? <button className="ghost-btn" onClick={cancelReceiptWatch}>Stop checking</button> : receipt.status !== "confirmed" && <button className="ghost-btn" onClick={retryReceipt}>{receipt.status === "failed" ? "Retry anchoring" : "Check again"}</button>}</div></div>}{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
 
       <section className="try-agents"><div className="try-section-head"><div><span>WHAT YOU CAN TEST</span><h2>Nine bounded agent demonstrations</h2></div><p>Each test uses a safe, validated fixture. The Butler supervises execution; it does not invent arbitrary jobs or access private data.</p></div><div className="try-agent-grid">{agents.slice(0, 6).map((agent, index) => <button key={agent.name} onClick={() => useExample(agent)}><span>0{index + 1}</span><strong>{agent.label}</strong><p>{agent.exampleGoal}</p><i>Select this agent →</i></button>)}</div></section>
     </div>
