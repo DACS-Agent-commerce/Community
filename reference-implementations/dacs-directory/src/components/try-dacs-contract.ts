@@ -38,15 +38,25 @@ export type ProcurementEvidence = {
 
 export type ReceiptStatus = "queued" | "anchoring" | "broadcast" | "confirmed" | "failed";
 
+/**
+ * The gateway publishes two attestation shapes: the asynchronous receipt
+ * (receiptId + statusUrl, pollable/retryable) and the synchronous
+ * LIVE-ANCHOR-storage attestation (digest + anchor + txRef, no status URL).
+ * Both carry status/digest/anchorAddress/note; polling fields are optional
+ * and the UI only polls or retries when a statusUrl is present.
+ */
 export type OutputReceipt = {
-  receiptId: string;
-  statusUrl: string;
+  receiptId?: string;
+  statusUrl?: string;
   status: ReceiptStatus;
-  attempts: number;
-  createdAt: string;
-  updatedAt: string;
+  attempts?: number;
+  createdAt?: string;
+  updatedAt?: string;
   digest: string;
   anchorAddress: string;
+  anchorName?: string;
+  scheme?: string;
+  committedBy?: string;
   txRef?: string;
   error?: string;
   note: string;
@@ -198,20 +208,28 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
   };
 }
 
+function optionalNumber(value: unknown, path: string): number | undefined {
+  if (value === undefined) return undefined;
+  return requiredNumber(value, path);
+}
+
 function parseOutputReceipt(value: unknown, path: string): OutputReceipt {
   const receipt = requiredRecord(value, path);
   if (receipt.status !== "queued" && receipt.status !== "anchoring" && receipt.status !== "broadcast" && receipt.status !== "confirmed" && receipt.status !== "failed") {
     throw new ButlerContractError(`${path}.status`, '"queued", "anchoring", "broadcast", "confirmed", or "failed"');
   }
   return {
-    receiptId: requiredString(receipt.receiptId, `${path}.receiptId`),
-    statusUrl: requiredString(receipt.statusUrl, `${path}.statusUrl`),
+    receiptId: optionalString(receipt.receiptId, `${path}.receiptId`),
+    statusUrl: optionalString(receipt.statusUrl, `${path}.statusUrl`),
     status: receipt.status,
-    attempts: requiredNumber(receipt.attempts, `${path}.attempts`),
-    createdAt: requiredString(receipt.createdAt, `${path}.createdAt`),
-    updatedAt: requiredString(receipt.updatedAt, `${path}.updatedAt`),
+    attempts: optionalNumber(receipt.attempts, `${path}.attempts`),
+    createdAt: optionalString(receipt.createdAt, `${path}.createdAt`),
+    updatedAt: optionalString(receipt.updatedAt, `${path}.updatedAt`),
     digest: requiredString(receipt.digest, `${path}.digest`),
     anchorAddress: requiredString(receipt.anchorAddress, `${path}.anchorAddress`),
+    anchorName: optionalString(receipt.anchorName, `${path}.anchorName`),
+    scheme: optionalString(receipt.scheme, `${path}.scheme`),
+    committedBy: optionalString(receipt.committedBy, `${path}.committedBy`),
     txRef: optionalString(receipt.txRef, `${path}.txRef`),
     error: optionalString(receipt.error, `${path}.error`),
     note: requiredString(receipt.note, `${path}.note`),

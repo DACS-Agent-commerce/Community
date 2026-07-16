@@ -198,3 +198,32 @@ test("only reports acceptance when every explicit verification signal is present
     negotiation: { ...acceptedReport.negotiation, buyerSignature: undefined, sellerSignature: undefined },
   }).overallAccepted, false, "both negotiation signatures are required for acceptance");
 });
+
+test("synchronous LIVE-ANCHOR attestations parse without polling fields", () => {
+  // Exact shape observed from the live gateway (2026-07-16): no receiptId,
+  // statusUrl, attempts, or timestamps — evidence is final in the response.
+  const run = parseButlerRun({
+    butler: { selectedAgent: "site-auditor", label: "Site Auditor" },
+    result: { ok: true },
+    execution: { requestId: "r-1", durationMs: 1200 },
+    outputAttestation: {
+      scheme: "LIVE-ANCHOR-storage",
+      digest: "ee2c3f4063c12d4c675ecd1ce00580d550162d70d31bab08211e0b020bbcbf96",
+      anchorName: "dacs:out:site-auditor:152d9787-006a-4577-8350-b0d1c86f6bc4",
+      anchorAddress: "stor-fe71b82554c98045d0682069bcf6b85e83663703",
+      txRef: "9c01292740a6f510ce190accd831259a83fab8582e227afff951c0670d093701",
+      committedBy: "0xbe3a1915bf109b55243c00e4b9ec92014f82d2b7faeccac8f66df7af05f7329c",
+      status: "broadcast",
+      note: "The result digest was broadcast to Demos StorageProgram.",
+    },
+  });
+  assert.equal(run.outputAttestation?.status, "broadcast");
+  assert.equal(run.outputAttestation?.statusUrl, undefined);
+  assert.equal(run.outputAttestation?.scheme, "LIVE-ANCHOR-storage");
+  assert.ok(run.outputAttestation?.txRef);
+  // Digest/anchor/note remain mandatory in both shapes.
+  assert.throws(() => parseButlerRun({
+    butler: { selectedAgent: "x", label: "X" }, result: {},
+    outputAttestation: { status: "broadcast", note: "n" },
+  }));
+});
