@@ -52,6 +52,21 @@ strictly party-bound bundles with verified references contribute to reputation.
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
 
+### Fixture agent: Counterparty Evidence Desk
+
+For no-spend development and demo checkpoints, seed a fixture-backed service into the
+configured catalog data directory:
+
+```bash
+npm run seed:counterparty-fixture
+npm run dev
+```
+
+This adds one local `Counterparty Evidence Desk` listing that serves a fixture machine
+contract and a runnable receipt verifier UI. The page is labelled `fixture listing` /
+`not chain anchored`; it does not claim source truth, certification, sanctions
+clearance, payment readiness, settlement, or production chain inclusion.
+
 ### Railway deployment
 
 The included `railway.json` builds the pinned SDK, performs the production Next build,

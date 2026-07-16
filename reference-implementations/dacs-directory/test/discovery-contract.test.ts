@@ -34,8 +34,12 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  assert.ok(listingSummarySchema.properties.artifactProfile.enum.includes("fixture-listing"));
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
   assert.ok(filters.includes("identityTier"));
+  const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");
+  assert.ok(profile?.schema.enum);
+  assert.ok(profile.schema.enum.includes("fixture-listing"));
   for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }
