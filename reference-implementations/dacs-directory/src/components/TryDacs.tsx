@@ -152,6 +152,12 @@ const JOURNEY = [
   ["verify", "Verify", "Return the result with its evidence and signed guarantees."],
 ] as const;
 
+type PhaseOutput = {
+  state: "pending" | "active" | "complete" | "warning";
+  summary: string;
+  detail?: string;
+};
+
 function message(value: unknown): string {
   if (value && typeof value === "object" && "error" in value) {
     const error = (value as { error?: string | { message?: string } }).error;
@@ -206,7 +212,7 @@ export default function TryDacs() {
   const receiptElapsedMs = receipt
     ? Math.max(0, (receipt.status === "confirmed" || receipt.status === "failed" ? Date.parse(receipt.updatedAt) : Date.now()) - Date.parse(receipt.createdAt))
     : 0;
-  const activeIndex = phase === "idle" ? 0 : phase === "planning" ? 2 : phase === "ready" ? 2 : phase === "running" ? 3 : phase === "done" ? 4 : -1;
+  const activeIndex = phase === "idle" ? 0 : phase === "planning" ? 2 : phase === "ready" || phase === "running" ? 3 : phase === "done" ? 4 : -1;
   const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
     ? procurementEvidence(result).overallAccepted
     : false;
@@ -214,6 +220,42 @@ export default function TryDacs() {
     try { parseAgentInput(JSON.parse(input) as unknown); return true; }
     catch { return false; }
   }, [input]);
+  const verificationComplete = phase === "done" && (selected?.name === "procurement-butler"
+    ? procurementAccepted
+    : receipt === null || receipt.status === "confirmed");
+  const parsedInput = useMemo(() => {
+    try { return parseAgentInput(JSON.parse(input) as unknown); }
+    catch { return undefined; }
+  }, [input]);
+  const resultPayload = selected?.name === "procurement-butler" ? result : record(result).result;
+  const resultFields = Object.keys(record(resultPayload));
+  const phaseOutputs: PhaseOutput[] = [
+    goal
+      ? { state: "complete", summary: "Goal captured", detail: goal }
+      : { state: "active", summary: "Waiting for an agent choice" },
+    agents.length
+      ? { state: "complete", summary: `${agents.length} live specialists discovered`, detail: agents.map((agent) => agent.label).join(", ") }
+      : { state: "active", summary: "Reading the live catalog" },
+    plan
+      ? { state: "complete", summary: plan.butler.label, detail: plan.butler.rationale }
+      : { state: "pending", summary: "No specialist selected yet" },
+    phase === "running"
+      ? { state: "active", summary: `Specialist running · ${elapsedLabel(elapsedMs)}`, detail: `Bounded by a ${plan?.butler.selectedAgent === "procurement-butler" ? "12-minute full-flow" : "35-second specialist"} deadline.` }
+      : phase === "done"
+        ? { state: "complete", summary: specialistDurationMs === undefined ? "Specialist result returned" : `Result returned in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
+        : phase === "error"
+          ? { state: "warning", summary: "Execution stopped safely", detail: error }
+          : parsedInput
+            ? { state: "complete", summary: `Input validated · ${Object.keys(parsedInput).length} fields`, detail: Object.keys(parsedInput).join(", ") || "Empty bounded input object" }
+            : { state: "pending", summary: "Waiting for valid job details" },
+    selected?.name === "procurement-butler" && phase === "done"
+      ? { state: procurementAccepted ? "complete" : "warning", summary: procurementAccepted ? "Full evidence bundle accepted" : "Verification incomplete", detail: `${procurementJob?.events.length ?? 0} lifecycle events recorded` }
+      : receipt
+        ? { state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active", summary: `Receipt ${receipt.status}`, detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)}` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}` }
+        : phase === "done"
+          ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt." }
+          : { state: "pending", summary: "Waiting for the specialist result" },
+  ];
 
   async function watchReceipt(initial: OutputReceipt) {
     receiptAbort.current?.abort();
@@ -412,13 +454,14 @@ export default function TryDacs() {
         </div>
 
         <aside className="journey" aria-label="DACS execution journey">
-          <div className="journey-head"><span>WHAT IS HAPPENING</span><span>{phase === "done" ? "COMPLETE" : "LIVE"}</span></div>
+          <div className="journey-head"><span>PHASE OUTPUTS</span><span>{verificationComplete ? "COMPLETE" : "LIVE"}</span></div>
           {JOURNEY.map(([key, label, description], index) => {
-            const done = phase === "done" || (activeIndex > index && phase !== "error");
-            const active = index === activeIndex && phase !== "error";
-            return <div className={`journey-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={key}><span className="journey-index">{done ? "✓" : `0${index + 1}`}</span><div><strong>{label}</strong><p>{description}</p></div><i /></div>;
+            const output = phaseOutputs[index]!;
+            const done = (activeIndex > index && phase !== "error") || (index === 4 && verificationComplete);
+            const active = index === activeIndex && phase !== "error" && !done;
+            return <div className={`journey-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={key}><span className="journey-index">{done ? "✓" : `0${index + 1}`}</span><div><strong>{label}</strong><p>{description}</p><div className={`phase-output ${output.state}`}><span>{output.state}</span><b>{output.summary}</b>{output.detail && <small>{output.detail}</small>}</div></div><i /></div>;
           })}
-          <div className="journey-note"><strong>Human view</strong><p>The simple story stays visible. Chain references, signatures and raw JSON remain available below when you want to inspect them.</p></div>
+          <div className="journey-note"><strong>Evidence, not theatre</strong><p>Each box reports data already returned by that phase. Pending work stays visibly pending; full artifacts remain inspectable below.</p></div>
         </aside>
       </section>
 
