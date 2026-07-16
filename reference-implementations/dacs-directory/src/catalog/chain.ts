@@ -25,6 +25,8 @@ export interface AnchorRecord {
   data: Record<string, unknown>;
   owner?: string;
   programName?: string;
+  /** Storage-subsystem write-apply metadata; the SR-2 anchor time source. */
+  createdAt?: unknown;
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
@@ -40,9 +42,10 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
       data?: Record<string, unknown>;
       owner?: string;
       programName?: string;
+      createdAt?: unknown;
     };
     return json?.success && json.data != null
-      ? { data: json.data, owner: json.owner, programName: json.programName }
+      ? { data: json.data, owner: json.owner, programName: json.programName, createdAt: json.createdAt }
       : null;
   } catch {
     return null;

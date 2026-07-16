@@ -182,7 +182,12 @@ const recordArtifactTransaction = db.transaction((observation: StoredArtifactObs
     VALUES (@locator,@kind,@profile,@owner,@contentHash,@observedAt,@anchorTime,@status,@dataJson)
     ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind, profile=excluded.profile, owner=excluded.owner,
       content_hash=COALESCE(excluded.content_hash,artifacts.content_hash), observed_at=excluded.observed_at,
-      anchor_time=COALESCE(excluded.anchor_time,artifacts.anchor_time), status=excluded.status,
+      -- Keep the EARLIEST anchor time observed for a locator; a re-observation
+      -- may only lower it, never raise it.
+      anchor_time=CASE
+        WHEN artifacts.anchor_time IS NULL THEN excluded.anchor_time
+        WHEN excluded.anchor_time IS NULL THEN artifacts.anchor_time
+        ELSE MIN(artifacts.anchor_time, excluded.anchor_time) END, status=excluded.status,
       data_json=COALESCE(excluded.data_json,artifacts.data_json), error_code=NULL, error_message=NULL,
       retry_count=0, next_retry_at=NULL`)
     .run(observation);
@@ -232,6 +237,23 @@ export const loadRetryableArtifacts = (now = Date.now()): string[] =>
   (db.prepare("SELECT locator FROM artifacts WHERE status='retry' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
+
+/**
+ * Locators of readable artifacts still missing an anchor time. Drives the
+ * resumable historical backfill: a bounded batch each pass, oldest observation
+ * first, until none remain. Only successfully-observed rows qualify (retry /
+ * dead-letter rows have no readable record to source createdAt from).
+ */
+export const loadUnanchoredArtifacts = (limit = 200): string[] =>
+  (db.prepare("SELECT locator FROM artifacts WHERE anchor_time IS NULL AND status='observed' ORDER BY observed_at ASC LIMIT ?")
+    .all(Math.max(1, Math.min(1000, limit))) as Array<{ locator: string }>).map((row) => row.locator);
+
+/** Set a locator's anchor time, keeping the earliest (never raising it). */
+export function backfillAnchorTime(locator: string, anchorTime: number): void {
+  db.prepare(`UPDATE artifacts SET anchor_time = CASE
+      WHEN anchor_time IS NULL THEN @anchorTime ELSE MIN(anchor_time, @anchorTime) END
+    WHERE locator = @locator`).run({ locator, anchorTime });
+}
 
 export function beginScanRun(fromTx: number): number {
   return Number(db.prepare("INSERT INTO scan_runs(started_at,from_tx,status) VALUES (?,?,?)").run(Date.now(), fromTx, "running").lastInsertRowid);

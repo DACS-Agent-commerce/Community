@@ -5,7 +5,8 @@
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { scanChain } from "./scan";
+import { scanChain, parseAnchorTimestamp } from "./scan";
+import { readAnchorRecord } from "./chain";
 import { crawlDomains } from "./wellknown";
 import {
   loadCatalog,
@@ -17,6 +18,8 @@ import {
   beginScanRun,
   finishScanRun,
   loadRetryableArtifacts,
+  loadUnanchoredArtifacts,
+  backfillAnchorTime,
   recordArtifact,
   recordArtifactFailure,
 } from "./store";
@@ -87,6 +90,22 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   for (const observation of scan.observations) recordArtifact(observation);
   for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
+
+  // Historical backfill: artifacts observed before anchor times were recorded
+  // (or before this fix) carry anchor_time = NULL and fall back to finalisedAt.
+  // Re-read a bounded batch each pass — oldest first — and set the SR-2 anchor
+  // time from the storage record's createdAt. Resumable: successive passes
+  // drain the remainder until none are left.
+  const configuredBackfill = Number(process.env.DACS_ANCHOR_BACKFILL_BATCH ?? 200);
+  const backfillBudget = Number.isSafeInteger(configuredBackfill) && configuredBackfill >= 0 ? configuredBackfill : 200;
+  const unanchored = backfillBudget > 0 ? loadUnanchoredArtifacts(backfillBudget) : [];
+  let backfilled = 0;
+  for (const locator of unanchored) {
+    const anchorTime = parseAnchorTimestamp((await readAnchorRecord(locator))?.createdAt);
+    if (anchorTime !== undefined) { backfillAnchorTime(locator, anchorTime); backfilled += 1; }
+  }
+  if (unanchored.length) log(`anchor backfill: ${backfilled}/${unanchored.length} resolved (batch of ${backfillBudget})`);
+
   state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
   state.lastChainTip = scan.chainTip;
   state.schemaVersion = 4;

@@ -100,6 +100,7 @@ vendor directory.
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
 | `DACS_SCAN_REPLAY_DEPTH` | No | Finalized transaction overlap replayed on every pass; defaults to `2` |
+| `DACS_ANCHOR_BACKFILL_BATCH` | No | Artifacts per pass whose missing SR-2 anchor time is backfilled from chain; defaults to `200`, `0` disables |
 | `DACS_RECIPE_POLICIES` | For tier elevation | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy fails closed to `self-declared` |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |

@@ -47,8 +47,38 @@ interface StorageRead {
   success?: boolean;
   owner?: string;
   programName?: string;
+  createdAt?: unknown;
   data?: Record<string, unknown>;
 }
+
+/**
+ * The SR-2 anchor time for a storage program, in ms since epoch. This is taken
+ * from the storage record's own `createdAt` (write-apply metadata maintained by
+ * the storage subsystem), NOT from a transaction's producer-supplied timestamp:
+ *   - it is intrinsic to this exact locator, so an unrelated or failed
+ *     transaction that merely references the address cannot influence it;
+ *   - it reflects when the write was applied, not a value the publisher chose.
+ * Accepts an ISO-8601 string (the node's form) or a numeric/decimal-string ms
+ * value; anything malformed yields undefined (the record keeps no anchor time
+ * and reputation falls back to finalisedAt).
+ */
+export const parseAnchorTimestamp = (value: unknown): number | undefined => {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d{1,15}$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : undefined;
+    }
+    // Strict ISO-8601 only — Date.parse is otherwise lenient enough to turn
+    // arbitrary strings into timestamps.
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed)) {
+      const parsed = Date.parse(trimmed);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    }
+  }
+  return undefined;
+};
 
 async function readStorage(address: string, attempts = 3): Promise<StorageRead | null> {
   for (let attempt = 1; attempt <= attempts; attempt++) try {
@@ -123,7 +153,6 @@ export async function scanChain(
   const since = nonNegativeInt(opts.sinceTxId, 0);
   const addresses = new Set<string>();
   for (const locator of opts.retryLocators ?? []) if (/^stor-[0-9a-f]{40}$/.test(locator)) addresses.add(locator);
-  const addressTimes = new Map<string, number>();
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
@@ -153,11 +182,10 @@ export async function scanChain(
     const freshIds = fresh.map((t) => t.id).filter((id): id is number => typeof id === "number");
     highestTxId = Math.max(highestTxId, ...(freshIds.length ? freshIds : [highestTxId]));
     scanned += fresh.length;
-    for (const tx of fresh) {
-      const inTx = new Set<string>(); collectStorageAddresses(tx, inTx);
-      const timestamp = typeof (tx as { timestamp?: unknown }).timestamp === "number" ? (tx as { timestamp: number }).timestamp : undefined;
-      for (const address of inTx) { addresses.add(address); if (timestamp !== undefined && !addressTimes.has(address)) addressTimes.set(address, timestamp); }
-    }
+    // Transactions are only a DISCOVERY signal for which storage addresses to
+    // read; their producer-set timestamps are never used for anchoring. The
+    // authoritative write time comes from each storage record itself below.
+    for (const tx of fresh) collectStorageAddresses(tx, addresses);
     if (ids.length === 0) break;
     const lowest = Math.min(...ids);
     if (lowest <= since + 1 || lowest <= 1) {
@@ -212,7 +240,10 @@ export async function scanChain(
       bundleOwners.set(name.slice("dacs5:bundle:".length), { address, owner: read.owner });
     }
     observations.push({ locator: address, kind: artifactKind, profile: currentListing || currentBundle ? "dacs-v0.1" : "legacy-sdk-v0.1", owner: read.owner,
-      observedAt: Date.now(), anchorTime: addressTimes.get(address), data });
+      // A successful storage read IS a confirmed write targeting this locator;
+      // its createdAt is the SR-2 anchor time (a failed/unrelated tx never
+      // produces a readable record, so it can contribute nothing here).
+      observedAt: Date.now(), anchorTime: parseAnchorTimestamp(read.createdAt), data });
   }
 
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
