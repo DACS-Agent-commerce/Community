@@ -373,6 +373,8 @@ main { max-width: 1200px; }
 .detail-list > div { display: grid; grid-template-columns: 120px 1fr; gap: 20px; padding: 12px 0; border-top: 1px solid var(--border); }
 .detail-list dt { color: var(--text-muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .detail-list dd { font-size: 0.88rem; font-weight: 600; }
+.detail-list.compact > div { grid-template-columns: 120px minmax(0, 1fr); }
+.detail-list.compact dd { overflow-wrap: anywhere; }
 .trust-checks { display: grid; gap: 16px; list-style: none; }
 .trust-checks li { display: flex; align-items: flex-start; gap: 11px; }
 .trust-checks p { color: var(--text-secondary); font-size: 0.78rem; }
@@ -408,9 +410,15 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .verification-summary { margin: 16px 0; padding: 20px; border-radius: var(--radius-card); border: 1px solid; }
 .verification-summary.ok { background: var(--green-soft); border-color: var(--green-border); color: var(--green-strong); }
 .verification-summary.limited { background: var(--cyan-soft); border-color: var(--cyan-border); color: var(--cyan-strong); }
+.verification-summary.warn { background: #fef3c7; border-color: rgba(217, 119, 6, 0.28); color: #92400e; }
 .verification-summary.err { background: var(--red-soft); border-color: var(--red-border); color: var(--red-strong); }
 .verification-summary h3 { font-size: 1.1rem; }
 .verification-summary p { margin-top: 4px; font-size: 0.84rem; }
+.counterparty-runner { margin-top: 20px; }
+.run-output { margin-top: 16px; display: grid; gap: 14px; }
+.verify-checks { display: grid; gap: 12px; list-style: none; }
+.verify-checks li { display: flex; align-items: flex-start; gap: 11px; }
+.verify-checks p { color: var(--text-secondary); font-size: 0.78rem; overflow-wrap: anywhere; }
 .lifecycle-demo { margin-top: 22px; border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; background: var(--bg-card); }
 .lifecycle-tabs { display: grid; grid-template-columns: repeat(5, 1fr); border-bottom: 1px solid var(--border); }
 .lifecycle-tabs button { display: grid; gap: 3px; padding: 14px 8px; border: 0; border-right: 1px solid var(--border); background: var(--bg-subtle); color: var(--text-secondary); cursor: pointer; font-size: 0.76rem; font-weight: 700; }

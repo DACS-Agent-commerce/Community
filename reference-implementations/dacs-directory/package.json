@@ -15,6 +15,7 @@
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:seed": "tsx --test test/seed-smoke.test.ts",
     "index": "tsx src/catalog/reindex.ts",
+    "seed:counterparty-fixture": "tsx scripts/seed-counterparty-fixture.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

@@ -2,6 +2,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
 import { readAnchor } from "@/src/catalog/chain";
+import {
+  readCounterpartyEvidenceFixtureAnchor,
+  verifyCounterpartyEvidenceFixtureListing,
+} from "@/src/catalog/counterpartyEvidence";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
@@ -17,6 +21,20 @@ export async function GET(
     .sellers.flatMap((s) => s.listings)
     .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
+  if (hit.anchor.kind === "fixture") {
+    const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
+    if (!fixture || !verifyCounterpartyEvidenceFixtureListing(fixture, hit)) {
+      return NextResponse.json({ error: "fixture listing failed verification" }, { status: 502 });
+    }
+    return catalogJson(req, fixture, {
+      lastModified: hit.catalogObservedAt,
+      links: [
+        { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+        { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+        { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+      ],
+    });
+  }
   const raw = await readAnchor(hit.anchor.locator);
   const verified = raw ? await verifyListing(raw) : null;
   if (!verified || verified.contentHash !== hit.contentHash) {
