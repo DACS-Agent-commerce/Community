@@ -29,9 +29,7 @@ export async function GET(
     reputation: {
       profile: "dacs-5-scalar-derivation-v1",
       ...seller.reputation,
-      observedTransactionalVolume: [],
-      transactionCountByCurrency: [],
-      limitation: "Two-sided reconciliation, perspective/fault metrics and neutral exclusions are applied. Rating and volume records are not yet resolved, so those fields remain null/empty.",
+      limitation: "Two-sided reconciliation, perspective/fault metrics, neutral exclusions, resolved ratings, and exact-decimal volume are applied over chain-verified bundles. averageBuyerRating is intentionally null (these records are seller-scoped). Completeness is best-effort: no oracle guarantees every relevant bundle is present.",
     },
     deals: seller.deals,
   }, {
