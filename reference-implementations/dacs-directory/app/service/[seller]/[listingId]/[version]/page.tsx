@@ -107,7 +107,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <div className="eyebrow">the offer</div>
           <h2 id="offer-heading" className="card-section-title">What to expect</h2>
           <dl className="detail-list">
-            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.offering.negotiation)}</dd></div>
+            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.pricing, listing.offering.negotiation)}</dd></div>
             <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}${listing.pricing.unit ? ` · ${listing.pricing.unit}` : ""}` : "Not published"}</dd></div>
             <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
             <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>

@@ -11,8 +11,31 @@ export const NEGOTIATION_LABELS: Record<string, string> = {
 };
 export const negotiationLabel = (n: string) =>
   NEGOTIATION_LABELS[n] ?? n.replace(/^negotiate-/, "").replace(/-/g, " ");
-export const pricingModelLabel = (negotiation: string[] | undefined) =>
-  negotiation?.length ? negotiation.map(negotiationLabel).join(", ") : "Not stated";
+
+/** The signed pricing MODEL (DACS-1 §8.9) — orthogonal to the negotiation pattern. */
+export const PRICING_MODEL_LABELS: Record<string, string> = {
+  fixed: "fixed price",
+  negotiable: "negotiable band",
+  auction: "sealed-envelope auction",
+  metered: "metered",
+};
+
+/**
+ * Describe how a service is priced. The structured `pricing.kind` is the real
+ * pricing model and takes precedence; the negotiation pattern is only a
+ * fallback for legacy listings that carry no structured pricing, labeled
+ * honestly as a negotiation basis (a `negotiable` band listing fronting
+ * `negotiate-fixed-price` must not read as "fixed price").
+ */
+export const pricingModelLabel = (
+  pricing: { kind?: string } | undefined,
+  negotiation: string[] | undefined,
+): string => {
+  const kind = pricing?.kind;
+  if (kind && PRICING_MODEL_LABELS[kind]) return PRICING_MODEL_LABELS[kind];
+  if (negotiation?.length) return `by negotiation (${negotiation.map(negotiationLabel).join(", ")})`;
+  return "Not stated";
+};
 /** "deliver-attested-payload" → "attested payload" */
 export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
