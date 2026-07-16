@@ -1,7 +1,8 @@
-const probe = process.argv.includes("--probe");
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-function httpsOrigin(name) {
-  const raw = process.env[name]?.trim();
+export function httpsOrigin(env, name) {
+  const raw = env[name]?.trim();
   if (!raw) throw new Error(`${name} is required for a production deployment`);
   let url;
   try { url = new URL(raw); }
@@ -13,28 +14,67 @@ function httpsOrigin(name) {
   return url.origin;
 }
 
-try {
-  const directoryOrigin = httpsOrigin("NEXT_PUBLIC_DIRECTORY_URL");
-  const butlerOrigin = httpsOrigin("NEXT_PUBLIC_BUTLER_ORIGIN");
+function headerValues(response, name) {
+  return (response.headers.get(name) ?? "").toLowerCase().split(",").map((value) => value.trim()).filter(Boolean);
+}
 
-  if (probe) {
-    const response = await fetch(`${butlerOrigin}/demo/butler/agents`, {
-      headers: { origin: directoryOrigin },
+export function assertCorsOrigin(response, directoryOrigin, requestLabel) {
+  if (response.headers.get("access-control-allow-origin") !== directoryOrigin) {
+    throw new Error(`Butler gateway does not CORS-allow ${directoryOrigin} for ${requestLabel}`);
+  }
+}
+
+export function assertJsonPostPreflight(response, directoryOrigin) {
+  if (!response.ok) throw new Error(`Butler JSON POST preflight returned HTTP ${response.status}`);
+  assertCorsOrigin(response, directoryOrigin, "JSON POST preflight");
+  if (!headerValues(response, "access-control-allow-methods").includes("post")) {
+    throw new Error("Butler JSON POST preflight does not allow POST");
+  }
+  if (!headerValues(response, "access-control-allow-headers").includes("content-type")) {
+    throw new Error("Butler JSON POST preflight does not allow content-type");
+  }
+}
+
+export async function checkButlerOrigin({ env = process.env, fetcher = fetch, probe = false } = {}) {
+  const directoryOrigin = httpsOrigin(env, "NEXT_PUBLIC_DIRECTORY_URL");
+  const butlerOrigin = httpsOrigin(env, "NEXT_PUBLIC_BUTLER_ORIGIN");
+
+  if (!probe) return `Production origins valid: directory=${directoryOrigin} butler=${butlerOrigin}`;
+
+  const response = await fetcher(`${butlerOrigin}/demo/butler/agents`, {
+    headers: { origin: directoryOrigin },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Butler catalog probe returned HTTP ${response.status}`);
+  assertCorsOrigin(response, directoryOrigin, "catalog GET");
+  const body = await response.json();
+  if (!Array.isArray(body?.agents) || body.agents.length === 0) {
+    throw new Error("Butler catalog probe returned no agents");
+  }
+
+  for (const path of ["/demo/procurement", "/demo/butler"]) {
+    const preflight = await fetcher(`${butlerOrigin}${path}`, {
+      method: "OPTIONS",
+      headers: {
+        origin: directoryOrigin,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new Error(`Butler catalog probe returned HTTP ${response.status}`);
-    if (response.headers.get("access-control-allow-origin") !== directoryOrigin) {
-      throw new Error(`Butler gateway does not CORS-allow ${directoryOrigin}`);
-    }
-    const body = await response.json();
-    if (!Array.isArray(body?.agents) || body.agents.length === 0) {
-      throw new Error("Butler catalog probe returned no agents");
-    }
-    console.log(`Butler gateway ready: ${body.agents.length} agents available to ${directoryOrigin}`);
-  } else {
-    console.log(`Production origins valid: directory=${directoryOrigin} butler=${butlerOrigin}`);
+    try { assertJsonPostPreflight(preflight, directoryOrigin); }
+    catch (cause) { throw new Error(`${path}: ${cause instanceof Error ? cause.message : String(cause)}`); }
   }
-} catch (error) {
-  console.error(`[deployment config] ${error.message}`);
-  process.exitCode = 1;
+  return `Butler gateway ready: ${body.agents.length} agents and JSON POST CORS available to ${directoryOrigin}`;
 }
+
+async function main() {
+  try {
+    console.log(await checkButlerOrigin({ probe: process.argv.includes("--probe") }));
+  } catch (error) {
+    console.error(`[deployment config] ${error.message}`);
+    process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

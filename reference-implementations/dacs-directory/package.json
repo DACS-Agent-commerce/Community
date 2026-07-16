@@ -12,7 +12,7 @@
     "start:railway": "bash scripts/start-railway.sh",
     "check:deploy-config": "node scripts/check-butler-origin.mjs",
     "check:butler": "node scripts/check-butler-origin.mjs --probe",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:seed": "tsx --test test/seed-smoke.test.ts",
     "index": "tsx src/catalog/reindex.ts",
     "typecheck": "tsc --noEmit"

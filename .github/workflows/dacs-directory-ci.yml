@@ -32,6 +32,8 @@ jobs:
       # Keeps canonical URLs / sitemap deterministic during the build instead
       # of falling back to localhost (which the build warns about).
       NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.local
+      # Exercise the same production build-time path as the public /try page.
+      NEXT_PUBLIC_BUTLER_ORIGIN: https://agents.ci.local
     steps:
       - uses: actions/checkout@v4
 
@@ -54,6 +56,9 @@ jobs:
 
       - name: Test (includes seed smoke)
         run: npm test
+
+      - name: Validate production origins
+        run: npm run check:deploy-config
 
       - name: Production build
         run: npm run build

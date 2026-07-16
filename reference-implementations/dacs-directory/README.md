@@ -118,9 +118,10 @@ NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.example \
 npm run check:butler
 ```
 
-The probe fails unless the gateway returns at least one Butler agent and its
-`Access-Control-Allow-Origin` exactly matches the directory origin. Configure the
-gateway's `BUTLER_ALLOWED_ORIGINS` with that directory origin before running it.
+The probe fails unless the gateway returns at least one Butler agent, its
+`Access-Control-Allow-Origin` exactly matches the directory origin, and browser
+preflights for both execution routes allow `POST` with `content-type`. Configure
+the gateway's `BUTLER_ALLOWED_ORIGINS` with that directory origin before running it.
 
 ## Human and agent discovery
 

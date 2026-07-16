@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AgentInputError,
   ButlerContractError,
+  PROCUREMENT_TIMEOUT_MESSAGE,
+  fetchJsonBeforeDeadline,
   parseAgentCatalog,
+  parseAgentInput,
   parseButlerRun,
   parseProcurementJob,
   procurementEvidence,
@@ -72,6 +76,48 @@ test("rejects malformed procurement and general Butler responses", () => {
   );
 });
 
+test("only accepts JSON objects as editable agent input", () => {
+  assert.deepEqual(parseAgentInput({ budgetDem: 5 }), { budgetDem: 5 });
+  for (const value of [null, [], "text", 5, true]) {
+    assert.throws(() => parseAgentInput(value), AgentInputError);
+  }
+});
+
+test("aborts a procurement request and body read when its deadline expires", async () => {
+  let signalWasAborted = false;
+  const hangingFetch: typeof fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => {
+      signalWasAborted = true;
+      reject(new DOMException("aborted", "AbortError"));
+    }, { once: true });
+  });
+  await assert.rejects(
+    fetchJsonBeforeDeadline("https://agents.example/demo/procurement", undefined, Date.now() + 20, hangingFetch),
+    new RegExp(PROCUREMENT_TIMEOUT_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal(signalWasAborted, true);
+
+  let called = false;
+  await assert.rejects(
+    fetchJsonBeforeDeadline("https://agents.example/demo/procurement", undefined, Date.now() - 1, async () => {
+      called = true;
+      return new Response();
+    }),
+    new RegExp(PROCUREMENT_TIMEOUT_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal(called, false);
+
+  const headersFirstFetch: typeof fetch = async (_input, init) => ({
+    json: async () => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }),
+  }) as Response;
+  await assert.rejects(
+    fetchJsonBeforeDeadline("https://agents.example/demo/procurement/job-1", undefined, Date.now() + 20, headersFirstFetch),
+    new RegExp(PROCUREMENT_TIMEOUT_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+});
+
 test("only reports acceptance when every explicit verification signal is present", () => {
   assert.deepEqual(procurementEvidence(acceptedReport), {
     statusAccepted: true,
@@ -101,4 +147,9 @@ test("only reports acceptance when every explicit verification signal is present
     ...acceptedReport,
     settlement: { txHash: "different-tx" },
   }).overallAccepted, false, "the payment hash must also appear in the transaction receipts");
+
+  assert.equal(procurementEvidence({
+    ...acceptedReport,
+    negotiation: { ...acceptedReport.negotiation, buyerSignature: undefined, sellerSignature: undefined },
+  }).overallAccepted, false, "both negotiation signatures are required for acceptance");
 });

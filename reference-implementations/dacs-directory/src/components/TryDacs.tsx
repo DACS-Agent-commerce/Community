@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ButlerContractError,
+  fetchJsonBeforeDeadline,
   parseAgentCatalog,
+  parseAgentInput,
   parseButlerRun,
   parseProcurementJob,
   procurementEvidence,
@@ -163,41 +165,45 @@ export default function TryDacs() {
   const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
     ? procurementEvidence(result).overallAccepted
     : false;
+  const inputIsValid = useMemo(() => {
+    try { parseAgentInput(JSON.parse(input) as unknown); return true; }
+    catch { return false; }
+  }, [input]);
 
   async function runAgent() {
     if (!plan) return;
     let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(input) as Record<string, unknown>; }
-    catch { setError("The job details are not valid JSON yet."); return; }
+    try { parsed = parseAgentInput(JSON.parse(input) as unknown); }
+    catch (cause) {
+      setError(cause instanceof SyntaxError ? "The job details are not valid JSON yet." : (cause as Error).message);
+      return;
+    }
     setPhase("running"); setError(""); setResult(undefined);
     try {
       if (plan.butler.selectedAgent === "procurement-butler") {
+        const deadline = Date.now() + 12 * 60_000;
         // The Directory is the discovery surface. Pass its verified listing
         // pointer to the Butler; the gateway independently dereferences and
         // verifies the signed DACS-1 artifact before negotiation.
         const request = { ...parsed };
         try {
-          const catalog = await fetch("/api/dacs/listings?rail=pay-dem&limit=100");
+          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>("/api/dacs/listings?rail=pay-dem&limit=100", undefined, deadline);
           if (catalog.ok) {
-            const body = await catalog.json() as { listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> };
             const auditor = body.listings?.find((item) => item.listingId === "audit-negotiator" && item.offering?.negotiation?.includes("rfq") && /auditor/i.test(item.offering?.title ?? ""));
             const ref = auditor?.anchor?.locator;
             if (ref) request.auditorListingRef = ref;
           }
         } catch { /* gateway will derive and verify the configured Auditor slot */ }
-        const start = await fetch(`${BUTLER}/demo/procurement`, {
+        const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
-        });
-        const startBody: unknown = await start.json();
+        }, deadline);
         if (!start.ok) throw new Error(message(startBody));
         const started = parseProcurementJob(startBody);
         setProcurementJob(started);
-        const deadline = Date.now() + 12 * 60_000;
         let current = started;
         while (current.status === "running" && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 2_000));
-          const poll = await fetch(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`);
-          const pollBody: unknown = await poll.json();
+          await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, Math.max(0, deadline - Date.now()))));
+          const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, undefined, deadline);
           if (!poll.ok) throw new Error(message(pollBody));
           current = parseProcurementJob(pollBody); setProcurementJob(current);
         }
@@ -229,7 +235,7 @@ export default function TryDacs() {
         alternatives: [],
       },
       proposedInput: agent.exampleInput,
-      inputNote: "This is the agent's safe test fixture. You may review it before execution.",
+      inputNote: "This starts from the agent's safe fixture. The gateway applies specialist validation before execution.",
     });
     setInput(JSON.stringify(agent.exampleInput, null, 2));
     setResult(undefined); setProcurementJob(null); setPhase("ready"); setError("");
@@ -264,9 +270,9 @@ export default function TryDacs() {
             </div>
           ) : plan && phase === "ready" ? (
             <div className="job-box">
-              <div className="job-head"><div><span>Proposed job details</span><small>{plan.inputNote}</small></div><span className="badge ok">validated shape</span></div>
-              <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={8} spellCheck={false} aria-label="Proposed agent input" />
-              <div className="job-actions"><button className="ghost-btn" onClick={() => setPhase("idle")}>Start over</button><button className="btn try-primary" onClick={runAgent}>Run this agent <span>→</span></button></div>
+              <div className="job-head"><div><span>Proposed job details</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? "valid JSON object" : "invalid job details"}</span></div>
+              <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={8} spellCheck={false} aria-label="Proposed agent input" aria-invalid={!inputIsValid} />
+              <div className="job-actions"><button className="ghost-btn" onClick={() => setPhase("idle")}>Start over</button><button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid}>Run this agent <span>→</span></button></div>
             </div>
           ) : phase === "running" && plan?.butler.selectedAgent === "procurement-butler" ? (
             <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING</div><small>Keep this page open — chain confirmations appear here live.</small></div><div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div></div>

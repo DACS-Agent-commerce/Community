@@ -43,6 +43,15 @@ export class ButlerContractError extends Error {
   }
 }
 
+export class AgentInputError extends Error {
+  constructor() {
+    super("Job details must be a JSON object, not a string, array, or null.");
+    this.name = "AgentInputError";
+  }
+}
+
+export const PROCUREMENT_TIMEOUT_MESSAGE = "The full procurement flow exceeded its 12-minute deadline.";
+
 export function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -63,6 +72,37 @@ function requiredString(value: unknown, path: string): string {
 function optionalString(value: unknown, path: string): string | undefined {
   if (value === undefined) return undefined;
   return requiredString(value, path);
+}
+
+export function parseAgentInput(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new AgentInputError();
+  return value as Record<string, unknown>;
+}
+
+export async function fetchJsonBeforeDeadline<T = unknown>(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  deadlineMs: number,
+  fetcher: typeof fetch = fetch,
+): Promise<{ response: Response; body: T }> {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) throw new Error(PROCUREMENT_TIMEOUT_MESSAGE);
+  const controller = new AbortController();
+  let deadlineExpired = false;
+  const timer = setTimeout(() => {
+    deadlineExpired = true;
+    controller.abort();
+  }, remainingMs);
+  try {
+    const response = await fetcher(input, { ...init, signal: controller.signal });
+    const body = await response.json() as T;
+    return { response, body };
+  } catch (cause) {
+    if (deadlineExpired) throw new Error(PROCUREMENT_TIMEOUT_MESSAGE);
+    throw cause;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function parseAgentCatalog(value: unknown): AgentCard[] {
@@ -154,6 +194,6 @@ export function procurementEvidence(value: unknown): ProcurementEvidence {
     reconciled,
     rulingValid,
     rulingAccepted,
-    overallAccepted: statusAccepted && paymentRecorded && deliveryVerified && bundlesVerified && reconciled && rulingValid && rulingAccepted,
+    overallAccepted: statusAccepted && paymentRecorded && negotiationSigned && deliveryVerified && bundlesVerified && reconciled && rulingValid && rulingAccepted,
   };
 }
