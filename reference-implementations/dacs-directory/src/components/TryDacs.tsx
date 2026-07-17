@@ -157,18 +157,72 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
   );
 }
 
-const JOURNEY = [
-  ["understand", "Understand", "Translate the human goal into a service need."],
-  ["discover", "Discover", "Read the agents and capabilities available to DACS."],
-  ["select", "Select", "Compare the candidates and explain the recommendation."],
-  ["execute", "Execute", "Validate the input and supervise the chosen specialist."],
-  ["verify", "Verify", "Return the result with its evidence and signed guarantees."],
+/**
+ * The five DACS stages, in the standard's own words (see /how-it-works:
+ * Identify → Vet → Negotiate → Settle → Verify, "one deal · five receipts").
+ * `plain` is the novice explanation shown behind "What's happening here?".
+ */
+const DACS_STAGES = [
+  {
+    key: "identify", name: "Identify", primitive: "DACS-1",
+    tagline: "Who offers the service? Signed listings only.",
+    receipt: "a signed on-chain listing",
+    plain: "Every agent here published a signed listing on the Demos chain — like a business card that can't be forged. The Butler reads those listings to know who offers what, without trusting anyone's word for it.",
+  },
+  {
+    key: "vet", name: "Vet", primitive: "DACS-2",
+    tagline: "Check the counterparty before committing.",
+    receipt: "an anchored verification record",
+    plain: "Before dealing with a stranger you check who they are. Here the buyer verifies the seller's identity and claims, and writes that check to the chain — so later everyone can see the vet actually happened.",
+  },
+  {
+    key: "negotiate", name: "Negotiate", primitive: "DACS-3",
+    tagline: "Fix price, scope and timing — both agents sign.",
+    receipt: "a dual-signed agreement",
+    plain: "The two agents agree the job: what will be done, by when, for how much. Both sign the same agreement, so neither can later claim different terms. That signed agreement is anchored before any money moves.",
+  },
+  {
+    key: "settle", name: "Settle & deliver", primitive: "DACS-4",
+    tagline: "Pay on the agreed rail; the work arrives with evidence.",
+    receipt: "a payment transaction + delivery evidence",
+    plain: "The buyer pays on the agreed payment rail (in the full purchase demo, real DEM moves on-chain) and the seller delivers the work. The payment hash and the delivered report are both captured as evidence.",
+  },
+  {
+    key: "verify", name: "Verify", primitive: "DACS-5",
+    tagline: "Bind every receipt into one bundle both sides anchor.",
+    receipt: "a reconciled attestation bundle",
+    plain: "Finally everything — listing, vet, agreement, payment and delivery — is tied into one signed bundle that both sides anchor. Anyone can re-run the checks later, and honest deals build the seller's public reputation.",
+  },
 ] as const;
 
-type PhaseOutput = {
-  state: "pending" | "active" | "complete" | "warning";
+/** Gateway procurement event phases → DACS stage index. */
+const PROCUREMENT_PHASE_STAGE: Record<string, number> = {
+  queued: 0, connecting: 0, discovering: 0,
+  selecting: 1,
+  agreeing: 2,
+  settling: 3, delivering: 3,
+  verifying: 4, evaluating: 4, complete: 4,
+};
+
+/**
+ * Some gateway phases span two DACS stages (e.g. the RFQ opens and the
+ * agreement anchors while the job phase is still "selecting"), so the event
+ * label decides first and the phase map is the fallback.
+ */
+function stageForEvent(event: ProcurementEvent): number {
+  const label = event.label.toLowerCase();
+  if (/\bvet\b/.test(label)) return 1;
+  if (/agreement|commitment|rfq|agreed/.test(label)) return 2;
+  if (/settlement evidence|payment evidence/.test(label)) return 3;
+  return PROCUREMENT_PHASE_STAGE[event.phase] ?? 4;
+}
+
+type StageOutput = {
+  state: "pending" | "active" | "complete" | "warning" | "skipped";
   summary: string;
   detail?: string;
+  /** Chain records produced by this stage, rendered as explorer links. */
+  chain?: ProcurementEvent[];
 };
 
 function message(value: unknown): string {
@@ -235,7 +289,6 @@ export default function TryDacs() {
   const receiptElapsedMs = receipt?.createdAt
     ? Math.max(0, (receipt.status === "confirmed" || receipt.status === "failed" ? Date.parse(receipt.updatedAt ?? receipt.createdAt) : Date.now()) - Date.parse(receipt.createdAt))
     : 0;
-  const activeIndex = phase === "idle" ? 0 : phase === "planning" ? 2 : phase === "ready" || phase === "running" ? 3 : phase === "done" ? 4 : -1;
   const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
     ? procurementEvidence(result).overallAccepted
     : false;
@@ -256,42 +309,90 @@ export default function TryDacs() {
   const verificationComplete = phase === "done" && (selected?.name === "procurement-butler"
     ? procurementAccepted
     : receipt === null || receipt.status === "confirmed");
-  const parsedInput = inputValue;
   const resultPayload = selected?.name === "procurement-butler" ? result : record(result).result;
   const resultFields = Object.keys(record(resultPayload));
-  const phaseOutputs: PhaseOutput[] = [
-    goal
-      ? { state: "complete", summary: "Goal captured", detail: goal }
-      : { state: "active", summary: "Waiting for an agent choice" },
-    agents.length
-      ? { state: "complete", summary: `${agents.length} live specialists discovered`, detail: agents.map((agent) => agent.label).join(", ") }
-      : { state: "active", summary: "Reading the live catalog" },
-    plan
-      ? { state: "complete", summary: plan.butler.label, detail: plan.butler.rationale }
-      : { state: "pending", summary: "No specialist selected yet" },
-    phase === "running"
-      ? { state: "active", summary: `Specialist running · ${elapsedLabel(elapsedMs)}`, detail: `Bounded by a ${plan?.butler.selectedAgent === "procurement-butler" ? "12-minute full-flow" : "2-minute specialist"} deadline.` }
-      : phase === "done"
-        ? { state: "complete", summary: specialistDurationMs === undefined ? "Specialist result returned" : `Result returned in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
-        : phase === "error"
-          ? { state: "warning", summary: "Execution stopped safely", detail: error }
-          : plan && inputIsValid
-            ? { state: "complete", summary: `Input ready · ${Object.keys(parsedInput).length} field${Object.keys(parsedInput).length === 1 ? "" : "s"}`, detail: Object.keys(parsedInput).join(", ") || "Empty bounded input object" }
-            : plan
-              ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention` }
-              : { state: "pending", summary: "Waiting for valid job details" },
-    selected?.name === "procurement-butler" && phase === "done"
-      ? { state: procurementAccepted ? "complete" : "warning", summary: procurementAccepted ? "Full evidence bundle accepted" : "Verification incomplete", detail: `${procurementJob?.events.length ?? 0} lifecycle events recorded` }
-      : receipt
-        ? {
-            state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active",
-            summary: `Receipt ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (no status endpoint; anchoring continues on the gateway)" : ""}`,
-            detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — verify on the explorer` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}`,
-          }
-        : phase === "done"
-          ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt." }
-          : { state: "pending", summary: "Waiting for the specialist result" },
+  const isProcurementSel = selected?.name === "procurement-butler";
+  const procEvents = procurementJob?.events ?? [];
+  const eventsByStage = DACS_STAGES.map((_, stageIdx) => procEvents.filter((event) => stageForEvent(event) === stageIdx));
+  const procStage = procEvents.length ? stageForEvent(procEvents[procEvents.length - 1]!) : 0;
+
+  // Live procurement run: each DACS stage reports the gateway's own events
+  // (and their chain records) as they arrive.
+  function procurementStageOutput(stageIdx: number): StageOutput {
+    const events = eventsByStage[stageIdx]!;
+    const latest = events[events.length - 1];
+    const chain = events.filter((event) => event.txRef || event.anchorRef);
+    const jobComplete = procurementJob?.status === "complete";
+    const jobFailed = procurementJob?.status === "failed" || phase === "error";
+    if (stageIdx === 4 && jobComplete) {
+      return {
+        state: procurementAccepted ? "complete" : "warning",
+        summary: procurementAccepted ? "Full evidence bundle accepted & reconciled" : "Verification incomplete",
+        detail: latest?.label,
+        chain,
+      };
+    }
+    if (procStage > stageIdx || jobComplete) {
+      return { state: "complete", summary: latest?.label ?? "Completed", detail: events.length > 1 ? `${events.length} steps recorded` : undefined, chain };
+    }
+    if (procStage === stageIdx) {
+      return jobFailed
+        ? { state: "warning", summary: latest?.label ?? "Stopped safely", detail: error || undefined, chain }
+        : { state: "active", summary: latest?.label ?? "In progress", detail: `${elapsedLabel(elapsedMs)} elapsed`, chain };
+    }
+    return { state: "pending", summary: "Waiting for the earlier stages" };
+  }
+
+  const identifyOut: StageOutput = !agents.length
+    ? { state: "active", summary: "Reading the live catalog…" }
+    : !plan
+      ? { state: "active", summary: `${agents.length} signed listings discovered — pick an agent`, detail: agents.map((agent) => agent.label).join(", ") }
+      : { state: "complete", summary: `${plan.butler.label} picked from ${agents.length} live listings`, detail: "Each card comes from a signed on-chain listing; nothing here is typed in by hand." };
+  const vetOut: StageOutput = !plan
+    ? { state: "pending", summary: "Waiting for an agent choice" }
+    : isProcurementSel
+      ? { state: "pending", summary: "Runs live during the purchase — the vet record is anchored on-chain" }
+      : { state: "skipped", summary: "Skipped in this demo", detail: "The Butler already trusts this in-network specialist. Run the Procurement Butler to watch a real counterparty vet get anchored as a DACS-2 record." };
+  const negotiateOut: StageOutput = !plan
+    ? { state: "pending", summary: "Waiting for an agent choice" }
+    : isProcurementSel
+      ? { state: "pending", summary: "Runs live during the purchase — both agents sign the agreement" }
+      : { state: "skipped", summary: "Skipped — this demo is free", detail: "There is nothing to price here. The Procurement Butler negotiates a real RFQ and both agents sign the DACS-3 agreement before payment." };
+  const settleOut: StageOutput = phase === "running"
+    ? { state: "active", summary: `Specialist working · ${elapsedLabel(elapsedMs)}`, detail: "No payment moves in this free demo — the specialist delivers its result directly. Bounded by a 2-minute deadline." }
+    : phase === "done"
+      ? { state: "complete", summary: specialistDurationMs === undefined ? "Result delivered" : `Result delivered in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
+      : phase === "error"
+        ? { state: "warning", summary: "Execution stopped safely", detail: error }
+        : plan && inputIsValid
+          ? { state: "pending", summary: isProcurementSel ? "A real DEM payment happens here when you press Run" : "Starts when you press Run — delivery is free in this demo" }
+          : plan
+            ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention in the form` }
+            : { state: "pending", summary: "Waiting for job details" };
+  const verifyOut: StageOutput = receipt
+    ? {
+        state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active",
+        summary: `Receipt ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
+        detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}`,
+      }
+    : phase === "done"
+      ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt for this agent." }
+      : { state: "pending", summary: "Waiting for delivery" };
+
+  // A live/finished procurement job reports the real gateway events per stage;
+  // everything else (specialists, and procurement before the run) uses the
+  // honest static mapping — including visibly-skipped stages.
+  const stageOutputs: StageOutput[] = isProcurementSel && procEvents.length
+    ? DACS_STAGES.map((_, stageIdx) => procurementStageOutput(stageIdx))
+    : [identifyOut, vetOut, negotiateOut, settleOut, verifyOut];
+
+  // Every chain record seen this run (procurement events + the specialist
+  // receipt), so all transactions stay visible in one place with explorer links.
+  const chainActivity: Array<{ label: string; txRef?: string; anchorRef?: string }> = [
+    ...procEvents.filter((event) => event.txRef || event.anchorRef).map((event) => ({ label: event.label, txRef: event.txRef, anchorRef: event.anchorRef })),
+    ...(receipt ? [{ label: "Output attestation anchored", txRef: receipt.txRef, anchorRef: receipt.anchorAddress }] : []),
   ];
+  const chainTxCount = chainActivity.filter((row) => row.txRef).length;
 
   async function watchReceipt(initial: OutputReceipt) {
     // The synchronous LIVE-ANCHOR attestation has no status URL: there is
@@ -465,7 +566,7 @@ export default function TryDacs() {
           ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
           : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
         : isProcurement
-          ? "This procurement run did not complete in this browser. Retrying reuses the same idempotency key, so the gateway resumes the existing job instead of starting a second paid purchase."
+          ? `${(cause as Error).message} — Retrying reuses the same idempotency key, so the gateway resumes the existing job instead of starting a second paid purchase.`
           : (cause as Error).message);
       setPhase("error");
     } finally {
@@ -486,7 +587,13 @@ export default function TryDacs() {
       if (!poll.ok) throw new Error(message(pollBody));
       current = parseProcurementJob(pollBody); setProcurementJob(current);
     }
-    if (current.status === "failed") throw new Error(current.error ?? "the full procurement flow failed safely");
+    if (current.status === "failed") {
+      // A gateway-confirmed terminal failure: replaying the same idempotency
+      // key would only return this failed job again, so the next retry is a
+      // consciously-new purchase attempt.
+      procurementRunId.current = null;
+      throw new Error(current.error ?? "the full procurement flow failed safely");
+    }
     if (current.status !== "complete") throw new Error("the full procurement flow is still running; use Resume status to keep following it");
     setResult(current.result); setPhase("done");
     procurementRunId.current = null;
@@ -585,7 +692,12 @@ export default function TryDacs() {
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              {plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
+              {plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" ? (
+                <>
+                  <div><strong>Procurement failed safely on the gateway</strong><small>The gateway reported this job as failed (its reason is shown above). Retrying starts a fresh purchase attempt with a new idempotency key.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry the purchase <span>→</span></button></div>
+                </>
+              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
                 <>
                   <div><strong>Watching stopped — the procurement job is still live on the gateway</strong><small>Job {procurementJob.id} was not cancelled; resuming follows the same job and never starts a second purchase.</small></div>
                   <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>
@@ -618,15 +730,53 @@ export default function TryDacs() {
           : null}
         </div>
 
-        <aside className="journey" aria-label="DACS execution journey">
-          <div className="journey-head"><span>PHASE OUTPUTS</span><span>{verificationComplete ? "COMPLETE" : "LIVE"}</span></div>
-          {JOURNEY.map(([key, label, description], index) => {
-            const output = phaseOutputs[index]!;
-            const done = (activeIndex > index && phase !== "error") || (index === 4 && verificationComplete);
-            const active = index === activeIndex && phase !== "error" && !done;
-            return <div className={`journey-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={key}><span className="journey-index">{done ? "✓" : `0${index + 1}`}</span><div><strong>{label}</strong><p>{description}</p><div className={`phase-output ${output.state}`}><span>{output.state}</span><b>{output.summary}</b>{output.detail && <small>{output.detail}</small>}</div></div><i /></div>;
-          })}
-          <div className="journey-note"><strong>Evidence, not theatre</strong><p>Each box reports data already returned by that phase. Pending work stays visibly pending; full artifacts remain inspectable below.</p></div>
+        <aside className="journey" aria-label="The five DACS stages">
+          <div className="journey-head"><span>THE DACS DEAL</span><span>{verificationComplete ? "COMPLETE" : "LIVE"}</span></div>
+          <p className="journey-intro">One deal leaves five signed receipts: <em>Identify → Vet → Negotiate → Settle → Verify</em>. Each stage below reports the real evidence it produced — nothing is ticked off without proof.</p>
+          <div className="journey-steps">
+            {DACS_STAGES.map((stage, index) => {
+              const output = stageOutputs[index]!;
+              return (
+                <div className={`journey-step ${output.state}`} key={stage.key}>
+                  <span className="journey-index">{output.state === "complete" ? "✓" : index + 1}</span>
+                  <div>
+                    <div className="stage-title"><strong>{stage.name}</strong><span className="dacs-tag">{stage.primitive}</span></div>
+                    <p>{stage.tagline}</p>
+                    <div className={`phase-output ${output.state}`}>
+                      <span>{output.state === "skipped" ? "not in this demo" : output.state}</span>
+                      <b>{output.summary}</b>
+                      {output.detail && <small>{output.detail}</small>}
+                      {output.chain && output.chain.length > 0 && (
+                        <div className="stage-txs">{output.chain.map((event, chainIdx) => event.txRef
+                          ? <a key={chainIdx} href={`${EXPLORER}/tx/${event.txRef}`} target="_blank" rel="noreferrer" title={event.label}>tx {compact(event.txRef, 8, 6)} ↗</a>
+                          : <code key={chainIdx} title={event.label}>{compact(event.anchorRef, 12, 6)}</code>)}</div>
+                      )}
+                    </div>
+                    <details className="stage-help">
+                      <summary>What’s happening here?</summary>
+                      <p>{stage.plain} <b>Proof created: {stage.receipt}.</b></p>
+                    </details>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {chainActivity.length > 0 && (
+            <div className="chain-activity">
+              <div className="chain-activity-head"><span>CHAIN ACTIVITY</span><span>{chainTxCount} tx · {chainActivity.length - chainTxCount} anchors</span></div>
+              <p>Every receipt lands on the public Demos chain. Click a hash to inspect it yourself — no login, no trust required.</p>
+              <div className="chain-activity-list">
+                {chainActivity.map((row, index) => (
+                  <div className="chain-row" key={`${row.txRef ?? row.anchorRef}-${index}`}>
+                    <span className="chain-index">{String(index + 1).padStart(2, "0")}</span>
+                    <div><strong>{row.label}</strong>{row.anchorRef && <small>anchor {compact(row.anchorRef, 16, 6)}</small>}</div>
+                    {row.txRef ? <a href={`${EXPLORER}/tx/${row.txRef}`} target="_blank" rel="noreferrer">{compact(row.txRef, 8, 6)} ↗</a> : <span className="muted-text">anchor</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="journey-note"><strong>Evidence, not theatre</strong><p>Each box reports data already returned by that stage. Pending work stays visibly pending, skipped stages say so, and full artifacts remain inspectable below.</p></div>
         </aside>
       </section>
 

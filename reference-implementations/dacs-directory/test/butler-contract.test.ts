@@ -203,6 +203,26 @@ test("only reports acceptance when every explicit verification signal is present
     ...acceptedReport,
     negotiation: { ...acceptedReport.negotiation, buyerSignature: undefined, sellerSignature: undefined },
   }).overallAccepted, false, "both negotiation signatures are required for acceptance");
+
+  // Structured shape observed from the live gateway (2026-07-17):
+  // { party, algorithm, value } records instead of bare signature strings.
+  assert.equal(procurementEvidence({
+    ...acceptedReport,
+    negotiation: {
+      ...acceptedReport.negotiation,
+      buyerSignature: { party: "did:demos:agent:buyer", algorithm: "ed25519", value: "buyer-sig-bytes" },
+      sellerSignature: { party: "did:demos:agent:seller", algorithm: "ed25519", value: "seller-sig-bytes" },
+    },
+  }).overallAccepted, true, "structured { party, algorithm, value } signatures count as present");
+
+  assert.equal(procurementEvidence({
+    ...acceptedReport,
+    negotiation: {
+      ...acceptedReport.negotiation,
+      buyerSignature: { party: "did:demos:agent:buyer", algorithm: "ed25519", value: "  " },
+      sellerSignature: { party: "did:demos:agent:seller", algorithm: "ed25519", value: "seller-sig-bytes" },
+    },
+  }).overallAccepted, false, "a structured signature with a blank value is still missing");
 });
 
 test("synchronous LIVE-ANCHOR attestations parse without polling fields", () => {

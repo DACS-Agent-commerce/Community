@@ -269,6 +269,17 @@ export function parseButlerRun(value: unknown): ButlerRun {
   return { ...response, result: response.result, execution, outputAttestation };
 }
 
+/**
+ * The gateway has published two negotiation-signature shapes: a bare
+ * signature string, and the structured `{ party, algorithm, value }` record.
+ * Either counts as present when it carries a non-empty signature value.
+ */
+function signaturePresent(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  const structured = record(value);
+  return typeof structured.value === "string" && Boolean(structured.value.trim());
+}
+
 export function procurementEvidence(value: unknown): ProcurementEvidence {
   const report = record(value);
   const settlement = record(report.settlement);
@@ -284,8 +295,7 @@ export function procurementEvidence(value: unknown): ProcurementEvidence {
     transaction.kind === "payment" && transaction.txRef === paymentHash,
   );
   const statusAccepted = report.status === "settled-and-accepted" || report.status === "recovered-after-terminal-abort";
-  const negotiationSigned = typeof negotiation.buyerSignature === "string" && Boolean(negotiation.buyerSignature.trim())
-    && typeof negotiation.sellerSignature === "string" && Boolean(negotiation.sellerSignature.trim());
+  const negotiationSigned = signaturePresent(negotiation.buyerSignature) && signaturePresent(negotiation.sellerSignature);
   const deliveryVerified = delivery.verified === true && Object.keys(record(delivery.report)).length > 0;
   const bundlesVerified = bundles.ok === true;
   const reconciled = reconciliation.reconciled === true;
