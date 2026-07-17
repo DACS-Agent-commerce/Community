@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_TIMEOUT_MESSAGE,
   ButlerContractError,
@@ -20,10 +20,13 @@ import {
 } from "./try-dacs-contract.js";
 import {
   flattenInputKeys,
+  hasBuiltinForm,
   initialAgentInput,
   mapGatewayErrors,
+  parseAgentFieldSchema,
   summarizeAgentInput,
   validateAgentInput,
+  validateSchemaInput,
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
@@ -195,6 +198,12 @@ export default function TryDacs() {
   const runAbort = useRef<AbortController | null>(null);
   const receiptAbort = useRef<AbortController | null>(null);
   const procurementJobRef = useRef<ProcurementJob | null>(null);
+  // True from the instant a /demo/procurement POST is dispatched until a job
+  // id is known (or the attempt ends). While true with no known job id, the
+  // gateway may have created a PAID job this browser never saw — retrying
+  // would double-pay, so Retry is withheld.
+  const procurementPostInFlight = useRef(false);
+  const [procurementIndeterminate, setProcurementIndeterminate] = useState(false);
 
   useEffect(() => {
     fetch(`${BUTLER}/demo/butler/agents`)
@@ -230,9 +239,14 @@ export default function TryDacs() {
   const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
     ? procurementEvidence(result).overallAccepted
     : false;
+  const validateInput = useCallback((agentName: string, value: Record<string, unknown>): FieldErrors => {
+    if (hasBuiltinForm(agentName)) return validateAgentInput(agentName, value);
+    const schema = selected ? parseAgentFieldSchema(selected) : null;
+    return schema ? validateSchemaInput(schema, value) : {};
+  }, [selected]);
   const localErrors = useMemo(
-    () => plan ? validateAgentInput(plan.butler.selectedAgent, inputValue) : {},
-    [plan, inputValue],
+    () => plan ? validateInput(plan.butler.selectedAgent, inputValue) : {},
+    [plan, inputValue, validateInput],
   );
   const inputIsValid = Object.keys(localErrors).length === 0;
   // Verification completes only on evidence: a confirmed receipt (or no
@@ -361,7 +375,7 @@ export default function TryDacs() {
     }
     // Local validation is advisory feedback; a hard local failure blocks the
     // obviously-broken submissions, the gateway remains authoritative.
-    const advisory = validateAgentInput(plan.butler.selectedAgent, parsed);
+    const advisory = validateInput(plan.butler.selectedAgent, parsed);
     if (Object.keys(advisory).length > 0) {
       setError("Some fields need attention before this can run — see the highlighted inputs.");
       return;
@@ -374,6 +388,7 @@ export default function TryDacs() {
     // offer resuming a stale job (ref set synchronously: the catch below may
     // run before the state-sync effect).
     setProcurementJob(null); procurementJobRef.current = null;
+    procurementPostInFlight.current = false; setProcurementIndeterminate(false);
     setGatewayFieldErrors({});
     setSubmittedSummary(summarizeAgentInput(plan.butler.selectedAgent, parsed));
     setRunStartedAt(Date.now()); setElapsedMs(0);
@@ -406,14 +421,20 @@ export default function TryDacs() {
             if (ref) request.auditorListingRef = ref;
           }
         } catch { /* gateway will derive and verify the configured Auditor slot */ }
+        // From here a paid job may exist on the gateway even if the browser
+        // never receives the response.
+        procurementPostInFlight.current = true;
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: controller.signal,
         }, deadline);
         if (!start.ok) {
-          if (fieldMappedRejection(startBody)) return;
+          // A named-field 4xx means the gateway rejected BEFORE creating a job.
+          if (fieldMappedRejection(startBody)) { procurementPostInFlight.current = false; return; }
           throw new Error(message(startBody));
         }
         const started = parseProcurementJob(startBody);
+        procurementJobRef.current = started;       // synchronous — the catch relies on it
+        procurementPostInFlight.current = false;   // job id known; safe to resume
         setProcurementJob(started);
         await followProcurementJob(started, controller, deadline);
         return;
@@ -435,12 +456,20 @@ export default function TryDacs() {
       }
     } catch (cause) {
       const cancelled = (cause as Error).name === "AbortError";
-      const liveProcurement = plan.butler.selectedAgent === "procurement-butler" && procurementJobRef.current !== null;
-      setError(cancelled
-        ? liveProcurement
-          ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
-          : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
-        : (cause as Error).message);
+      const isProcurement = plan.butler.selectedAgent === "procurement-butler";
+      const haveJob = procurementJobRef.current !== null;
+      // Dispatched a procurement POST but never learned the job id: a paid job
+      // may exist. Withhold Retry entirely.
+      const indeterminate = isProcurement && procurementPostInFlight.current && !haveJob;
+      procurementPostInFlight.current = false;
+      setProcurementIndeterminate(indeterminate);
+      setError(indeterminate
+        ? "This browser dispatched the procurement request but never received the job id, so a paid job may have started on the gateway. Do NOT retry — that could start a second paid job. Check the agent gateway or your wallet activity before running procurement again."
+        : cancelled
+          ? isProcurement && haveJob
+            ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
+            : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
+          : (cause as Error).message);
       setPhase("error");
     } finally {
       if (runAbort.current === controller) runAbort.current = null;
@@ -550,7 +579,12 @@ export default function TryDacs() {
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              {plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
+              {procurementIndeterminate ? (
+                <>
+                  <div><strong>Procurement state is unknown — do not retry</strong><small>The request was dispatched but this browser never received a job id, so a paid job may exist on the gateway. Retrying could start a second paid job.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); setProcurementIndeterminate(false); }}>Choose another agent</button></div>
+                </>
+              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
                 <>
                   <div><strong>Watching stopped — the procurement job is still live on the gateway</strong><small>Job {procurementJob.id} was not cancelled; resuming follows the same job and never starts a second purchase.</small></div>
                   <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>

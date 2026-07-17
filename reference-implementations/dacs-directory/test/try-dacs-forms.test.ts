@@ -15,6 +15,7 @@ import {
   parseAgentFieldSchema,
   removeRow,
   summarizeAgentInput,
+  validateSchemaInput,
   validateAgentInput,
 } from "../src/components/try-dacs-forms.js";
 import type { AgentCard } from "../src/components/try-dacs-contract.js";
@@ -173,7 +174,7 @@ test("the gateway's published input schema is consumed, with safe fallback", () 
   const published = card("future-agent", {
     mode: "sync",
     input: [
-      { name: "region", type: "enum", required: true, enum: ["eu", "us"], description: "Deployment region" },
+      { name: "region", type: "string", required: true, enum: ["eu", "us"], description: "Deployment region" },
       { name: "maxDepth", type: "number", min: 1, max: 5 },
       { name: "dryRun", type: "boolean" },
     ],
@@ -207,14 +208,28 @@ test("EvalBot checks match the gateway contract and swap parameters cleanly", ()
   }), {});
   assert.deepEqual(validateAgentInput("evalbot", {
     deliverable: { content: "abc" },
-    rubric: { acceptThreshold: 80, criteria: [{ id: "rx", kind: "mechanical", weight: 1, description: "match", test: { check: "regex-match", needle: "a.c" } }] },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "rx", kind: "mechanical", weight: 1, description: "match", test: { check: "regex-match", pattern: "a.c" } }] },
   }), {});
+  // regex-match REQUIRES pattern (not needle): sending needle leaves pattern
+  // undefined, and the gateway runs new RegExp(undefined) which matches all.
+  assert.ok(validateAgentInput("evalbot", {
+    deliverable: { content: "abc" },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "rx", kind: "mechanical", weight: 1, description: "m", test: { check: "regex-match", needle: "a.c" } }] },
+  })["rubric.criteria.0.test.pattern"]);
+  // An invalid regex is caught locally.
+  assert.ok(validateAgentInput("evalbot", {
+    deliverable: { content: "abc" },
+    rubric: { acceptThreshold: 80, criteria: [{ id: "rx", kind: "mechanical", weight: 1, description: "m", test: { check: "regex-match", pattern: "(" } }] },
+  })["rubric.criteria.0.test.pattern"]);
 
   // Switching check kinds swaps parameters — stale ones are never submitted.
   const toMinLength = criterionCheckChange({ check: "content-includes", needle: "Introduction" }, "min-length");
   assert.deepEqual(toMinLength, { check: "min-length", minChars: 1 });
-  const backToText = criterionCheckChange(toMinLength, "regex-match");
-  assert.deepEqual(backToText, { check: "regex-match", needle: "" });
+  const toRegex = criterionCheckChange(toMinLength, "regex-match");
+  assert.deepEqual(toRegex, { check: "regex-match", pattern: "" });
+  // content-includes text carries into a regex pattern, and back.
+  assert.deepEqual(criterionCheckChange({ check: "content-includes", needle: "abc" }, "regex-match"), { check: "regex-match", pattern: "abc" });
+  assert.deepEqual(criterionCheckChange({ check: "regex-match", pattern: "abc" }, "content-includes"), { check: "content-includes", needle: "abc" });
 });
 
 test("submission summaries state the actual values being sent", () => {
@@ -227,4 +242,20 @@ test("submission summaries state the actual values being sent", () => {
   });
   assert.ok(procurement.some((line) => line.includes("5 DEM")));
   assert.ok(procurement.some((line) => line.includes("server.js")));
+});
+
+test("schema-driven forms validate required fields and option/number bounds", () => {
+  const schema = parseAgentFieldSchema(card("future-agent", {
+    input: [
+      { name: "region", type: "string", required: true, enum: ["eu", "us"] },
+      { name: "depth", type: "number", min: 1, max: 5 },
+    ],
+  }))!;
+  // Missing required field is flagged; bad enum + out-of-range number too.
+  assert.ok(validateSchemaInput(schema, {}).region);
+  assert.ok(validateSchemaInput(schema, { region: "mars" }).region);
+  assert.ok(validateSchemaInput(schema, { region: "eu", depth: 9 }).depth);
+  assert.ok(validateSchemaInput(schema, { region: "eu", depth: "x" }).depth);
+  // A complete, in-bounds input passes.
+  assert.deepEqual(validateSchemaInput(schema, { region: "eu", depth: 3 }), {});
 });

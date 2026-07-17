@@ -84,11 +84,19 @@ export default function RubricEditor({
                     onChange={(event) => updateTest(index, { minChars: event.target.value === "" ? undefined : Number(event.target.value) })} />
                   {fieldError(`${base}.test.minChars`) && <span className="field-error" role="alert">{fieldError(`${base}.test.minChars`)}</span>}
                 </div>
+              ) : String(test.check) === "regex-match" ? (
+                <div className="form-field try-field">
+                  <label htmlFor={`${idPrefix}-pattern-${index}`}>Pattern<span className="required-mark" title="Required">*</span></label>
+                  <input id={`${idPrefix}-pattern-${index}`} className="form-control mono" value={String(test.pattern ?? "")}
+                    placeholder="a.c" aria-invalid={Boolean(fieldError(`${base}.test.pattern`))}
+                    onChange={(event) => updateTest(index, { pattern: event.target.value })} />
+                  {fieldError(`${base}.test.pattern`) && <span className="field-error" role="alert">{fieldError(`${base}.test.pattern`)}</span>}
+                </div>
               ) : (
                 <div className="form-field try-field">
-                  <label htmlFor={`${idPrefix}-needle-${index}`}>{String(test.check) === "regex-match" ? "Pattern" : "Check text"}<span className="required-mark" title="Required">*</span></label>
+                  <label htmlFor={`${idPrefix}-needle-${index}`}>Check text<span className="required-mark" title="Required">*</span></label>
                   <input id={`${idPrefix}-needle-${index}`} className="form-control mono" value={String(test.needle ?? "")}
-                    placeholder={String(test.check) === "regex-match" ? "a.c" : "Introduction"} aria-invalid={Boolean(fieldError(`${base}.test.needle`))}
+                    placeholder="Introduction" aria-invalid={Boolean(fieldError(`${base}.test.needle`))}
                     onChange={(event) => updateTest(index, { needle: event.target.value })} />
                   {fieldError(`${base}.test.needle`) && <span className="field-error" role="alert">{fieldError(`${base}.test.needle`)}</span>}
                 </div>

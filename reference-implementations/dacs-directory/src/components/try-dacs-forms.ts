@@ -61,6 +61,13 @@ const SCHEMA_KINDS: Record<string, AgentFieldSchema["kind"]> = {
   enum: "select",
 };
 
+const schemaFieldKind = (field: Record<string, unknown>): AgentFieldSchema["kind"] | null => {
+  // The gateway expresses an enum as a companion `enum` array on a string
+  // field ({ type: "string", enum: [...] }); it may also use type: "enum".
+  if (Array.isArray(field.enum)) return field.enum.every((option) => typeof option === "string") ? "select" : null;
+  return SCHEMA_KINDS[String(field.type)] ?? null;
+};
+
 const labelFromName = (name: string): string =>
   name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
@@ -77,10 +84,9 @@ export function parseAgentFieldSchema(agent: AgentCard & { input?: unknown }): A
   for (const value of agent.input) {
     const field = rec(value);
     if (typeof field.name !== "string" || !field.name.trim()) return null;
-    const kind = SCHEMA_KINDS[String(field.type)];
+    const kind = schemaFieldKind(field);
     if (!kind) return null;
-    const options = Array.isArray(field.enum) ? field.enum : undefined;
-    if (kind === "select" && (!options || options.some((option) => typeof option !== "string"))) return null;
+    const options = Array.isArray(field.enum) ? field.enum as string[] : undefined;
     fields.push({
       key: field.name,
       label: labelFromName(field.name),
@@ -93,6 +99,34 @@ export function parseAgentFieldSchema(agent: AgentCard & { input?: unknown }): A
     });
   }
   return fields;
+}
+
+/**
+ * Validate an input object against a gateway-published field schema: required
+ * fields must be present and non-empty; numbers must parse and honour min/max;
+ * selects must hold one of the published options. Advisory only — the gateway
+ * remains authoritative.
+ */
+export function validateSchemaInput(fields: AgentFieldSchema[], input: Record<string, unknown>): FieldErrors {
+  const errors: FieldErrors = {};
+  for (const field of fields) {
+    const value = input[field.key];
+    const missing = value === undefined || value === null || (typeof value === "string" && value.trim() === "");
+    if (field.required && field.kind !== "checkbox" && missing) {
+      errors[field.key] = `Required — ${field.label}.`;
+      continue;
+    }
+    if (missing) continue;
+    if (field.kind === "number") {
+      const parsed = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(parsed)) errors[field.key] = `${field.label} must be a number.`;
+      else if (field.min !== undefined && parsed < field.min) errors[field.key] = `${field.label} must be at least ${field.min}.`;
+      else if (field.max !== undefined && parsed > field.max) errors[field.key] = `${field.label} must be at most ${field.max}.`;
+    } else if (field.kind === "select" && field.options && !field.options.includes(String(value))) {
+      errors[field.key] = `${field.label} must be one of: ${field.options.join(", ")}.`;
+    }
+  }
+  return errors;
 }
 
 /** True when the agent has a dedicated built-in form (vs schema/JSON fallback). */
@@ -146,7 +180,14 @@ export function criterionCheckChange(test: Record<string, unknown>, check: strin
   if (check === "min-length") {
     return { check, minChars: typeof test.minChars === "number" ? test.minChars : 1 };
   }
-  return { check, needle: typeof test.needle === "string" ? test.needle : "" };
+  if (check === "regex-match") {
+    // The gateway runs new RegExp(test.pattern); an undefined pattern matches
+    // everything and would falsely accept. Carry a string over from either key.
+    const carried = typeof test.pattern === "string" ? test.pattern : typeof test.needle === "string" ? test.needle : "";
+    return { check, pattern: carried };
+  }
+  const carried = typeof test.needle === "string" ? test.needle : typeof test.pattern === "string" ? test.pattern : "";
+  return { check, needle: carried };
 }
 
 /** Repeatable-row helpers (pure; unit-tested). */
@@ -221,15 +262,22 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
         if (weight === undefined || weight <= 0) errors[`rubric.criteria.${index}.weight`] = "Positive weight required.";
         if (!str(criterion.description).trim()) errors[`rubric.criteria.${index}.description`] = "Describe what this criterion checks.";
         const test = rec(criterion.test);
-        if (str(test.check) === "min-length") {
+        const check = str(test.check);
+        if (check === "min-length") {
           const minChars = num(test.minChars);
           if (minChars === undefined || !Number.isInteger(minChars) || minChars < 1) {
             errors[`rubric.criteria.${index}.test.minChars`] = "Required — the minimum character count this check enforces.";
           }
+        } else if (check === "regex-match") {
+          const pattern = str(test.pattern);
+          if (!pattern.trim()) {
+            errors[`rubric.criteria.${index}.test.pattern`] = "Required — a pattern (an empty pattern matches everything).";
+          } else {
+            try { new RegExp(pattern); }
+            catch { errors[`rubric.criteria.${index}.test.pattern`] = "Not a valid regular expression."; }
+          }
         } else if (!str(test.needle).trim()) {
-          errors[`rubric.criteria.${index}.test.needle`] = str(test.check) === "regex-match"
-            ? "Required — the regular expression the check matches."
-            : "Required — the text the mechanical check looks for.";
+          errors[`rubric.criteria.${index}.test.needle`] = "Required — the text the mechanical check looks for.";
         }
       });
       break;
