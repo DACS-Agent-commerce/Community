@@ -107,12 +107,31 @@ export function parseAgentFieldSchema(agent: AgentCard & { input?: unknown }): A
  * selects must hold one of the published options. Advisory only — the gateway
  * remains authoritative.
  */
+/**
+ * Default input for a schema-driven agent. Selects seed to their first option
+ * and checkboxes to false so what the form displays matches submitted state
+ * (a required select must not read as "chosen" while its value is empty).
+ * Text/number fields start absent so their required validation fires.
+ */
+export function initialSchemaInput(fields: AgentFieldSchema[]): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (field.kind === "checkbox") input[field.key] = false;
+    else if (field.kind === "select" && field.options && field.options.length > 0) input[field.key] = field.options[0];
+  }
+  return input;
+}
+
 export function validateSchemaInput(fields: AgentFieldSchema[], input: Record<string, unknown>): FieldErrors {
   const errors: FieldErrors = {};
   for (const field of fields) {
     const value = input[field.key];
     const missing = value === undefined || value === null || (typeof value === "string" && value.trim() === "");
-    if (field.required && field.kind !== "checkbox" && missing) {
+    if (field.required && field.kind === "checkbox") {
+      if (value !== true) errors[field.key] = `Required — ${field.label} must be checked.`;
+      continue;
+    }
+    if (field.required && missing) {
       errors[field.key] = `Required — ${field.label}.`;
       continue;
     }

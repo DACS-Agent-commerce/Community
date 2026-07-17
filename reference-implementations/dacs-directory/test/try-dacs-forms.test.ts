@@ -10,6 +10,7 @@ import {
   flattenInputKeys,
   hasBuiltinForm,
   initialAgentInput,
+  initialSchemaInput,
   mapGatewayErrors,
   oracleProductChange,
   parseAgentFieldSchema,
@@ -258,4 +259,25 @@ test("schema-driven forms validate required fields and option/number bounds", ()
   assert.ok(validateSchemaInput(schema, { region: "eu", depth: "x" }).depth);
   // A complete, in-bounds input passes.
   assert.deepEqual(validateSchemaInput(schema, { region: "eu", depth: 3 }), {});
+});
+
+test("schema defaults seed selects/checkboxes so display matches state", () => {
+  const schema = parseAgentFieldSchema(card("future-agent", {
+    input: [
+      { name: "region", type: "string", required: true, enum: ["eu", "us"] },
+      { name: "dryRun", type: "boolean", required: true },
+      { name: "note", type: "string" },
+    ],
+  }))!;
+  const seeded = initialSchemaInput(schema);
+  // A required select is pre-set to its displayed first option (not empty), so
+  // it doesn't validate-block while appearing selected.
+  assert.equal(seeded.region, "eu");
+  assert.deepEqual(validateSchemaInput(schema, seeded).region, undefined);
+  // A required checkbox seeds to false and must be checked to pass.
+  assert.equal(seeded.dryRun, false);
+  assert.ok(validateSchemaInput(schema, seeded).dryRun, "required checkbox must be checked");
+  assert.deepEqual(validateSchemaInput(schema, { ...seeded, dryRun: true }).dryRun, undefined);
+  // Non-required text stays absent.
+  assert.ok(!("note" in seeded));
 });
