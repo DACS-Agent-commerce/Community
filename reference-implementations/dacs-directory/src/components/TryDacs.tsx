@@ -200,6 +200,11 @@ export default function TryDacs() {
   const runAbort = useRef<AbortController | null>(null);
   const receiptAbort = useRef<AbortController | null>(null);
   const procurementJobRef = useRef<ProcurementJob | null>(null);
+  // One idempotency key per intentional procurement run, reused across retries
+  // of that run so the gateway returns the existing job instead of creating a
+  // second paid one. Cleared when a new intent begins (new agent, edited input,
+  // Load example) or on success.
+  const procurementRunId = useRef<string | null>(null);
   // True from the instant a /demo/procurement POST is dispatched until a job
   // id is known (or the attempt ends). While true with no known job id, the
   // gateway may have created a PAID job this browser never saw — retrying
@@ -441,11 +446,16 @@ export default function TryDacs() {
             if (ref) request.auditorListingRef = ref;
           }
         } catch { /* gateway will derive and verify the configured Auditor slot */ }
+        // One key per intentional run; a retry of this same run reuses it so
+        // the gateway dedupes to the existing job (never a second payment).
+        procurementRunId.current ??= crypto.randomUUID();
         // From here a paid job may exist on the gateway even if the browser
         // never receives the response.
         procurementPostInFlight.current = true;
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: controller.signal,
+          method: "POST",
+          headers: { "content-type": "application/json", "Idempotency-Key": procurementRunId.current },
+          body: JSON.stringify(request), signal: controller.signal,
         }, deadline);
         if (!start.ok) {
           // Only a 4xx is a verified pre-job client rejection (no job created);
@@ -518,6 +528,7 @@ export default function TryDacs() {
     if (current.status === "failed") throw new Error(current.error ?? "the full procurement flow failed safely");
     if (current.status !== "complete") throw new Error("the full procurement flow is still running; use Resume status to keep following it");
     setResult(current.result); setPhase("done");
+    procurementRunId.current = null;
   }
 
   /** Resume following the existing procurement job (never a new purchase). */
@@ -565,6 +576,7 @@ export default function TryDacs() {
     // matches submitted state.
     const schema = hasBuiltinForm(agent.name) ? null : parseAgentFieldSchema(agent);
     setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(agent.name));
+    procurementRunId.current = null;
     setGatewayFieldErrors({}); setSubmittedSummary([]);
     setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); setPhase("ready"); setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -572,6 +584,7 @@ export default function TryDacs() {
 
   function loadExample() {
     if (!selected) return;
+    procurementRunId.current = null;
     setInputValue(JSON.parse(JSON.stringify(selected.exampleInput)) as Record<string, unknown>);
     setGatewayFieldErrors({});
     setError("");
@@ -579,6 +592,9 @@ export default function TryDacs() {
 
   function editInput(next: Record<string, unknown>) {
     setInputValue(next);
+    // Edited input is a new intent: a fresh idempotency key so a retry can't
+    // dedupe to a job that ran the previous payload.
+    procurementRunId.current = null;
     // Stale gateway verdicts don't apply to edited input.
     if (Object.keys(gatewayFieldErrors).length) setGatewayFieldErrors({});
   }
