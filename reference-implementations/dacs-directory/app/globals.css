@@ -570,10 +570,3 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .submitted-summary { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.75rem; }
 .submitted-summary span { display: block; letter-spacing: 0.08em; color: var(--text-secondary); margin-bottom: 4px; }
 .submitted-summary ul { margin: 0; padding-left: 16px; }
-
-/* ── /try procurement lock banner ──────────────────────────────────────── */
-.procurement-lock { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 16px; padding: 14px 16px; border: 1px solid var(--red-strong, #c0392b); border-radius: 10px; background: color-mix(in srgb, var(--red-strong, #c0392b) 8%, transparent); }
-.procurement-lock strong { display: block; color: var(--red-strong, #c0392b); }
-.procurement-lock p { margin: 4px 0 0; font-size: 0.8rem; color: var(--text-secondary); max-width: 60ch; }
-.procurement-lock .btn { white-space: nowrap; }
-.picker-grid button:disabled, .try-agent-grid button:disabled { opacity: 0.5; cursor: not-allowed; }

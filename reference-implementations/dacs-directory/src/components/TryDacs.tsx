@@ -43,7 +43,6 @@ type Plan = {
 const EXPLORER = "https://explorer.demos.sh";
 const AGENT_TIMEOUT_MS = 120_000;
 const RECEIPT_WATCH_TIMEOUT_MS = 2 * 60_000;
-const PROCUREMENT_LOCK_KEY = "dacs-try:procurement-unreconciled";
 
 function compact(value: unknown, head = 18, tail = 8): string {
   const text = String(value ?? "");
@@ -205,16 +204,6 @@ export default function TryDacs() {
   // second paid one. Cleared when a new intent begins (new agent, edited input,
   // Load example) or on success.
   const procurementRunId = useRef<string | null>(null);
-  // True from the instant a /demo/procurement POST is dispatched until a job
-  // id is known (or the attempt ends). While true with no known job id, the
-  // gateway may have created a PAID job this browser never saw — retrying
-  // would double-pay, so Retry is withheld.
-  const procurementPostInFlight = useRef(false);
-  // A persistent lock: once a procurement job may exist but is unaccounted for,
-  // procurement stays disabled across re-selection AND page refresh until the
-  // user explicitly reconciles. (The robust fix is gateway idempotency; this is
-  // the safe-by-default UI guarantee in the meantime.)
-  const [procurementLock, setProcurementLock] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`${BUTLER}/demo/butler/agents`)
@@ -234,20 +223,6 @@ export default function TryDacs() {
   }, [phase, receiptPolling, runStartedAt]);
 
   useEffect(() => { procurementJobRef.current = procurementJob; }, [procurementJob]);
-
-  // Restore the procurement lock across refreshes.
-  useEffect(() => {
-    try { setProcurementLock(window.localStorage.getItem(PROCUREMENT_LOCK_KEY)); } catch { /* storage unavailable */ }
-  }, []);
-
-  const lockProcurement = useCallback((detail: string) => {
-    setProcurementLock(detail);
-    try { window.localStorage.setItem(PROCUREMENT_LOCK_KEY, detail); } catch { /* ignore */ }
-  }, []);
-  const clearProcurementLock = useCallback(() => {
-    setProcurementLock(null);
-    try { window.localStorage.removeItem(PROCUREMENT_LOCK_KEY); } catch { /* ignore */ }
-  }, []);
 
   useEffect(() => () => {
     runAbort.current?.abort();
@@ -413,7 +388,6 @@ export default function TryDacs() {
     // offer resuming a stale job (ref set synchronously: the catch below may
     // run before the state-sync effect).
     setProcurementJob(null); procurementJobRef.current = null;
-    procurementPostInFlight.current = false;
     setGatewayFieldErrors({});
     setSubmittedSummary(summarizeAgentInput(plan.butler.selectedAgent, parsed));
     setRunStartedAt(Date.now()); setElapsedMs(0);
@@ -450,27 +424,19 @@ export default function TryDacs() {
         // the gateway dedupes to the existing job (never a second payment).
         procurementRunId.current ??= crypto.randomUUID();
         // From here a paid job may exist on the gateway even if the browser
-        // never receives the response.
-        procurementPostInFlight.current = true;
+        // never receives the response — but the Idempotency-Key makes a retry
+        // safe: re-POSTing the same key returns the existing job.
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
           method: "POST",
           headers: { "content-type": "application/json", "Idempotency-Key": procurementRunId.current },
           body: JSON.stringify(request), signal: controller.signal,
         }, deadline);
         if (!start.ok) {
-          // Only a 4xx is a verified pre-job client rejection (no job created);
-          // a 5xx/opaque failure may have created a paid job, so it must remain
-          // in-flight and fall through to the indeterminate guard.
-          const preJob = start.status >= 400 && start.status < 500;
-          if (preJob) {
-            procurementPostInFlight.current = false;
-            if (fieldMappedRejection(startBody)) return;
-          }
+          if (fieldMappedRejection(startBody)) return;
           throw new Error(message(startBody));
         }
         const started = parseProcurementJob(startBody);
-        procurementJobRef.current = started;       // synchronous — the catch relies on it
-        procurementPostInFlight.current = false;   // job id known; safe to resume
+        procurementJobRef.current = started;   // synchronous — the catch relies on it
         setProcurementJob(started);
         await followProcurementJob(started, controller, deadline);
         return;
@@ -494,17 +460,12 @@ export default function TryDacs() {
       const cancelled = (cause as Error).name === "AbortError";
       const isProcurement = plan.butler.selectedAgent === "procurement-butler";
       const haveJob = procurementJobRef.current !== null;
-      // Dispatched a procurement POST but never learned the job id: a paid job
-      // may exist. Withhold Retry entirely.
-      const indeterminate = isProcurement && procurementPostInFlight.current && !haveJob;
-      procurementPostInFlight.current = false;
-      if (indeterminate) lockProcurement(`A procurement request was dispatched at ${new Date().toISOString()} but this browser never received a job id.`);
-      setError(indeterminate
-        ? "This browser dispatched the procurement request but never received the job id, so a paid job may have started on the gateway. Do NOT retry — that could start a second paid job. Check the agent gateway or your wallet activity, then clear the lock below once reconciled."
-        : cancelled
-          ? isProcurement && haveJob
-            ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
-            : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
+      setError(cancelled
+        ? isProcurement && haveJob
+          ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
+          : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
+        : isProcurement
+          ? "This procurement run did not complete in this browser. Retrying reuses the same idempotency key, so the gateway resumes the existing job instead of starting a second paid purchase."
           : (cause as Error).message);
       setPhase("error");
     } finally {
@@ -554,9 +515,6 @@ export default function TryDacs() {
   }
 
   function selectAgent(agent: AgentCard) {
-    // Procurement stays locked until the prior indeterminate run is reconciled,
-    // so it can't be restarted from the picker into a second paid job.
-    if (agent.name === "procurement-butler" && procurementLock) return;
     runAbort.current?.abort(); receiptAbort.current?.abort();
     setGoal(agent.exampleGoal);
     setPlan({
@@ -609,18 +567,6 @@ export default function TryDacs() {
         <p>Choose one of the live test agents. The Butler will explain its role, validate the test, supervise the work and show you how DACS verifies the result.</p>
       </section>
 
-      {procurementLock && (
-        <section className="procurement-lock" role="alert">
-          <div>
-            <strong>Procurement is locked — an earlier run may have started a paid job</strong>
-            <p>{procurementLock} Check the agent gateway or your wallet activity to confirm whether that job exists before running procurement again. Retrying without checking could pay twice.</p>
-          </div>
-          <button className="btn" onClick={() => { if (window.confirm("Only clear this after confirming on the gateway/your wallet that no unaccounted procurement job is pending. Clear the lock?")) clearProcurementLock(); }}>
-            I&apos;ve reconciled — clear the lock
-          </button>
-        </section>
-      )}
-
       <section className="try-shell">
         <div className="butler-chat">
           <div className="chat-head"><span className="butler-avatar">B</span><div><strong>DACS Butler</strong><small>{agents.length ? `${agents.length} specialists online · agent gateway connected` : "Connecting to the agent network…"}</small></div></div>
@@ -635,19 +581,19 @@ export default function TryDacs() {
           {phase === "idle" || (phase === "error" && !plan) ? (
             <div className="agent-picker">
               <div className="picker-head"><strong>Choose a test agent</strong><span>{agents.length} available</span></div>
-              <div className="picker-grid">{agents.map((agent) => { const locked = agent.name === "procurement-butler" && Boolean(procurementLock); return <button key={agent.name} disabled={locked} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{locked ? "Locked — an earlier procurement run is unreconciled. Clear the lock below to re-enable." : agent.summary}</small></div><i>→</i></button>; })}</div>
+              <div className="picker-grid">{agents.map((agent) => <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{agent.summary}</small></div><i>→</i></button>)}</div>
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              {plan.butler.selectedAgent === "procurement-butler" && procurementLock && !procurementJob ? (
-                <>
-                  <div><strong>Procurement state is unknown — do not retry</strong><small>The request was dispatched but this browser never received a job id, so a paid job may exist on the gateway. It stays locked until you reconcile it above.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button></div>
-                </>
-              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
+              {plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
                 <>
                   <div><strong>Watching stopped — the procurement job is still live on the gateway</strong><small>Job {procurementJob.id} was not cancelled; resuming follows the same job and never starts a second purchase.</small></div>
                   <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>
+                </>
+              ) : plan.butler.selectedAgent === "procurement-butler" ? (
+                <>
+                  <div><strong>Procurement stopped safely</strong><small>Retrying reuses this run’s idempotency key, so the gateway resumes the existing job rather than starting a second paid purchase.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={runAgent}>Retry this run <span>→</span></button></div>
                 </>
               ) : (
                 <>
@@ -686,7 +632,7 @@ export default function TryDacs() {
 
       {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className={`badge ${selected?.name === "procurement-butler" && !procurementAccepted ? "err" : "ok"}`}>{selected?.name === "procurement-butler" ? (procurementAccepted ? "verified" : "verification incomplete") : "completed"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another goal</button></div>{receipt && <div className={`receipt-status receipt-${receipt.status}`}><div><span className={receiptPolling ? "live-pulse" : "receipt-dot"} /><strong>On-chain receipt: {receipt.status}</strong><small>{receipt.note}{receipt.createdAt ? ` · ${elapsedLabel(receiptElapsedMs)}` : ""}{receipt.attempts !== undefined ? ` · attempt ${receipt.attempts}/3` : ""}</small>{receiptMessage && <p>{receiptMessage}</p>}</div><div className="receipt-actions">{receipt.txRef && <a className="ghost-btn" href={`${EXPLORER}/tx/${receipt.txRef}`} target="_blank" rel="noreferrer">View transaction ↗</a>}{receiptPolling ? <button className="ghost-btn" onClick={cancelReceiptWatch}>Stop checking</button> : receipt.statusUrl && receipt.status !== "confirmed" ? <button className="ghost-btn" onClick={retryReceipt}>{receipt.status === "failed" ? "Retry anchoring" : "Check again"}</button> : null}</div></div>}{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
 
-      <section className="try-agents"><div className="try-section-head"><div><span>WHAT YOU CAN TEST</span><h2>Nine bounded agent demonstrations</h2></div><p>Each test uses a safe, validated fixture. The Butler supervises execution; it does not invent arbitrary jobs or access private data.</p></div><div className="try-agent-grid">{agents.slice(0, 6).map((agent, index) => { const locked = agent.name === "procurement-butler" && Boolean(procurementLock); return <button key={agent.name} disabled={locked} onClick={() => selectAgent(agent)}><span>0{index + 1}</span><strong>{agent.label}</strong><p>{locked ? "Locked until the earlier procurement run is reconciled." : agent.exampleGoal}</p><i>{locked ? "Locked" : "Select this agent →"}</i></button>; })}</div></section>
+      <section className="try-agents"><div className="try-section-head"><div><span>WHAT YOU CAN TEST</span><h2>Nine bounded agent demonstrations</h2></div><p>Each test uses a safe, validated fixture. The Butler supervises execution; it does not invent arbitrary jobs or access private data.</p></div><div className="try-agent-grid">{agents.slice(0, 6).map((agent, index) => <button key={agent.name} onClick={() => selectAgent(agent)}><span>0{index + 1}</span><strong>{agent.label}</strong><p>{agent.exampleGoal}</p><i>Select this agent →</i></button>)}</div></section>
     </div>
   );
 }
