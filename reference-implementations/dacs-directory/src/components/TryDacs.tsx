@@ -31,8 +31,20 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
+import { parseStoredProcurementRun, stageEvents, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
+const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
+
+function readStoredRun(): StoredProcurementRun | null {
+  try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
+}
+function writeStoredRun(run: StoredProcurementRun | null): void {
+  try {
+    if (run) window.localStorage.setItem(PROCUREMENT_RUN_KEY, JSON.stringify(run));
+    else window.localStorage.removeItem(PROCUREMENT_RUN_KEY);
+  } catch { /* storage unavailable — the in-memory key still covers this session */ }
+}
 
 type Plan = {
   butler: { selectedAgent: string; label: string; rationale: string; selectionEngine: string; alternatives: string[] };
@@ -167,7 +179,7 @@ const DACS_STAGES = [
     key: "identify", name: "Identify", primitive: "DACS-1",
     tagline: "Who offers the service? Signed listings only.",
     receipt: "a signed on-chain listing",
-    plain: "Every agent here published a signed listing on the Demos chain — like a business card that can't be forged. The Butler reads those listings to know who offers what, without trusting anyone's word for it.",
+    plain: "Agents advertise what they offer. In full DACS that's a signed listing anchored on the Demos chain — like a business card that can't be forged. This demo's picker shows the live gateway's agent roster; the Procurement Butler run then resolves and verifies a real signed DACS-1 listing on-chain before dealing.",
   },
   {
     key: "vet", name: "Vet", primitive: "DACS-2",
@@ -194,28 +206,6 @@ const DACS_STAGES = [
     plain: "Finally everything — listing, vet, agreement, payment and delivery — is tied into one signed bundle that both sides anchor. Anyone can re-run the checks later, and honest deals build the seller's public reputation.",
   },
 ] as const;
-
-/** Gateway procurement event phases → DACS stage index. */
-const PROCUREMENT_PHASE_STAGE: Record<string, number> = {
-  queued: 0, connecting: 0, discovering: 0,
-  selecting: 1,
-  agreeing: 2,
-  settling: 3, delivering: 3,
-  verifying: 4, evaluating: 4, complete: 4,
-};
-
-/**
- * Some gateway phases span two DACS stages (e.g. the RFQ opens and the
- * agreement anchors while the job phase is still "selecting"), so the event
- * label decides first and the phase map is the fallback.
- */
-function stageForEvent(event: ProcurementEvent): number {
-  const label = event.label.toLowerCase();
-  if (/\bvet\b/.test(label)) return 1;
-  if (/agreement|commitment|rfq|agreed/.test(label)) return 2;
-  if (/settlement evidence|payment evidence/.test(label)) return 3;
-  return PROCUREMENT_PHASE_STAGE[event.phase] ?? 4;
-}
 
 type StageOutput = {
   state: "pending" | "active" | "complete" | "warning" | "skipped";
@@ -278,6 +268,17 @@ export default function TryDacs() {
 
   useEffect(() => { procurementJobRef.current = procurementJob; }, [procurementJob]);
 
+  // The persisted procurement run (idempotency key + input + job id). Written
+  // BEFORE the POST is dispatched so a reload/crash can never lose the key of
+  // a purchase the gateway may have started; kept until the job reaches a
+  // browser-verified safe terminal state.
+  const [storedRun, setStoredRun] = useState<StoredProcurementRun | null>(null);
+  const updateStoredRun = useCallback((run: StoredProcurementRun | null) => {
+    writeStoredRun(run);
+    setStoredRun(run);
+  }, []);
+  useEffect(() => { setStoredRun(readStoredRun()); }, []);
+
   useEffect(() => () => {
     runAbort.current?.abort();
     receiptAbort.current?.abort();
@@ -311,10 +312,11 @@ export default function TryDacs() {
     : receipt === null || receipt.status === "confirmed");
   const resultPayload = selected?.name === "procurement-butler" ? result : record(result).result;
   const resultFields = Object.keys(record(resultPayload));
-  const isProcurementSel = selected?.name === "procurement-butler";
+  const isProcurementSel = plan?.butler.selectedAgent === "procurement-butler";
   const procEvents = procurementJob?.events ?? [];
-  const eventsByStage = DACS_STAGES.map((_, stageIdx) => procEvents.filter((event) => stageForEvent(event) === stageIdx));
-  const procStage = procEvents.length ? stageForEvent(procEvents[procEvents.length - 1]!) : 0;
+  // Fail-closed staging: a terminal "failed" (or unknown-phase) event attaches
+  // to the stage the run had actually reached and never advances progress.
+  const { byStage: eventsByStage, progress: procStage } = stageEvents(procEvents);
 
   // Live procurement run: each DACS stage reports the gateway's own events
   // (and their chain records) as they arrive.
@@ -344,10 +346,10 @@ export default function TryDacs() {
   }
 
   const identifyOut: StageOutput = !agents.length
-    ? { state: "active", summary: "Reading the live catalog…" }
+    ? { state: "active", summary: "Reading the live agent roster…" }
     : !plan
-      ? { state: "active", summary: `${agents.length} signed listings discovered — pick an agent`, detail: agents.map((agent) => agent.label).join(", ") }
-      : { state: "complete", summary: `${plan.butler.label} picked from ${agents.length} live listings`, detail: "Each card comes from a signed on-chain listing; nothing here is typed in by hand." };
+      ? { state: "active", summary: `${agents.length} live agents on the gateway roster — pick one`, detail: agents.map((agent) => agent.label).join(", ") }
+      : { state: "complete", summary: `${plan.butler.label} picked from the gateway's ${agents.length}-agent roster`, detail: "This picker is the gateway's published roster. A signed DACS-1 listing is only resolved and verified on-chain during the full Procurement run." };
   const vetOut: StageOutput = !plan
     ? { state: "pending", summary: "Waiting for an agent choice" }
     : isProcurementSel
@@ -372,11 +374,11 @@ export default function TryDacs() {
   const verifyOut: StageOutput = receipt
     ? {
         state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active",
-        summary: `Receipt ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
-        detail: receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}`,
+        summary: `Output anchor ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
+        detail: `${receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below.` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}.`} This is a single-sided output anchor, not the reconciled two-party DACS-5 bundle — run the Procurement Butler for that.`,
       }
     : phase === "done"
-      ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt for this agent." }
+      ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt for this agent. The reconciled DACS-5 bundle is only produced by the full Procurement run." }
       : { state: "pending", summary: "Waiting for delivery" };
 
   // A live/finished procurement job reports the real gateway events per stage;
@@ -481,6 +483,13 @@ export default function TryDacs() {
       setError("Some fields need attention before this can run — see the highlighted inputs.");
       return;
     }
+    // A new procurement run must not overwrite the persisted record of an
+    // earlier, unreconciled one — that record may be the only handle on a
+    // paid job. Retrying the SAME run (matching key) passes through.
+    if (plan.butler.selectedAgent === "procurement-butler" && storedRun && storedRun.runId !== procurementRunId.current) {
+      setError("An earlier procurement run from this browser is still on record. Use “Check & resume” in the banner above (or dismiss it once reconciled) before starting a new purchase.");
+      return;
+    }
     runAbort.current?.abort(); receiptAbort.current?.abort();
     const controller = new AbortController();
     runAbort.current = controller;
@@ -524,20 +533,27 @@ export default function TryDacs() {
         // One key per intentional run; a retry of this same run reuses it so
         // the gateway dedupes to the existing job (never a second payment).
         procurementRunId.current ??= crypto.randomUUID();
-        // From here a paid job may exist on the gateway even if the browser
-        // never receives the response — but the Idempotency-Key makes a retry
-        // safe: re-POSTing the same key returns the existing job.
+        // Persist the key + input BEFORE dispatch: a reload/crash between the
+        // POST and the job-id response must not lose the only handle on a
+        // purchase the gateway may have started. Restored on mount.
+        const runRecord: StoredProcurementRun = { runId: procurementRunId.current, goal, input: request, startedAt: new Date().toISOString() };
+        updateStoredRun(runRecord);
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
           method: "POST",
           headers: { "content-type": "application/json", "Idempotency-Key": procurementRunId.current },
           body: JSON.stringify(request), signal: controller.signal,
         }, deadline);
         if (!start.ok) {
+          // A 4xx is a verified pre-job rejection (nothing was created), so
+          // the persisted record has nothing to protect. A 5xx/opaque failure
+          // keeps it: the job may exist, and the key is the only handle.
+          if (start.status >= 400 && start.status < 500) updateStoredRun(null);
           if (fieldMappedRejection(startBody)) return;
           throw new Error(message(startBody));
         }
         const started = parseProcurementJob(startBody);
         procurementJobRef.current = started;   // synchronous — the catch relies on it
+        updateStoredRun({ ...runRecord, jobId: started.id });
         setProcurementJob(started);
         await followProcurementJob(started, controller, deadline);
         return;
@@ -561,11 +577,15 @@ export default function TryDacs() {
       const cancelled = (cause as Error).name === "AbortError";
       const isProcurement = plan.butler.selectedAgent === "procurement-butler";
       const haveJob = procurementJobRef.current !== null;
+      // The retry-reuses-the-key reassurance only holds while the key is
+      // retained — a terminal failed job is explained by the recovery box
+      // instead, so its gateway reason is shown verbatim.
+      const failedJob = procurementJobRef.current?.status === "failed";
       setError(cancelled
         ? isProcurement && haveJob
           ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
           : "Run cancelled in this browser. No result was accepted; you can retry the same bounded job."
-        : isProcurement
+        : isProcurement && !failedJob
           ? `${(cause as Error).message} — Retrying reuses the same idempotency key, so the gateway resumes the existing job instead of starting a second paid purchase.`
           : (cause as Error).message);
       setPhase("error");
@@ -588,15 +608,21 @@ export default function TryDacs() {
       current = parseProcurementJob(pollBody); setProcurementJob(current);
     }
     if (current.status === "failed") {
-      // A gateway-confirmed terminal failure: replaying the same idempotency
-      // key would only return this failed job again, so the next retry is a
-      // consciously-new purchase attempt.
-      procurementRunId.current = null;
+      // Only the gateway's explicit failedBeforePayment=true proves no money
+      // moved — then (and only then) a fresh purchase is safe, so the key and
+      // persisted record are released. Anything else (flag false or absent)
+      // may have paid: keep both, so the job stays referenced for the
+      // gateway's operator recovery path and no new purchase is offered.
+      if (current.failedBeforePayment === true) {
+        procurementRunId.current = null;
+        updateStoredRun(null);
+      }
       throw new Error(current.error ?? "the full procurement flow failed safely");
     }
     if (current.status !== "complete") throw new Error("the full procurement flow is still running; use Resume status to keep following it");
     setResult(current.result); setPhase("done");
     procurementRunId.current = null;
+    updateStoredRun(null);
   }
 
   /** Resume following the existing procurement job (never a new purchase). */
@@ -615,6 +641,75 @@ export default function TryDacs() {
       setError(cancelled
         ? "Stopped watching in this browser. The gateway is still completing this procurement job — resume below to keep following it; no second purchase will be started."
         : (cause as Error).message);
+      setPhase("error");
+    } finally {
+      if (runAbort.current === controller) runAbort.current = null;
+    }
+  }
+
+  /**
+   * Reconcile a persisted run after a reload. With a job id this only reads
+   * status. Without one (the reload raced the POST response) it re-POSTs the
+   * SAME stored input under the SAME idempotency key, so the gateway returns
+   * the original job if it exists — it can never start a second purchase for
+   * this run.
+   */
+  async function resumeStoredRun() {
+    const stored = storedRun;
+    if (!stored) return;
+    runAbort.current?.abort(); receiptAbort.current?.abort();
+    const controller = new AbortController();
+    runAbort.current = controller;
+    procurementRunId.current = stored.runId;
+    setGoal(stored.goal);
+    setPlan({
+      butler: {
+        selectedAgent: "procurement-butler",
+        label: "Procurement Butler",
+        selectionEngine: "restored run",
+        rationale: "Reconnecting to the procurement run this browser dispatched earlier — same idempotency key, so no second purchase can start.",
+        alternatives: [],
+      },
+      proposedInput: stored.input,
+      inputNote: "Restored from this browser's persisted run record.",
+    });
+    setInputValue(stored.input);
+    setResult(undefined); setReceipt(null); setReceiptMessage(""); setGatewayFieldErrors({});
+    setProcurementJob(null); procurementJobRef.current = null;
+    setSubmittedSummary(summarizeAgentInput("procurement-butler", stored.input));
+    setPhase("running"); setError("");
+    setRunStartedAt(Date.now()); setElapsedMs(0);
+    const deadline = Date.now() + 12 * 60_000;
+    try {
+      let job: ProcurementJob;
+      if (stored.jobId) {
+        const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(stored.jobId)}`, { signal: controller.signal }, deadline);
+        if (!response.ok) throw new Error(message(body));
+        job = parseProcurementJob(body);
+      } else {
+        const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "Idempotency-Key": stored.runId },
+          body: JSON.stringify(stored.input), signal: controller.signal,
+        }, deadline);
+        if (!response.ok) {
+          if (response.status >= 400 && response.status < 500) updateStoredRun(null);
+          throw new Error(message(body));
+        }
+        job = parseProcurementJob(body);
+        updateStoredRun({ ...stored, jobId: job.id });
+      }
+      procurementJobRef.current = job;
+      setProcurementJob(job);
+      await followProcurementJob(job, controller, deadline);
+    } catch (cause) {
+      const cancelled = (cause as Error).name === "AbortError";
+      const failedJob = procurementJobRef.current?.status === "failed";
+      setError(cancelled
+        ? "Stopped watching in this browser. Any live gateway job continues — resume again to keep following it."
+        : failedJob
+          ? (cause as Error).message
+          : `${(cause as Error).message} — Resuming again reuses the same idempotency key, so no second purchase can start.`);
       setPhase("error");
     } finally {
       if (runAbort.current === controller) runAbort.current = null;
@@ -674,6 +769,19 @@ export default function TryDacs() {
         <p>Choose one of the live test agents. The Butler will explain its role, validate the test, supervise the work and show you how DACS verifies the result.</p>
       </section>
 
+      {storedRun && phase !== "running" && procurementJob?.id !== storedRun.jobId && (
+        <section className="resume-banner" role="alert">
+          <div>
+            <strong>A procurement run from this browser is still on record</strong>
+            <p>Started {new Date(storedRun.startedAt).toLocaleString()}{storedRun.jobId ? ` · job ${compact(storedRun.jobId, 8, 6)}` : " · the job id was never received"}. Resuming reconnects under the same idempotency key, so it can never start a second purchase.</p>
+          </div>
+          <div className="resume-actions">
+            <button className="ghost-btn" onClick={() => { if (window.confirm("Dismiss this reminder? If the run paid, its job remains preserved on the gateway — only dismiss once you no longer need this browser to track it.")) updateStoredRun(null); }}>Dismiss</button>
+            <button className="btn" onClick={resumeStoredRun}>Check &amp; resume <span>→</span></button>
+          </div>
+        </section>
+      )}
+
       <section className="try-shell">
         <div className="butler-chat">
           <div className="chat-head"><span className="butler-avatar">B</span><div><strong>DACS Butler</strong><small>{agents.length ? `${agents.length} specialists online · agent gateway connected` : "Connecting to the agent network…"}</small></div></div>
@@ -692,10 +800,15 @@ export default function TryDacs() {
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              {plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" ? (
+              {plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" && procurementJob.failedBeforePayment === true ? (
                 <>
-                  <div><strong>Procurement failed safely on the gateway</strong><small>The gateway reported this job as failed (its reason is shown above). Retrying starts a fresh purchase attempt with a new idempotency key.</small></div>
+                  <div><strong>Procurement failed before any payment</strong><small>The gateway confirms no money moved (its reason is shown above). Retrying starts a fresh purchase attempt with a new idempotency key.</small></div>
                   <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry the purchase <span>→</span></button></div>
+                </>
+              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" ? (
+                <>
+                  <div><strong>Procurement failed after payment may have moved — do not re-purchase</strong><small>Job {procurementJob.id} is preserved on the gateway with its payment evidence; the gateway cannot confirm the failure happened before payment, so starting a new run could pay twice. A gateway operator can recover the delivery for the existing job without another payment.</small></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button></div>
                 </>
               ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
                 <>
@@ -754,7 +867,7 @@ export default function TryDacs() {
                     </div>
                     <details className="stage-help">
                       <summary>What’s happening here?</summary>
-                      <p>{stage.plain} <b>Proof created: {stage.receipt}.</b></p>
+                      <p>{stage.plain} <b>{output.state === "skipped" ? `Proof this stage normally creates: ${stage.receipt} — not produced in this demo.` : `Proof this stage creates: ${stage.receipt}.`}</b></p>
                     </details>
                   </div>
                 </div>

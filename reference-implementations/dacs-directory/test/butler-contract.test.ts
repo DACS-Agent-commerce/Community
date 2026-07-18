@@ -64,6 +64,19 @@ test("accepts running and completed procurement envelopes", () => {
   assert.equal(complete.result, acceptedReport);
 });
 
+test("failedBeforePayment passes through only as an explicit boolean", () => {
+  const failedShape = { id: "job-1", status: "failed", phase: "failed", events: [], error: "stopped" };
+  assert.equal(parseProcurementJob({ ...failedShape, failedBeforePayment: true }).failedBeforePayment, true);
+  assert.equal(parseProcurementJob({ ...failedShape, failedBeforePayment: false }).failedBeforePayment, false);
+  // Older gateways omit the flag entirely — the client must treat that as
+  // "a payment may exist" and never re-purchase.
+  assert.equal(parseProcurementJob(failedShape).failedBeforePayment, undefined);
+  assert.throws(
+    () => parseProcurementJob({ ...failedShape, failedBeforePayment: "yes" }),
+    ButlerContractError,
+  );
+});
+
 test("rejects malformed procurement and general Butler responses", () => {
   assert.throws(
     () => parseProcurementJob({ id: "job-1", status: "done", phase: "complete", events: [] }),

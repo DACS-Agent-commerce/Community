@@ -26,6 +26,12 @@ export type ProcurementJob = {
   events: ProcurementEvent[];
   result?: unknown;
   error?: string;
+  /**
+   * Gateway-published only on failed jobs: true means NO payment was
+   * broadcast, so a fresh purchase is safe. Absent or false must be treated
+   * as "a payment may exist" — never re-purchase.
+   */
+  failedBeforePayment?: boolean;
 };
 
 export type ProcurementEvidence = {
@@ -206,6 +212,9 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     };
   });
   if (job.status === "complete") requiredRecord(job.result, "procurement job.result");
+  if (job.failedBeforePayment !== undefined && typeof job.failedBeforePayment !== "boolean") {
+    throw new ButlerContractError("procurement job.failedBeforePayment", "a boolean");
+  }
   return {
     id: requiredString(job.id, "procurement job.id"),
     status: job.status,
@@ -213,6 +222,7 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     events,
     result: job.result,
     error: optionalString(job.error, "procurement job.error"),
+    failedBeforePayment: job.failedBeforePayment,
   };
 }
 
