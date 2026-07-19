@@ -39,6 +39,33 @@ const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
 function readStoredRun(): StoredProcurementRun | null {
   try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
 }
+
+/**
+ * Cross-tab exclusive section around reading the persisted run record,
+ * writing it, and dispatching the initial paid POST. Without this, two tabs
+ * can interleave: B overwrites A's record, gets a 409 (A's job is running),
+ * and then deletes the shared record that was A's only recovery handle.
+ * Web Locks are per-origin and queue fairly; on the rare browser without
+ * them, the in-section storage re-read still guards best-effort.
+ */
+const PROCUREMENT_LOCK_NAME = "dacs-try:procurement-dispatch";
+function withProcurementLock<T>(section: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (locks?.request) return locks.request(PROCUREMENT_LOCK_NAME, section) as Promise<T>;
+  return section();
+}
+
+/**
+ * Delete the persisted record ONLY if it still belongs to `runId` — another
+ * tab's record must never be deleted by this tab's cleanup or 4xx handling.
+ */
+function releaseStoredRunIfOwned(runId: string | null): void {
+  try {
+    const current = parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY));
+    if (current && current.runId !== runId) return;
+    window.localStorage.removeItem(PROCUREMENT_RUN_KEY);
+  } catch { /* storage unavailable — nothing to release */ }
+}
 /**
  * Write the run record and VERIFY it by reading it back. Returns false when
  * durable persistence cannot be established (storage blocked, full, or the
@@ -292,7 +319,21 @@ export default function TryDacs() {
     setStoredRun(ok ? run : readStoredRun());
     return ok;
   }, []);
+  /** Ownership-conditional delete: never removes another tab's record. */
+  const releaseStoredRun = useCallback((runId: string | null) => {
+    releaseStoredRunIfOwned(runId);
+    setStoredRun(readStoredRun());
+  }, []);
   useEffect(() => { setStoredRun(readStoredRun()); }, []);
+  // Keep this tab's view of the record in sync when ANOTHER tab writes or
+  // clears it (storage events fire only in non-originating tabs).
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === PROCUREMENT_RUN_KEY || event.key === null) setStoredRun(readStoredRun());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => () => {
     runAbort.current?.abort();
@@ -393,9 +434,9 @@ export default function TryDacs() {
   // so the stage never earns a completion tick outside the full purchase.
   const verifyOut: StageOutput = receipt
     ? {
-        state: receipt.status === "failed" ? "warning" : "skipped",
+        state: "skipped",
         summary: `Single-sided output anchor ${receipt.status} — not a DACS-5 bundle${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
-        detail: `${receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below.` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}.`} The reconciled two-party DACS-5 bundle is only produced by the full Procurement run.`,
+        detail: `${receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below.` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}.`}${receipt.status === "failed" ? " Anchoring failed safely — use the receipt panel below to retry." : ""} The reconciled two-party DACS-5 bundle is only produced by the full Procurement run.`,
       }
     : phase === "done"
       ? { state: "skipped", summary: "No DACS-5 bundle — this demo returns the result directly", detail: "This gateway did not advertise a separate live receipt for this agent. The reconciled DACS-5 bundle is only produced by the full Procurement run." }
@@ -553,34 +594,49 @@ export default function TryDacs() {
         // One key per intentional run; a retry of this same run reuses it so
         // the gateway dedupes to the existing job (never a second payment).
         procurementRunId.current ??= crypto.randomUUID();
-        // Persist the key + input BEFORE dispatch: a reload/crash between the
-        // POST and the job-id response must not lose the only handle on a
-        // purchase the gateway may have started. Restored on mount.
-        const runRecord: StoredProcurementRun = { runId: procurementRunId.current, goal, input: request, startedAt: new Date().toISOString() };
-        if (!updateStoredRun(runRecord)) {
-          // No durable recovery record → a reload would lose the only handle
-          // on the purchase. Refuse to send the paid request at all.
-          setPhase("ready");
-          setError("This browser cannot durably save the purchase-recovery record (storage is blocked or full), so the paid request was NOT sent. Free up site storage or use a different browser profile, then run again.");
-          return;
-        }
-        const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "Idempotency-Key": procurementRunId.current },
-          body: JSON.stringify(request), signal: controller.signal,
-        }, deadline);
-        if (!start.ok) {
-          // A 4xx is a verified pre-job rejection (nothing was created), so
-          // the persisted record has nothing to protect. A 5xx/opaque failure
-          // keeps it: the job may exist, and the key is the only handle.
-          if (start.status >= 400 && start.status < 500) updateStoredRun(null);
-          if (fieldMappedRejection(startBody)) return;
-          throw new Error(message(startBody));
-        }
-        const started = parseProcurementJob(startBody);
-        procurementJobRef.current = started;   // synchronous — the catch relies on it
-        updateStoredRun({ ...runRecord, jobId: started.id });
-        setProcurementJob(started);
+        // Read-record → write-record → POST runs under a cross-tab exclusive
+        // lock, with the record RE-READ from storage inside the section: two
+        // tabs can otherwise interleave, the loser overwriting the winner's
+        // record and then deleting it on its own 4xx.
+        const started = await withProcurementLock(async (): Promise<ProcurementJob | "handled" | null> => {
+          const existing = readStoredRun();
+          if (existing && existing.runId !== procurementRunId.current) {
+            setPhase("ready");
+            setError("Another procurement run's recovery record is active (possibly from another tab). Use “Check & resume” in the banner — or dismiss it once reconciled — before starting a new purchase.");
+            return null;
+          }
+          // Persist the key + input BEFORE dispatch: a reload/crash between
+          // the POST and the job-id response must not lose the only handle on
+          // a purchase the gateway may have started. Restored on mount.
+          const runRecord: StoredProcurementRun = { runId: procurementRunId.current!, goal, input: request, startedAt: new Date().toISOString() };
+          if (!updateStoredRun(runRecord)) {
+            // No durable recovery record → a reload would lose the only
+            // handle on the purchase. Refuse to send the paid request at all.
+            setPhase("ready");
+            setError("This browser cannot durably save the purchase-recovery record (storage is blocked or full), so the paid request was NOT sent. Free up site storage or use a different browser profile, then run again.");
+            return null;
+          }
+          const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "Idempotency-Key": runRecord.runId },
+            body: JSON.stringify(request), signal: controller.signal,
+          }, deadline);
+          if (!start.ok) {
+            // A 4xx is a verified pre-job rejection (nothing was created), so
+            // THIS run's record has nothing to protect — release it only if
+            // it is still ours. A 5xx/opaque failure keeps it: the job may
+            // exist, and the key is the only handle.
+            if (start.status >= 400 && start.status < 500) releaseStoredRun(runRecord.runId);
+            if (fieldMappedRejection(startBody)) return "handled";
+            throw new Error(message(startBody));
+          }
+          const job = parseProcurementJob(startBody);
+          procurementJobRef.current = job;   // synchronous — the catch relies on it
+          updateStoredRun({ ...runRecord, jobId: job.id });
+          setProcurementJob(job);
+          return job;
+        });
+        if (started === null || started === "handled") return;
         await followProcurementJob(started, controller, deadline);
         return;
       }
@@ -606,7 +662,7 @@ export default function TryDacs() {
       // The retry-reuses-the-key reassurance only holds while the key is
       // retained — a terminal failed job is explained by the recovery box
       // instead, so its gateway reason is shown verbatim.
-      const failedJob = procurementJobRef.current?.status === "failed";
+      const failedJob = (procurementJobRef.current as ProcurementJob | null)?.status === "failed";
       setError(cancelled
         ? isProcurement && haveJob
           ? "Stopped watching in this browser. The gateway is still completing this procurement job — it was NOT cancelled, and any payment it makes still happens. Resume below to keep following the same job; no second purchase will be started."
@@ -636,19 +692,22 @@ export default function TryDacs() {
     if (current.status === "failed") {
       // Only the gateway's explicit failedBeforePayment=true proves no money
       // moved — then (and only then) a fresh purchase is safe, so the key and
-      // persisted record are released. Anything else (flag false or absent)
-      // may have paid: keep both, so the job stays referenced for the
-      // gateway's operator recovery path and no new purchase is offered.
+      // persisted record are released (if the record is still this run's).
+      // Anything else (flag false or absent) may have paid: keep both, so the
+      // job stays referenced for the gateway's operator recovery path and no
+      // new purchase is offered.
       if (current.failedBeforePayment === true) {
+        const ownedRunId = procurementRunId.current;
         procurementRunId.current = null;
-        updateStoredRun(null);
+        releaseStoredRun(ownedRunId);
       }
       throw new Error(current.error ?? "the full procurement flow failed safely");
     }
     if (current.status !== "complete") throw new Error("the full procurement flow is still running; use Resume status to keep following it");
     setResult(current.result); setPhase("done");
+    const ownedRunId = procurementRunId.current;
     procurementRunId.current = null;
-    updateStoredRun(null);
+    releaseStoredRun(ownedRunId);
   }
 
   /** Resume following the existing procurement job (never a new purchase). */
@@ -719,7 +778,7 @@ export default function TryDacs() {
           body: JSON.stringify(stored.input), signal: controller.signal,
         }, deadline);
         if (!response.ok) {
-          if (response.status >= 400 && response.status < 500) updateStoredRun(null);
+          if (response.status >= 400 && response.status < 500) releaseStoredRun(stored.runId);
           throw new Error(message(body));
         }
         job = parseProcurementJob(body);
@@ -730,7 +789,7 @@ export default function TryDacs() {
       await followProcurementJob(job, controller, deadline);
     } catch (cause) {
       const cancelled = (cause as Error).name === "AbortError";
-      const failedJob = procurementJobRef.current?.status === "failed";
+      const failedJob = (procurementJobRef.current as ProcurementJob | null)?.status === "failed";
       setError(cancelled
         ? "Stopped watching in this browser. Any live gateway job continues — resume again to keep following it."
         : failedJob
@@ -795,7 +854,10 @@ export default function TryDacs() {
         <p>Choose one of the live test agents. The Butler will explain its role, validate the test, supervise the work and show you how DACS verifies the result.</p>
       </section>
 
-      {storedRun && phase !== "running" && procurementJob?.id !== storedRun.jobId && (
+      {/* Suppress the banner only when THIS tab is already tracking the
+          record's job. A record with no jobId (the reload-raced-the-POST
+          case) must always surface — that is the exact state it protects. */}
+      {storedRun && phase !== "running" && !(procurementJob && storedRun.jobId && procurementJob.id === storedRun.jobId) && (
         <section className="resume-banner" role="alert">
           <div>
             <strong>A procurement run from this browser is still on record</strong>
@@ -870,7 +932,7 @@ export default function TryDacs() {
         </div>
 
         <aside className="journey" aria-label="The five DACS stages">
-          <div className="journey-head"><span>THE DACS DEAL</span><span>{verificationComplete ? "COMPLETE" : "LIVE"}</span></div>
+          <div className="journey-head"><span>THE DACS DEAL</span><span>{verificationComplete ? (isProcurementSel ? "COMPLETE" : "DEMO COMPLETE") : "LIVE"}</span></div>
           <p className="journey-intro">One deal leaves five signed receipts: <em>Identify → Vet → Negotiate → Settle → Verify</em>. Each stage below reports the real evidence it produced — nothing is ticked off without proof.</p>
           <div className="journey-steps">
             {DACS_STAGES.map((stage, index) => {
