@@ -39,11 +39,24 @@ const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
 function readStoredRun(): StoredProcurementRun | null {
   try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
 }
-function writeStoredRun(run: StoredProcurementRun | null): void {
+/**
+ * Write the run record and VERIFY it by reading it back. Returns false when
+ * durable persistence cannot be established (storage blocked, full, or the
+ * read-back doesn't match) — the caller must refuse to dispatch a paid
+ * request in that case, because a reload would lose the idempotency key.
+ */
+function writeStoredRun(run: StoredProcurementRun | null): boolean {
   try {
-    if (run) window.localStorage.setItem(PROCUREMENT_RUN_KEY, JSON.stringify(run));
-    else window.localStorage.removeItem(PROCUREMENT_RUN_KEY);
-  } catch { /* storage unavailable — the in-memory key still covers this session */ }
+    if (run) {
+      window.localStorage.setItem(PROCUREMENT_RUN_KEY, JSON.stringify(run));
+      const back = parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY));
+      return back !== null && back.runId === run.runId && back.jobId === run.jobId;
+    }
+    window.localStorage.removeItem(PROCUREMENT_RUN_KEY);
+    return window.localStorage.getItem(PROCUREMENT_RUN_KEY) === null;
+  } catch {
+    return false;
+  }
 }
 
 type Plan = {
@@ -273,9 +286,11 @@ export default function TryDacs() {
   // a purchase the gateway may have started; kept until the job reaches a
   // browser-verified safe terminal state.
   const [storedRun, setStoredRun] = useState<StoredProcurementRun | null>(null);
-  const updateStoredRun = useCallback((run: StoredProcurementRun | null) => {
-    writeStoredRun(run);
-    setStoredRun(run);
+  const updateStoredRun = useCallback((run: StoredProcurementRun | null): boolean => {
+    const ok = writeStoredRun(run);
+    // Reflect what storage actually holds, not what we hoped to write.
+    setStoredRun(ok ? run : readStoredRun());
+    return ok;
   }, []);
   useEffect(() => { setStoredRun(readStoredRun()); }, []);
 
@@ -349,7 +364,9 @@ export default function TryDacs() {
     ? { state: "active", summary: "Reading the live agent roster…" }
     : !plan
       ? { state: "active", summary: `${agents.length} live agents on the gateway roster — pick one`, detail: agents.map((agent) => agent.label).join(", ") }
-      : { state: "complete", summary: `${plan.butler.label} picked from the gateway's ${agents.length}-agent roster`, detail: "This picker is the gateway's published roster. A signed DACS-1 listing is only resolved and verified on-chain during the full Procurement run." };
+      : isProcurementSel
+        ? { state: "pending", summary: "The Auditor's signed DACS-1 listing is resolved and verified on-chain when the run starts" }
+        : { state: "skipped", summary: `${plan.butler.label} picked from the gateway roster — no DACS-1 listing involved`, detail: "This picker is the gateway's published roster, not a signed listing. A real DACS-1 listing is only resolved and verified during the full Procurement run." };
   const vetOut: StageOutput = !plan
     ? { state: "pending", summary: "Waiting for an agent choice" }
     : isProcurementSel
@@ -371,14 +388,17 @@ export default function TryDacs() {
           : plan
             ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention in the form` }
             : { state: "pending", summary: "Waiting for job details" };
+  // A specialist's output attestation is real evidence, but it is a
+  // single-sided anchor — NOT the two-party DACS-5 bundle this stage names —
+  // so the stage never earns a completion tick outside the full purchase.
   const verifyOut: StageOutput = receipt
     ? {
-        state: receipt.status === "confirmed" ? "complete" : receipt.status === "failed" ? "warning" : "active",
-        summary: `Output anchor ${receipt.status}${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
-        detail: `${receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below.` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}.`} This is a single-sided output anchor, not the reconciled two-party DACS-5 bundle — run the Procurement Butler for that.`,
+        state: receipt.status === "failed" ? "warning" : "skipped",
+        summary: `Single-sided output anchor ${receipt.status} — not a DACS-5 bundle${!receipt.statusUrl && receipt.status !== "confirmed" && receipt.status !== "failed" ? " · confirmation unknown (anchoring continues on the gateway)" : ""}`,
+        detail: `${receipt.txRef ? `Transaction ${compact(receipt.txRef, 14, 7)} — inspect it in Chain activity below.` : `Anchor ${compact(receipt.anchorAddress, 18, 8)}.`} The reconciled two-party DACS-5 bundle is only produced by the full Procurement run.`,
       }
     : phase === "done"
-      ? { state: "complete", summary: "Agent evidence returned", detail: "This gateway did not advertise a separate live receipt for this agent. The reconciled DACS-5 bundle is only produced by the full Procurement run." }
+      ? { state: "skipped", summary: "No DACS-5 bundle — this demo returns the result directly", detail: "This gateway did not advertise a separate live receipt for this agent. The reconciled DACS-5 bundle is only produced by the full Procurement run." }
       : { state: "pending", summary: "Waiting for delivery" };
 
   // A live/finished procurement job reports the real gateway events per stage;
@@ -537,7 +557,13 @@ export default function TryDacs() {
         // POST and the job-id response must not lose the only handle on a
         // purchase the gateway may have started. Restored on mount.
         const runRecord: StoredProcurementRun = { runId: procurementRunId.current, goal, input: request, startedAt: new Date().toISOString() };
-        updateStoredRun(runRecord);
+        if (!updateStoredRun(runRecord)) {
+          // No durable recovery record → a reload would lose the only handle
+          // on the purchase. Refuse to send the paid request at all.
+          setPhase("ready");
+          setError("This browser cannot durably save the purchase-recovery record (storage is blocked or full), so the paid request was NOT sent. Free up site storage or use a different browser profile, then run again.");
+          return;
+        }
         const { response: start, body: startBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
           method: "POST",
           headers: { "content-type": "application/json", "Idempotency-Key": procurementRunId.current },

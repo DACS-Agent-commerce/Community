@@ -86,6 +86,16 @@ test("an unknown non-terminal phase attaches to current progress without advanci
   assert.ok(byStage[1]!.some((e) => e.label === "A future gateway milestone"));
 });
 
+test("label overrides apply to recognised phases only — an unknown phase cannot spoof progress", () => {
+  const { byStage, progress } = stageEvents([
+    event("queued", "Full DACS purchase queued"),
+    event("mystery-phase", "Preparing the RFQ agreement paperwork"),
+  ]);
+  assert.equal(progress, 0, "keyword-bearing labels on unrecognised phases must not advance progress");
+  assert.equal(byStage[0]!.length, 2);
+  assert.equal(byStage[2]!.length, 0);
+});
+
 test("a failure after payment keeps progress at Settle with the payment evidence", () => {
   const { byStage, progress } = stageEvents([
     event("queued", "Full DACS purchase queued"),

@@ -46,14 +46,18 @@ export function stageEvents(events: readonly ProcurementEvent[]): StagedEvents {
   const byStage: ProcurementEvent[][] = [[], [], [], [], []];
   let progress = 0;
   for (const event of events) {
-    if (event.phase === "failed") {
+    const phaseStage = PROCUREMENT_PHASE_STAGE[event.phase];
+    // Terminal or UNKNOWN phases attach to the stage the run had reached and
+    // never advance progress — and their labels are never matched, so an
+    // unrecognised event whose text mentions "agreement"/"rfq" cannot fake
+    // Negotiate progress. Label overrides apply to recognised phases only.
+    if (event.phase === "failed" || phaseStage === undefined) {
       byStage[progress]!.push(event);
       continue;
     }
-    const known = stageForLabel(event.label) ?? PROCUREMENT_PHASE_STAGE[event.phase];
-    const stage = known ?? progress;
+    const stage = stageForLabel(event.label) ?? phaseStage;
     byStage[stage]!.push(event);
-    if (known !== undefined && known > progress) progress = known;
+    if (stage > progress) progress = stage;
   }
   return { byStage, progress };
 }
