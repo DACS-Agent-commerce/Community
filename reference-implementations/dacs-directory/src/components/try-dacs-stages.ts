@@ -99,3 +99,35 @@ export function parseStoredProcurementRun(raw: string | null): StoredProcurement
     return null;
   }
 }
+
+/** Minimal surface of the Web Locks manager the dispatch section needs. */
+export type LockRequestor = {
+  request: (name: string, options: { signal?: AbortSignal }, callback: () => Promise<unknown>) => Promise<unknown>;
+};
+
+export class ProcurementLockUnavailableError extends Error {
+  constructor() {
+    super("This browser does not support the cross-tab locking (Web Locks) required to dispatch a paid procurement safely.");
+    this.name = "ProcurementLockUnavailableError";
+  }
+}
+
+export const PROCUREMENT_LOCK_NAME = "dacs-try:procurement-dispatch";
+
+/**
+ * Run `section` under the cross-tab exclusive procurement lock. REFUSES to
+ * run when no real lock manager exists — paid dispatch must never fall back
+ * to best-effort mutual exclusion, because that restores the two-tab
+ * overwrite race. `signal` aborts a request still WAITING for the lock, so a
+ * cancelled tab can never execute its section later and write a stale
+ * record; a section already granted runs to completion (its fetches observe
+ * the same signal).
+ */
+export function withExclusiveProcurementLock<T>(
+  locks: LockRequestor | undefined,
+  signal: AbortSignal,
+  section: () => Promise<T>,
+): Promise<T> {
+  if (!locks?.request) return Promise.reject(new ProcurementLockUnavailableError());
+  return locks.request(PROCUREMENT_LOCK_NAME, { signal }, section) as Promise<T>;
+}

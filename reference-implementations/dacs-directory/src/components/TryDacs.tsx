@@ -31,7 +31,7 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
-import { parseStoredProcurementRun, stageEvents, type StoredProcurementRun } from "./try-dacs-stages.js";
+import { ProcurementLockUnavailableError, parseStoredProcurementRun, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
 const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
@@ -40,19 +40,11 @@ function readStoredRun(): StoredProcurementRun | null {
   try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
 }
 
-/**
- * Cross-tab exclusive section around reading the persisted run record,
- * writing it, and dispatching the initial paid POST. Without this, two tabs
- * can interleave: B overwrites A's record, gets a 409 (A's job is running),
- * and then deletes the shared record that was A's only recovery handle.
- * Web Locks are per-origin and queue fairly; on the rare browser without
- * them, the in-section storage re-read still guards best-effort.
- */
-const PROCUREMENT_LOCK_NAME = "dacs-try:procurement-dispatch";
-function withProcurementLock<T>(section: () => Promise<T>): Promise<T> {
-  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  if (locks?.request) return locks.request(PROCUREMENT_LOCK_NAME, section) as Promise<T>;
-  return section();
+/** The browser's Web Locks manager, or undefined where unsupported. */
+function browserLocks(): LockRequestor | undefined {
+  return typeof navigator !== "undefined" && navigator.locks
+    ? (navigator.locks as unknown as LockRequestor)
+    : undefined;
 }
 
 /**
@@ -598,7 +590,7 @@ export default function TryDacs() {
         // lock, with the record RE-READ from storage inside the section: two
         // tabs can otherwise interleave, the loser overwriting the winner's
         // record and then deleting it on its own 4xx.
-        const started = await withProcurementLock(async (): Promise<ProcurementJob | "handled" | null> => {
+        const started = await withExclusiveProcurementLock(browserLocks(), controller.signal, async (): Promise<ProcurementJob | "handled" | null> => {
           const existing = readStoredRun();
           if (existing && existing.runId !== procurementRunId.current) {
             setPhase("ready");
@@ -635,6 +627,13 @@ export default function TryDacs() {
           updateStoredRun({ ...runRecord, jobId: job.id });
           setProcurementJob(job);
           return job;
+        }).catch((cause: unknown) => {
+          if (cause instanceof ProcurementLockUnavailableError) {
+            setPhase("ready");
+            setError(`${cause.message} Use a current version of Chrome, Edge, Firefox or Safari — the paid request was NOT sent.`);
+            return null;
+          }
+          throw cause;
         });
         if (started === null || started === "handled") return;
         await followProcurementJob(started, controller, deadline);
@@ -772,17 +771,23 @@ export default function TryDacs() {
         if (!response.ok) throw new Error(message(body));
         job = parseProcurementJob(body);
       } else {
-        const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "Idempotency-Key": stored.runId },
-          body: JSON.stringify(stored.input), signal: controller.signal,
-        }, deadline);
-        if (!response.ok) {
-          if (response.status >= 400 && response.status < 500) releaseStoredRun(stored.runId);
-          throw new Error(message(body));
-        }
-        job = parseProcurementJob(body);
-        updateStoredRun({ ...stored, jobId: job.id });
+        // The reload raced the original POST response: re-POST the SAME
+        // stored input under the SAME key — inside the cross-tab lock, like
+        // every paid dispatch, and refusing without a real lock manager.
+        job = await withExclusiveProcurementLock(browserLocks(), controller.signal, async () => {
+          const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "Idempotency-Key": stored.runId },
+            body: JSON.stringify(stored.input), signal: controller.signal,
+          }, deadline);
+          if (!response.ok) {
+            if (response.status >= 400 && response.status < 500) releaseStoredRun(stored.runId);
+            throw new Error(message(body));
+          }
+          const parsedJob = parseProcurementJob(body);
+          updateStoredRun({ ...stored, jobId: parsedJob.id });
+          return parsedJob;
+        });
       }
       procurementJobRef.current = job;
       setProcurementJob(job);
@@ -792,9 +797,11 @@ export default function TryDacs() {
       const failedJob = (procurementJobRef.current as ProcurementJob | null)?.status === "failed";
       setError(cancelled
         ? "Stopped watching in this browser. Any live gateway job continues — resume again to keep following it."
-        : failedJob
-          ? (cause as Error).message
-          : `${(cause as Error).message} — Resuming again reuses the same idempotency key, so no second purchase can start.`);
+        : cause instanceof ProcurementLockUnavailableError
+          ? `${cause.message} Use a current version of Chrome, Edge, Firefox or Safari — no request was sent.`
+          : failedJob
+            ? (cause as Error).message
+            : `${(cause as Error).message} — Resuming again reuses the same idempotency key, so no second purchase can start.`);
       setPhase("error");
     } finally {
       if (runAbort.current === controller) runAbort.current = null;

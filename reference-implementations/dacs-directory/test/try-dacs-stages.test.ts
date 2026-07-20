@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseStoredProcurementRun, stageEvents } from "../src/components/try-dacs-stages.js";
+import { ProcurementLockUnavailableError, parseStoredProcurementRun, stageEvents, withExclusiveProcurementLock, type LockRequestor } from "../src/components/try-dacs-stages.js";
 import type { ProcurementEvent } from "../src/components/try-dacs-contract.js";
 
 const at = "2026-07-17T16:58:00.000Z";
@@ -122,4 +122,66 @@ test("stored procurement run records round-trip and reject malformed shapes", ()
   assert.equal(parseStoredProcurementRun(JSON.stringify({ runId: "r", goal: "g", input: [], startedAt: at })), null);
   assert.equal(parseStoredProcurementRun(JSON.stringify({ runId: "r", goal: "g", input: {}, startedAt: at, jobId: 7 })), null);
   assert.equal(parseStoredProcurementRun(JSON.stringify(["runId"])), null);
+});
+
+/**
+ * A faithful in-process stand-in for the Web Locks manager: exclusive FIFO
+ * grants, and a request whose signal is already aborted at grant time
+ * rejects without ever invoking its callback.
+ */
+function fakeLockManager(): LockRequestor {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    request(_name, options, callback) {
+      const run = tail.then(() => {
+        if (options.signal?.aborted) throw new DOMException("aborted", "AbortError");
+        return callback();
+      });
+      tail = run.then(() => undefined, () => undefined);
+      return run;
+    },
+  };
+}
+
+test("paid dispatch REFUSES to run without a real lock manager", async () => {
+  let sectionRan = false;
+  await assert.rejects(
+    withExclusiveProcurementLock(undefined, new AbortController().signal, async () => { sectionRan = true; }),
+    ProcurementLockUnavailableError,
+  );
+  assert.equal(sectionRan, false, "the section must never execute without mutual exclusion");
+});
+
+test("the lock serializes two dispatch sections and propagates results", async () => {
+  const locks = fakeLockManager();
+  const order: string[] = [];
+  const signal = new AbortController().signal;
+  const first = withExclusiveProcurementLock(locks, signal, async () => {
+    order.push("a-start");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    order.push("a-end");
+    return "A";
+  });
+  const second = withExclusiveProcurementLock(locks, signal, async () => {
+    order.push("b-start");
+    return "B";
+  });
+  assert.deepEqual(await Promise.all([first, second]), ["A", "B"]);
+  assert.deepEqual(order, ["a-start", "a-end", "b-start"], "the second section must wait for the first");
+});
+
+test("aborting while waiting for the lock rejects and never runs the section", async () => {
+  const locks = fakeLockManager();
+  let release!: () => void;
+  const holder = withExclusiveProcurementLock(locks, new AbortController().signal, () =>
+    new Promise<void>((resolve) => { release = resolve; }));
+  const cancelled = new AbortController();
+  let lateSectionRan = false;
+  const waiting = withExclusiveProcurementLock(locks, cancelled.signal, async () => { lateSectionRan = true; });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // let the holder's section start and assign release
+  cancelled.abort();
+  release();
+  await holder;
+  await assert.rejects(waiting, (error: unknown) => (error as Error).name === "AbortError");
+  assert.equal(lateSectionRan, false, "a cancelled tab must never execute its section after the wait");
 });
