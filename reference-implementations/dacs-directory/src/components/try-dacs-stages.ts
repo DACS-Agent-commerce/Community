@@ -131,3 +131,29 @@ export function withExclusiveProcurementLock<T>(
   if (!locks?.request) return Promise.reject(new ProcurementLockUnavailableError());
   return locks.request(PROCUREMENT_LOCK_NAME, { signal }, section) as Promise<T>;
 }
+
+/**
+ * What a queued resume section may do once it finally holds the lock. The
+ * lock only SERIALIZES sections — it cannot stop a stale section from
+ * executing later — so the section must re-validate the record it captured
+ * against what storage holds NOW:
+ * - record gone or owned by a different run → the captured run was
+ *   reconciled elsewhere (dismissed, or replaced by a new purchase); acting
+ *   on the stale capture could overwrite the live run's recovery handle.
+ * - same run, jobId now known (another tab already re-POSTed) → READ that
+ *   job; a second POST is unnecessary.
+ * - same run, still no jobId → the idempotent re-POST proceeds.
+ */
+export type ResumeDispatchDecision =
+  | { action: "abort-stale" }
+  | { action: "read"; jobId: string }
+  | { action: "post" };
+
+export function resumeDispatchDecision(
+  captured: StoredProcurementRun,
+  current: StoredProcurementRun | null,
+): ResumeDispatchDecision {
+  if (!current || current.runId !== captured.runId) return { action: "abort-stale" };
+  if (current.jobId) return { action: "read", jobId: current.jobId };
+  return { action: "post" };
+}

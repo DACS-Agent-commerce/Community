@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ProcurementLockUnavailableError, parseStoredProcurementRun, stageEvents, withExclusiveProcurementLock, type LockRequestor } from "../src/components/try-dacs-stages.js";
+import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispatchDecision, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "../src/components/try-dacs-stages.js";
 import type { ProcurementEvent } from "../src/components/try-dacs-contract.js";
 
 const at = "2026-07-17T16:58:00.000Z";
@@ -184,4 +184,62 @@ test("aborting while waiting for the lock rejects and never runs the section", a
   await holder;
   await assert.rejects(waiting, (error: unknown) => (error as Error).name === "AbortError");
   assert.equal(lateSectionRan, false, "a cancelled tab must never execute its section after the wait");
+});
+
+test("resume decisions: stale records abort, known job ids read, only the raced case posts", () => {
+  const captured: StoredProcurementRun = { runId: "run-x", goal: "g", input: { budgetDem: 5 }, startedAt: at };
+  assert.deepEqual(resumeDispatchDecision(captured, null), { action: "abort-stale" });
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured, runId: "run-y" }), { action: "abort-stale" });
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured, jobId: "job-1" }), { action: "read", jobId: "job-1" });
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured }), { action: "post" });
+});
+
+test("a stale resume queued behind a newer run neither posts nor touches the newer record", async () => {
+  const locks = fakeLockManager();
+  const signal = new AbortController().signal;
+  // Shared storage stand-in: starts holding run X (tab A's capture).
+  const runX: StoredProcurementRun = { runId: "run-x", goal: "old goal", input: { budgetDem: 5 }, startedAt: at };
+  const runY: StoredProcurementRun = { runId: "run-y", jobId: "job-y", goal: "new goal", input: { budgetDem: 3 }, startedAt: at };
+  let storage: string | null = JSON.stringify(runX);
+  const capturedByA = JSON.parse(storage) as StoredProcurementRun;
+
+  // Tab B holds the lock first: dismisses X and starts run Y (writes Y).
+  const tabB = withExclusiveProcurementLock(locks, signal, async () => {
+    storage = null;                    // user dismissed X
+    storage = JSON.stringify(runY);    // B dispatched a new purchase
+  });
+  // Tab A's resume of X is QUEUED behind B — the reviewer's exact sequence.
+  let aPosted = false;
+  const tabA = withExclusiveProcurementLock(locks, signal, async () => {
+    const decision = resumeDispatchDecision(capturedByA, parseStoredProcurementRun(storage));
+    if (decision.action === "post") {
+      aPosted = true;                  // would re-POST X and overwrite Y
+      storage = JSON.stringify({ ...capturedByA, jobId: "job-x" });
+    }
+    return decision;
+  });
+
+  await tabB;
+  const decision = await tabA;
+  assert.deepEqual(decision, { action: "abort-stale" }, "A must refuse once its captured record is superseded");
+  assert.equal(aPosted, false, "the stale section must never dispatch");
+  assert.equal(storage, JSON.stringify(runY), "run Y's recovery record must remain byte-identical");
+});
+
+test("a same-run resume queued behind the job-id write reads instead of re-posting", async () => {
+  const locks = fakeLockManager();
+  const signal = new AbortController().signal;
+  const runX: StoredProcurementRun = { runId: "run-x", goal: "g", input: { budgetDem: 5 }, startedAt: at };
+  let storage: string | null = JSON.stringify(runX);
+  const captured = JSON.parse(storage) as StoredProcurementRun;
+
+  // Another tab of the SAME run learned the job id while this resume queued.
+  const other = withExclusiveProcurementLock(locks, signal, async () => {
+    storage = JSON.stringify({ ...runX, jobId: "job-x" });
+  });
+  const resume = withExclusiveProcurementLock(locks, signal, async () =>
+    resumeDispatchDecision(captured, parseStoredProcurementRun(storage)));
+
+  await other;
+  assert.deepEqual(await resume, { action: "read", jobId: "job-x" }, "a known job id must be read, never re-POSTed");
 });

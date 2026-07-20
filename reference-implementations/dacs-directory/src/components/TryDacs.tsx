@@ -31,13 +31,21 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
-import { ProcurementLockUnavailableError, parseStoredProcurementRun, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
+import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispatchDecision, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
 const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
 
 function readStoredRun(): StoredProcurementRun | null {
   try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
+}
+
+/** Thrown when a queued resume finds its captured record was reconciled by another tab. */
+class StaleResumeRecordError extends Error {
+  constructor() {
+    super("This recovery record was reconciled in another tab (dismissed, resumed there, or replaced by a new run), so nothing was sent from this tab.");
+    this.name = "StaleResumeRecordError";
+  }
 }
 
 /** The browser's Web Locks manager, or undefined where unsupported. */
@@ -774,7 +782,19 @@ export default function TryDacs() {
         // The reload raced the original POST response: re-POST the SAME
         // stored input under the SAME key — inside the cross-tab lock, like
         // every paid dispatch, and refusing without a real lock manager.
+        // The lock only SERIALIZES: while this section was queued, another
+        // tab may have dismissed this record and started a new run, so the
+        // section re-validates its captured record against storage NOW and
+        // must never act on (or overwrite) a record it no longer owns.
         job = await withExclusiveProcurementLock(browserLocks(), controller.signal, async () => {
+          const decision = resumeDispatchDecision(stored, readStoredRun());
+          if (decision.action === "abort-stale") throw new StaleResumeRecordError();
+          if (decision.action === "read") {
+            // Another tab already learned this run's job id — read it, never re-POST.
+            const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(decision.jobId)}`, { signal: controller.signal }, deadline);
+            if (!response.ok) throw new Error(message(body));
+            return parseProcurementJob(body);
+          }
           const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
             method: "POST",
             headers: { "content-type": "application/json", "Idempotency-Key": stored.runId },
@@ -793,6 +813,14 @@ export default function TryDacs() {
       setProcurementJob(job);
       await followProcurementJob(job, controller, deadline);
     } catch (cause) {
+      if (cause instanceof StaleResumeRecordError) {
+        // The record now belongs to another run (or is gone); this tab must
+        // not keep its key or offer procurement retries against it.
+        procurementRunId.current = null;
+        setPlan(null); setPhase("idle");
+        setError(cause.message);
+        return;
+      }
       const cancelled = (cause as Error).name === "AbortError";
       const failedJob = (procurementJobRef.current as ProcurementJob | null)?.status === "failed";
       setError(cancelled
