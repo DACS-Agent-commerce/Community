@@ -63,6 +63,14 @@ export type ProcurementJob = {
    * as "a payment may exist" — never re-purchase.
    */
   failedBeforePayment?: boolean;
+  queue?: {
+    status: "waiting" | "active" | "finished";
+    enqueuedAt: string;
+    position?: number;
+    startedAt?: string;
+    waitMs?: number;
+    finishedAt?: string;
+  };
 };
 
 export type ProcurementEvidence = {
@@ -302,6 +310,29 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
   if (job.failedBeforePayment !== undefined && typeof job.failedBeforePayment !== "boolean") {
     throw new ButlerContractError("procurement job.failedBeforePayment", "a boolean");
   }
+  let queue: ProcurementJob["queue"];
+  if (job.queue !== undefined) {
+    const rawQueue = requiredRecord(job.queue, "procurement job.queue");
+    if (rawQueue.status !== "waiting" && rawQueue.status !== "active" && rawQueue.status !== "finished") {
+      throw new ButlerContractError("procurement job.queue.status", '"waiting", "active", or "finished"');
+    }
+    const position = optionalNumber(rawQueue.position, "procurement job.queue.position");
+    const waitMs = optionalNumber(rawQueue.waitMs, "procurement job.queue.waitMs");
+    if (position !== undefined && (!Number.isSafeInteger(position) || position < 1)) {
+      throw new ButlerContractError("procurement job.queue.position", "a positive integer");
+    }
+    if (waitMs !== undefined && waitMs < 0) {
+      throw new ButlerContractError("procurement job.queue.waitMs", "a non-negative number");
+    }
+    queue = {
+      status: rawQueue.status,
+      enqueuedAt: requiredString(rawQueue.enqueuedAt, "procurement job.queue.enqueuedAt"),
+      position,
+      startedAt: optionalString(rawQueue.startedAt, "procurement job.queue.startedAt"),
+      waitMs,
+      finishedAt: optionalString(rawQueue.finishedAt, "procurement job.queue.finishedAt"),
+    };
+  }
   return {
     id: requiredString(job.id, "procurement job.id"),
     status: job.status,
@@ -310,6 +341,7 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     result: job.result,
     error: optionalString(job.error, "procurement job.error"),
     failedBeforePayment: job.failedBeforePayment,
+    queue,
   };
 }
 

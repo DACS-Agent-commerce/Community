@@ -93,11 +93,26 @@ test("accepts running and completed procurement envelopes", () => {
     status: "running",
     phase: "settling",
     events: [{ phase: "settling", label: "Payment broadcast", at: "2026-07-16T08:00:00.000Z", txRef: "payment-tx" }],
+    queue: { status: "waiting", enqueuedAt: "2026-07-16T07:59:00.000Z", position: 2 },
   });
   assert.equal(running.events[0]?.txRef, "payment-tx");
+  assert.equal(running.queue?.status, "waiting");
+  assert.equal(running.queue?.position, 2);
 
   const complete = parseProcurementJob({ ...running, status: "complete", phase: "complete", result: acceptedReport });
   assert.equal(complete.result, acceptedReport);
+});
+
+test("procurement queue metadata fails closed on malformed state or position", () => {
+  const running = { id: "job-1", status: "running", phase: "queued", events: [] };
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    queue: { status: "blocked", enqueuedAt: "2026-07-16T08:00:00.000Z", position: 1 },
+  }), ButlerContractError);
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    queue: { status: "waiting", enqueuedAt: "2026-07-16T08:00:00.000Z", position: 0 },
+  }), ButlerContractError);
 });
 
 test("failedBeforePayment passes through only as an explicit boolean", () => {
