@@ -8,8 +8,10 @@ import {
   parseAgentCatalog,
   parseAgentInput,
   parseButlerRun,
+  parseProcurementProfiles,
   parseProcurementJob,
   parseReceiptEnvelope,
+  procurementProfileCard,
   procurementEvidence,
 } from "../src/components/try-dacs-contract.js";
 
@@ -33,6 +35,23 @@ const acceptedReport = {
   transactions: [{ kind: "payment", txRef: "payment-tx" }],
 };
 
+const oracleProfile = {
+  id: "oracle-auto-accept",
+  title: "Buy attested data now",
+  agentName: "Oracle Desk",
+  serviceId: "oracle-data",
+  mode: "fixed-price-auto-accept",
+  negotiationPhase: "negotiate-fixed-price",
+  summary: "Buy a posted-price public data point.",
+  fields: [{ name: "product", type: "string", required: true }],
+  sampleInput: { product: "crypto-price", params: { id: "bitcoin" } },
+  timing: { healthyMinSec: 60, healthyMaxSec: 90, hardTimeoutSec: 180, protocolFloorSec: 0 },
+  confirmationGates: ["commit-agreement", "pay-dem"],
+  implementationStatus: "live",
+  executable: true,
+  reasons: [],
+};
+
 test("accepts the published Butler catalog contract", () => {
   // mode/input are optional gateway schema fields, passed through (undefined
   // when the catalog does not publish them).
@@ -49,6 +68,23 @@ test("rejects catalog drift instead of rendering invented fallbacks", () => {
     (error: unknown) => error instanceof ButlerContractError && /exampleGoal/.test(error.message),
   );
   assert.throws(() => parseAgentCatalog({ agents: [] }), ButlerContractError);
+});
+
+test("parses the live procurement options and maps supported profiles to forms", () => {
+  const [profile] = parseProcurementProfiles({ profiles: [oracleProfile] });
+  assert.deepEqual(profile, oracleProfile);
+  assert.deepEqual(procurementProfileCard(profile!), {
+    name: "oracle-desk",
+    label: "Oracle Desk",
+    summary: oracleProfile.summary,
+    tags: ["fixed-price-auto-accept", "oracle-data"],
+    exampleGoal: oracleProfile.title,
+    exampleInput: oracleProfile.sampleInput,
+    mode: oracleProfile.mode,
+    input: oracleProfile.fields,
+  });
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, executable: "yes" }] }), ButlerContractError);
+  assert.throws(() => procurementProfileCard({ ...profile!, id: "future-profile" }), ButlerContractError);
 });
 
 test("accepts running and completed procurement envelopes", () => {
@@ -187,11 +223,13 @@ test("only reports acceptance when every explicit verification signal is present
     statusAccepted: true,
     paymentRecorded: true,
     negotiationSigned: true,
+    negotiationVerified: true,
     deliveryVerified: true,
     bundlesVerified: true,
     reconciled: true,
     rulingValid: true,
     rulingAccepted: true,
+    rulingRequired: true,
     overallAccepted: true,
   });
 
@@ -199,11 +237,13 @@ test("only reports acceptance when every explicit verification signal is present
     statusAccepted: true,
     paymentRecorded: false,
     negotiationSigned: false,
+    negotiationVerified: false,
     deliveryVerified: false,
     bundlesVerified: false,
     reconciled: false,
     rulingValid: false,
     rulingAccepted: false,
+    rulingRequired: true,
     overallAccepted: false,
   });
 
@@ -236,6 +276,27 @@ test("only reports acceptance when every explicit verification signal is present
       sellerSignature: { party: "did:demos:agent:seller", algorithm: "ed25519", value: "seller-sig-bytes" },
     },
   }).overallAccepted, false, "a structured signature with a blank value is still missing");
+});
+
+test("fixed-price acceptance uses the anchored agreement and does not invent an EvalBot requirement", () => {
+  const fixedReport = {
+    status: "settled-and-accepted",
+    settlement: { txHash: "fixed-payment" },
+    negotiation: { protocol: "dacs-fixed/1", agreementHash: "agreement-digest" },
+    delivery: { verified: true, report: { kind: "oracle-attested-value", value: 42 } },
+    bundleVerification: { ok: true },
+    reconciliation: { reconciled: true },
+    anchors: { agreement: "stor-agreement", commitment: "stor-commitment" },
+    transactions: [{ kind: "payment", txRef: "fixed-payment" }],
+  };
+  const evidence = procurementEvidence(fixedReport, "fixed-price-auto-accept");
+  assert.equal(evidence.negotiationSigned, false);
+  assert.equal(evidence.negotiationVerified, true);
+  assert.equal(evidence.rulingRequired, false);
+  assert.equal(evidence.overallAccepted, true);
+
+  assert.equal(procurementEvidence({ ...fixedReport, anchors: { agreement: "stor-agreement" } }, "fixed-price-auto-accept").overallAccepted, false);
+  assert.equal(procurementEvidence(fixedReport, "rfq").overallAccepted, false, "RFQ still requires both signatures and a valid accepted ruling");
 });
 
 test("synchronous LIVE-ANCHOR attestations parse without polling fields", () => {

@@ -11,6 +11,37 @@ export type AgentCard = {
   input?: unknown;
 };
 
+export type ProcurementProfile = {
+  id: string;
+  title: string;
+  agentName: string;
+  serviceId: string;
+  mode: string;
+  negotiationPhase: string;
+  summary: string;
+  fields: unknown[];
+  sampleInput: Record<string, unknown>;
+  timing: {
+    healthyMinSec: number;
+    healthyMaxSec: number;
+    hardTimeoutSec: number;
+    protocolFloorSec: number;
+  };
+  confirmationGates: string[];
+  implementationStatus: string;
+  executable: boolean;
+  reasons: string[];
+};
+
+const PROFILE_AGENT_NAMES: Record<string, string> = {
+  "oracle-auto-accept": "oracle-desk",
+  "dd-live-fixed": "dd-researcher",
+  "security-audit-rfq": "procurement-butler",
+};
+
+/** Only these production profiles are deliberately presented as live demos. */
+export const LIVE_PROCUREMENT_PROFILE_IDS = Object.freeze(Object.keys(PROFILE_AGENT_NAMES));
+
 export type ProcurementEvent = {
   phase: string;
   label: string;
@@ -38,11 +69,13 @@ export type ProcurementEvidence = {
   statusAccepted: boolean;
   paymentRecorded: boolean;
   negotiationSigned: boolean;
+  negotiationVerified: boolean;
   deliveryVerified: boolean;
   bundlesVerified: boolean;
   reconciled: boolean;
   rulingValid: boolean;
   rulingAccepted: boolean;
+  rulingRequired: boolean;
   overallAccepted: boolean;
 };
 
@@ -194,6 +227,60 @@ export function parseAgentCatalog(value: unknown): AgentCard[] {
   });
 }
 
+export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
+  const body = requiredRecord(value, "procurement options");
+  if (!Array.isArray(body.profiles)) throw new ButlerContractError("procurement options.profiles", "an array");
+  return body.profiles.map((value, index) => {
+    const path = `procurement options.profiles[${index}]`;
+    const profile = requiredRecord(value, path);
+    const timing = requiredRecord(profile.timing, `${path}.timing`);
+    if (!Array.isArray(profile.fields)) throw new ButlerContractError(`${path}.fields`, "an array");
+    if (!Array.isArray(profile.confirmationGates) || profile.confirmationGates.some((gate) => typeof gate !== "string")) {
+      throw new ButlerContractError(`${path}.confirmationGates`, "an array of strings");
+    }
+    if (!Array.isArray(profile.reasons) || profile.reasons.some((reason) => typeof reason !== "string")) {
+      throw new ButlerContractError(`${path}.reasons`, "an array of strings");
+    }
+    if (typeof profile.executable !== "boolean") throw new ButlerContractError(`${path}.executable`, "a boolean");
+    return {
+      id: requiredString(profile.id, `${path}.id`),
+      title: requiredString(profile.title, `${path}.title`),
+      agentName: requiredString(profile.agentName, `${path}.agentName`),
+      serviceId: requiredString(profile.serviceId, `${path}.serviceId`),
+      mode: requiredString(profile.mode, `${path}.mode`),
+      negotiationPhase: requiredString(profile.negotiationPhase, `${path}.negotiationPhase`),
+      summary: requiredString(profile.summary, `${path}.summary`),
+      fields: profile.fields,
+      sampleInput: requiredRecord(profile.sampleInput, `${path}.sampleInput`),
+      timing: {
+        healthyMinSec: requiredNumber(timing.healthyMinSec, `${path}.timing.healthyMinSec`),
+        healthyMaxSec: requiredNumber(timing.healthyMaxSec, `${path}.timing.healthyMaxSec`),
+        hardTimeoutSec: requiredNumber(timing.hardTimeoutSec, `${path}.timing.hardTimeoutSec`),
+        protocolFloorSec: requiredNumber(timing.protocolFloorSec, `${path}.timing.protocolFloorSec`),
+      },
+      confirmationGates: profile.confirmationGates as string[],
+      implementationStatus: requiredString(profile.implementationStatus, `${path}.implementationStatus`),
+      executable: profile.executable,
+      reasons: profile.reasons as string[],
+    };
+  });
+}
+
+export function procurementProfileCard(profile: ProcurementProfile): AgentCard {
+  const name = PROFILE_AGENT_NAMES[profile.id];
+  if (!name) throw new ButlerContractError(`procurement profile ${profile.id}`, "a supported live demo profile");
+  return {
+    name,
+    label: profile.agentName,
+    summary: profile.summary,
+    tags: [profile.mode, profile.serviceId],
+    exampleGoal: profile.title,
+    exampleInput: profile.sampleInput,
+    mode: profile.mode,
+    input: profile.fields,
+  };
+}
+
 export function parseProcurementJob(value: unknown): ProcurementJob {
   const job = requiredRecord(value, "procurement job");
   if (job.status !== "running" && job.status !== "complete" && job.status !== "failed") {
@@ -290,7 +377,7 @@ function signaturePresent(value: unknown): boolean {
   return typeof structured.value === "string" && Boolean(structured.value.trim());
 }
 
-export function procurementEvidence(value: unknown): ProcurementEvidence {
+export function procurementEvidence(value: unknown, mode = "rfq"): ProcurementEvidence {
   const report = record(value);
   const settlement = record(report.settlement);
   const negotiation = record(report.negotiation);
@@ -299,6 +386,7 @@ export function procurementEvidence(value: unknown): ProcurementEvidence {
   const ruling = record(evaluation.ruling);
   const bundles = record(report.bundleVerification);
   const reconciliation = record(report.reconciliation);
+  const anchors = record(report.anchors);
   const transactions = Array.isArray(report.transactions) ? report.transactions.map(record) : [];
   const paymentHash = typeof settlement.txHash === "string" ? settlement.txHash.trim() : "";
   const paymentRecorded = Boolean(paymentHash) && transactions.some((transaction) =>
@@ -306,20 +394,34 @@ export function procurementEvidence(value: unknown): ProcurementEvidence {
   );
   const statusAccepted = report.status === "settled-and-accepted" || report.status === "recovered-after-terminal-abort";
   const negotiationSigned = signaturePresent(negotiation.buyerSignature) && signaturePresent(negotiation.sellerSignature);
+  // Fixed-price flows publish the jointly-signed agreement as the anchored
+  // agreement/commitment pair rather than projecting both raw signatures into
+  // the result envelope. DACS-5 bundle verification then binds that agreement
+  // into the two-party receipt set. RFQ stays fail-closed on both signatures.
+  const fixedAgreementAnchored = mode.startsWith("fixed-price-")
+    && negotiation.protocol === "dacs-fixed/1"
+    && typeof negotiation.agreementHash === "string" && Boolean(negotiation.agreementHash.trim())
+    && typeof anchors.agreement === "string" && Boolean(anchors.agreement.trim())
+    && typeof anchors.commitment === "string" && Boolean(anchors.commitment.trim());
+  const negotiationVerified = negotiationSigned || fixedAgreementAnchored;
   const deliveryVerified = delivery.verified === true && Object.keys(record(delivery.report)).length > 0;
   const bundlesVerified = bundles.ok === true;
   const reconciled = reconciliation.reconciled === true;
   const rulingValid = evaluation.rulingValid === true;
   const rulingAccepted = evaluation.accepted === true && ruling.verdict === "accept";
+  const rulingRequired = mode === "rfq";
   return {
     statusAccepted,
     paymentRecorded,
     negotiationSigned,
+    negotiationVerified,
     deliveryVerified,
     bundlesVerified,
     reconciled,
     rulingValid,
     rulingAccepted,
-    overallAccepted: statusAccepted && paymentRecorded && negotiationSigned && deliveryVerified && bundlesVerified && reconciled && rulingValid && rulingAccepted,
+    rulingRequired,
+    overallAccepted: statusAccepted && paymentRecorded && negotiationVerified && deliveryVerified && bundlesVerified && reconciled
+      && (!rulingRequired || (rulingValid && rulingAccepted)),
   };
 }
