@@ -41,11 +41,11 @@ test.describe("/try live paid procurement", () => {
 
   test("1. completes one real paid purchase", async ({}, testInfo) => {
     test.setTimeout(13 * 60_000);
-    await chooseProcurementExample(page);
+    await chooseProcurementExample(page, "pay-dem");
     await page.locator("#proc-budget").fill(String(LIVE_MAX_DEM));
 
     const startResponse = page.waitForResponse((response) => isProcurementPost(response.request()));
-    await page.getByRole("button", { name: /Run this agent/ }).click();
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
     const response = await startResponse;
     const request = response.request();
     const startBody = await response.json() as { id?: string; error?: unknown };
@@ -58,9 +58,10 @@ test.describe("/try live paid procurement", () => {
     expect(response.ok(), JSON.stringify(startBody)).toBe(true);
     expect(idempotencyKey).toBeTruthy();
     expect(jobId).toBeTruthy();
+    expect(submittedInput.paymentRail).toBe("pay-dem");
     expect(Number(submittedInput.budgetDem)).toBeLessThanOrEqual(LIVE_MAX_DEM);
 
-    await expect(page.getByRole("heading", { name: "Procurement Butler result" })).toBeVisible({ timeout: 12 * 60_000 });
+    await expect(page.getByRole("heading", { name: "Security Auditor result" })).toBeVisible({ timeout: 12 * 60_000 });
     paymentTx = (await page.locator(".tx-link code").textContent())?.trim() ?? "";
     expect(paymentTx).toBeTruthy();
 
@@ -105,7 +106,7 @@ test.describe("/try live paid procurement", () => {
     );
     await page.getByRole("button", { name: /Check & resume/ }).click();
     expect((await statusResponse).ok()).toBe(true);
-    await expect(page.getByRole("heading", { name: "Procurement Butler result" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Security Auditor result" })).toBeVisible();
     page.off("request", countPosts);
 
     expect(posts).toBe(0);
@@ -129,9 +130,9 @@ test.describe("/try live paid procurement", () => {
     let posts = 0;
     const countPosts = (request: Request) => { if (isProcurementPost(request)) posts += 1; };
     secondTab.on("request", countPosts);
-    await secondTab.getByRole("button", { name: /Procurement Butler/ }).first().click();
+    await secondTab.getByRole("button", { name: /Security Auditor/ }).first().click();
     await secondTab.getByRole("button", { name: "Load example" }).click();
-    await secondTab.getByRole("button", { name: /Run this agent/ }).click();
+    await secondTab.getByRole("button", { name: /Run the full deal/ }).click();
 
     await expect(secondTab.locator(".bubble.error")).toContainText("earlier procurement run from this browser is still on record");
     expect(posts).toBe(0);
@@ -164,8 +165,8 @@ test.describe("/try live paid procurement", () => {
     let posts = 0;
     const countPosts = (request: Request) => { if (isProcurementPost(request)) posts += 1; };
     actor.on("request", countPosts);
-    await actor.getByRole("button", { name: /Run this agent/ }).click();
-    await expect(actor.getByText(/FULL DACS FLOW RUNNING/)).toBeVisible();
+    await actor.getByRole("button", { name: /Run the full deal/ }).click();
+    await expect(actor.getByText(/FULL DACS FLOW · DEM · Demos/)).toBeVisible();
     await actor.getByRole("button", { name: /Stop watching/ }).click();
     await page.evaluate(() => (window as typeof window & { __liveE2eReleaseLock?: () => void }).__liveE2eReleaseLock?.());
 

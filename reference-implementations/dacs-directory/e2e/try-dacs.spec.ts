@@ -6,6 +6,7 @@ import {
   completedJob,
   expectAcceptedEvidence,
   installMockGateway,
+  x402CompletedJob,
 } from "./try-dacs-fixtures.js";
 
 async function fulfillJson(route: Route, body: unknown) {
@@ -22,7 +23,7 @@ test.describe("/try procurement browser safety", () => {
     await installMockGateway(context);
     await chooseProcurementExample(page);
 
-    await page.getByRole("button", { name: /Run this agent/ }).click();
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
 
     await expectAcceptedEvidence(page);
     await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), PROCUREMENT_RUN_KEY)).toBeNull();
@@ -41,7 +42,7 @@ test.describe("/try procurement browser safety", () => {
     });
     await chooseProcurementExample(page);
 
-    await page.getByRole("button", { name: /Run this agent/ }).click();
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
     await expect(page.locator(".bubble.error")).toContainText("Retrying reuses the same idempotency key");
     const storedBeforeReload = await page.evaluate((key) => localStorage.getItem(key), PROCUREMENT_RUN_KEY);
     expect(storedBeforeReload).not.toBeNull();
@@ -76,18 +77,18 @@ test.describe("/try procurement browser safety", () => {
 
     const secondTab = await context.newPage();
     await secondTab.goto("/try");
-    await expect(secondTab.getByRole("button", { name: /Procurement Butler/ }).first()).toBeVisible();
+    await expect(secondTab.getByRole("button", { name: /Security Auditor/ }).first()).toBeVisible();
     await chooseProcurementExample(page);
-    await page.getByRole("button", { name: /Run this agent/ }).click();
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
     await firstPost;
 
     await expect(secondTab.locator(".resume-banner")).toContainText("still on record");
     const recordBefore = await secondTab.evaluate((key) => localStorage.getItem(key), PROCUREMENT_RUN_KEY);
     expect(recordBefore).not.toBeNull();
 
-    await secondTab.getByRole("button", { name: /Procurement Butler/ }).first().click();
+    await secondTab.getByRole("button", { name: /Security Auditor/ }).first().click();
     await secondTab.getByRole("button", { name: "Load example" }).click();
-    await secondTab.getByRole("button", { name: /Run this agent/ }).click();
+    await secondTab.getByRole("button", { name: /Run the full deal/ }).click();
 
     await expect(secondTab.locator(".bubble.error")).toContainText("earlier procurement run from this browser is still on record");
     expect(posts).toBe(1);
@@ -126,8 +127,8 @@ test.describe("/try procurement browser safety", () => {
     }, PROCUREMENT_LOCK_NAME);
     await expect.poll(() => lockHolder.evaluate(() => Boolean((window as typeof window & { __e2eLockHeld?: boolean }).__e2eLockHeld))).toBe(true);
 
-    await actor.getByRole("button", { name: /Run this agent/ }).click();
-    await expect(actor.getByText(/FULL DACS FLOW RUNNING/)).toBeVisible();
+    await actor.getByRole("button", { name: /Run the full deal/ }).click();
+    await expect(actor.getByText(/FULL DACS FLOW · DEM · Demos/)).toBeVisible();
     await actor.getByRole("button", { name: /Stop watching/ }).click();
     await lockHolder.evaluate(() => (window as typeof window & { __e2eReleaseLock?: () => void }).__e2eReleaseLock?.());
 
@@ -149,11 +150,35 @@ test.describe("/try procurement browser safety", () => {
     });
     await chooseProcurementExample(page);
 
-    await page.getByRole("button", { name: /Run this agent/ }).click();
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
 
     await expectAcceptedEvidence(page);
     await expect(page.locator(".tx-link code")).toHaveText("mock-payment-transaction");
     await expect(page.locator(".chain-activity .chain-row")).toHaveCount(completedJob.events.length);
     await expect(page.getByText("Full evidence bundle accepted & reconciled", { exact: true })).toBeVisible();
+  });
+
+  test("6. switches to the x402 schema and submits the USDC rail explicitly", async ({ context, page }) => {
+    let submitted: Record<string, unknown> | undefined;
+    await installMockGateway(context, {
+      onProcurementPost: async (route) => {
+        submitted = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+        await fulfillJson(route, x402CompletedJob);
+      },
+    });
+    await chooseProcurementExample(page, "pay-x402");
+
+    await expect(page.getByText("Operator-provisional rail authority", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("USDC budget")).toHaveValue("0.1");
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
+
+    await expect(page.getByRole("heading", { name: "Security Auditor result" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Base Sepolia USDC settlement" })).toBeVisible();
+    await expect(page.getByText("settled & seller-verified", { exact: true })).toBeVisible();
+    await expect(page.getByText("Settled & accepted", { exact: true })).toBeVisible();
+    expect(submitted?.profileId).toBe("security-audit-rfq");
+    expect(submitted?.paymentRail).toBe("pay-x402");
+    expect(submitted?.budgetUsdc).toBe(0.1);
+    expect(submitted?.budgetDem).toBeUndefined();
   });
 });

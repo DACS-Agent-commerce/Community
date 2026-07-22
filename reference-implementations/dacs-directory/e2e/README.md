@@ -2,7 +2,7 @@
 
 The Playwright suite has two layers:
 
-- `npm run test:e2e` runs five deterministic browser regressions with a mocked gateway. It never spends DEM and is safe for CI.
+- `npm run test:e2e` runs six deterministic browser regressions with a mocked gateway, including explicit DEM and x402 request coverage. It never spends DEM or USDC and is safe for CI.
 - `npm run test:e2e:live` contains five serial checks against the live Butler gateway. It is skipped unless the operator explicitly authorizes a capped testnet purchase.
 
 ## Install the browser
