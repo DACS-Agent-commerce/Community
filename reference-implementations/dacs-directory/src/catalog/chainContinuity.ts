@@ -24,8 +24,8 @@ export function chainResetRequired(
 ): boolean {
   if (!Number.isSafeInteger(chainTip) || chainTip < 0) return false;
   const cursorRegression = state.lastSeenTxId - chainTip;
-  const priorTipRegression = state.lastChainTip === undefined
+  const priorCursorRegression = state.lastChainTip === undefined
     ? cursorRegression
-    : state.lastChainTip - chainTip;
-  return cursorRegression >= threshold && priorTipRegression >= threshold;
+    : state.lastSeenTxId - state.lastChainTip;
+  return cursorRegression >= threshold && priorCursorRegression >= threshold;
 }

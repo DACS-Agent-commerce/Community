@@ -43,7 +43,9 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
   store.saveScanState({
     schemaVersion: 4,
     lastSeenTxId: 147_262,
-    lastChainTip: 147_264,
+    // Old releases retained the high cursor but overwrote this observation
+    // with the replacement chain's low tip on every zero-work scan.
+    lastChainTip: 5,
     listings: { [`stor-${"a".repeat(40)}`]: `0x${"b".repeat(64)}` },
     deals: {},
   });
