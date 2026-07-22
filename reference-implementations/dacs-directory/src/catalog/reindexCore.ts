@@ -5,7 +5,8 @@
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { scanChain } from "./scan";
+import { readChainTip, scanChain } from "./scan";
+import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import {
@@ -19,6 +20,7 @@ import {
   beginScanRun,
   finishScanRun,
   loadRetryableArtifacts,
+  clearChainDerivedArtifacts,
   recordArtifact,
   recordArtifactFailure,
 } from "./store";
@@ -47,10 +49,36 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const prior = loadCatalog();
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
-  //    accumulated scan state. Discoveries are never forgotten (the chain is
-  //    the proof; this state is just the memory of where to look). First run
-  //    backfills the full history.
-  const state = loadScanState();
+  //    accumulated scan state. Discoveries persist while the chain does; a
+  //    confirmed large tip regression clears derived state before a genesis
+  //    rescan. First run backfills the full history.
+  let state = loadScanState();
+  const resetThreshold = chainResetThreshold();
+  let observedChainTip: number | null = null;
+  try {
+    observedChainTip = await readChainTip();
+  } catch {
+    // The normal scan below retains the established fail-closed behaviour and
+    // surfaces the node error. This preflight exists only for reset detection.
+  }
+  if (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold)) {
+    const previousCursor = state.lastSeenTxId;
+    clearChainDerivedArtifacts();
+    state = {
+      schemaVersion: 4,
+      lastSeenTxId: 0,
+      lastChainTip: observedChainTip,
+      listings: {},
+      deals: {},
+      programs: {},
+      revocations: {},
+    };
+    saveScanState(state);
+    log(
+      `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs ` +
+        `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
+    );
+  }
   const needsBindingBackfill = state.schemaVersion !== 4;
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;

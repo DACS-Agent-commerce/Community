@@ -79,12 +79,14 @@ export const indexerScanRunSchema = {
 
 export const catalogStatusSchema = {
   type: "object",
-  required: ["generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "indexer"],
+  required: ["generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy", "chainResetSuspected", "indexer"],
   properties: {
     generatedAt: { type: "integer" },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },
+    cursorAheadBy: { type: ["integer", "null"], minimum: 0 },
+    chainResetSuspected: { type: ["boolean", "null"] },
     indexer: {
       type: "object",
       required: ["storage", "artifacts", "deadLetters", "deadLetterDiagnostics", "lastRun"],

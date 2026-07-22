@@ -161,6 +161,11 @@ export const loadRegistrations = (): Registration[] => getJson("registrations", 
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = (): ScanState => getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
 export const saveScanState = (state: ScanState): void => setJson("scan-state", state);
+/** Remove cache rows that belong to a replaced chain. Registrations survive. */
+export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM dead_letters").run();
+  db.prepare("DELETE FROM artifacts").run();
+});
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 export const loadFixtureSeeds = (): FixtureSeed[] => {
