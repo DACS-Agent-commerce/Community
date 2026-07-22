@@ -7,7 +7,7 @@
  * and `runAgent()` submits it unchanged. Local validation is advisory for
  * immediate feedback; the gateway remains authoritative.
  */
-import type { AgentCard } from "./try-dacs-contract.js";
+import type { AgentCard, PaymentRail } from "./try-dacs-contract.js";
 
 /**
  * A renderable field derived from the gateway's published input schema. The
@@ -154,14 +154,16 @@ export function hasBuiltinForm(name: string): boolean {
 }
 
 /** Blank starting input per agent — examples are opt-in via "Load example". */
-export function initialAgentInput(name: string): Record<string, unknown> {
+export function initialAgentInput(name: string, paymentRail: PaymentRail = "pay-dem"): Record<string, unknown> {
   switch (name) {
     case "procurement-butler":
-      return { goal: "", budgetDem: 5, files: [{ path: "", content: "" }] };
+      return paymentRail === "pay-x402"
+        ? { goal: "", budgetUsdc: 0.1, files: [{ path: "", content: "" }], paymentRail }
+        : { goal: "", budgetDem: 5, files: [{ path: "", content: "" }], paymentRail };
     case "oracle-desk":
-      return { product: "crypto-price", params: { ...ORACLE_DEFAULT_PARAMS["crypto-price"] } };
+      return { product: "crypto-price", params: { ...ORACLE_DEFAULT_PARAMS["crypto-price"] }, paymentRail };
     case "dd-researcher":
-      return { kind: "npm-package", subject: "" };
+      return { kind: "npm-package", subject: "", paymentRail };
     case "dep-upgrade":
       return { packageJson: {}, includeNextMajor: false };
     case "evalbot":
@@ -243,8 +245,13 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
   switch (name) {
     case "procurement-butler": {
       requireText("goal", input.goal, "Required — this states what you are purchasing.");
-      const budget = num(input.budgetDem);
-      if (budget === undefined || budget <= 0) errors.budgetDem = "Required — a positive DEM budget caps what the Butler may spend.";
+      if (input.paymentRail === "pay-x402") {
+        const budget = num(input.budgetUsdc);
+        if (budget === undefined || budget <= 0 || budget > 10) errors.budgetUsdc = "Enter a Base Sepolia USDC budget above 0 and no more than 10.";
+      } else {
+        const budget = num(input.budgetDem);
+        if (budget === undefined || budget <= 0 || budget > 10) errors.budgetDem = "Enter a DEM budget above 0 and no more than 10.";
+      }
       requireFiles("files", input.files);
       break;
     }
@@ -426,7 +433,9 @@ export function summarizeAgentInput(name: string, input: Record<string, unknown>
   switch (name) {
     case "procurement-butler": {
       lines.push(`Goal: ${str(input.goal) || "—"}`);
-      lines.push(`Budget: ${num(input.budgetDem) ?? "—"} DEM`);
+      lines.push(input.paymentRail === "pay-x402"
+        ? `Budget: ${num(input.budgetUsdc) ?? "—"} USDC · Base Sepolia x402`
+        : `Budget: ${num(input.budgetDem) ?? "—"} DEM`);
       lines.push(`Files: ${arr(input.files).map((file) => str(rec(file).path) || "(unnamed)").join(", ") || "none"}`);
       break;
     }
@@ -434,10 +443,12 @@ export function summarizeAgentInput(name: string, input: Record<string, unknown>
       lines.push(`Product: ${str(input.product)}`);
       const params = rec(input.params);
       lines.push(`Params: ${Object.entries(params).map(([key, value]) => `${key}=${String(value)}`).join(", ") || "none"}`);
+      lines.push(`Payment: ${input.paymentRail === "pay-x402" ? "USDC · Base Sepolia x402" : "DEM · Demos"}`);
       break;
     }
     case "dd-researcher":
       lines.push(`Subject: ${str(input.subject)} (${str(input.kind)})`);
+      lines.push(`Payment: ${input.paymentRail === "pay-x402" ? "USDC · Base Sepolia x402" : "DEM · Demos"}`);
       break;
     case "dep-upgrade": {
       const dependencies = rec(rec(input.packageJson).dependencies);
@@ -477,10 +488,12 @@ export function summarizeAgentInput(name: string, input: Record<string, unknown>
 }
 
 /** One-line safety statement rendered with each form (honest boundaries). */
-export function agentSafetyNote(name: string): string | null {
+export function agentSafetyNote(name: string, paymentRail: PaymentRail = "pay-dem"): string | null {
   switch (name) {
     case "procurement-butler":
-      return "Runs the full live purchase flow: discovery, negotiation, a real DEM payment, delivery, and verification. The DEM budget bounds spend.";
+      return paymentRail === "pay-x402"
+        ? "Runs the full live purchase flow with a real Base Sepolia USDC payment. Your USDC budget is a hard spend cap."
+        : "Runs the full live purchase flow with a real DEM payment. Your DEM budget is a hard spend cap.";
     case "dep-upgrade":
       return "Plans upgrades only — it never installs or modifies anything.";
     case "treasury-ops":
