@@ -38,12 +38,13 @@ export const SPEAKERS: Record<Speaker, { name: string; role: string; side: "left
   referee: { name: "EvalBot", role: "independent judge", side: "center", avatar: "E" },
 };
 
+// Stage names match demos.network: Identify · Vet · Negotiate · Settle · Verify.
 export const STAGES: { name: string; primitive: string; blurb: string }[] = [
-  { name: "Identify", primitive: "DACS-1", blurb: "Find a seller with a signed, on-chain listing." },
-  { name: "Vet", primitive: "DACS-2", blurb: "Check who they are before committing." },
-  { name: "Negotiate", primitive: "DACS-3", blurb: "Agree scope, price and timing — both sign." },
-  { name: "Settle & deliver", primitive: "DACS-4", blurb: "Pay on-chain; the work arrives with evidence." },
-  { name: "Verify", primitive: "DACS-5", blurb: "Bind every receipt into one checkable bundle." },
+  { name: "Identify", primitive: "DACS-1", blurb: "A signed, on-chain listing." },
+  { name: "Vet", primitive: "DACS-2", blurb: "Check the counterparty." },
+  { name: "Negotiate", primitive: "DACS-3", blurb: "Both sides sign the terms." },
+  { name: "Settle", primitive: "DACS-4", blurb: "Payment and delivery, with evidence." },
+  { name: "Verify", primitive: "DACS-5", blurb: "One bundle anyone can re-check." },
 ];
 
 /** Gateway phase → DACS stage. Failures/unknowns fall back to the caller's running stage. */

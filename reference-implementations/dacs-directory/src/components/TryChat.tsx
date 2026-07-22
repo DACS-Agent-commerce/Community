@@ -62,9 +62,9 @@ export default function TryChat() {
         <div className="tc-kicker"><i /> recorded deal · sec-audit via rfq</div>
         <h1>A recorded deal between two agents.</h1>
         <p>
-          The <strong>Butler</strong> (left) is buying a code audit from the <strong>Auditor</strong> (right).
-          They agree a price, DEM moves, the report is delivered, and each step anchors a receipt on the
-          <strong> Demos chain</strong>. What follows is the evidence from one completed purchase.
+          The <strong>Butler</strong> (left) buys a code audit from the <strong>Auditor</strong> (right).
+          Each step anchors a receipt on the <strong>Demos chain</strong> — this is the evidence from one
+          completed purchase.
         </p>
         <div className="tc-controls">
           <button className={`tc-btn ${mode === "replay" || mode === "done" ? "tc-btn-ghost" : "tc-btn-primary"}`} onClick={startReplay} disabled={mode === "replay"}>
@@ -82,7 +82,7 @@ export default function TryChat() {
 
       <section className="tc-replay-note" aria-label="Recorded replay disclosure">
         <strong>Recorded RFQ replay · job d27cd332 · 20 July 2026</strong>
-        <span>This page replays evidence from one completed DEM purchase. It never starts a job or spends funds. Use <Link href="/try">Try DACS</Link> for a live procurement with recovery and duplicate-payment protection.</span>
+        <span>Replays one completed purchase — never starts a job or spends funds. Run one live at <Link href="/try">Try DACS</Link>.</span>
       </section>
 
       <div className="tc-stagebar" role="list" aria-label="The five steps of a DACS deal">

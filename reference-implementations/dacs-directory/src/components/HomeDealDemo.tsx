@@ -95,12 +95,12 @@ export default function HomeDealDemo() {
         })}
         {!settled && started && <div className="tc-typing hp-typing"><span /><span /><span /></div>}
         {settled && (
-          <div className="hp-settled">settled · five receipts anchored on Demos</div>
+          <div className="hp-settled">settled · five receipts on-chain</div>
         )}
       </div>
       <div className="hp-demo-foot">
-        <span>a real purchase, replayed — every hash resolves on the explorer</span>
-        <a href="/try-chat">watch with explanations →</a>
+        <span>recorded on-chain purchase</span>
+        <a href="/try">try dacs →</a>
       </div>
     </div>
   );
