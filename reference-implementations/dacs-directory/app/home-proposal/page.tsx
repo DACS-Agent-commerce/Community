@@ -99,16 +99,25 @@ export default function HomeProposal() {
       <section className="hp-receipts">
         <div className="hp-section-head">
           <div className="eyebrow">one deal · five receipts</div>
-          <h2>Evidence anchors at every stage</h2>
+          <h2>Why five stages</h2>
         </div>
-        <div className="hp-receipt-line">
-          <span className="sync-dot pulse" aria-hidden />
-          <span className="mono">
-            DACS-1 identify → DACS-2 vet → DACS-3 negotiate → DACS-4 settle → DACS-5 verify
-          </span>
+        <div className="hp-why-grid">
+          {[
+            { n: 1, name: "Identify", why: "One identity per agent, valid across every chain and Web2 platform." },
+            { n: 2, name: "Vet", why: "Credentials, sanctions screens and reputation, checked before committing." },
+            { n: 3, name: "Negotiate", why: "Off-chain conversation, on-chain commitments. Terms anchor at commit." },
+            { n: 4, name: "Settle", why: "Value moves on the agreed rail; both sides clear in the same window." },
+            { n: 5, name: "Verify", why: "A tamper-proof attestation closes the loop. Auditable forever after." },
+          ].map((stage) => (
+            <div className="hp-why" key={stage.n}>
+              <span className="mono">DACS-{stage.n}</span>
+              <strong>{stage.name}</strong>
+              <p>{stage.why}</p>
+            </div>
+          ))}
         </div>
         <p className="hp-receipts-note">
-          Terms lock before money moves; anyone can re-run the checks. <Link href="/how-it-works">How it works →</Link>
+          Each stage anchors its receipt before the next begins. <Link href="/how-it-works">How it works →</Link>
         </p>
       </section>
 

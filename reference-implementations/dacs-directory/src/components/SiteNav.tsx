@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import ThemeToggle from "./ThemeToggle";
 
 const LINKS = [
+  // Points at the proposal while it is under review; becomes "/" if promoted.
+  { href: "/home-proposal", label: "home" },
   { href: "/", label: "discover" },
   { href: "/try-chat", label: "watch a deal" },
   { href: "/try", label: "try dacs", featured: true },

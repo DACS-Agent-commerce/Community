@@ -742,8 +742,12 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .hp-deal-status-live { color: var(--accent-strong); }
 .hp-deal-status-spec { color: var(--text-muted); }
 
-.hp-receipt-line { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); overflow-x: auto; }
-.hp-receipt-line .mono { font: .74rem var(--font-scp, monospace); color: var(--text-secondary); white-space: nowrap; }
+.hp-why-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); overflow: hidden; }
+.hp-why { padding: 18px 16px; }
+.hp-why + .hp-why { border-left: 1px solid var(--border); }
+.hp-why .mono { font: 600 .62rem var(--font-scp, monospace); color: var(--accent-strong); }
+.hp-why strong { display: block; margin-top: 6px; font-size: .92rem; }
+.hp-why p { margin-top: 6px; color: var(--text-secondary); font-size: .76rem; line-height: 1.55; }
 .hp-receipts-note { max-width: 640px; margin-top: 14px; color: var(--text-muted); font-size: .8rem; line-height: 1.6; }
 .hp-receipts-note a { color: var(--accent-strong); font-weight: 600; }
 
@@ -754,5 +758,7 @@ textarea.form-control { min-height: 112px; resize: vertical; }
   .hp-hero { grid-template-columns: 1fr; }
   .hp-deal-row { grid-template-columns: 1fr; gap: 8px; }
   .hp-deal-row > code { justify-self: start; text-align: left; }
+  .hp-why-grid { grid-template-columns: 1fr; }
+  .hp-why + .hp-why { border-left: 0; border-top: 1px solid var(--border); }
   .hp-demo-scroll { height: 320px; }
 }
