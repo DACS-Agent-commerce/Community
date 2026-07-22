@@ -30,16 +30,23 @@ export default function HomeDealDemo() {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Begin only when the demo is actually on screen.
+  // Begin only when the demo is actually on screen. Users who prefer reduced
+  // motion get the finished conversation immediately — no reveal, no loop.
   useEffect(() => {
     const node = rootRef.current;
     if (!node || started) return;
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) setStarted(true);
+      if (entries.some((entry) => entry.isIntersecting)) {
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          setVisible(turns.length);
+          setPaused(true);
+        }
+        setStarted(true);
+      }
     }, { threshold: 0.25 });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [started]);
+  }, [started, turns.length]);
 
   // Reveal one turn per beat; hold on the finished deal, then loop.
   useEffect(() => {

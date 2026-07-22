@@ -669,9 +669,10 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .tc-bubble p { font-size: .9rem; line-height: 1.5; color: var(--text-primary); }
 .tc-turn-center .tc-bubble p { font-size: .82rem; color: var(--text-secondary); }
 
-.tc-receipt { display: inline-flex; align-items: center; gap: 8px; margin-top: 8px; padding: 5px 9px; border-radius: 8px; background: color-mix(in srgb, #0891b2 8%, transparent); border: 1px solid color-mix(in srgb, #0891b2 25%, transparent); }
-.tc-receipt-tag { font: 700 .56rem var(--font-scp, monospace); letter-spacing: .05em; color: #0e7490; }
-.tc-receipt a { font: 600 .64rem var(--font-scp, monospace); color: #0e7490; }
+.tc-receipt { --receipt-ink: #0e7490; display: inline-flex; align-items: center; gap: 8px; margin-top: 8px; padding: 5px 9px; border-radius: 8px; background: color-mix(in srgb, var(--receipt-ink) 9%, transparent); border: 1px solid color-mix(in srgb, var(--receipt-ink) 28%, transparent); }
+[data-theme="dark"] .tc-receipt { --receipt-ink: #67e8f9; }
+.tc-receipt-tag { font: 700 .56rem var(--font-scp, monospace); letter-spacing: .05em; color: var(--receipt-ink); }
+.tc-receipt a { font: 600 .64rem var(--font-scp, monospace); color: var(--receipt-ink); }
 .tc-receipt code { font: 600 .64rem var(--font-scp, monospace); color: var(--text-muted); }
 .tc-raw { margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--border); }
 .tc-raw span { display: block; font: 700 .52rem var(--font-scp, monospace); letter-spacing: .06em; color: var(--text-muted); text-transform: uppercase; }
