@@ -44,6 +44,16 @@ test("forms produce the exact expected gateway input objects", () => {
     files: [{ path: "server.js", content: "eval(x)\n" }],
   };
   assert.deepEqual(validateAgentInput("procurement-butler", procurement), {});
+  const x402Procurement = {
+    goal: "procure a content-bound security audit of the posted source",
+    budgetUsdc: 0.1,
+    files: [{ path: "server.js", content: "eval(x)\n" }],
+    paymentRail: "pay-x402",
+  };
+  assert.deepEqual(validateAgentInput("procurement-butler", x402Procurement), {});
+  assert.deepEqual(initialAgentInput("procurement-butler", "pay-x402"), {
+    goal: "", budgetUsdc: 0.1, files: [{ path: "", content: "" }], paymentRail: "pay-x402",
+  });
 
   const oracle = { product: "crypto-price", params: { id: "bitcoin" } };
   assert.deepEqual(validateAgentInput("oracle-desk", oracle), {});
@@ -124,6 +134,8 @@ test("invalid URLs, budgets, sample counts, and thresholds are blocked locally",
   assert.ok(validateAgentInput("site-auditor", { url: "https://example.com", samples: 2.5 }).samples);
   assert.ok(validateAgentInput("procurement-butler", { goal: "g", budgetDem: 0, files: [{ path: "a", content: "b" }] }).budgetDem);
   assert.ok(validateAgentInput("procurement-butler", { goal: "g", budgetDem: -5, files: [{ path: "a", content: "b" }] }).budgetDem);
+  assert.ok(validateAgentInput("procurement-butler", { goal: "g", budgetUsdc: 0, paymentRail: "pay-x402", files: [{ path: "a", content: "b" }] }).budgetUsdc);
+  assert.ok(validateAgentInput("procurement-butler", { goal: "g", budgetUsdc: 11, paymentRail: "pay-x402", files: [{ path: "a", content: "b" }] }).budgetUsdc);
   assert.ok(validateAgentInput("evalbot", {
     deliverable: { content: "x" },
     rubric: { acceptThreshold: 101, criteria: [blankCriterion()] },
@@ -243,6 +255,11 @@ test("submission summaries state the actual values being sent", () => {
   });
   assert.ok(procurement.some((line) => line.includes("5 DEM")));
   assert.ok(procurement.some((line) => line.includes("server.js")));
+  const x402 = summarizeAgentInput("procurement-butler", {
+    goal: "audit", budgetUsdc: 0.1, paymentRail: "pay-x402", files: [{ path: "server.js", content: "x" }],
+  });
+  assert.ok(x402.some((line) => line.includes("0.1 USDC")));
+  assert.ok(x402.some((line) => line.includes("Base Sepolia x402")));
 });
 
 test("schema-driven forms validate required fields and option/number bounds", () => {

@@ -11,6 +11,27 @@ export type AgentCard = {
   input?: unknown;
 };
 
+export type PaymentRail = "pay-dem" | "pay-x402";
+
+export type RailGovernance = {
+  status: string;
+  conformantAuthority: boolean;
+  signer: string;
+  disclosure: string;
+};
+
+export type ProcurementRailInput = {
+  rail: PaymentRail;
+  fields: unknown[];
+  sampleInput: Record<string, unknown>;
+};
+
+export type ProcurementRailReadiness = {
+  executable: boolean;
+  reasons: string[];
+  railGovernance?: RailGovernance;
+};
+
 export type ProcurementProfile = {
   id: string;
   title: string;
@@ -28,6 +49,9 @@ export type ProcurementProfile = {
     protocolFloorSec: number;
   };
   confirmationGates: string[];
+  paymentRails: PaymentRail[];
+  railInputs: ProcurementRailInput[];
+  railReadiness: Record<PaymentRail, ProcurementRailReadiness | undefined>;
   implementationStatus: string;
   executable: boolean;
   reasons: string[];
@@ -163,6 +187,36 @@ function requiredNumber(value: unknown, path: string): number {
   return value;
 }
 
+function requiredBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw new ButlerContractError(path, "a boolean");
+  return value;
+}
+
+function requiredStringArray(value: unknown, path: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ButlerContractError(path, "an array of strings");
+  }
+  return value;
+}
+
+function requiredPaymentRail(value: unknown, path: string): PaymentRail {
+  if (value !== "pay-dem" && value !== "pay-x402") {
+    throw new ButlerContractError(path, '"pay-dem" or "pay-x402"');
+  }
+  return value;
+}
+
+function requiredHttpsUrl(value: unknown, path: string): string {
+  const text = requiredString(value, path);
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "https:" || url.username || url.password) throw new Error("unsafe URL");
+    return url.toString();
+  } catch {
+    throw new ButlerContractError(path, "a public HTTPS URL without credentials");
+  }
+}
+
 export function parseAgentInput(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new AgentInputError();
   return value as Record<string, unknown>;
@@ -243,13 +297,55 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
     const profile = requiredRecord(value, path);
     const timing = requiredRecord(profile.timing, `${path}.timing`);
     if (!Array.isArray(profile.fields)) throw new ButlerContractError(`${path}.fields`, "an array");
-    if (!Array.isArray(profile.confirmationGates) || profile.confirmationGates.some((gate) => typeof gate !== "string")) {
-      throw new ButlerContractError(`${path}.confirmationGates`, "an array of strings");
+    const paymentRails = requiredStringArray(profile.paymentRails, `${path}.paymentRails`)
+      .map((rail, railIndex) => requiredPaymentRail(rail, `${path}.paymentRails[${railIndex}]`));
+    if (paymentRails.length === 0 || new Set(paymentRails).size !== paymentRails.length) {
+      throw new ButlerContractError(`${path}.paymentRails`, "one or more unique supported rails");
     }
-    if (!Array.isArray(profile.reasons) || profile.reasons.some((reason) => typeof reason !== "string")) {
-      throw new ButlerContractError(`${path}.reasons`, "an array of strings");
+    if (!Array.isArray(profile.railInputs)) throw new ButlerContractError(`${path}.railInputs`, "an array");
+    const railInputs = profile.railInputs.map((value, railIndex): ProcurementRailInput => {
+      const railPath = `${path}.railInputs[${railIndex}]`;
+      const input = requiredRecord(value, railPath);
+      if (!Array.isArray(input.fields)) throw new ButlerContractError(`${railPath}.fields`, "an array");
+      const rail = requiredPaymentRail(input.rail, `${railPath}.rail`);
+      const sampleInput = requiredRecord(input.sampleInput, `${railPath}.sampleInput`);
+      if (sampleInput.paymentRail !== rail) throw new ButlerContractError(`${railPath}.sampleInput.paymentRail`, rail);
+      return {
+        rail,
+        fields: input.fields,
+        sampleInput,
+      };
+    });
+    if (new Set(railInputs.map((input) => input.rail)).size !== railInputs.length) {
+      throw new ButlerContractError(`${path}.railInputs`, "one unique schema per supported rail");
     }
-    if (typeof profile.executable !== "boolean") throw new ButlerContractError(`${path}.executable`, "a boolean");
+    const readinessSource = requiredRecord(profile.railReadiness, `${path}.railReadiness`);
+    const railReadiness: Record<PaymentRail, ProcurementRailReadiness | undefined> = { "pay-dem": undefined, "pay-x402": undefined };
+    for (const rail of paymentRails) {
+      const readinessPath = `${path}.railReadiness.${rail}`;
+      const readiness = requiredRecord(readinessSource[rail], readinessPath);
+      const governanceSource = readiness.railGovernance;
+      let railGovernance: RailGovernance | undefined;
+      if (governanceSource !== undefined) {
+        const governance = requiredRecord(governanceSource, `${readinessPath}.railGovernance`);
+        railGovernance = {
+          status: requiredString(governance.status, `${readinessPath}.railGovernance.status`),
+          conformantAuthority: requiredBoolean(governance.conformantAuthority, `${readinessPath}.railGovernance.conformantAuthority`),
+          signer: requiredString(governance.signer, `${readinessPath}.railGovernance.signer`),
+          disclosure: requiredHttpsUrl(governance.disclosure, `${readinessPath}.railGovernance.disclosure`),
+        };
+      }
+      railReadiness[rail] = {
+        executable: requiredBoolean(readiness.executable, `${readinessPath}.executable`),
+        reasons: requiredStringArray(readiness.reasons, `${readinessPath}.reasons`),
+        ...(railGovernance ? { railGovernance } : {}),
+      };
+    }
+    for (const rail of paymentRails) {
+      if (!railInputs.some((input) => input.rail === rail)) {
+        throw new ButlerContractError(`${path}.railInputs`, `an input schema for ${rail}`);
+      }
+    }
     return {
       id: requiredString(profile.id, `${path}.id`),
       title: requiredString(profile.title, `${path}.title`),
@@ -266,26 +362,36 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
         hardTimeoutSec: requiredNumber(timing.hardTimeoutSec, `${path}.timing.hardTimeoutSec`),
         protocolFloorSec: requiredNumber(timing.protocolFloorSec, `${path}.timing.protocolFloorSec`),
       },
-      confirmationGates: profile.confirmationGates as string[],
+      confirmationGates: requiredStringArray(profile.confirmationGates, `${path}.confirmationGates`),
+      paymentRails,
+      railInputs,
+      railReadiness,
       implementationStatus: requiredString(profile.implementationStatus, `${path}.implementationStatus`),
-      executable: profile.executable,
-      reasons: profile.reasons as string[],
+      executable: requiredBoolean(profile.executable, `${path}.executable`),
+      reasons: requiredStringArray(profile.reasons, `${path}.reasons`),
     };
   });
 }
 
-export function procurementProfileCard(profile: ProcurementProfile): AgentCard {
+export function procurementRailInput(profile: ProcurementProfile, rail: PaymentRail): ProcurementRailInput {
+  const input = profile.railInputs.find((candidate) => candidate.rail === rail);
+  if (!input) throw new ButlerContractError(`procurement profile ${profile.id}`, `an input schema for ${rail}`);
+  return input;
+}
+
+export function procurementProfileCard(profile: ProcurementProfile, rail: PaymentRail = profile.paymentRails[0]!): AgentCard {
   const name = PROFILE_AGENT_NAMES[profile.id];
   if (!name) throw new ButlerContractError(`procurement profile ${profile.id}`, "a supported live demo profile");
+  const railInput = procurementRailInput(profile, rail);
   return {
     name,
     label: profile.agentName,
     summary: profile.summary,
-    tags: [profile.mode, profile.serviceId],
+    tags: [profile.mode, profile.serviceId, rail],
     exampleGoal: profile.title,
-    exampleInput: profile.sampleInput,
+    exampleInput: railInput.sampleInput,
     mode: profile.mode,
-    input: profile.fields,
+    input: railInput.fields,
   };
 }
 

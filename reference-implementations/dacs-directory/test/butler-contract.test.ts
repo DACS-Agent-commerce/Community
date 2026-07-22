@@ -12,6 +12,7 @@ import {
   parseProcurementJob,
   parseReceiptEnvelope,
   procurementProfileCard,
+  procurementRailInput,
   procurementEvidence,
 } from "../src/components/try-dacs-contract.js";
 
@@ -47,6 +48,32 @@ const oracleProfile = {
   sampleInput: { product: "crypto-price", params: { id: "bitcoin" } },
   timing: { healthyMinSec: 60, healthyMaxSec: 90, hardTimeoutSec: 180, protocolFloorSec: 0 },
   confirmationGates: ["commit-agreement", "pay-dem"],
+  paymentRails: ["pay-dem", "pay-x402"],
+  railInputs: [
+    {
+      rail: "pay-dem",
+      fields: [{ name: "product", type: "string", required: true }],
+      sampleInput: { product: "crypto-price", params: { id: "bitcoin" }, paymentRail: "pay-dem" },
+    },
+    {
+      rail: "pay-x402",
+      fields: [{ name: "product", type: "string", required: true }, { name: "paymentRail", type: "string", required: true, enum: ["pay-x402"] }],
+      sampleInput: { product: "crypto-price", params: { id: "bitcoin" }, paymentRail: "pay-x402" },
+    },
+  ],
+  railReadiness: {
+    "pay-dem": { executable: true, reasons: [] },
+    "pay-x402": {
+      executable: true,
+      reasons: [],
+      railGovernance: {
+        status: "operator-provisional",
+        conformantAuthority: false,
+        signer: "did:demos:agent:abc",
+        disclosure: "https://example.test/governance",
+      },
+    },
+  },
   implementationStatus: "live",
   executable: true,
   reasons: [],
@@ -77,13 +104,21 @@ test("parses the live procurement options and maps supported profiles to forms",
     name: "oracle-desk",
     label: "Oracle Desk",
     summary: oracleProfile.summary,
-    tags: ["fixed-price-auto-accept", "oracle-data"],
+    tags: ["fixed-price-auto-accept", "oracle-data", "pay-dem"],
     exampleGoal: oracleProfile.title,
-    exampleInput: oracleProfile.sampleInput,
+    exampleInput: oracleProfile.railInputs[0]!.sampleInput,
     mode: oracleProfile.mode,
-    input: oracleProfile.fields,
+    input: oracleProfile.railInputs[0]!.fields,
   });
+  assert.deepEqual(procurementProfileCard(profile!, "pay-x402").exampleInput, oracleProfile.railInputs[1]!.sampleInput);
+  assert.equal(procurementRailInput(profile!, "pay-x402").rail, "pay-x402");
+  assert.equal(profile!.railReadiness["pay-x402"]?.railGovernance?.status, "operator-provisional");
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, executable: "yes" }] }), ButlerContractError);
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railInputs: oracleProfile.railInputs.slice(0, 1) }] }), ButlerContractError);
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railInputs: [...oracleProfile.railInputs, oracleProfile.railInputs[0]] }] }), ButlerContractError);
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railInputs: oracleProfile.railInputs.map((input) => input.rail === "pay-x402" ? { ...input, sampleInput: { ...input.sampleInput, paymentRail: "pay-dem" } } : input) }] }), ButlerContractError);
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railReadiness: { ...oracleProfile.railReadiness, "pay-x402": { ...oracleProfile.railReadiness["pay-x402"], railGovernance: { ...oracleProfile.railReadiness["pay-x402"].railGovernance, disclosure: "javascript:alert(1)" } } } }] }), ButlerContractError);
+  assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, paymentRails: ["pay-magic"] }] }), ButlerContractError);
   assert.throws(() => procurementProfileCard({ ...profile!, id: "future-profile" }), ButlerContractError);
 });
 

@@ -17,6 +17,7 @@ import {
   record,
   type AgentCard,
   type OutputReceipt,
+  type PaymentRail,
   type ProcurementEvent,
   type ProcurementJob,
   type ProcurementProfile,
@@ -101,6 +102,7 @@ type Plan = {
 };
 
 const EXPLORER = "https://explorer.demos.sh";
+const BASE_SEPOLIA_EXPLORER = "https://sepolia.basescan.org";
 const AGENT_TIMEOUT_MS = 120_000;
 const RECEIPT_WATCH_TIMEOUT_MS = 2 * 60_000;
 
@@ -111,6 +113,20 @@ function compact(value: unknown, head = 18, tail = 8): string {
 
 function elapsedLabel(ms: number): string {
   return ms < 10_000 ? `${(ms / 1_000).toFixed(1)}s` : `${Math.floor(ms / 1_000)}s`;
+}
+
+function paymentRailLabel(rail: PaymentRail): string {
+  return rail === "pay-x402" ? "USDC · x402" : "DEM · Demos";
+}
+
+function transactionExplorer(txRef: string): string {
+  return /^0x[0-9a-f]{64}$/i.test(txRef)
+    ? `${BASE_SEPOLIA_EXPLORER}/tx/${encodeURIComponent(txRef)}`
+    : `${EXPLORER}/tx/${encodeURIComponent(txRef)}`;
+}
+
+function defaultPaymentRail(profile: ProcurementProfile): PaymentRail {
+  return profile.paymentRails.find((rail) => profile.railReadiness[rail]?.executable) ?? profile.paymentRails[0]!;
 }
 
 function procurementModeLabel(mode: string): string {
@@ -130,7 +146,7 @@ function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function ProcurementReport({ value, events, profile }: { value: unknown; events: ProcurementEvent[]; profile: ProcurementProfile }) {
+function ProcurementReport({ value, events, profile, rail }: { value: unknown; events: ProcurementEvent[]; profile: ProcurementProfile; rail: PaymentRail }) {
   const report = record(value);
   const evidence = procurementEvidence(report, profile.mode);
   const decision = record(report.decision);
@@ -149,6 +165,9 @@ function ProcurementReport({ value, events, profile }: { value: unknown; events:
   const findings = Array.isArray(audit.findings) ? audit.findings.map(record) : [];
   const transactions = Array.isArray(report.transactions) ? report.transactions.map(record) : [];
   const paymentHash = String(settlement.txHash ?? "");
+  const settlementRail: PaymentRail = settlement.rail === "pay-x402" ? "pay-x402" : rail;
+  const x402 = settlementRail === "pay-x402";
+  const railGovernance = record(settlement.railGovernance);
   const price = settlement.amountDem ?? amount.amount ?? settlement.amount ?? winner.price;
   const currency = String(amount.currency ?? amount.unit ?? "DEM");
   const agreedPrice = termPrice.amount ?? (Object.keys(termPrice).length ? price : terms.price) ?? price;
@@ -175,11 +194,15 @@ function ProcurementReport({ value, events, profile }: { value: unknown; events:
       </div>
 
       <section className={`proc-panel payment-panel ${evidence.paymentRecorded ? "" : "unverified-panel"}`}>
-        <div className="proc-panel-head"><div><span>REAL PAYMENT</span><h3>Demos settlement transaction</h3></div><span className={`badge ${evidence.paymentRecorded ? "ok" : "err"}`}>{evidence.paymentRecorded ? "broadcast & recorded" : "evidence missing"}</span></div>
-        {paymentHash ? <a className="tx-link" href={`${EXPLORER}/tx/${paymentHash}`} target="_blank" rel="noreferrer">
+        <div className="proc-panel-head"><div><span>REAL PAYMENT · {paymentRailLabel(settlementRail)}</span><h3>{x402 ? "Base Sepolia USDC settlement" : "Demos native settlement"}</h3></div><span className={`badge ${evidence.paymentRecorded ? "ok" : "err"}`}>{evidence.paymentRecorded ? (x402 ? "settled & seller-verified" : "broadcast & recorded") : "evidence missing"}</span></div>
+        {paymentHash ? <a className="tx-link" href={transactionExplorer(paymentHash)} target="_blank" rel="noreferrer">
           <span><small>PAYMENT TX</small><code>{paymentHash}</code></span><b>View on explorer ↗</b>
         </a> : <div className="tx-link missing-evidence"><span><small>PAYMENT TX</small><code>not reported</code></span></div>}
         <div className="party-row"><span>payer <code>{compact(settlement.payer)}</code></span><i>→</i><span>seller <code>{compact(settlement.payee)}</code></span></div>
+        {x402 && Object.keys(railGovernance).length > 0 && <div className={`rail-governance ${railGovernance.conformantAuthority === true ? "canonical" : "provisional"}`}>
+          <div><strong>{railGovernance.conformantAuthority === true ? "Canonical rail authority" : "Operator-provisional rail"}</strong><span>{railGovernance.conformantAuthority === true ? "The configured authority is conformant." : "Live for this demo, pending a standardised DACS rail authority."}</span></div>
+          {typeof railGovernance.disclosure === "string" && <a href={railGovernance.disclosure} target="_blank" rel="noreferrer">Governance disclosure ↗</a>}
+        </div>}
       </section>
 
       <section className="proc-panel">
@@ -197,7 +220,7 @@ function ProcurementReport({ value, events, profile }: { value: unknown; events:
         <div className="proc-panel-head"><div><span>PROCUREMENT ROUTE</span><h3>{profile.title}</h3></div><span className="badge ok">{profile.negotiationPhase.replace("negotiate-", "")}</span></div>
         {candidates.length ? <div className="candidate-table">
           <div className="candidate-row candidate-head"><span>Provider</span><span>Price</span><span>Rail</span><span>Decision</span></div>
-          {candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.listingId}-${index}`}><span><strong>{String(candidate.provider ?? "candidate")}</strong><small>{compact(candidate.listingId, 12, 6)}</small></span><span>{String(candidate.askPrice ?? "—")} DEM</span><span>{String(candidate.chosenRail ?? "—")}</span><span className={candidate.excluded ? "muted-text" : "success-text"}>{candidate.excluded ? String(candidate.excluded) : "selected ✓"}</span></div>)}
+          {candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.listingId}-${index}`}><span><strong>{String(candidate.provider ?? "candidate")}</strong><small>{compact(candidate.listingId, 12, 6)}</small></span><span>{String(candidate.askPrice ?? "—")} {candidate.chosenRail === "pay-x402" ? "USDC" : "DEM"}</span><span>{String(candidate.chosenRail ?? "—")}</span><span className={candidate.excluded ? "muted-text" : "success-text"}>{candidate.excluded ? String(candidate.excluded) : "selected ✓"}</span></div>)}
         </div> : <p className="empty-report">{profile.summary} The gateway resolved the configured signed listing and bound it into this deal.</p>}
       </section>
 
@@ -221,7 +244,7 @@ function ProcurementReport({ value, events, profile }: { value: unknown; events:
         <div className="receipt-list">{transactions.map((transaction, index) => {
           const txRef = String(transaction.txRef ?? "");
           const anchorRef = String(transaction.address ?? "");
-          return <div className="receipt-row" key={`${txRef}-${anchorRef}-${index}`}><span className="receipt-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{String(transaction.name ?? transaction.kind ?? "chain record")}</strong><small>{anchorRef ? `anchor ${compact(anchorRef, 22, 8)}` : "Demos payment"}</small></div>{txRef ? <a href={`${EXPLORER}/tx/${txRef}`} target="_blank" rel="noreferrer">{compact(txRef, 15, 7)} ↗</a> : <span className="muted-text">existing anchor</span>}</div>;
+          return <div className="receipt-row" key={`${txRef}-${anchorRef}-${index}`}><span className="receipt-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{String(transaction.name ?? transaction.kind ?? "chain record")}</strong><small>{anchorRef ? `anchor ${compact(anchorRef, 22, 8)}` : (/^0x/.test(txRef) ? "Base Sepolia payment" : "Demos transaction")}</small></div>{txRef ? <a href={transactionExplorer(txRef)} target="_blank" rel="noreferrer">{compact(txRef, 15, 7)} ↗</a> : <span className="muted-text">existing anchor</span>}</div>;
         })}</div>
         <details className="anchor-details"><summary>All anchor addresses</summary><pre>{JSON.stringify(anchors, null, 2)}</pre></details>
       </section>
@@ -259,7 +282,7 @@ const DACS_STAGES = [
     key: "settle", name: "Settle & deliver", primitive: "DACS-4",
     tagline: "Pay on the agreed rail; the work arrives with evidence.",
     receipt: "a payment transaction + delivery evidence",
-    plain: "The buyer pays on the agreed payment rail (in the full purchase demo, real DEM moves on-chain) and the seller delivers the work. The payment hash and the delivered report are both captured as evidence.",
+    plain: "The buyer pays on the agreed payment rail — native DEM on Demos or USDC through x402 on Base Sepolia — and the seller delivers the work. The payment hash and the delivered report are both captured as evidence.",
   },
   {
     key: "verify", name: "Verify", primitive: "DACS-5",
@@ -290,6 +313,7 @@ export default function TryDacs() {
   const [agents, setAgents] = useState<AgentCard[]>([]);
   const [profiles, setProfiles] = useState<ProcurementProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [selectedPaymentRail, setSelectedPaymentRail] = useState<PaymentRail>("pay-dem");
   const [goal, setGoal] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [inputValue, setInputValue] = useState<Record<string, unknown>>({});
@@ -323,7 +347,7 @@ export default function TryDacs() {
           throw new Error("the three production procurement profiles are not all executable");
         }
         setProfiles(live);
-        setAgents(live.map(procurementProfileCard));
+        setAgents(live.map((profile) => procurementProfileCard(profile, defaultPaymentRail(profile))));
       })
       .catch((cause: unknown) => setError(cause instanceof ButlerContractError
         ? cause.message
@@ -372,8 +396,12 @@ export default function TryDacs() {
     receiptAbort.current?.abort();
   }, []);
 
-  const selected = useMemo(() => agents.find((agent) => agent.name === plan?.butler.selectedAgent), [agents, plan]);
   const selectedProfile = useMemo(() => profiles.find((profile) => profile.id === selectedProfileId), [profiles, selectedProfileId]);
+  const selected = useMemo(() => selectedProfile
+    ? procurementProfileCard(selectedProfile, selectedPaymentRail)
+    : agents.find((agent) => agent.name === plan?.butler.selectedAgent),
+  [agents, plan, selectedPaymentRail, selectedProfile]);
+  const selectedRailReadiness = selectedProfile?.railReadiness[selectedPaymentRail];
   const execution = record(record(result).execution);
   const specialistDurationMs = typeof execution.durationMs === "number" ? execution.durationMs : undefined;
   const receiptElapsedMs = receipt?.createdAt
@@ -391,7 +419,7 @@ export default function TryDacs() {
     () => plan ? validateInput(plan.butler.selectedAgent, inputValue) : {},
     [plan, inputValue, validateInput],
   );
-  const inputIsValid = Object.keys(localErrors).length === 0;
+  const inputIsValid = Object.keys(localErrors).length === 0 && (selectedRailReadiness?.executable ?? true);
   // Verification completes only on evidence: a confirmed receipt (or no
   // receipt advertised at all). A synchronous broadcast-only attestation has
   // no status URL to poll, so its confirmation is UNKNOWN in this browser —
@@ -451,13 +479,13 @@ export default function TryDacs() {
       ? { state: "pending", summary: "Runs live during the purchase — both agents sign the agreement" }
       : { state: "skipped", summary: "Skipped — this demo is free", detail: "There is nothing to price here. The Procurement Butler negotiates a real RFQ and both agents sign the DACS-3 agreement before payment." };
   const settleOut: StageOutput = phase === "running"
-    ? { state: "active", summary: `Live procurement running · ${elapsedLabel(elapsedMs)}`, detail: "The gateway confirms the signed agreement before broadcasting the real DEM payment." }
+    ? { state: "active", summary: `Live procurement running · ${elapsedLabel(elapsedMs)}`, detail: `The gateway confirms the signed agreement before broadcasting the real ${paymentRailLabel(selectedPaymentRail)} payment.` }
     : phase === "done"
       ? { state: "complete", summary: specialistDurationMs === undefined ? "Result delivered" : `Result delivered in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
       : phase === "error"
         ? { state: "warning", summary: "Execution stopped safely", detail: error }
         : plan && inputIsValid
-          ? { state: "pending", summary: "A real DEM payment happens here when you press Run" }
+          ? { state: "pending", summary: `A real ${paymentRailLabel(selectedPaymentRail)} payment happens here when you press Run` }
           : plan
             ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention in the form` }
             : { state: "pending", summary: "Waiting for job details" };
@@ -614,9 +642,9 @@ export default function TryDacs() {
         // The Directory is the discovery surface. Pass its verified listing
         // pointer to the Butler; the gateway independently dereferences and
         // verifies the signed DACS-1 artifact before negotiation.
-        const request: Record<string, unknown> = { profileId: selectedProfile.id, ...parsed };
+        const request: Record<string, unknown> = { profileId: selectedProfile.id, ...parsed, paymentRail: selectedPaymentRail };
         if (selectedProfile.id === "security-audit-rfq") try {
-          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>("/api/dacs/listings?rail=pay-dem&limit=100", { signal: controller.signal }, deadline);
+          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>(`/api/dacs/listings?rail=${encodeURIComponent(selectedPaymentRail)}&limit=100`, { signal: controller.signal }, deadline);
           if (catalog.ok) {
             const auditor = body.listings?.find((item) => item.listingId === "audit-negotiator" && item.offering?.negotiation?.includes("rfq") && /auditor/i.test(item.offering?.title ?? ""));
             const ref = auditor?.anchor?.locator;
@@ -788,7 +816,9 @@ export default function TryDacs() {
     setGoal(stored.goal);
     const storedProfileId = typeof stored.input.profileId === "string" ? stored.input.profileId : "security-audit-rfq";
     const storedAgent = PROFILE_AGENT[storedProfileId] ?? PROFILE_AGENT["security-audit-rfq"]!;
+    const storedPaymentRail: PaymentRail = stored.input.paymentRail === "pay-x402" ? "pay-x402" : "pay-dem";
     setSelectedProfileId(storedProfileId);
+    setSelectedPaymentRail(storedPaymentRail);
     setPlan({
       butler: {
         selectedAgent: storedAgent.name,
@@ -875,8 +905,11 @@ export default function TryDacs() {
   function selectAgent(agent: AgentCard) {
     runAbort.current?.abort(); receiptAbort.current?.abort();
     setGoal(agent.exampleGoal);
-    const profile = profiles.find((candidate) => procurementProfileCard(candidate).name === agent.name);
+    const profile = profiles.find((candidate) => procurementProfileCard(candidate, defaultPaymentRail(candidate)).name === agent.name);
+    const paymentRail = profile ? defaultPaymentRail(profile) : "pay-dem";
+    const railAgent = profile ? procurementProfileCard(profile, paymentRail) : agent;
     setSelectedProfileId(profile?.id ?? null);
+    setSelectedPaymentRail(paymentRail);
     setPlan({
       butler: {
         selectedAgent: agent.name,
@@ -885,19 +918,30 @@ export default function TryDacs() {
         rationale: `You selected ${agent.label}. Fill in the job below (or load its example), and I will supervise the run and show you the evidence it returns.`,
         alternatives: [],
       },
-      proposedInput: agent.exampleInput,
+      proposedInput: railAgent.exampleInput,
       inputNote: "Your values are submitted unchanged to the live gateway, which applies specialist validation before execution.",
     });
     // Switching agents resets to that agent's blank form. Examples are never
     // submitted silently — "Load example" below is the only way they enter.
     // Schema-driven agents seed select/checkbox defaults so the form's display
     // matches submitted state.
-    const schema = hasBuiltinForm(agent.name) ? null : parseAgentFieldSchema(agent);
-    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(agent.name));
+    const schema = hasBuiltinForm(railAgent.name) ? null : parseAgentFieldSchema(railAgent);
+    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(railAgent.name, paymentRail));
     procurementRunId.current = null;
     setGatewayFieldErrors({}); setSubmittedSummary([]);
     setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); setPhase("ready"); setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function selectPaymentRail(rail: PaymentRail) {
+    if (!selectedProfile || rail === selectedPaymentRail || !selectedProfile.railReadiness[rail]?.executable) return;
+    const railAgent = procurementProfileCard(selectedProfile, rail);
+    setSelectedPaymentRail(rail);
+    setPlan((current) => current ? { ...current, proposedInput: railAgent.exampleInput } : current);
+    const schema = hasBuiltinForm(railAgent.name) ? null : parseAgentFieldSchema(railAgent);
+    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(railAgent.name, rail));
+    procurementRunId.current = null;
+    setGatewayFieldErrors({}); setSubmittedSummary([]); setError("");
   }
 
   function loadExample() {
@@ -924,7 +968,7 @@ export default function TryDacs() {
           <span className="try-kicker"><i /> LIVE DACS WALKTHROUGH</span>
           <h1>Buy agent work.<br /><em>Watch the deal.</em></h1>
         </div>
-        <p>Choose a real procurement route. The Butler discovers a signed listing, vets both parties, forms an agreement, pays DEM, verifies delivery and exposes every receipt as it happens.</p>
+        <p>Choose a real procurement route and how to pay: native DEM on Demos, or USDC through x402 on Base Sepolia. The Butler verifies the complete deal and exposes every receipt as it happens.</p>
       </section>
 
       {/* Suppress the banner only when THIS tab is already tracking the
@@ -959,7 +1003,8 @@ export default function TryDacs() {
               <div className="picker-head"><strong>Choose a live procurement</strong><span>{agents.length} available</span></div>
               <div className="picker-grid">{agents.map((agent) => {
                 const profile = profiles.find((candidate) => procurementProfileCard(candidate).name === agent.name);
-                return <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{profile ? procurementModeLabel(profile.mode) : agent.summary}</small><em>{profile ? `${profile.timing.healthyMinSec}–${profile.timing.healthyMaxSec}s healthy window` : "live"}</em></div><i>→</i></button>;
+                const liveRails = profile?.paymentRails.filter((rail) => profile.railReadiness[rail]?.executable).map(paymentRailLabel).join(" · ");
+                return <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{profile ? procurementModeLabel(profile.mode) : agent.summary}</small><em>{profile ? `${liveRails} · ${profile.timing.healthyMinSec}–${profile.timing.healthyMaxSec}s` : "live"}</em></div><i>→</i></button>;
               })}</div>
             </div>
           ) : phase === "error" && plan ? (
@@ -993,7 +1038,22 @@ export default function TryDacs() {
             </div>
           ) : plan && phase === "ready" && selected ? (
             <div className="job-box">
-              <div className="job-head"><div><span>{selectedProfile ? procurementModeLabel(selectedProfile.mode) : "Job details"}</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? "ready to buy" : "fields need attention"}</span></div>
+              <div className="job-head"><div><span>{selectedProfile ? procurementModeLabel(selectedProfile.mode) : "Job details"}</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? `ready · ${paymentRailLabel(selectedPaymentRail)}` : "fields need attention"}</span></div>
+              {selectedProfile && <div className="rail-picker" role="group" aria-label="Payment rail">
+                <div className="rail-picker-head"><strong>Choose payment rail</strong><span>This changes the real asset and settlement network.</span></div>
+                <div className="rail-options">{selectedProfile.paymentRails.map((rail) => {
+                  const readiness = selectedProfile.railReadiness[rail];
+                  const ready = readiness?.executable === true;
+                  return <button type="button" key={rail} className={selectedPaymentRail === rail ? "selected" : ""} disabled={!ready}
+                    aria-pressed={selectedPaymentRail === rail} onClick={() => selectPaymentRail(rail)}>
+                    <i>{selectedPaymentRail === rail ? "✓" : ""}</i><span><strong>{paymentRailLabel(rail)}</strong><small>{rail === "pay-x402" ? "Base Sepolia USDC · x402 exact payment" : "Demos native token · pay-dem"}</small><em>{ready ? (readiness?.railGovernance?.conformantAuthority === false ? "live · provisional governance" : "live") : readiness?.reasons[0] ?? "unavailable"}</em></span>
+                  </button>;
+                })}</div>
+                {selectedRailReadiness?.railGovernance && <div className={`rail-disclosure ${selectedRailReadiness.railGovernance.conformantAuthority ? "canonical" : "provisional"}`}>
+                  <span><strong>{selectedRailReadiness.railGovernance.conformantAuthority ? "Canonical rail authority" : "Operator-provisional rail authority"}</strong><small>{selectedRailReadiness.railGovernance.conformantAuthority ? "Authority conforms to the current DACS rail registry rules." : "Usable in this live demo while the standardised rail authority is being agreed."}</small></span>
+                  <a href={selectedRailReadiness.railGovernance.disclosure} target="_blank" rel="noreferrer">Read disclosure ↗</a>
+                </div>}
+              </div>}
               <AgentInputForm agent={selected} value={inputValue} onChange={editInput} errors={localErrors} gatewayErrors={gatewayFieldErrors} />
               <div className="job-actions">
                 <button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); }}>Start over</button>
@@ -1002,7 +1062,7 @@ export default function TryDacs() {
               </div>
             </div>
           ) : phase === "running" && isProcurementSel ? (
-            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> {procurementWaiting ? `QUEUED · POSITION ${procurementJob?.queue?.position ?? "…"} · ${elapsedLabel(elapsedMs)}` : `FULL DACS FLOW RUNNING · ${elapsedLabel(elapsedMs)}`}</div><small>{procurementWaiting ? "Your purchase is safely queued behind the active buyer-wallet deal. No payment has started yet." : "Keep this page open — chain confirmations appear here live."}</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
+            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> {procurementWaiting ? `QUEUED · POSITION ${procurementJob?.queue?.position ?? "…"} · ${elapsedLabel(elapsedMs)}` : `FULL DACS FLOW · ${paymentRailLabel(selectedPaymentRail)} · ${elapsedLabel(elapsedMs)}`}</div><small>{procurementWaiting ? "Your purchase is safely queued behind the active buyer-wallet deal. No payment has started yet." : "Keep this page open — settlement and chain confirmations appear here live."}</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
           ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 2-minute deadline</small>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}</div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
           : null}
         </div>
@@ -1025,7 +1085,7 @@ export default function TryDacs() {
                       {output.detail && <small>{output.detail}</small>}
                       {output.chain && output.chain.length > 0 && (
                         <div className="stage-txs">{output.chain.map((event, chainIdx) => event.txRef
-                          ? <a key={chainIdx} href={`${EXPLORER}/tx/${event.txRef}`} target="_blank" rel="noreferrer" title={event.label}>tx {compact(event.txRef, 8, 6)} ↗</a>
+                          ? <a key={chainIdx} href={transactionExplorer(event.txRef)} target="_blank" rel="noreferrer" title={event.label}>tx {compact(event.txRef, 8, 6)} ↗</a>
                           : <code key={chainIdx} title={event.label}>{compact(event.anchorRef, 12, 6)}</code>)}</div>
                       )}
                     </div>
@@ -1041,13 +1101,13 @@ export default function TryDacs() {
           {chainActivity.length > 0 && (
             <div className="chain-activity">
               <div className="chain-activity-head"><span>CHAIN ACTIVITY</span><span>{chainTxCount} tx · {chainActivity.length - chainTxCount} anchors</span></div>
-              <p>Every receipt lands on the public Demos chain. Click a hash to inspect it yourself — no login, no trust required.</p>
+              <p>DACS artifacts link to the public Demos explorer; x402 payments link to BaseScan on Base Sepolia. No login or trust is required.</p>
               <div className="chain-activity-list">
                 {chainActivity.map((row, index) => (
                   <div className="chain-row" key={`${row.txRef ?? row.anchorRef}-${index}`}>
                     <span className="chain-index">{String(index + 1).padStart(2, "0")}</span>
                     <div><strong>{row.label}</strong>{row.anchorRef && <small>anchor {compact(row.anchorRef, 16, 6)}</small>}</div>
-                    {row.txRef ? <a href={`${EXPLORER}/tx/${row.txRef}`} target="_blank" rel="noreferrer">{compact(row.txRef, 8, 6)} ↗</a> : <span className="muted-text">anchor</span>}
+                    {row.txRef ? <a href={transactionExplorer(row.txRef)} target="_blank" rel="noreferrer">{compact(row.txRef, 8, 6)} ↗</a> : <span className="muted-text">anchor</span>}
                   </div>
                 ))}
               </div>
@@ -1057,10 +1117,10 @@ export default function TryDacs() {
         </aside>
       </section>
 
-      {result !== undefined && selectedProfile && <section className="try-result full-proc-result"><div className="result-title"><div><span className={`badge ${procurementAccepted ? "ok" : "err"}`}>{procurementAccepted ? "verified" : "verification incomplete"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setSelectedProfileId(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another procurement</button></div><ProcurementReport value={result} events={procurementJob?.events ?? []} profile={selectedProfile} /></section>}
+      {result !== undefined && selectedProfile && <section className="try-result full-proc-result"><div className="result-title"><div><span className={`badge ${procurementAccepted ? "ok" : "err"}`}>{procurementAccepted ? "verified" : "verification incomplete"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)} · {paymentRailLabel(selectedPaymentRail)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setSelectedProfileId(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another procurement</button></div><ProcurementReport value={result} events={procurementJob?.events ?? []} profile={selectedProfile} rail={selectedPaymentRail} /></section>}
 
-      <section className="try-agents"><div className="try-section-head"><div><span>THREE WAYS TO PROCURE</span><h2>Production agents, real DEM, full DACS</h2></div><p>Each route uses the gateway’s live schema and runs Identify → Vet → Negotiate → Settle → Verify. Sealed tender stays hidden until its DACS-3 role model is released.</p></div><div className="try-agent-grid">{profiles.map((profile, index) => {
-        const agent = procurementProfileCard(profile);
+      <section className="try-agents"><div className="try-section-head"><div><span>THREE WAYS TO PROCURE</span><h2>Production agents, DEM or x402, full DACS</h2></div><p>Each route uses the gateway’s rail-specific live schema and runs Identify → Vet → Negotiate → Settle → Verify. Sealed tender stays hidden until its DACS-3 role model is released.</p></div><div className="try-agent-grid">{profiles.map((profile, index) => {
+        const agent = procurementProfileCard(profile, defaultPaymentRail(profile));
         return <button key={profile.id} onClick={() => selectAgent(agent)}><span>0{index + 1} · {procurementModeLabel(profile.mode)}</span><strong>{profile.agentName}</strong><p>{profile.summary}</p><i>Run this procurement →</i></button>;
       })}</div></section>
     </div>
