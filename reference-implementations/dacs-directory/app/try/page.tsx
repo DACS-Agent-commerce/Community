@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Try DACS",
-  description: "Ask the DACS Butler to discover, select and run a verifiable specialist agent.",
+  description: "Run a live fixed-price or RFQ agent procurement, pay with DEM or Base Sepolia USDC through x402, and inspect every DACS receipt.",
   alternates: { canonical: "/try" },
 };
 

@@ -4,19 +4,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_TIMEOUT_MESSAGE,
   ButlerContractError,
+  LIVE_PROCUREMENT_PROFILE_IDS,
   fetchJsonBeforeDeadline,
   fetchJsonWithTimeout,
-  parseAgentCatalog,
   parseAgentInput,
   parseButlerRun,
+  parseProcurementProfiles,
   parseProcurementJob,
   parseReceiptEnvelope,
+  procurementProfileCard,
   procurementEvidence,
   record,
   type AgentCard,
   type OutputReceipt,
+  type PaymentRail,
   type ProcurementEvent,
   type ProcurementJob,
+  type ProcurementProfile,
 } from "./try-dacs-contract.js";
 import {
   flattenInputKeys,
@@ -35,6 +39,11 @@ import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispa
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
 const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
+const PROFILE_AGENT: Record<string, { name: string; label: string }> = {
+  "oracle-auto-accept": { name: "oracle-desk", label: "Oracle Desk" },
+  "dd-live-fixed": { name: "dd-researcher", label: "Due-Diligence Researcher" },
+  "security-audit-rfq": { name: "procurement-butler", label: "Security Auditor" },
+};
 
 function readStoredRun(): StoredProcurementRun | null {
   try { return parseStoredProcurementRun(window.localStorage.getItem(PROCUREMENT_RUN_KEY)); } catch { return null; }
@@ -93,6 +102,7 @@ type Plan = {
 };
 
 const EXPLORER = "https://explorer.demos.sh";
+const BASE_SEPOLIA_EXPLORER = "https://sepolia.basescan.org";
 const AGENT_TIMEOUT_MS = 120_000;
 const RECEIPT_WATCH_TIMEOUT_MS = 2 * 60_000;
 
@@ -105,6 +115,27 @@ function elapsedLabel(ms: number): string {
   return ms < 10_000 ? `${(ms / 1_000).toFixed(1)}s` : `${Math.floor(ms / 1_000)}s`;
 }
 
+function paymentRailLabel(rail: PaymentRail): string {
+  return rail === "pay-x402" ? "USDC · x402" : "DEM · Demos";
+}
+
+function transactionExplorer(txRef: string): string {
+  return /^0x[0-9a-f]{64}$/i.test(txRef)
+    ? `${BASE_SEPOLIA_EXPLORER}/tx/${encodeURIComponent(txRef)}`
+    : `${EXPLORER}/tx/${encodeURIComponent(txRef)}`;
+}
+
+function defaultPaymentRail(profile: ProcurementProfile): PaymentRail {
+  return profile.paymentRails.find((rail) => profile.railReadiness[rail]?.executable) ?? profile.paymentRails[0]!;
+}
+
+function procurementModeLabel(mode: string): string {
+  if (mode === "fixed-price-auto-accept") return "Fixed price · auto-accept";
+  if (mode === "fixed-price-live-cosign") return "Fixed price · live co-sign";
+  if (mode === "rfq") return "RFQ · negotiated price";
+  return mode.replaceAll("-", " ");
+}
+
 function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));
@@ -115,9 +146,9 @@ function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function ProcurementReport({ value, events }: { value: unknown; events: ProcurementEvent[] }) {
+function ProcurementReport({ value, events, profile, rail }: { value: unknown; events: ProcurementEvent[]; profile: ProcurementProfile; rail: PaymentRail }) {
   const report = record(value);
-  const evidence = procurementEvidence(report);
+  const evidence = procurementEvidence(report, profile.mode);
   const decision = record(report.decision);
   const winner = record(decision.winner);
   const settlement = record(report.settlement);
@@ -125,6 +156,8 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
   const terms = record(negotiation.terms);
   const delivery = record(report.delivery);
   const audit = record(delivery.report);
+  const amount = record(settlement.amount);
+  const termPrice = record(terms.price);
   const evaluation = record(report.evaluation);
   const ruling = record(evaluation.ruling);
   const anchors = record(report.anchors);
@@ -132,12 +165,20 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
   const findings = Array.isArray(audit.findings) ? audit.findings.map(record) : [];
   const transactions = Array.isArray(report.transactions) ? report.transactions.map(record) : [];
   const paymentHash = String(settlement.txHash ?? "");
+  const settlementRail: PaymentRail = settlement.rail === "pay-x402" ? "pay-x402" : rail;
+  const x402 = settlementRail === "pay-x402";
+  const railGovernance = record(settlement.railGovernance);
+  const price = settlement.amountDem ?? amount.amount ?? settlement.amount ?? winner.price;
+  const currency = String(amount.currency ?? amount.unit ?? "DEM");
+  const agreedPrice = termPrice.amount ?? (Object.keys(termPrice).length ? price : terms.price) ?? price;
   const acceptedClass = evidence.overallAccepted ? "success-text" : "error-text";
   const acceptanceLabel = evidence.overallAccepted ? "Settled & accepted" : "Verification incomplete";
   const verificationLabel = evidence.overallAccepted ? "accepted" : "not accepted";
   const evaluationLabel = evidence.rulingAccepted && evidence.rulingValid
     ? "accept · signature valid"
     : `${String(ruling.verdict ?? "not reported")} · ${evidence.rulingValid ? "signature valid" : "signature unverified"}`;
+  const negotiationLabel = evidence.negotiationSigned ? "dual-signed" : evidence.negotiationVerified ? "signed agreement anchored" : "agreement evidence missing";
+  const reportKind = String(audit.kind ?? "");
 
   function check(label: string, detail: string, ok: boolean) {
     return <div className={ok ? "" : "failed-check"}><i>{ok ? "✓" : "!"}</i><span>{label}<strong>{detail}</strong></span></div>;
@@ -147,41 +188,45 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
     <div className="proc-report">
       <div className="proc-summary">
         <div><span>OUTCOME</span><strong className={acceptedClass}>{acceptanceLabel}</strong></div>
-        <div><span>SELECTED SELLER</span><strong>{String(winner.provider ?? "not reported")}</strong></div>
-        <div><span>PRICE</span><strong>{String(settlement.amountDem ?? settlement.amount ?? winner.price ?? "not reported")}{settlement.amountDem !== undefined || settlement.amount !== undefined || winner.price !== undefined ? " DEM" : ""}</strong></div>
-        <div><span>PAYMENT RAIL</span><strong>{String(settlement.rail ?? "not reported")}</strong></div>
+        <div><span>SELECTED SELLER</span><strong>{String(winner.provider ?? profile.agentName)}</strong></div>
+        <div><span>PRICE</span><strong>{price === undefined ? "not reported" : `${String(price)} ${currency}`}</strong></div>
+        <div><span>PROCUREMENT TYPE</span><strong>{profile.mode.replaceAll("-", " ")}</strong></div>
       </div>
 
       <section className={`proc-panel payment-panel ${evidence.paymentRecorded ? "" : "unverified-panel"}`}>
-        <div className="proc-panel-head"><div><span>REAL PAYMENT</span><h3>Demos settlement transaction</h3></div><span className={`badge ${evidence.paymentRecorded ? "ok" : "err"}`}>{evidence.paymentRecorded ? "broadcast & recorded" : "evidence missing"}</span></div>
-        {paymentHash ? <a className="tx-link" href={`${EXPLORER}/tx/${paymentHash}`} target="_blank" rel="noreferrer">
+        <div className="proc-panel-head"><div><span>REAL PAYMENT · {paymentRailLabel(settlementRail)}</span><h3>{x402 ? "Base Sepolia USDC settlement" : "Demos native settlement"}</h3></div><span className={`badge ${evidence.paymentRecorded ? "ok" : "err"}`}>{evidence.paymentRecorded ? (x402 ? "settled & seller-verified" : "broadcast & recorded") : "evidence missing"}</span></div>
+        {paymentHash ? <a className="tx-link" href={transactionExplorer(paymentHash)} target="_blank" rel="noreferrer">
           <span><small>PAYMENT TX</small><code>{paymentHash}</code></span><b>View on explorer ↗</b>
         </a> : <div className="tx-link missing-evidence"><span><small>PAYMENT TX</small><code>not reported</code></span></div>}
         <div className="party-row"><span>payer <code>{compact(settlement.payer)}</code></span><i>→</i><span>seller <code>{compact(settlement.payee)}</code></span></div>
+        {x402 && Object.keys(railGovernance).length > 0 && <div className={`rail-governance ${railGovernance.conformantAuthority === true ? "canonical" : "provisional"}`}>
+          <div><strong>{railGovernance.conformantAuthority === true ? "Canonical rail authority" : "Operator-provisional rail"}</strong><span>{railGovernance.conformantAuthority === true ? "The configured authority is conformant." : "Live for this demo, pending a standardised DACS rail authority."}</span></div>
+          {typeof railGovernance.disclosure === "string" && <a href={railGovernance.disclosure} target="_blank" rel="noreferrer">Governance disclosure ↗</a>}
+        </div>}
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>LIVE NEGOTIATION</span><h3>Buyer and Auditor agreement over L2PS</h3></div><span className={`badge ${evidence.negotiationSigned ? "ok" : "err"}`}>{evidence.negotiationSigned ? "dual-signed" : "signatures missing"}</span></div>
+        <div className="proc-panel-head"><div><span>LIVE NEGOTIATION</span><h3>{profile.mode === "rfq" ? "Buyer and seller negotiated over L2PS" : "Buyer accepted the seller's published price"}</h3></div><span className={`badge ${evidence.negotiationVerified ? "ok" : "err"}`}>{negotiationLabel}</span></div>
         <div className="verify-grid">
           {check("Protocol", String(negotiation.protocol ?? "not reported"), Boolean(negotiation.protocol))}
-          {check("Audit tier", String(terms.tier ?? "not reported"), Boolean(terms.tier))}
-          {check("Turnaround", String(terms.deadline ?? "not reported"), Boolean(terms.deadline))}
-          {check("Agreed price", terms.price !== undefined || settlement.amountDem !== undefined ? `${String(terms.price ?? settlement.amountDem)} DEM` : "not reported", terms.price !== undefined || settlement.amountDem !== undefined)}
+          {check("Mode", profile.mode.replaceAll("-", " "), true)}
+          {check("Agreement", String(negotiation.agreementHash ?? "not reported"), evidence.negotiationVerified)}
+          {check("Agreed price", agreedPrice === undefined ? "not reported" : `${String(agreedPrice)} ${currency}`, agreedPrice !== undefined)}
         </div>
         <details className="anchor-details"><summary>Signed negotiation transcript and agreement hash</summary><pre>{JSON.stringify(negotiation, null, 2)}</pre></details>
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>PROCUREMENT REPORT</span><h3>Why this seller was selected</h3></div><span className={`badge ${decision.outcome ? "ok" : "err"}`}>{String(decision.outcome ?? "not reported")}</span></div>
-        <div className="candidate-table">
+        <div className="proc-panel-head"><div><span>PROCUREMENT ROUTE</span><h3>{profile.title}</h3></div><span className="badge ok">{profile.negotiationPhase.replace("negotiate-", "")}</span></div>
+        {candidates.length ? <div className="candidate-table">
           <div className="candidate-row candidate-head"><span>Provider</span><span>Price</span><span>Rail</span><span>Decision</span></div>
-          {candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.listingId}-${index}`}><span><strong>{String(candidate.provider ?? "candidate")}</strong><small>{compact(candidate.listingId, 12, 6)}</small></span><span>{String(candidate.askPrice ?? "—")} DEM</span><span>{String(candidate.chosenRail ?? "—")}</span><span className={candidate.excluded ? "muted-text" : "success-text"}>{candidate.excluded ? String(candidate.excluded) : "selected ✓"}</span></div>)}
-        </div>
+          {candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.listingId}-${index}`}><span><strong>{String(candidate.provider ?? "candidate")}</strong><small>{compact(candidate.listingId, 12, 6)}</small></span><span>{String(candidate.askPrice ?? "—")} {candidate.chosenRail === "pay-x402" ? "USDC" : "DEM"}</span><span>{String(candidate.chosenRail ?? "—")}</span><span className={candidate.excluded ? "muted-text" : "success-text"}>{candidate.excluded ? String(candidate.excluded) : "selected ✓"}</span></div>)}
+        </div> : <p className="empty-report">{profile.summary} The gateway resolved the configured signed listing and bound it into this deal.</p>}
       </section>
 
       <section className="proc-panel">
-        <div className="proc-panel-head"><div><span>DELIVERED REPORT</span><h3>Security audit findings</h3></div><span className={`badge ${evidence.deliveryVerified ? "ok" : "err"}`}>{evidence.deliveryVerified ? `${findings.length} finding${findings.length === 1 ? "" : "s"} · verified` : "delivery unverified"}</span></div>
-        {findings.length ? <div className="finding-list">{findings.map((finding, index) => <article key={`${finding.id}-${index}`}><span className={`severity ${String(finding.severity ?? "info").toLowerCase()}`}>{String(finding.severity ?? "info")}</span><div><strong>{String(finding.ruleId ?? finding.id ?? "Finding")}</strong><p>{String(finding.rationale ?? "Attested source finding")}</p><code>{String(finding.file ?? "file")}:{String(finding.line ?? "?")}</code></div></article>)}</div> : <p className="empty-report">{evidence.deliveryVerified ? "The verified report found no matching issues in the posted fixture." : "No verified security report was returned."}</p>}
+        <div className="proc-panel-head"><div><span>DELIVERED REPORT</span><h3>{profile.id === "oracle-auto-accept" ? "Attested data value" : profile.id === "dd-live-fixed" ? "Due-diligence findings" : "Security audit findings"}</h3></div><span className={`badge ${evidence.deliveryVerified ? "ok" : "err"}`}>{evidence.deliveryVerified ? "delivery verified" : "delivery unverified"}</span></div>
+        {profile.id === "oracle-auto-accept" && evidence.deliveryVerified ? <div className="oracle-delivery"><span>{String(audit.preset ?? (reportKind || "attested value"))}</span><strong>{String(audit.value ?? audit.extract ?? "reported")}</strong><small>{String(audit.url ?? "Source recorded in the attestation")}</small></div> : findings.length ? <div className="finding-list">{findings.map((finding, index) => <article key={`${finding.id}-${index}`}><span className={`severity ${String(finding.severity ?? "info").toLowerCase()}`}>{String(finding.severity ?? "info")}</span><div><strong>{String(finding.title ?? finding.ruleId ?? finding.id ?? "Finding")}</strong><p>{String(finding.detail ?? finding.rationale ?? "Attested finding")}</p><code>{String(finding.file ?? finding.rule ?? "evidence")}{finding.line !== undefined ? `:${String(finding.line)}` : ""}</code></div></article>)}</div> : <p className="empty-report">{evidence.deliveryVerified ? String(record(audit.summary).text ?? "The delivered report was verified and contains no findings.") : "No verified report was returned."}</p>}
       </section>
 
       <section className="proc-panel">
@@ -190,7 +235,7 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
           {check("Delivery evidence", evidence.deliveryVerified ? "verified" : "unverified", evidence.deliveryVerified)}
           {check("Buyer + seller bundles", evidence.bundlesVerified ? "verified" : "unverified", evidence.bundlesVerified)}
           {check("Reconciliation", evidence.reconciled ? "reconciled" : "not reconciled", evidence.reconciled)}
-          {check("EvalBot ruling", evaluationLabel, evidence.rulingAccepted && evidence.rulingValid)}
+          {check(evidence.rulingRequired ? "EvalBot ruling" : "Acceptance policy", evidence.rulingRequired ? evaluationLabel : "not required for fixed price", evidence.rulingRequired ? evidence.rulingAccepted && evidence.rulingValid : true)}
         </div>
       </section>
 
@@ -199,7 +244,7 @@ function ProcurementReport({ value, events }: { value: unknown; events: Procurem
         <div className="receipt-list">{transactions.map((transaction, index) => {
           const txRef = String(transaction.txRef ?? "");
           const anchorRef = String(transaction.address ?? "");
-          return <div className="receipt-row" key={`${txRef}-${anchorRef}-${index}`}><span className="receipt-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{String(transaction.name ?? transaction.kind ?? "chain record")}</strong><small>{anchorRef ? `anchor ${compact(anchorRef, 22, 8)}` : "Demos payment"}</small></div>{txRef ? <a href={`${EXPLORER}/tx/${txRef}`} target="_blank" rel="noreferrer">{compact(txRef, 15, 7)} ↗</a> : <span className="muted-text">existing anchor</span>}</div>;
+          return <div className="receipt-row" key={`${txRef}-${anchorRef}-${index}`}><span className="receipt-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{String(transaction.name ?? transaction.kind ?? "chain record")}</strong><small>{anchorRef ? `anchor ${compact(anchorRef, 22, 8)}` : (/^0x/.test(txRef) ? "Base Sepolia payment" : "Demos transaction")}</small></div>{txRef ? <a href={transactionExplorer(txRef)} target="_blank" rel="noreferrer">{compact(txRef, 15, 7)} ↗</a> : <span className="muted-text">existing anchor</span>}</div>;
         })}</div>
         <details className="anchor-details"><summary>All anchor addresses</summary><pre>{JSON.stringify(anchors, null, 2)}</pre></details>
       </section>
@@ -237,7 +282,7 @@ const DACS_STAGES = [
     key: "settle", name: "Settle & deliver", primitive: "DACS-4",
     tagline: "Pay on the agreed rail; the work arrives with evidence.",
     receipt: "a payment transaction + delivery evidence",
-    plain: "The buyer pays on the agreed payment rail (in the full purchase demo, real DEM moves on-chain) and the seller delivers the work. The payment hash and the delivered report are both captured as evidence.",
+    plain: "The buyer pays on the agreed payment rail — native DEM on Demos or USDC through x402 on Base Sepolia — and the seller delivers the work. The payment hash and the delivered report are both captured as evidence.",
   },
   {
     key: "verify", name: "Verify", primitive: "DACS-5",
@@ -266,6 +311,9 @@ function message(value: unknown): string {
 
 export default function TryDacs() {
   const [agents, setAgents] = useState<AgentCard[]>([]);
+  const [profiles, setProfiles] = useState<ProcurementProfile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [selectedPaymentRail, setSelectedPaymentRail] = useState<PaymentRail>("pay-dem");
   const [goal, setGoal] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [inputValue, setInputValue] = useState<Record<string, unknown>>({});
@@ -290,12 +338,20 @@ export default function TryDacs() {
   const procurementRunId = useRef<string | null>(null);
 
   useEffect(() => {
-    fetch(`${BUTLER}/demo/butler/agents`)
-      .then((res) => res.ok ? res.json() : Promise.reject(new Error("catalog unavailable")))
-      .then((body: unknown) => setAgents(parseAgentCatalog(body)))
+    fetch(`${BUTLER}/demo/procurement/options`)
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error("procurement options unavailable")))
+      .then((body: unknown) => {
+        const live = parseProcurementProfiles(body)
+          .filter((profile) => profile.executable && LIVE_PROCUREMENT_PROFILE_IDS.includes(profile.id));
+        if (live.length !== 3 || new Set(live.map((profile) => profile.id)).size !== 3) {
+          throw new Error("the three production procurement profiles are not all executable");
+        }
+        setProfiles(live);
+        setAgents(live.map((profile) => procurementProfileCard(profile, defaultPaymentRail(profile))));
+      })
       .catch((cause: unknown) => setError(cause instanceof ButlerContractError
         ? cause.message
-        : "The live agent network is temporarily unavailable."));
+        : "The live procurement demos are temporarily unavailable."));
   }, []);
 
   useEffect(() => {
@@ -340,14 +396,19 @@ export default function TryDacs() {
     receiptAbort.current?.abort();
   }, []);
 
-  const selected = useMemo(() => agents.find((agent) => agent.name === plan?.butler.selectedAgent), [agents, plan]);
+  const selectedProfile = useMemo(() => profiles.find((profile) => profile.id === selectedProfileId), [profiles, selectedProfileId]);
+  const selected = useMemo(() => selectedProfile
+    ? procurementProfileCard(selectedProfile, selectedPaymentRail)
+    : agents.find((agent) => agent.name === plan?.butler.selectedAgent),
+  [agents, plan, selectedPaymentRail, selectedProfile]);
+  const selectedRailReadiness = selectedProfile?.railReadiness[selectedPaymentRail];
   const execution = record(record(result).execution);
   const specialistDurationMs = typeof execution.durationMs === "number" ? execution.durationMs : undefined;
   const receiptElapsedMs = receipt?.createdAt
     ? Math.max(0, (receipt.status === "confirmed" || receipt.status === "failed" ? Date.parse(receipt.updatedAt ?? receipt.createdAt) : Date.now()) - Date.parse(receipt.createdAt))
     : 0;
-  const procurementAccepted = selected?.name === "procurement-butler" && result !== undefined
-    ? procurementEvidence(result).overallAccepted
+  const procurementAccepted = selectedProfile !== undefined && result !== undefined
+    ? procurementEvidence(result, selectedProfile.mode).overallAccepted
     : false;
   const validateInput = useCallback((agentName: string, value: Record<string, unknown>): FieldErrors => {
     if (hasBuiltinForm(agentName)) return validateAgentInput(agentName, value);
@@ -358,18 +419,17 @@ export default function TryDacs() {
     () => plan ? validateInput(plan.butler.selectedAgent, inputValue) : {},
     [plan, inputValue, validateInput],
   );
-  const inputIsValid = Object.keys(localErrors).length === 0;
+  const inputIsValid = Object.keys(localErrors).length === 0 && (selectedRailReadiness?.executable ?? true);
   // Verification completes only on evidence: a confirmed receipt (or no
   // receipt advertised at all). A synchronous broadcast-only attestation has
   // no status URL to poll, so its confirmation is UNKNOWN in this browser —
   // the Verify phase stays visibly pending rather than claiming completion.
-  const verificationComplete = phase === "done" && (selected?.name === "procurement-butler"
-    ? procurementAccepted
-    : receipt === null || receipt.status === "confirmed");
-  const resultPayload = selected?.name === "procurement-butler" ? result : record(result).result;
+  const verificationComplete = phase === "done" && procurementAccepted;
+  const resultPayload = result;
   const resultFields = Object.keys(record(resultPayload));
-  const isProcurementSel = plan?.butler.selectedAgent === "procurement-butler";
+  const isProcurementSel = selectedProfileId !== null;
   const procEvents = procurementJob?.events ?? [];
+  const procurementWaiting = phase === "running" && procurementJob?.queue?.status === "waiting";
   // Fail-closed staging: a terminal "failed" (or unknown-phase) event attaches
   // to the stage the run had actually reached and never advances progress.
   const { byStage: eventsByStage, progress: procStage } = stageEvents(procEvents);
@@ -402,11 +462,11 @@ export default function TryDacs() {
   }
 
   const identifyOut: StageOutput = !agents.length
-    ? { state: "active", summary: "Reading the live agent roster…" }
+    ? { state: "active", summary: "Reading the live procurement profiles…" }
     : !plan
-      ? { state: "active", summary: `${agents.length} live agents on the gateway roster — pick one`, detail: agents.map((agent) => agent.label).join(", ") }
+      ? { state: "active", summary: `${agents.length} live procurement routes — pick one`, detail: agents.map((agent) => agent.label).join(", ") }
       : isProcurementSel
-        ? { state: "pending", summary: "The Auditor's signed DACS-1 listing is resolved and verified on-chain when the run starts" }
+        ? { state: "pending", summary: `${selected?.label ?? "The seller"}'s signed DACS-1 listing is resolved and verified when the run starts` }
         : { state: "skipped", summary: `${plan.butler.label} picked from the gateway roster — no DACS-1 listing involved`, detail: "This picker is the gateway's published roster, not a signed listing. A real DACS-1 listing is only resolved and verified during the full Procurement run." };
   const vetOut: StageOutput = !plan
     ? { state: "pending", summary: "Waiting for an agent choice" }
@@ -419,13 +479,13 @@ export default function TryDacs() {
       ? { state: "pending", summary: "Runs live during the purchase — both agents sign the agreement" }
       : { state: "skipped", summary: "Skipped — this demo is free", detail: "There is nothing to price here. The Procurement Butler negotiates a real RFQ and both agents sign the DACS-3 agreement before payment." };
   const settleOut: StageOutput = phase === "running"
-    ? { state: "active", summary: `Specialist working · ${elapsedLabel(elapsedMs)}`, detail: "No payment moves in this free demo — the specialist delivers its result directly. Bounded by a 2-minute deadline." }
+    ? { state: "active", summary: `Live procurement running · ${elapsedLabel(elapsedMs)}`, detail: `The gateway confirms the signed agreement before broadcasting the real ${paymentRailLabel(selectedPaymentRail)} payment.` }
     : phase === "done"
       ? { state: "complete", summary: specialistDurationMs === undefined ? "Result delivered" : `Result delivered in ${elapsedLabel(specialistDurationMs)}`, detail: resultFields.length ? `Result fields: ${resultFields.join(", ")}` : "The complete result is shown below." }
       : phase === "error"
         ? { state: "warning", summary: "Execution stopped safely", detail: error }
         : plan && inputIsValid
-          ? { state: "pending", summary: isProcurementSel ? "A real DEM payment happens here when you press Run" : "Starts when you press Run — delivery is free in this demo" }
+          ? { state: "pending", summary: `A real ${paymentRailLabel(selectedPaymentRail)} payment happens here when you press Run` }
           : plan
             ? { state: "active", summary: "Waiting for required fields", detail: `${Object.keys(localErrors).length} field${Object.keys(localErrors).length === 1 ? " needs" : "s need"} attention in the form` }
             : { state: "pending", summary: "Waiting for job details" };
@@ -547,7 +607,7 @@ export default function TryDacs() {
     // A new procurement run must not overwrite the persisted record of an
     // earlier, unreconciled one — that record may be the only handle on a
     // paid job. Retrying the SAME run (matching key) passes through.
-    if (plan.butler.selectedAgent === "procurement-butler" && storedRun && storedRun.runId !== procurementRunId.current) {
+    if (isProcurementSel && storedRun && storedRun.runId !== procurementRunId.current) {
       setError("An earlier procurement run from this browser is still on record. Use “Check & resume” in the banner above (or dismiss it once reconciled) before starting a new purchase.");
       return;
     }
@@ -577,14 +637,14 @@ export default function TryDacs() {
       return true;
     };
     try {
-      if (plan.butler.selectedAgent === "procurement-butler") {
+      if (isProcurementSel && selectedProfile) {
         const deadline = Date.now() + 12 * 60_000;
         // The Directory is the discovery surface. Pass its verified listing
         // pointer to the Butler; the gateway independently dereferences and
         // verifies the signed DACS-1 artifact before negotiation.
-        const request = { ...parsed };
-        try {
-          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>("/api/dacs/listings?rail=pay-dem&limit=100", { signal: controller.signal }, deadline);
+        const request: Record<string, unknown> = { profileId: selectedProfile.id, ...parsed, paymentRail: selectedPaymentRail };
+        if (selectedProfile.id === "security-audit-rfq") try {
+          const { response: catalog, body } = await fetchJsonBeforeDeadline<{ listings?: Array<{ listingId?: string; anchor?: { locator?: string }; offering?: { title?: string; negotiation?: string[] } }> }>(`/api/dacs/listings?rail=${encodeURIComponent(selectedPaymentRail)}&limit=100`, { signal: controller.signal }, deadline);
           if (catalog.ok) {
             const auditor = body.listings?.find((item) => item.listingId === "audit-negotiator" && item.offering?.negotiation?.includes("rfq") && /auditor/i.test(item.offering?.title ?? ""));
             const ref = auditor?.anchor?.locator;
@@ -664,7 +724,7 @@ export default function TryDacs() {
       }
     } catch (cause) {
       const cancelled = (cause as Error).name === "AbortError";
-      const isProcurement = plan.butler.selectedAgent === "procurement-butler";
+      const isProcurement = isProcurementSel;
       const haveJob = procurementJobRef.current !== null;
       // The retry-reuses-the-key reassurance only holds while the key is
       // retained — a terminal failed job is explained by the recovery box
@@ -754,10 +814,15 @@ export default function TryDacs() {
     runAbort.current = controller;
     procurementRunId.current = stored.runId;
     setGoal(stored.goal);
+    const storedProfileId = typeof stored.input.profileId === "string" ? stored.input.profileId : "security-audit-rfq";
+    const storedAgent = PROFILE_AGENT[storedProfileId] ?? PROFILE_AGENT["security-audit-rfq"]!;
+    const storedPaymentRail: PaymentRail = stored.input.paymentRail === "pay-x402" ? "pay-x402" : "pay-dem";
+    setSelectedProfileId(storedProfileId);
+    setSelectedPaymentRail(storedPaymentRail);
     setPlan({
       butler: {
-        selectedAgent: "procurement-butler",
-        label: "Procurement Butler",
+        selectedAgent: storedAgent.name,
+        label: storedAgent.label,
         selectionEngine: "restored run",
         rationale: "Reconnecting to the procurement run this browser dispatched earlier — same idempotency key, so no second purchase can start.",
         alternatives: [],
@@ -765,10 +830,11 @@ export default function TryDacs() {
       proposedInput: stored.input,
       inputNote: "Restored from this browser's persisted run record.",
     });
-    setInputValue(stored.input);
+    const { profileId: _profileId, auditorListingRef: _auditorListingRef, ...storedFormInput } = stored.input;
+    setInputValue(storedFormInput);
     setResult(undefined); setReceipt(null); setReceiptMessage(""); setGatewayFieldErrors({});
     setProcurementJob(null); procurementJobRef.current = null;
-    setSubmittedSummary(summarizeAgentInput("procurement-butler", stored.input));
+    setSubmittedSummary(summarizeAgentInput(storedAgent.name, storedFormInput));
     setPhase("running"); setError("");
     setRunStartedAt(Date.now()); setElapsedMs(0);
     const deadline = Date.now() + 12 * 60_000;
@@ -839,6 +905,11 @@ export default function TryDacs() {
   function selectAgent(agent: AgentCard) {
     runAbort.current?.abort(); receiptAbort.current?.abort();
     setGoal(agent.exampleGoal);
+    const profile = profiles.find((candidate) => procurementProfileCard(candidate, defaultPaymentRail(candidate)).name === agent.name);
+    const paymentRail = profile ? defaultPaymentRail(profile) : "pay-dem";
+    const railAgent = profile ? procurementProfileCard(profile, paymentRail) : agent;
+    setSelectedProfileId(profile?.id ?? null);
+    setSelectedPaymentRail(paymentRail);
     setPlan({
       butler: {
         selectedAgent: agent.name,
@@ -847,19 +918,30 @@ export default function TryDacs() {
         rationale: `You selected ${agent.label}. Fill in the job below (or load its example), and I will supervise the run and show you the evidence it returns.`,
         alternatives: [],
       },
-      proposedInput: agent.exampleInput,
+      proposedInput: railAgent.exampleInput,
       inputNote: "Your values are submitted unchanged to the live gateway, which applies specialist validation before execution.",
     });
     // Switching agents resets to that agent's blank form. Examples are never
     // submitted silently — "Load example" below is the only way they enter.
     // Schema-driven agents seed select/checkbox defaults so the form's display
     // matches submitted state.
-    const schema = hasBuiltinForm(agent.name) ? null : parseAgentFieldSchema(agent);
-    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(agent.name));
+    const schema = hasBuiltinForm(railAgent.name) ? null : parseAgentFieldSchema(railAgent);
+    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(railAgent.name, paymentRail));
     procurementRunId.current = null;
     setGatewayFieldErrors({}); setSubmittedSummary([]);
     setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); setPhase("ready"); setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function selectPaymentRail(rail: PaymentRail) {
+    if (!selectedProfile || rail === selectedPaymentRail || !selectedProfile.railReadiness[rail]?.executable) return;
+    const railAgent = procurementProfileCard(selectedProfile, rail);
+    setSelectedPaymentRail(rail);
+    setPlan((current) => current ? { ...current, proposedInput: railAgent.exampleInput } : current);
+    const schema = hasBuiltinForm(railAgent.name) ? null : parseAgentFieldSchema(railAgent);
+    setInputValue(schema ? initialSchemaInput(schema) : initialAgentInput(railAgent.name, rail));
+    procurementRunId.current = null;
+    setGatewayFieldErrors({}); setSubmittedSummary([]); setError("");
   }
 
   function loadExample() {
@@ -884,9 +966,9 @@ export default function TryDacs() {
       <section className="try-hero">
         <div>
           <span className="try-kicker"><i /> LIVE DACS WALKTHROUGH</span>
-          <h1>Pick an agent.<br /><em>Watch it work.</em></h1>
+          <h1>Buy agent work.<br /><em>Watch the deal.</em></h1>
         </div>
-        <p>Choose one of the live test agents. The Butler will explain its role, validate the test, supervise the work and show you how DACS verifies the result.</p>
+        <p>Choose a real procurement route and how to pay: native DEM on Demos, or USDC through x402 on Base Sepolia. The Butler verifies the complete deal and exposes every receipt as it happens.</p>
       </section>
 
       {/* Suppress the banner only when THIS tab is already tracking the
@@ -907,9 +989,9 @@ export default function TryDacs() {
 
       <section className="try-shell">
         <div className="butler-chat">
-          <div className="chat-head"><span className="butler-avatar">B</span><div><strong>DACS Butler</strong><small>{agents.length ? `${agents.length} specialists online · agent gateway connected` : "Connecting to the agent network…"}</small></div></div>
+          <div className="chat-head"><span className="butler-avatar">B</span><div><strong>DACS Butler</strong><small>{agents.length ? `${agents.length} procurement routes live · gateway connected` : "Connecting to the procurement gateway…"}</small></div></div>
           <div className="chat-body" aria-live="polite">
-            <div className="bubble butler"><span>Butler</span><p>Welcome. Pick one of our test agents below and I’ll walk you through exactly what it does and what DACS verifies.</p></div>
+            <div className="bubble butler"><span>Butler</span><p>Welcome. Choose how you want to buy agent work. I’ll run the complete live DACS deal and explain the evidence produced at every phase.</p></div>
             {goal && phase !== "idle" && <div className="bubble human"><span>You</span><p>{goal}</p></div>}
             {plan && <div className="bubble butler"><span>Butler</span><p><strong>{plan.butler.label}</strong> is ready. {plan.butler.rationale}</p><div className="reasoning-chip">{plan.butler.selectionEngine}</div></div>}
             {phase === "done" && <div className="bubble butler"><span>Butler</span><p>The specialist finished. Its result is ready now; the separate receipt status below shows any on-chain anchoring still completing in the background.</p></div>}
@@ -918,30 +1000,34 @@ export default function TryDacs() {
 
           {phase === "idle" || (phase === "error" && !plan) ? (
             <div className="agent-picker">
-              <div className="picker-head"><strong>Choose a test agent</strong><span>{agents.length} available</span></div>
-              <div className="picker-grid">{agents.map((agent) => <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{agent.summary}</small></div><i>→</i></button>)}</div>
+              <div className="picker-head"><strong>Choose a live procurement</strong><span>{agents.length} available</span></div>
+              <div className="picker-grid">{agents.map((agent) => {
+                const profile = profiles.find((candidate) => procurementProfileCard(candidate).name === agent.name);
+                const liveRails = profile?.paymentRails.filter((rail) => profile.railReadiness[rail]?.executable).map(paymentRailLabel).join(" · ");
+                return <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{profile ? procurementModeLabel(profile.mode) : agent.summary}</small><em>{profile ? `${liveRails} · ${profile.timing.healthyMinSec}–${profile.timing.healthyMaxSec}s` : "live"}</em></div><i>→</i></button>;
+              })}</div>
             </div>
           ) : phase === "error" && plan ? (
             <div className="job-box recovery-box">
-              {plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" && procurementJob.failedBeforePayment === true ? (
+              {isProcurementSel && procurementJob?.status === "failed" && procurementJob.failedBeforePayment === true ? (
                 <>
                   <div><strong>Procurement failed before any payment</strong><small>The gateway confirms no money moved (its reason is shown above). Retrying starts a fresh purchase attempt with a new idempotency key.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry the purchase <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry the purchase <span>→</span></button></div>
                 </>
-              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob?.status === "failed" ? (
+              ) : isProcurementSel && procurementJob?.status === "failed" ? (
                 <>
                   <div><strong>Procurement failed after payment may have moved — do not re-purchase</strong><small>Job {procurementJob.id} is preserved on the gateway with its payment evidence; the gateway cannot confirm the failure happened before payment, so starting a new run could pay twice. A gateway operator can recover the delivery for the existing job without another payment.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button></div>
                 </>
-              ) : plan.butler.selectedAgent === "procurement-butler" && procurementJob ? (
+              ) : isProcurementSel && procurementJob ? (
                 <>
                   <div><strong>Watching stopped — the procurement job is still live on the gateway</strong><small>Job {procurementJob.id} was not cancelled; resuming follows the same job and never starts a second purchase.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="btn try-primary" onClick={resumeProcurement}>Resume status <span>→</span></button></div>
                 </>
-              ) : plan.butler.selectedAgent === "procurement-butler" ? (
+              ) : isProcurementSel ? (
                 <>
                   <div><strong>Procurement stopped safely</strong><small>Retrying reuses this run’s idempotency key, so the gateway resumes the existing job rather than starting a second paid purchase.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); setProcurementJob(null); }}>Choose another agent</button><button className="btn try-primary" onClick={runAgent}>Retry this run <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="btn try-primary" onClick={runAgent}>Retry this run <span>→</span></button></div>
                 </>
               ) : (
                 <>
@@ -952,16 +1038,31 @@ export default function TryDacs() {
             </div>
           ) : plan && phase === "ready" && selected ? (
             <div className="job-box">
-              <div className="job-head"><div><span>Job details</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? "ready to run" : "fields need attention"}</span></div>
+              <div className="job-head"><div><span>{selectedProfile ? procurementModeLabel(selectedProfile.mode) : "Job details"}</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? `ready · ${paymentRailLabel(selectedPaymentRail)}` : "fields need attention"}</span></div>
+              {selectedProfile && <div className="rail-picker" role="group" aria-label="Payment rail">
+                <div className="rail-picker-head"><strong>Choose payment rail</strong><span>This changes the real asset and settlement network.</span></div>
+                <div className="rail-options">{selectedProfile.paymentRails.map((rail) => {
+                  const readiness = selectedProfile.railReadiness[rail];
+                  const ready = readiness?.executable === true;
+                  return <button type="button" key={rail} className={selectedPaymentRail === rail ? "selected" : ""} disabled={!ready}
+                    aria-pressed={selectedPaymentRail === rail} onClick={() => selectPaymentRail(rail)}>
+                    <i>{selectedPaymentRail === rail ? "✓" : ""}</i><span><strong>{paymentRailLabel(rail)}</strong><small>{rail === "pay-x402" ? "Base Sepolia USDC · x402 exact payment" : "Demos native token · pay-dem"}</small><em>{ready ? (readiness?.railGovernance?.conformantAuthority === false ? "live · provisional governance" : "live") : readiness?.reasons[0] ?? "unavailable"}</em></span>
+                  </button>;
+                })}</div>
+                {selectedRailReadiness?.railGovernance && <div className={`rail-disclosure ${selectedRailReadiness.railGovernance.conformantAuthority ? "canonical" : "provisional"}`}>
+                  <span><strong>{selectedRailReadiness.railGovernance.conformantAuthority ? "Canonical rail authority" : "Operator-provisional rail authority"}</strong><small>{selectedRailReadiness.railGovernance.conformantAuthority ? "Authority conforms to the current DACS rail registry rules." : "Usable in this live demo while the standardised rail authority is being agreed."}</small></span>
+                  <a href={selectedRailReadiness.railGovernance.disclosure} target="_blank" rel="noreferrer">Read disclosure ↗</a>
+                </div>}
+              </div>}
               <AgentInputForm agent={selected} value={inputValue} onChange={editInput} errors={localErrors} gatewayErrors={gatewayFieldErrors} />
               <div className="job-actions">
-                <button className="ghost-btn" onClick={() => setPhase("idle")}>Start over</button>
+                <button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); }}>Start over</button>
                 <button className="ghost-btn" onClick={loadExample}>Load example</button>
-                <button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid}>Run this agent <span>→</span></button>
+                <button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid}>Run the full deal <span>→</span></button>
               </div>
             </div>
-          ) : phase === "running" && plan?.butler.selectedAgent === "procurement-butler" ? (
-            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> FULL DACS FLOW RUNNING · {elapsedLabel(elapsedMs)}</div><small>Keep this page open — chain confirmations appear here live.</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
+          ) : phase === "running" && isProcurementSel ? (
+            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> {procurementWaiting ? `QUEUED · POSITION ${procurementJob?.queue?.position ?? "…"} · ${elapsedLabel(elapsedMs)}` : `FULL DACS FLOW · ${paymentRailLabel(selectedPaymentRail)} · ${elapsedLabel(elapsedMs)}`}</div><small>{procurementWaiting ? "Your purchase is safely queued behind the active buyer-wallet deal. No payment has started yet." : "Keep this page open — settlement and chain confirmations appear here live."}</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
           ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 2-minute deadline</small>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}</div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
           : null}
         </div>
@@ -984,7 +1085,7 @@ export default function TryDacs() {
                       {output.detail && <small>{output.detail}</small>}
                       {output.chain && output.chain.length > 0 && (
                         <div className="stage-txs">{output.chain.map((event, chainIdx) => event.txRef
-                          ? <a key={chainIdx} href={`${EXPLORER}/tx/${event.txRef}`} target="_blank" rel="noreferrer" title={event.label}>tx {compact(event.txRef, 8, 6)} ↗</a>
+                          ? <a key={chainIdx} href={transactionExplorer(event.txRef)} target="_blank" rel="noreferrer" title={event.label}>tx {compact(event.txRef, 8, 6)} ↗</a>
                           : <code key={chainIdx} title={event.label}>{compact(event.anchorRef, 12, 6)}</code>)}</div>
                       )}
                     </div>
@@ -1000,13 +1101,13 @@ export default function TryDacs() {
           {chainActivity.length > 0 && (
             <div className="chain-activity">
               <div className="chain-activity-head"><span>CHAIN ACTIVITY</span><span>{chainTxCount} tx · {chainActivity.length - chainTxCount} anchors</span></div>
-              <p>Every receipt lands on the public Demos chain. Click a hash to inspect it yourself — no login, no trust required.</p>
+              <p>DACS artifacts link to the public Demos explorer; x402 payments link to BaseScan on Base Sepolia. No login or trust is required.</p>
               <div className="chain-activity-list">
                 {chainActivity.map((row, index) => (
                   <div className="chain-row" key={`${row.txRef ?? row.anchorRef}-${index}`}>
                     <span className="chain-index">{String(index + 1).padStart(2, "0")}</span>
                     <div><strong>{row.label}</strong>{row.anchorRef && <small>anchor {compact(row.anchorRef, 16, 6)}</small>}</div>
-                    {row.txRef ? <a href={`${EXPLORER}/tx/${row.txRef}`} target="_blank" rel="noreferrer">{compact(row.txRef, 8, 6)} ↗</a> : <span className="muted-text">anchor</span>}
+                    {row.txRef ? <a href={transactionExplorer(row.txRef)} target="_blank" rel="noreferrer">{compact(row.txRef, 8, 6)} ↗</a> : <span className="muted-text">anchor</span>}
                   </div>
                 ))}
               </div>
@@ -1016,9 +1117,12 @@ export default function TryDacs() {
         </aside>
       </section>
 
-      {result !== undefined && <section className={`try-result ${selected?.name === "procurement-butler" ? "full-proc-result" : ""}`}><div className="result-title"><div><span className={`badge ${selected?.name === "procurement-butler" && !procurementAccepted ? "err" : "ok"}`}>{selected?.name === "procurement-butler" ? (procurementAccepted ? "verified" : "verification incomplete") : "completed"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another goal</button></div>{receipt && <div className={`receipt-status receipt-${receipt.status}`}><div><span className={receiptPolling ? "live-pulse" : "receipt-dot"} /><strong>On-chain receipt: {receipt.status}</strong><small>{receipt.note}{receipt.createdAt ? ` · ${elapsedLabel(receiptElapsedMs)}` : ""}{receipt.attempts !== undefined ? ` · attempt ${receipt.attempts}/3` : ""}</small>{receiptMessage && <p>{receiptMessage}</p>}</div><div className="receipt-actions">{receipt.txRef && <a className="ghost-btn" href={`${EXPLORER}/tx/${receipt.txRef}`} target="_blank" rel="noreferrer">View transaction ↗</a>}{receiptPolling ? <button className="ghost-btn" onClick={cancelReceiptWatch}>Stop checking</button> : receipt.statusUrl && receipt.status !== "confirmed" ? <button className="ghost-btn" onClick={retryReceipt}>{receipt.status === "failed" ? "Retry anchoring" : "Check again"}</button> : null}</div></div>}{selected?.name === "procurement-butler" ? <ProcurementReport value={result} events={procurementJob?.events ?? []} /> : <details open><summary>Human-readable execution result</summary><pre>{JSON.stringify(result, null, 2)}</pre></details>}</section>}
+      {result !== undefined && selectedProfile && <section className="try-result full-proc-result"><div className="result-title"><div><span className={`badge ${procurementAccepted ? "ok" : "err"}`}>{procurementAccepted ? "verified" : "verification incomplete"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)} · {paymentRailLabel(selectedPaymentRail)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setSelectedProfileId(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another procurement</button></div><ProcurementReport value={result} events={procurementJob?.events ?? []} profile={selectedProfile} rail={selectedPaymentRail} /></section>}
 
-      <section className="try-agents"><div className="try-section-head"><div><span>WHAT YOU CAN TEST</span><h2>Nine bounded agent demonstrations</h2></div><p>Each test uses a safe, validated fixture. The Butler supervises execution; it does not invent arbitrary jobs or access private data.</p></div><div className="try-agent-grid">{agents.slice(0, 6).map((agent, index) => <button key={agent.name} onClick={() => selectAgent(agent)}><span>0{index + 1}</span><strong>{agent.label}</strong><p>{agent.exampleGoal}</p><i>Select this agent →</i></button>)}</div></section>
+      <section className="try-agents"><div className="try-section-head"><div><span>THREE WAYS TO PROCURE</span><h2>Production agents, DEM or x402, full DACS</h2></div><p>Each route uses the gateway’s rail-specific live schema and runs Identify → Vet → Negotiate → Settle → Verify. Sealed tender stays hidden until its DACS-3 role model is released.</p></div><div className="try-agent-grid">{profiles.map((profile, index) => {
+        const agent = procurementProfileCard(profile, defaultPaymentRail(profile));
+        return <button key={profile.id} onClick={() => selectAgent(agent)}><span>0{index + 1} · {procurementModeLabel(profile.mode)}</span><strong>{profile.agentName}</strong><p>{profile.summary}</p><i>Run this procurement →</i></button>;
+      })}</div></section>
     </div>
   );
 }

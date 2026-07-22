@@ -46,9 +46,10 @@ export type AgentInputFormProps = {
  * `runAgent()` submits unchanged.
  */
 export default function AgentInputForm(props: AgentInputFormProps) {
-  const { agent } = props;
+  const { agent, value } = props;
   const schema = parseAgentFieldSchema(agent);
-  const note = agentSafetyNote(agent.name);
+  const paymentRail = value.paymentRail === "pay-x402" ? "pay-x402" : "pay-dem";
+  const note = agentSafetyNote(agent.name, paymentRail);
   // Precedence: the nine bespoke forms know their agents best; the gateway's
   // published input schema renders any NEW agent; JSON is the last resort.
   const builtin = hasBuiltinForm(agent.name);
@@ -119,6 +120,8 @@ function BuiltinForm(props: AgentInputFormProps) {
 }
 
 function ProcurementForm({ value, onChange, errors, gatewayErrors }: AgentInputFormProps) {
+  const x402 = value.paymentRail === "pay-x402";
+  const budgetKey = x402 ? "budgetUsdc" : "budgetDem";
   return (
     <div className="field-stack">
       <FieldRow id="proc-goal" label="Goal" required error={errors.goal} gatewayError={gatewayErrors.goal}
@@ -128,12 +131,12 @@ function ProcurementForm({ value, onChange, errors, gatewayErrors }: AgentInputF
           aria-invalid={Boolean(errors.goal)}
           onChange={(event) => onChange({ ...value, goal: event.target.value })} />
       </FieldRow>
-      <FieldRow id="proc-budget" label="DEM budget" required error={errors.budgetDem} gatewayError={gatewayErrors.budgetDem}
-        help="Hard cap on what the Butler may spend in this run.">
-        <input id="proc-budget" className="form-control" type="number" min={1} step={1}
-          value={typeof value.budgetDem === "number" ? value.budgetDem : ""}
-          aria-invalid={Boolean(errors.budgetDem)}
-          onChange={(event) => onChange({ ...value, budgetDem: event.target.value === "" ? undefined : Number(event.target.value) })} />
+      <FieldRow id="proc-budget" label={x402 ? "USDC budget" : "DEM budget"} required error={errors[budgetKey]} gatewayError={gatewayErrors[budgetKey]}
+        help={x402 ? "Hard cap on Base Sepolia USDC spend for this run." : "Hard cap on native Demos spend for this run."}>
+        <input id="proc-budget" className="form-control" type="number" min={x402 ? 0.000001 : 1} max={10} step={x402 ? 0.01 : 1}
+          value={typeof value[budgetKey] === "number" ? value[budgetKey] as number : ""}
+          aria-invalid={Boolean(errors[budgetKey])}
+          onChange={(event) => onChange({ ...value, [budgetKey]: event.target.value === "" ? undefined : Number(event.target.value) })} />
       </FieldRow>
       <FieldRow id="proc-files" label="Source files" required error={errors.files} gatewayError={gatewayErrors.files}
         help="The exact content the purchased audit is bound to.">
