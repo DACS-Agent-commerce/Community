@@ -1,11 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  fetchJsonBeforeDeadline,
-  parseProcurementJob,
-  type ProcurementEvent,
-} from "./try-dacs-contract.js";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SAMPLE_PROCUREMENT_EVENTS,
   SPEAKERS,
@@ -14,35 +10,25 @@ import {
   type ConversationTurn,
 } from "./try-chat-script.js";
 
-const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
 const EXPLORER = "https://explorer.demos.sh";
-
-const SAMPLE_INPUT = {
-  goal: "procure a content-bound security audit of the posted source",
-  budgetDem: 5,
-  files: [{ path: "server.js", content: "const userInput = process.argv[2];\neval(userInput);\n" }],
-};
 
 function compact(value: unknown, head = 8, tail = 6): string {
   const text = String(value ?? "");
   return text.length > head + tail + 1 ? `${text.slice(0, head)}…${text.slice(-tail)}` : text;
 }
 
-type Mode = "idle" | "replay" | "live" | "done" | "error";
+type Mode = "idle" | "replay" | "done";
 
 export default function TryChat() {
   const [mode, setMode] = useState<Mode>("idle");
-  const [events, setEvents] = useState<ProcurementEvent[]>(SAMPLE_PROCUREMENT_EVENTS);
   const [visible, setVisible] = useState(0);          // turns revealed so far (replay pacing)
   const [showTech, setShowTech] = useState(false);
-  const [error, setError] = useState("");
-  const abortRef = useRef<AbortController | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
 
-  const turns = useMemo(() => eventsToConversation(events), [events]);
+  const turns = useMemo(() => eventsToConversation(SAMPLE_PROCUREMENT_EVENTS), []);
   const shown = mode === "replay" ? turns.slice(0, visible) : mode === "idle" ? [] : turns;
   const currentStage = shown.length ? shown[shown.length - 1]!.stage : 0;
-  const complete = (mode === "done") || (mode === "replay" && visible >= turns.length);
+  const complete = mode === "done";
 
   // Auto-scroll the transcript as turns appear.
   useEffect(() => {
@@ -60,41 +46,15 @@ export default function TryChat() {
     return () => clearTimeout(timer);
   }, [mode, visible, turns]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  function startReplay() {
+    setVisible(0);
+    setMode("replay");
+  }
 
-  const startReplay = useCallback(() => {
-    abortRef.current?.abort();
-    setEvents(SAMPLE_PROCUREMENT_EVENTS);
-    setError(""); setVisible(0); setMode("replay");
-  }, []);
-
-  const runLive = useCallback(async () => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setError(""); setEvents([]); setVisible(0); setMode("live");
-    const deadline = Date.now() + 12 * 60_000;
-    try {
-      const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify(SAMPLE_INPUT), signal: controller.signal,
-      }, deadline);
-      if (!response.ok) throw new Error(typeof (body as { error?: { message?: string } })?.error?.message === "string" ? (body as { error: { message: string } }).error.message : "The gateway declined the run.");
-      let job = parseProcurementJob(body);
-      setEvents(job.events);
-      while (job.status === "running" && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const poll = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(job.id)}`, { signal: controller.signal }, deadline);
-        job = parseProcurementJob(poll.body);
-        setEvents(job.events);
-      }
-      if (job.status === "failed") { setError(job.error ?? "The run stopped safely."); setMode("error"); return; }
-      setMode("done");
-    } catch (cause) {
-      if ((cause as Error).name !== "AbortError") { setError((cause as Error).message); setMode("error"); }
-    }
-  }, []);
+  function showFullReplay() {
+    setVisible(turns.length);
+    setMode("done");
+  }
 
   return (
     <div className="tc-page">
@@ -107,17 +67,23 @@ export default function TryChat() {
           anyone can check on the <strong>Demos chain</strong>. No trust required.
         </p>
         <div className="tc-controls">
-          <button className={`tc-btn ${mode === "replay" || mode === "done" ? "tc-btn-ghost" : "tc-btn-primary"}`} onClick={startReplay} disabled={mode === "replay" || mode === "live"}>
-            {mode === "live" ? "Running live…" : "▶ Watch the deal"}
+          <button className={`tc-btn ${mode === "replay" || mode === "done" ? "tc-btn-ghost" : "tc-btn-primary"}`} onClick={startReplay} disabled={mode === "replay"}>
+            ▶ {mode === "done" ? "Watch again" : "Watch the recorded deal"}
           </button>
-          <button className="tc-btn tc-btn-ghost" onClick={runLive} disabled={mode === "live" || mode === "replay"}>
-            Run it live <small>(real agents · spends test DEM)</small>
-          </button>
+          {mode === "replay" && <button className="tc-btn tc-btn-ghost" onClick={showFullReplay}>Show the full deal now</button>}
+          <Link className="tc-btn tc-btn-ghost" href="/try">
+            Run a live deal <small>choose agent · DEM or x402</small>
+          </Link>
           <label className="tc-tech-toggle">
             <input type="checkbox" checked={showTech} onChange={(e) => setShowTech(e.target.checked)} /> Show the technical details
           </label>
         </div>
       </header>
+
+      <section className="tc-replay-note" aria-label="Recorded replay disclosure">
+        <strong>Recorded RFQ replay · job d27cd332 · 20 July 2026</strong>
+        <span>This page replays evidence from one completed DEM purchase. It never starts a job or spends funds. Use <Link href="/try">Try DACS</Link> for a live procurement with recovery and duplicate-payment protection.</span>
+      </section>
 
       <div className="tc-stagebar" role="list" aria-label="The five steps of a DACS deal">
         {STAGES.map((stage, index) => {
@@ -141,27 +107,25 @@ export default function TryChat() {
       <div className="tc-transcript" ref={transcriptRef} aria-live="polite">
         {shown.length === 0 && (
           <div className="tc-empty">
-            <p>Press <strong>Watch the deal</strong> to see a real purchase play out, step by step.</p>
+            <p>Press <strong>Watch the recorded deal</strong> to see a genuine purchase play out, step by step.</p>
             <small>The replay uses a genuine on-chain purchase captured from the live network — every transaction link is real.</small>
           </div>
         )}
         {shown.map((turn, index) => (
           <ChatTurn key={turn.id} turn={turn} newStage={index === 0 || shown[index - 1]!.stage !== turn.stage} showTech={showTech} />
         ))}
-        {(mode === "replay" || mode === "live") && !complete && (
+        {mode === "replay" && !complete && (
           <div className="tc-typing"><span /><span /><span /></div>
         )}
       </div>
 
-      {error && <div className="tc-error"><strong>Stopped safely</strong><p>{error}</p></div>}
-
       {complete && (
         <div className="tc-outcome">
-          <div className="tc-outcome-badge">✓ Settled &amp; verified</div>
+          <div className="tc-outcome-badge">✓ Recorded deal settled &amp; verified</div>
           <p>The Butler got its audit, the Auditor got paid, and the <strong>entire deal is now a chain of signed receipts</strong> anyone can re-check — the listing, the identity vet, the signed terms, the payment, and the delivery. That is DACS.</p>
           <div className="tc-outcome-actions">
             <button className="tc-btn tc-btn-ghost" onClick={startReplay}>Watch again</button>
-            <a className="tc-btn tc-btn-ghost" href="/try">Open the full playground →</a>
+            <Link className="tc-btn tc-btn-primary" href="/try">Run a live procurement →</Link>
           </div>
         </div>
       )}
