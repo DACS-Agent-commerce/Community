@@ -11,5 +11,8 @@ data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
 .playwright-mcp/
+playwright-report/
+playwright-report-live/
+test-results/
 *.png
 tsconfig.tsbuildinfo
