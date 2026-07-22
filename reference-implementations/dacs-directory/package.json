@@ -13,6 +13,9 @@
     "check:deploy-config": "node scripts/check-butler-origin.mjs",
     "check:butler": "node scripts/check-butler-origin.mjs --probe",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
+    "test:e2e": "playwright test e2e/try-dacs.spec.ts",
+    "test:e2e:live": "playwright test e2e/try-dacs.live.spec.ts",
+    "test:e2e:ui": "playwright test --ui",
     "test:seed": "tsx --test test/seed-smoke.test.ts",
     "index": "tsx src/catalog/reindex.ts",
     "seed:counterparty-fixture": "tsx scripts/seed-counterparty-fixture.ts",
@@ -32,6 +35,7 @@
     "tsx": "^4.19.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
