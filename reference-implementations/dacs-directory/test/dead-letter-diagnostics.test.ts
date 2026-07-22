@@ -103,6 +103,8 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
     assert.equal(response.status, 200);
     const body = await response.json() as Record<string, unknown>;
     assert.equal(body.chainLatestTx, 123);
+    assert.equal(body.cursorAheadBy, 0);
+    assert.equal(body.chainResetSuspected, false);
     const indexer = body.indexer as ReturnType<typeof store.indexerDiagnostics>;
     assert.equal(indexer.deadLetterDiagnostics.returned, 1);
     assert.equal(indexer.deadLetterDiagnostics.items[0].locator, target);
@@ -111,4 +113,14 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("chain reset cleanup removes derived failures but preserves registrations", () => {
+  const target = locator("6");
+  store.saveRegistrations([{ primaryClaim: "did:demos:agent:registered", displayName: "registered", listingAnchors: [] }]);
+  store.recordArtifactFailure(target, "listing", "STORAGE_UNREADABLE", "old chain", 1);
+  store.clearChainDerivedArtifacts();
+  assert.equal(store.indexerDiagnostics().deadLetters, 0);
+  assert.equal(store.loadRetryableArtifacts(Date.now() + 60_000).length, 0);
+  assert.equal(store.loadRegistrations()[0]?.displayName, "registered");
 });
