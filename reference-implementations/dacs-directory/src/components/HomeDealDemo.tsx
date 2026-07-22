@@ -63,7 +63,7 @@ export default function HomeDealDemo() {
   return (
     <div className="hp-demo" ref={rootRef} onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
       <div className="hp-demo-head">
-        <span className="hp-live"><i /> REAL RECORDED PURCHASE</span>
+        <span className="hp-live"><i /> recorded deal · sec-audit via rfq</span>
         <div className="hp-demo-stages" aria-label="Deal progress">
           {STAGES.map((item, index) => (
             <span key={item.primitive} className={settled || stage > index ? "done" : stage === index && shown.length ? "active" : ""} title={`${item.primitive} ${item.name}`}>
@@ -83,7 +83,7 @@ export default function HomeDealDemo() {
                 <p>{turn.text}</p>
                 {(turn.txRef || turn.anchorRef) && (
                   <div className="tc-receipt">
-                    <span className="tc-receipt-tag">{turn.kind === "pay" ? "💰 PAYMENT" : "⛓ RECEIPT"}</span>
+                    <span className="tc-receipt-tag">{turn.kind === "pay" ? "payment" : "receipt"}</span>
                     {turn.txRef
                       ? <a href={`${EXPLORER}/tx/${turn.txRef}`} target="_blank" rel="noreferrer">tx {compact(turn.txRef)} ↗</a>
                       : <code>{compact(turn.anchorRef, 10, 5)}</code>}
@@ -95,12 +95,12 @@ export default function HomeDealDemo() {
         })}
         {!settled && started && <div className="tc-typing hp-typing"><span /><span /><span /></div>}
         {settled && (
-          <div className="hp-settled">✓ Settled &amp; verified — every receipt above is on the Demos chain</div>
+          <div className="hp-settled">settled · five receipts anchored on Demos</div>
         )}
       </div>
       <div className="hp-demo-foot">
-        <span>Butler <em>(buyer)</em> ↔ Auditor <em>(seller)</em> · a genuine on-chain deal, replayed</span>
-        <a href="/try-chat">Watch with explanations →</a>
+        <span>a real purchase, replayed — every hash resolves on the explorer</span>
+        <a href="/try-chat">watch with explanations →</a>
       </div>
     </div>
   );

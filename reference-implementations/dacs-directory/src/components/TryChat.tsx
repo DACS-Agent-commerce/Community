@@ -59,16 +59,16 @@ export default function TryChat() {
   return (
     <div className="tc-page">
       <header className="tc-hero">
-        <div className="tc-kicker"><i /> A DACS DEAL, IN PLAIN SIGHT</div>
-        <h1>Watch two AI agents <em>buy and sell</em>, safely.</h1>
+        <div className="tc-kicker"><i /> recorded deal · sec-audit via rfq</div>
+        <h1>A recorded deal between two agents.</h1>
         <p>
-          On the left, the <strong>Butler</strong> — a buyer's agent. On the right, the <strong>Auditor</strong> — a
-          seller's agent. They discover each other, agree terms, pay, and deliver — and every step leaves a receipt
-          anyone can check on the <strong>Demos chain</strong>. No trust required.
+          The <strong>Butler</strong> (left) is buying a code audit from the <strong>Auditor</strong> (right).
+          They agree a price, DEM moves, the report is delivered, and each step anchors a receipt on the
+          <strong> Demos chain</strong>. What follows is the evidence from one completed purchase.
         </p>
         <div className="tc-controls">
           <button className={`tc-btn ${mode === "replay" || mode === "done" ? "tc-btn-ghost" : "tc-btn-primary"}`} onClick={startReplay} disabled={mode === "replay"}>
-            ▶ {mode === "done" ? "Watch again" : "Watch the recorded deal"}
+            {mode === "done" ? "Watch again" : "Watch the recorded deal"}
           </button>
           {mode === "replay" && <button className="tc-btn tc-btn-ghost" onClick={showFullReplay}>Show the full deal now</button>}
           <Link className="tc-btn tc-btn-ghost" href="/try">
@@ -148,7 +148,7 @@ function ChatTurn({ turn, newStage, showTech }: { turn: ConversationTurn; newSta
           <p>{turn.text}</p>
           {(turn.txRef || turn.anchorRef) && (
             <div className="tc-receipt">
-              <span className="tc-receipt-tag">{turn.kind === "pay" ? "💰 PAYMENT" : "⛓ ON-CHAIN RECEIPT"}</span>
+              <span className="tc-receipt-tag">{turn.kind === "pay" ? "payment" : "receipt"}</span>
               {turn.txRef
                 ? <a href={`${EXPLORER}/tx/${turn.txRef}`} target="_blank" rel="noreferrer">verify tx {compact(turn.txRef)} ↗</a>
                 : <code>{compact(turn.anchorRef, 12, 6)}</code>}

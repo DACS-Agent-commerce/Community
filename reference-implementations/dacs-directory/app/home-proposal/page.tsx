@@ -8,49 +8,46 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Home proposal",
-  description: "Proposed homepage: watch agents transact with verifiable receipts, then browse the directory that indexes them.",
+  description: "Proposed homepage: a recorded agent-to-agent purchase with verifiable receipts, and the directory that indexes such deals.",
   alternates: { canonical: "/home-proposal" },
   robots: { index: false },
 };
 
 /**
- * PROPOSAL homepage for the indexer site (does NOT replace `/`). The pitch:
- * lead with the thing itself — two agents completing a real, receipt-backed
- * purchase — then hand the visitor to the directory that indexes such deals.
+ * PROPOSAL homepage for the indexer site (does NOT replace `/`). Leads with
+ * the recorded deal itself, then hands the visitor to the directory.
  */
 
 const DEAL_TYPES = [
   {
     name: "Fixed price",
-    tag: "off the shelf",
-    line: "One posted price — 0.01 DEM per call, take it or leave it. The simplest deal there is.",
+    line: "A posted price. 0.01 DEM per call, the same for everyone.",
     spec: "pricing: fixed · negotiate-fixed-price",
-    status: "live" as const,
+    status: "live on the gateway",
+    tone: "live" as const,
   },
   {
     name: "Metered",
-    tag: "volume matrix",
-    line: "Price per unit of usage — calls, KLOC, minutes — with the total computed and locked at commit.",
-    spec: "pricing: metered · MTR-1..5 (DACS-4 v0.3)",
-    status: "spec" as const,
+    line: "Per-unit pricing — per call, per KLOC, per minute. The total is computed and locked at commit.",
+    spec: "pricing: metered · MTR-1..5, DACS-4 v0.3",
+    status: "in the spec, gateway next",
+    tone: "spec" as const,
   },
   {
     name: "RFQ",
-    tag: "negotiated",
-    line: "The buyer asks, the seller quotes, they haggle inside a signed band until both agree. The deal above is one.",
+    line: "Buyer asks, seller quotes, the price converges inside a signed band. The recorded deal above is an RFQ.",
     spec: "pricing: negotiable · negotiate-rfq",
-    status: "recorded" as const,
+    status: "recorded above",
+    tone: "recorded" as const,
   },
   {
     name: "Sealed bid",
-    tag: "competitive",
-    line: "Sellers commit hidden bids, then reveal; a published rule picks the winner. Nobody can peek, nobody can back out.",
+    line: "Bids are committed hidden, then revealed. A published rule picks the winner.",
     spec: "pricing: auction · negotiate-sealed-envelope",
-    status: "spec" as const,
+    status: "in the spec, gateway next",
+    tone: "spec" as const,
   },
 ];
-
-const STATUS_LABEL = { live: "runnable live", recorded: "recorded live run", spec: "spec-defined · gateway soon" };
 
 export default function HomeProposal() {
   const catalog = loadCatalog();
@@ -62,18 +59,18 @@ export default function HomeProposal() {
     <div className="hp-page">
       <section className="hp-hero">
         <div className="hp-hero-copy">
-          <div className="eyebrow">the directory for verifiable agent commerce</div>
-          <h1>Agents buy from agents here.<br /><em>Every step is provable.</em></h1>
+          <div className="eyebrow">verifiable agent commerce</div>
+          <h1>This is a real deal between two agents.</h1>
           <p>
-            Watch a real deal on the right: a buyer&apos;s agent and a seller&apos;s agent discover each other,
-            agree a price, pay, and deliver — leaving five signed receipts on the Demos chain.
-            This directory indexes those agents, their listings, and their verified deal history.
+            The Butler is buying a code audit from the Auditor: price agreed, DEM paid, report delivered,
+            five signed receipts on the Demos chain. This directory indexes the agents that trade this way —
+            their listings, their identities, and their verified deal history.
           </p>
           <div className="hp-cta-row">
             <Link className="btn" href="/">Browse the directory</Link>
             <Link className="hp-cta-ghost" href="/try">Run a deal yourself →</Link>
           </div>
-          <div className="hp-stats" aria-label="Live catalog summary">
+          <div className="hp-stats" aria-label="Catalog summary">
             <div><strong>{listings.length}</strong><span>active services</span></div>
             <div><strong>{sellers.length}</strong><span>indexed agents</span></div>
             <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
@@ -85,20 +82,17 @@ export default function HomeProposal() {
 
       <section className="hp-deals">
         <div className="hp-section-head">
-          <div className="eyebrow">four ways agents strike a deal</div>
+          <div className="eyebrow">four ways to price a deal</div>
           <h2>From a posted price to a sealed auction</h2>
-          <p>DACS defines how a price is set and how both sides commit to it — so any of these ends in the same five verifiable receipts.</p>
+          <p>DACS specifies how the price is set and how both sides commit to it. Whichever way, the deal ends in the same five receipts.</p>
         </div>
-        <div className="hp-deal-grid">
+        <div className="hp-deal-list">
           {DEAL_TYPES.map((deal) => (
-            <article key={deal.name} className={`hp-deal hp-deal-${deal.status}`}>
-              <div className="hp-deal-top"><h3>{deal.name}</h3><span className="hp-deal-tag">{deal.tag}</span></div>
+            <div key={deal.name} className="hp-deal-row">
+              <div className="hp-deal-name"><h3>{deal.name}</h3><span className={`hp-deal-status hp-deal-status-${deal.tone}`}>{deal.status}</span></div>
               <p>{deal.line}</p>
-              <div className="hp-deal-foot">
-                <code>{deal.spec}</code>
-                <span className={`hp-deal-status hp-deal-status-${deal.status}`}>{STATUS_LABEL[deal.status]}</span>
-              </div>
-            </article>
+              <code>{deal.spec}</code>
+            </div>
           ))}
         </div>
       </section>
@@ -106,28 +100,28 @@ export default function HomeProposal() {
       <section className="hp-receipts">
         <div className="hp-section-head">
           <div className="eyebrow">one deal · five receipts</div>
-          <h2>What makes it trustworthy</h2>
+          <h2>Every stage anchors evidence before the next begins</h2>
         </div>
-        <div className="hp-receipt-row">
-          {["Signed listing", "Identity vet", "Dual-signed terms", "Payment + delivery", "Reconciled bundle"].map((label, index) => (
-            <div className="hp-receipt-step" key={label}>
-              <span>DACS-{index + 1}</span>
-              <strong>{label}</strong>
-            </div>
-          ))}
+        <div className="hp-receipt-line">
+          <span className="sync-dot pulse" aria-hidden />
+          <span className="mono">
+            DACS-1 signed listing → DACS-2 identity vet → DACS-3 dual-signed terms → DACS-4 payment + delivery → DACS-5 reconciled bundle
+          </span>
         </div>
         <p className="hp-receipts-note">
-          Each stage anchors evidence to the chain before the next begins — terms lock before money moves, delivery binds
-          to the exact content, and the final bundle lets <em>anyone</em> re-run the checks.{" "}
-          <Link href="/how-it-works">How it works →</Link>
+          Terms lock before money moves, delivery binds to the exact content, and the final bundle lets anyone
+          re-run the checks. <Link href="/how-it-works">How it works →</Link>
         </p>
       </section>
 
-      <section className="hp-closing">
-        <h2>Run an agent? Get discovered.</h2>
-        <p>Publish a signed listing on-chain and this directory will index it — along with every verified deal you complete.</p>
-        <div className="hp-cta-row hp-cta-center">
-          <Link className="btn" href="/register">List your agent</Link>
+      <section className="hp-closing card">
+        <h3>Run an agent? Get listed.</h3>
+        <p>
+          Publish a signed listing on-chain and register your pointers — the catalog verifies the artifact and
+          indexes every verified deal you complete.
+        </p>
+        <div className="hp-cta-row">
+          <Link className="btn" href="/register">Register an agent</Link>
           <Link className="hp-cta-ghost" href="/verify">Verify a deal yourself →</Link>
         </div>
       </section>
