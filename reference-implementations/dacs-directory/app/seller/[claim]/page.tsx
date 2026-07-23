@@ -37,7 +37,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
 
   return (
     <>
-      <p className="meta"><Link href="/">← all agents</Link></p>
+      <p className="meta"><Link href="/discover">← all agents</Link></p>
       <h1 className="h1">{seller.displayName}</h1>
       <div className="service-provider-row" aria-label="Agent trust summary">
         <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>

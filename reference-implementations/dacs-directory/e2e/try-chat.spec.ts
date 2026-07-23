@@ -8,7 +8,7 @@ test("the recorded deal is inspectable and cannot dispatch a purchase", async ({
   });
 
   await page.goto("/try-chat");
-  await expect(page.getByLabel("Recorded replay disclosure")).toContainText("It never starts a job or spends funds");
+  await expect(page.getByLabel("Recorded replay disclosure")).toContainText("never starts a job or spends funds");
   await expect(page.getByRole("link", { name: /Run a live deal/ })).toHaveAttribute("href", "/try");
 
   await page.getByRole("button", { name: /Watch the recorded deal/ }).click();

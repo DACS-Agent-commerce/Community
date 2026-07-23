@@ -34,16 +34,17 @@ export type ConversationTurn = {
 export const SPEAKERS: Record<Speaker, { name: string; role: string; side: "left" | "right" | "center"; avatar: string }> = {
   butler: { name: "Butler", role: "the buyer's agent", side: "left", avatar: "B" },
   seller: { name: "Auditor", role: "the seller's agent", side: "right", avatar: "A" },
-  chain: { name: "Demos chain", role: "public ledger", side: "center", avatar: "⛓" },
-  referee: { name: "EvalBot", role: "independent judge", side: "center", avatar: "⚖" },
+  chain: { name: "Demos chain", role: "public ledger", side: "center", avatar: "D" },
+  referee: { name: "EvalBot", role: "independent judge", side: "center", avatar: "E" },
 };
 
+// Stage names match demos.network: Identify · Vet · Negotiate · Settle · Verify.
 export const STAGES: { name: string; primitive: string; blurb: string }[] = [
-  { name: "Identify", primitive: "DACS-1", blurb: "Find a seller with a signed, on-chain listing." },
-  { name: "Vet", primitive: "DACS-2", blurb: "Check who they are before committing." },
-  { name: "Negotiate", primitive: "DACS-3", blurb: "Agree scope, price and timing — both sign." },
-  { name: "Settle & deliver", primitive: "DACS-4", blurb: "Pay on-chain; the work arrives with evidence." },
-  { name: "Verify", primitive: "DACS-5", blurb: "Bind every receipt into one checkable bundle." },
+  { name: "Identify", primitive: "DACS-1", blurb: "A signed, on-chain listing." },
+  { name: "Vet", primitive: "DACS-2", blurb: "Check the counterparty." },
+  { name: "Negotiate", primitive: "DACS-3", blurb: "Both sides sign the terms." },
+  { name: "Settle", primitive: "DACS-4", blurb: "Payment and delivery, with evidence." },
+  { name: "Verify", primitive: "DACS-5", blurb: "One bundle anyone can re-check." },
 ];
 
 /** Gateway phase → DACS stage. Failures/unknowns fall back to the caller's running stage. */
@@ -69,36 +70,36 @@ export function describeEvent(event: ProcurementEvent, runningStage: StageIndex)
   const stage = event.phase === "failed" ? runningStage : (PHASE_STAGE[event.phase] ?? runningStage);
 
   // — Identify —
-  if (/^Full DACS purchase queued/.test(label)) return { speaker: "butler", stage, kind: "say", text: "I need a security audit of some code — and I want the whole deal to be provable. Let me find a seller." };
-  if (/Connecting the Butler buyer wallet/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Connecting my wallet and opening a secure channel…" };
-  if (/Resolving the indexed Auditor'?s signed DACS-1 listing/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Looking up an auditor whose listing is signed and anchored on-chain…" };
-  if (/failed current-standard verification/.test(label)) return { speaker: "butler", stage, kind: "say", text: "That listing didn't pass verification — falling back to my trusted auditor binding." };
-  if (/Verified the Auditor listing/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Auditor's signed listing verified on-chain — this seller is real." };
+  if (/^Full DACS purchase queued/.test(label)) return { speaker: "butler", stage, kind: "say", text: "I need a security audit on this file, and I want the deal itself to be provable. Finding a seller." };
+  if (/Connecting the Butler buyer wallet/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Connecting my wallet and opening a private channel." };
+  if (/Resolving the indexed Auditor'?s signed DACS-1 listing/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Pulling the auditor's signed listing from the chain index." };
+  if (/failed current-standard verification/.test(label)) return { speaker: "butler", stage, kind: "say", text: "That listing failed verification. Using my configured auditor binding instead." };
+  if (/Verified the Auditor listing/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Signed listing verified. The seller's offer is on the record." };
 
   // — Vet —
-  if (/Butler scoring the verified listing/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Checking they fit my budget, capabilities and quality bar…" };
-  if (/opened a signed RFQ channel/.test(label)) return { speaker: "butler", stage, kind: "say", text: "👋 Hi Auditor — I'd like a content-bound security audit. Can we agree terms?" };
-  if (/Identity Vet record anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Identity check recorded on-chain — proof the vet actually happened." };
+  if (/Butler scoring the verified listing/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Scoring the offer against budget, capability and quality." };
+  if (/opened a signed RFQ channel/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Auditor: I want a content-bound audit of one file. What are your terms?" };
+  if (/Identity Vet record anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Identity vet anchored. The check itself is now on the record." };
 
   // — Negotiate —
   if (/opened|scoring/.test(label) === false && /RFQ|quote/.test(label)) return { speaker: "seller", stage, kind: "say", text: "Happy to. Let me price it against your files." };
-  if (/Buyer\/seller agreement anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "The agreed terms are anchored on-chain." };
-  if (/Commitment anchored before payment/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Terms locked in before a single coin moves." };
-  if (/Buyer and Auditor agreed/.test(label)) { const amt = demAmount(label); return { speaker: "seller", stage, kind: "say", text: amt ? `Deal — a quick, standard audit for ${amt} DEM.` : "Deal — terms agreed." }; }
-  if (/Dual-signed agreement/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Both signatures anchored — neither of us can rewrite the terms." };
+  if (/Buyer\/seller agreement anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Agreed terms anchored." };
+  if (/Commitment anchored before payment/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Commitment anchored. Terms are locked before any payment." };
+  if (/Buyer and Auditor agreed/.test(label)) { const amt = demAmount(label); return { speaker: "seller", stage, kind: "say", text: amt ? `Agreed: quick scan, standard tier, ${amt} DEM.` : "Terms agreed." }; }
+  if (/Dual-signed agreement/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Both signatures anchored. Neither side can rewrite the terms." };
 
   // — Settle & deliver —
-  if (/^Paying .*DEM to the negotiated Auditor/.test(label)) { const amt = demAmount(label); return { speaker: "butler", stage, kind: "pay", text: amt ? `Paying ${amt} DEM now, on the agreed rail.` : "Sending payment now." }; }
-  if (/Payment broadcast on Demos/.test(label)) return { speaker: "chain", stage, kind: "pay", text: "Payment sent — here's the transaction, checkable by anyone." };
-  if (/Auditor verified payment and is scanning/.test(label)) return { speaker: "seller", stage, kind: "say", text: "Payment received. Scanning your source now…" };
-  if (/Auditor signed and anchored the content-bound report/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Signed audit report delivered and anchored — bound to the exact code." };
+  if (/^Paying .*DEM to the negotiated Auditor/.test(label)) { const amt = demAmount(label); return { speaker: "butler", stage, kind: "pay", text: amt ? `Sending ${amt} DEM on the agreed rail.` : "Sending payment." }; }
+  if (/Payment broadcast on Demos/.test(label)) return { speaker: "chain", stage, kind: "pay", text: "Payment broadcast. Transaction hash below." };
+  if (/Auditor verified payment and is scanning/.test(label)) return { speaker: "seller", stage, kind: "say", text: "Payment confirmed. Running the scan." };
+  if (/Auditor signed and anchored the content-bound report/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Signed report anchored, bound to the exact file contents." };
 
   // — Verify —
-  if (/Buyer anchoring payment evidence/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Recording my payment evidence and asking for your signed bundle…" };
-  if (/Settlement evidence anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "My side of the receipt is anchored." };
-  if (/Buyer attestation bundle anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "The full deal — listing, vet, terms, payment, delivery — bundled and anchored." };
-  if (/EvalBot applying and signing the acceptance rubric/.test(label)) return { speaker: "referee", stage, kind: "say", text: "Independent check: does the delivery meet the agreed rubric? Signing my verdict." };
-  if (/Purchase settled, report delivered/.test(label)) return { speaker: "seller", stage, kind: "say", text: "✅ Done. Paid, delivered, and the entire deal is verifiable by anyone — forever." };
+  if (/Buyer anchoring payment evidence/.test(label)) return { speaker: "butler", stage, kind: "say", text: "Anchoring my payment evidence. Requesting your bundle signature." };
+  if (/Settlement evidence anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Buyer settlement evidence anchored." };
+  if (/Buyer attestation bundle anchored/.test(label)) return { speaker: "chain", stage, kind: "anchor", text: "Full bundle anchored: listing, vet, terms, payment, delivery." };
+  if (/EvalBot applying and signing the acceptance rubric/.test(label)) return { speaker: "referee", stage, kind: "say", text: "Checking the delivery against the agreed rubric. Verdict signed." };
+  if (/Purchase settled, report delivered/.test(label)) return { speaker: "seller", stage, kind: "say", text: "Done. Paid and delivered. Anyone can re-verify this deal from the receipts." };
 
   // Failures + anything unrecognised: honest, attributed to whoever the phase implies.
   if (event.phase === "failed") return { speaker: "butler", stage, kind: "say", text: `Stopped safely: ${label}` };
