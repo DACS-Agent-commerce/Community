@@ -34,6 +34,11 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(document.paths["/api/dacs/listings"]);
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
   assert.ok(document.paths["/api/dacs/inspect-service/{listingId}/{version}"]);
+  const inspectSeller = document.paths["/api/dacs/inspect-service/{listingId}/{version}"].get.parameters
+    .find((parameter) => parameter.name === "seller");
+  assert.equal(inspectSeller?.required, true);
+  assert.equal(inspectSeller?.schema.minLength, 1);
+  assert.equal(inspectSeller?.schema.pattern, "\\S");
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
   assert.equal(listingSummarySchema.properties.inspection.properties.artifactType.const, "directory-service-profile");

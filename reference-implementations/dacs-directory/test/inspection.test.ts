@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { NextRequest } from "next/server";
+import { GET as inspectServiceGet } from "../app/api/dacs/inspect-service/[listingId]/[version]/route.js";
 
 import {
   buildDirectoryServiceInspectionEnvelope,
@@ -35,6 +37,17 @@ const listing: ListingSummary = {
   status: "active",
   catalogObservedAt: 1784016000000,
 };
+
+test("inspection route refuses missing or blank seller lookup keys", async () => {
+  for (const suffix of ["", "?seller=%20%20"]) {
+    const response = await inspectServiceGet(
+      new NextRequest(`https://directory.example/api/dacs/inspect-service/shared-listing/1${suffix}`),
+      { params: Promise.resolve({ listingId: "shared-listing", version: "1" }) },
+    );
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "seller is required" });
+  }
+});
 
 test("directory inspection affordance points at a verifier service profile envelope", () => {
   const affordance = directoryInspectionAffordance(listing);

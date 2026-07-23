@@ -208,9 +208,9 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
+          { name: "seller", in: "query", required: true, description: "Identifies the seller-scoped listing ID", schema: { type: "string", minLength: 1, pattern: "\\S" } },
         ],
-        responses: { "200": { description: "Directory service profile inspection envelope" }, "404": { description: "Listing not found" } },
+        responses: { "200": { description: "Directory service profile inspection envelope" }, "400": { description: "Seller is required" }, "404": { description: "Listing not found" } },
       },
     },
     "/api/dacs/sellers/{primaryClaimRef}": {

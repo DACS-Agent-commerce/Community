@@ -14,10 +14,13 @@ export async function GET(
   { params }: { params: Promise<{ listingId: string; version: string }> },
 ) {
   const { listingId, version } = await params;
-  const requestedSeller = req.nextUrl.searchParams.get("seller");
+  const requestedSeller = req.nextUrl.searchParams.get("seller")?.trim();
+  if (!requestedSeller) {
+    return NextResponse.json({ error: "seller is required" }, { status: 400 });
+  }
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
+    .find((l) => l.listingId === listingId && String(l.version) === version && l.seller.primaryClaim === requestedSeller);
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
 
   const origin = requestBaseUrl(req);
