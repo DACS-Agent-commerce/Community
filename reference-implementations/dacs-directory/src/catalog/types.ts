@@ -80,6 +80,21 @@ export interface ListingSummary {
   status: "active" | "revoked";
   catalogObservedAt: number;
   reputationHint?: ReputationHint;
+  /** Directory extension: machine-readable pointer to a verifier profile envelope. */
+  inspection?: DirectoryInspectionAffordance;
+}
+
+export type DirectoryServiceMaturity =
+  | "listed"
+  | "sample-backed"
+  | "callable"
+  | "strict-bundle-history"
+  | "live-paid";
+
+export interface DirectoryInspectionAffordance {
+  artifactType: "directory-service-profile";
+  maturity: DirectoryServiceMaturity;
+  href: string;
 }
 
 /** §6.3.6 ReputationHint — advisory; derived, never authoritative. */
