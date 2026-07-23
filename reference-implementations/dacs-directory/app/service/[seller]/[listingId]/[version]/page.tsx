@@ -76,7 +76,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   return (
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
-      <p className="meta"><Link href="/">← discover services</Link></p>
+      <p className="meta"><Link href="/discover">← discover services</Link></p>
       <section className="service-hero">
         <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
         <h1 className="h1">{listing.offering.title}</h1>

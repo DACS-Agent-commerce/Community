@@ -440,15 +440,6 @@ textarea.form-control { min-height: 112px; resize: vertical; }
   .trust-strip > div:nth-child(even) { border-left: 1px solid var(--border); }
   .trust-strip > div:nth-child(n + 3) { border-top: 1px solid var(--border); }
   .service-layout { grid-template-columns: 1fr; }
-  .nav-menu-button { display: grid; place-items: center; }
-  .nav .nav-links {
-    display: none; position: absolute; left: 0; right: 0; top: 100%; margin: 0; padding: 20px 24px 28px;
-    flex-direction: column; align-items: stretch; gap: 4px; background: var(--bg-base); border-bottom: 1px solid var(--border);
-    max-height: calc(100dvh - 70px); overflow-y: auto;
-  }
-  .nav .nav-links.open { display: flex; }
-  .nav .nav-links a { padding: 10px 0; font-size: 1rem; color: var(--text-primary); }
-  .nav .theme-toggle { margin: 10px 0 0; align-self: flex-start; }
   .footer .nav-links { width: 100%; margin-left: 0 !important; gap: 12px; flex-wrap: wrap; }
 }
 
@@ -695,7 +686,7 @@ textarea.form-control { min-height: 112px; resize: vertical; }
   .tc-turn { max-width: 92%; }
 }
 
-/* ═══ /home-proposal — homepage proposal (scoped .hp-*, reuses .tc-* bubbles) ═ */
+/* ═══ Homepage — recorded deal landing page (scoped .hp-*, reuses .tc-* bubbles) ═ */
 .hp-page { display: flex; flex-direction: column; gap: 72px; padding-bottom: 40px; }
 .hp-hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 44px; align-items: center; padding-top: 16px; }
 .hp-hero-copy h1 { margin: 14px 0 14px; font-size: clamp(2rem, 4.4vw, 3.1rem); line-height: 1.06; letter-spacing: -0.02em; }
@@ -713,10 +704,13 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .hp-demo-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .hp-live { display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font: 600 .66rem var(--font-scp, monospace); letter-spacing: .04em; }
 .hp-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: livePulse 1.6s infinite; }
+.hp-demo-actions { display: flex; align-items: center; gap: 10px; }
 .hp-demo-stages { display: flex; gap: 6px; }
 .hp-demo-stages span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; border: 2px solid var(--border-hover); color: var(--text-muted); font: 700 .62rem var(--font-scp, monospace); transition: .25s; }
 .hp-demo-stages span.active { border-color: var(--accent); color: var(--accent-strong); }
 .hp-demo-stages span.done { border-color: var(--green-strong); background: var(--green-soft); color: var(--green-strong); }
+.hp-demo-control { border: 1px solid var(--border); border-radius: var(--radius-chip); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; padding: 4px 8px; font: 600 .62rem var(--font-scp, monospace); }
+.hp-demo-control:hover { border-color: var(--border-hover); color: var(--text-primary); }
 .hp-demo-scroll { height: 380px; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; background: var(--bg-tinted); }
 .hp-turn .tc-bubble p { font-size: .8rem; }
 .hp-turn .tc-who { font-size: .64rem; }
@@ -762,4 +756,16 @@ textarea.form-control { min-height: 112px; resize: vertical; }
   .hp-why-grid { grid-template-columns: 1fr; }
   .hp-why + .hp-why { border-left: 0; border-top: 1px solid var(--border); }
   .hp-demo-scroll { height: 320px; }
+}
+
+@media (max-width: 1120px) {
+  .nav-menu-button { display: grid; place-items: center; }
+  .nav .nav-links {
+    display: none; position: absolute; left: 0; right: 0; top: 100%; margin: 0; padding: 20px 24px 28px;
+    flex-direction: column; align-items: stretch; gap: 4px; background: var(--bg-base); border-bottom: 1px solid var(--border);
+    max-height: calc(100dvh - 70px); overflow-y: auto;
+  }
+  .nav .nav-links.open { display: flex; }
+  .nav .nav-links a { padding: 10px 0; font-size: 1rem; color: var(--text-primary); }
+  .nav .theme-toggle { margin: 10px 0 0; align-self: flex-start; }
 }

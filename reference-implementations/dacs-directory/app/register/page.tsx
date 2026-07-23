@@ -238,7 +238,7 @@ export default function Register() {
           </ul>
           {status && <p className={publishStep === "failed" ? "verdict err" : publishStep === "complete" ? "verdict ok" : "note"} role={publishStep === "failed" ? "alert" : "status"}>{status}</p>}
           {publishStep === "failed" && <div className="button-row"><button className="btn" type="button" onClick={publish}>Retry publish</button><button className="btn secondary" type="button" onClick={() => setScreen("review")}>Review details</button></div>}
-          {screen === "done" && profileUrl && <div className="button-row"><Link className="btn" href={profileUrl}>View seller profile</Link><Link className="btn secondary" href="/">Browse directory</Link></div>}
+          {screen === "done" && profileUrl && <div className="button-row"><Link className="btn" href={profileUrl}>View seller profile</Link><Link className="btn secondary" href="/discover">Browse directory</Link></div>}
         </section>
       )}
 

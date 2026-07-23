@@ -17,10 +17,9 @@ function compact(value: unknown, head = 8, tail = 6): string {
 
 /**
  * Compact, auto-playing loop of the REAL recorded purchase (the same captured
- * run as /try-chat, every tx link genuine). Starts when scrolled into view,
- * pauses on hover, and loops with a short hold on the settled outcome — a
- * homepage hero that shows agent commerce actually happening instead of
- * describing it.
+ * run as /try-chat, every tx link genuine). Starts when scrolled into view and
+ * loops with a short hold on the settled outcome. A visible playback control
+ * lets mouse, keyboard, and touch users pause or resume it.
  */
 export default function HomeDealDemo() {
   const turns = useMemo(() => eventsToConversation(SAMPLE_PROCUREMENT_EVENTS), []);
@@ -68,15 +67,25 @@ export default function HomeDealDemo() {
   const settled = visible >= turns.length;
 
   return (
-    <div className="hp-demo" ref={rootRef} onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
+    <div className="hp-demo" ref={rootRef}>
       <div className="hp-demo-head">
         <span className="hp-live"><i /> recorded deal · sec-audit via rfq</span>
-        <div className="hp-demo-stages" aria-label="Deal progress">
-          {STAGES.map((item, index) => (
-            <span key={item.primitive} className={settled || stage > index ? "done" : stage === index && shown.length ? "active" : ""} title={`${item.primitive} ${item.name}`}>
-              {settled || stage > index ? "✓" : index + 1}
-            </span>
-          ))}
+        <div className="hp-demo-actions">
+          <div className="hp-demo-stages" aria-label="Deal progress">
+            {STAGES.map((item, index) => (
+              <span key={item.primitive} className={settled || stage > index ? "done" : stage === index && shown.length ? "active" : ""} title={`${item.primitive} ${item.name}`}>
+                {settled || stage > index ? "✓" : index + 1}
+              </span>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="hp-demo-control"
+            aria-pressed={paused}
+            onClick={() => setPaused((value) => !value)}
+          >
+            {paused ? "Play" : "Pause"}
+          </button>
         </div>
       </div>
       <div className="hp-demo-scroll" ref={scrollRef} aria-live="off">
