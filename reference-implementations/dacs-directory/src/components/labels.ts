@@ -2,7 +2,6 @@
 export const RAIL_LABELS: Record<string, string> = {
   "pay-dem": "DEM",
   "pay-x402": "USDC · x402",
-  "pay-evm-erc8183": "ERC-8183",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");
 /** "negotiate-fixed-price" → "fixed price"; acronym ids get proper casing. */

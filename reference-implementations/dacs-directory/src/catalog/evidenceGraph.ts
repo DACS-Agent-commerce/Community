@@ -38,6 +38,10 @@ const priceTermOk = (value: unknown): boolean => {
   return Boolean(price && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
+// PAYEE-BOUND COUPLING (issue #17 F2): site (c) of 3. No `dacs-payee-bound-agreement:v1:`
+// domain yet. When payee-bound support lands, add it here AND in bundlePolicy.ts SEPARATORS,
+// alongside shapeOk's discriminator (above) and isNeutralCancellation's commit-kind
+// (reputation.ts). §8.5.1: SELECT the domain from the required discriminator — never strip-and-retry.
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
   agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", "verify-result": "dacs-verifyresult:v1:",
   composite: "dacs-composite:v1:", rating: "dacs-rating:v1:", listing: "dacs-listing:v1:", bundle: "dacs-bundle:v1:",
@@ -87,6 +91,12 @@ export function isCurrentRef(value: unknown): value is CurrentRef {
   return Boolean(anchor && anchor.kind === "storage-program" && typeof anchor.locator === "string" && /^stor-[0-9a-f]{40}$/.test(anchor.locator) && /^[0-9a-f]{64}$/.test(normalizedHash(ref?.contentHash)));
 }
 function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
+  // PAYEE-BOUND COUPLING (issue #17 F2): site (a) of 3. Today this accepts only
+  // `agreementVersion === "1"`, so a payee-bound agreement ref (#236) fails shape →
+  // bundle never refsVerified → excluded (fail-closed, CORE §11.1.2). When payee-bound
+  // support lands, this discriminator, isNeutralCancellation's commit-kind (reputation.ts
+  // ~L35), and the SEPARATORS domain (below ~L41 + bundlePolicy.ts ~L10) MUST move together
+  // — accept exactly-one of agreementVersion / payeeBoundAgreementVersion (§8.5.1), never both.
   if (kind === "agreement") return raw.agreementVersion === "1" && typeof raw.jobId === "string" && rec(raw.listingRef) !== null && arr(raw.parties).length >= 2 && priceTermOk(rec(raw.terms)?.price);
   if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
   if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
