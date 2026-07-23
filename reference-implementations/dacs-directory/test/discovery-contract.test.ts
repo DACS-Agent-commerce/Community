@@ -48,6 +48,8 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(status.parameters[0].schema.maximum, 100);
   assert.equal(status.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/CatalogStatus");
   assert.ok(catalogStatusSchema.properties.indexer.properties.deadLetterDiagnostics);
+  assert.ok(catalogStatusSchema.required.includes("cursorAheadBy"));
+  assert.ok(catalogStatusSchema.required.includes("chainResetSuspected"));
   assert.equal(deadLetterDiagnosticSchema.properties.retryState.const, "exhausted");
   assert.equal(indexerScanRunSchema.additionalProperties, false);
   assert.ok(!("error" in indexerScanRunSchema.properties));
