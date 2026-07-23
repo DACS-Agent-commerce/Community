@@ -57,7 +57,7 @@ export default async function Deal({
   const outcome = typeof raw?.["outcome"] === "string" ? raw["outcome"] : null;
   return (
     <>
-      <p className="meta"><Link href="/">← all agents</Link></p>
+      <p className="meta"><Link href="/discover">← all agents</Link></p>
       <h1 className="h1">Deal bundle</h1>
       <div className="meta"><CopyText value={bundleRef} head={30} tail={8} /></div>
       <div className="trust-strip" style={{ marginTop: 18 }} aria-label="Deal summary">

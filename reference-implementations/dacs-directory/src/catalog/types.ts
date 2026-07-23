@@ -39,7 +39,7 @@ export interface RegisteredDeal {
   owners: { buyer: string; seller: string };
 }
 
-export type ArtifactProfile = "dacs-v0.1" | "legacy-sdk-v0.1";
+export type ArtifactProfile = "dacs-v0.1" | "legacy-sdk-v0.1" | "fixture-listing";
 
 /** §6.3.6 ListingSummary (subset the MVP populates; shape per spec). */
 export interface ListingSummary {

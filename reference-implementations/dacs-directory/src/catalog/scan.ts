@@ -108,6 +108,16 @@ async function nodeCall(message: string, data: Record<string, unknown>): Promise
   return json.response;
 }
 
+/** Read the node's current transaction tip without advancing scan state. */
+export async function readChainTip(): Promise<number> {
+  const page = ((await nodeCall("getTransactions", { start: "latest", limit: 1 })) ?? []) as Array<{ id?: number }>;
+  const id = page[0]?.id;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) {
+    throw new Error("node returned no valid transaction tip");
+  }
+  return id;
+}
+
 /**
  * Scan recent transactions for DACS artifacts: page the node's tx history
  * (descending ids), deep-walk each tx for storage addresses, then read +

@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import CounterpartyEvidenceRunner from "@/src/components/CounterpartyEvidenceRunner";
 import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { inspectServicePath } from "@/src/catalog/inspection";
+import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
@@ -47,6 +49,18 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const inspectHref = inspectServicePath(listing);
   const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
+  const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
+  const isFixtureListing = listing.anchor.kind === "fixture";
+  const listingProfileLabel = isFixtureListing
+    ? "fixture listing"
+    : listing.artifactProfile === "dacs-v0.1"
+      ? "current DACS listing"
+      : "legacy SDK listing";
+  const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
+  const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
+  const noEndpointNote = isFixtureListing
+    ? "This fixture has no live engagement endpoint. Inspect the fixture contract before coordinating off-directory."
+    : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory.";
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -64,7 +78,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   return (
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
-      <p className="meta"><Link href="/">← discover services</Link></p>
+      <p className="meta"><Link href="/discover">← discover services</Link></p>
       <section className="service-hero">
         <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
         <h1 className="h1">{listing.offering.title}</h1>
@@ -72,10 +86,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
-          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listing.artifactProfile === "dacs-v0.1" ? "current DACS listing" : "legacy SDK listing"}</span>
+          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingProfileLabel}</span>
           {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
-          {!seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
-          {!seller.ownerRegistered && !seller.discovered && (
+          {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
+          {isFixtureListing && <span className="badge">not chain anchored</span>}
+          {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
             <span className="badge" title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listing itself is still verified from chain.">
               unverified submission
             </span>
@@ -83,11 +98,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         </div>
         <div className="service-actions">
           {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
-          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>View signed listing artifact</a>
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
           <a className="btn secondary" href={inspectHref}>Inspect service</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory."}</p>
+        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : noEndpointNote}</p>
       </section>
 
       <div className="service-layout">
@@ -95,7 +110,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <div className="eyebrow">the offer</div>
           <h2 id="offer-heading" className="card-section-title">What to expect</h2>
           <dl className="detail-list">
-            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.offering.negotiation)}</dd></div>
+            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.pricing, listing.offering.negotiation)}</dd></div>
             <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}${listing.pricing.unit ? ` · ${listing.pricing.unit}` : ""}` : "Not published"}</dd></div>
             <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
             <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>
@@ -108,7 +123,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="trust-heading" className="card-section-title">Three different checks</h2>
           <ul className="trust-checks">
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
-            <li><span className="check ok">✓</span><div><strong>Listing</strong><p>Signature and chain anchor verified</p></div></li>
+            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
             <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed bundles passed strict verification</p></div></li>
           </ul>
         </aside>
@@ -126,11 +141,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="button-row"><a className="btn secondary mono" href={inspectHref}>inspection JSON</a></div>
       </section>
 
+      {isCounterpartyEvidenceDemo && <CounterpartyEvidenceRunner />}
+
       <details className="technical-disclosure">
         <summary>Technical listing details</summary>
         <div className="technical-body">
           <p><strong>Listing</strong> <span className="mono">{listing.listingId}@{listing.version}</span></p>
-          <p><strong>Artifact profile</strong> <span className="mono">{listing.artifactProfile ?? "legacy-sdk-v0.1"}</span></p>
+          <p><strong>Artifact profile</strong> <span className="mono">{technicalArtifactProfile}</span></p>
           <p><strong>Seller claim</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
           <p><strong>Content hash</strong> <CopyText value={listing.contentHash} head={24} tail={8} /></p>
           <p><strong>Anchor</strong> <CopyText value={listing.anchor.locator} head={24} tail={8} /></p>

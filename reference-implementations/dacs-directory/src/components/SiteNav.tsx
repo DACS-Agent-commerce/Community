@@ -5,7 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import ThemeToggle from "./ThemeToggle";
 
 const LINKS = [
-  { href: "/", label: "discover" },
+  { href: "/", label: "home" },
+  { href: "/discover", label: "discover" },
+  { href: "/try-chat", label: "watch a deal" },
+  { href: "/try", label: "try dacs", featured: true },
   { href: "/how-it-works", label: "how it works" },
   { href: "/verify", label: "verify" },
   { href: "/register", label: "list your service" },
@@ -59,8 +62,13 @@ export default function SiteNav() {
         </button>
         <div ref={menuRef} id="site-navigation" className={`nav-links ${open ? "open" : ""}`}>
           {LINKS.map((link) => (
-            <Link key={link.href} href={link.href} onClick={() => setOpen(false)}>
-              {link.label}
+            <Link
+              key={link.href}
+              href={link.href}
+              className={link.featured ? "nav-try" : undefined}
+              onClick={() => setOpen(false)}
+            >
+              {link.label}{link.featured ? <span aria-hidden> →</span> : null}
             </Link>
           ))}
           <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">

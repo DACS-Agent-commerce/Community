@@ -39,8 +39,12 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(listingSummarySchema.properties.inspection.properties.artifactType.const, "directory-service-profile");
   assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
   assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
+  assert.ok(listingSummarySchema.properties.artifactProfile.enum.includes("fixture-listing"));
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
   assert.ok(filters.includes("identityTier"));
+  const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");
+  assert.ok(profile?.schema.enum);
+  assert.ok(profile.schema.enum.includes("fixture-listing"));
   for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }
@@ -49,6 +53,8 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(status.parameters[0].schema.maximum, 100);
   assert.equal(status.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/CatalogStatus");
   assert.ok(catalogStatusSchema.properties.indexer.properties.deadLetterDiagnostics);
+  assert.ok(catalogStatusSchema.required.includes("cursorAheadBy"));
+  assert.ok(catalogStatusSchema.required.includes("chainResetSuspected"));
   assert.equal(deadLetterDiagnosticSchema.properties.retryState.const, "exhausted");
   assert.equal(indexerScanRunSchema.additionalProperties, false);
   assert.ok(!("error" in indexerScanRunSchema.properties));

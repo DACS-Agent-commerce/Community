@@ -32,17 +32,24 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const seller = findSeller(claim);
   if (!seller) notFound();
   const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
+  const hasFixtureListings = seller.listings.some((listing) => listing.anchor.kind === "fixture");
   const t = tierMeta(seller.identityTier ?? "self-declared");
 
   return (
     <>
-      <p className="meta"><Link href="/">← all agents</Link></p>
+      <p className="meta"><Link href="/discover">← all agents</Link></p>
       <h1 className="h1">{seller.displayName}</h1>
       <div className="service-provider-row" aria-label="Agent trust summary">
         <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
         {seller.ownerRegistered && <span className="badge ok" style={{ verticalAlign: "middle" }}>owner-registered</span>}{" "}
         {seller.discovered && <span className="badge" style={{ verticalAlign: "middle" }}>discovered on-chain</span>}{" "}
-        {!seller.ownerRegistered && !seller.discovered && (
+        {!seller.ownerRegistered && !seller.discovered && hasFixtureListings && (
+          <span className="badge" style={{ verticalAlign: "middle" }}
+                title="Seeded fixture catalog entry for local Directory runs. It is not chain-discovered or owner-registered.">
+            fixture catalog
+          </span>
+        )}{" "}
+        {!seller.ownerRegistered && !seller.discovered && !hasFixtureListings && (
           <span className="badge" style={{ verticalAlign: "middle" }}
                 title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listings below are still verified from chain.">
             unverified submission

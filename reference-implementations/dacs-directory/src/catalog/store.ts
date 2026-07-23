@@ -13,7 +13,11 @@ const LEGACY = {
   registrations: join(DATA_DIR, "registrations.json"),
   scanState: join(DATA_DIR, "scan-state.json"),
   domains: join(DATA_DIR, "domains.json"),
+  fixtures: join(DATA_DIR, "fixtures.json"),
 };
+
+export type FixtureSeed = "counterparty-evidence";
+const FIXTURE_SEEDS = new Set<FixtureSeed>(["counterparty-evidence"]);
 
 let db: Database.Database;
 try {
@@ -118,6 +122,7 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("registrations", readLegacy<Registration[]>(LEGACY.registrations, []));
   setJson("scan-state", readLegacy<ScanState>(LEGACY.scanState, { lastSeenTxId: 0, listings: {}, deals: {} }));
   setJson("domains", readLegacy<string[]>(LEGACY.domains, []));
+  setJson("fixtures", readLegacy<FixtureSeed[]>(LEGACY.fixtures, []));
   setJson("schema-version", 1);
 })();
 
@@ -156,8 +161,21 @@ export const loadRegistrations = (): Registration[] => getJson("registrations", 
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = (): ScanState => getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
 export const saveScanState = (state: ScanState): void => setJson("scan-state", state);
+/** Remove cache rows that belong to a replaced chain. Registrations survive. */
+export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM dead_letters").run();
+  db.prepare("DELETE FROM artifacts").run();
+});
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
+export const loadFixtureSeeds = (): FixtureSeed[] => {
+  const seeds = getJson<unknown[]>("fixtures", []);
+  return [...new Set(seeds.filter((seed): seed is FixtureSeed =>
+    typeof seed === "string" && FIXTURE_SEEDS.has(seed as FixtureSeed),
+  ))];
+};
+export const saveFixtureSeeds = (seeds: FixtureSeed[]): void =>
+  setJson("fixtures", [...new Set(seeds)].filter((seed) => FIXTURE_SEEDS.has(seed)).sort());
 
 /** Demos owners appear as both 0x addresses and did:demos:agent claims. */
 export const canonicalProgramOwner = (owner: string): string => {
