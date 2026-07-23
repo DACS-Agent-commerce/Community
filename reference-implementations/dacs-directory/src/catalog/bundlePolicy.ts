@@ -7,6 +7,10 @@ import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.j
 import { verifyListing } from "./listingVerification.js";
 import type { DealRecord, RegisteredDeal } from "./types.js";
 
+// PAYEE-BOUND COUPLING (issue #17 F2): site (c) of 3 (mirror of evidenceGraph.ts SEPARATORS).
+// No `dacs-payee-bound-agreement:v1:` domain yet. When payee-bound support lands, add it here
+// AND in evidenceGraph.ts, alongside shapeOk's discriminator and isNeutralCancellation's
+// commit-kind. §8.5.1: SELECT the domain from the required discriminator — never strip-and-retry.
 const SEPARATORS: Record<string, string> = {
   "dacs-3-agreement": "dacs-agreement:v1:",
   "dacs-4-evidence": "dacs-evidence:v1:",
