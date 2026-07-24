@@ -20,7 +20,6 @@ import {
 } from "../try-dacs-forms.js";
 import FieldRow from "./FieldRow.js";
 import JsonObjectEditor from "./JsonObjectEditor.js";
-import KeyValueEditor from "./KeyValueEditor.js";
 import RubricEditor from "./RubricEditor.js";
 import SourceFilesEditor from "./SourceFilesEditor.js";
 
@@ -148,25 +147,48 @@ function ProcurementForm({ value, onChange, errors, gatewayErrors }: AgentInputF
 }
 
 function OracleForm({ value, onChange, errors, gatewayErrors }: AgentInputFormProps) {
+  const product = String(value.product ?? ORACLE_PRODUCTS[0]);
   const params = rec(value.params);
-  const pairs = Object.entries(params).map(([key, val]) => [key, String(val)] as [string, string]);
+  const setParam = (key: string, val: string) => onChange({ ...value, params: { ...params, [key]: val } });
+  // Each product's parameters get their own labeled field instead of a raw
+  // key/value editor — the buyer shouldn't need to know the param key names.
   return (
     <div className="field-stack">
-      <FieldRow id="oracle-product" label="Product" required error={errors.product} gatewayError={gatewayErrors.product}
-        help="The attested data product to fetch.">
-        <select id="oracle-product" className="form-control" value={String(value.product ?? ORACLE_PRODUCTS[0])}
+      <FieldRow id="oracle-product" label="Data product" required error={errors.product} gatewayError={gatewayErrors.product}
+        help="The kind of attested value to buy.">
+        <select id="oracle-product" className="form-control" value={product}
           onChange={(event) => onChange(oracleProductChange(value, event.target.value))}>
-          {ORACLE_PRODUCTS.map((product) => <option key={product} value={product}>{product}</option>)}
+          <option value="crypto-price">Crypto price (a coin in USD)</option>
+          <option value="fx-rate">Exchange rate (currency pair)</option>
+          <option value="chain-height">Chain height (latest Demos block)</option>
         </select>
       </FieldRow>
-      <FieldRow id="oracle-params" label="Product parameters" error={errors.params} gatewayError={gatewayErrors.params}
-        help="Sent verbatim as the product's params (e.g. id=bitcoin for crypto-price; base/quote for fx-rate).">
-        <KeyValueEditor idPrefix="oracle-params" label="Product parameters" pairs={pairs}
-          onChange={(next) => onChange({
-            ...value,
-            params: Object.fromEntries(next.filter(([key]) => key.trim() !== "").map(([key, val]) => [key, val])),
-          })} />
-      </FieldRow>
+      {product === "crypto-price" && (
+        <FieldRow id="oracle-coin" label="Coin" required error={errors.params} gatewayError={gatewayErrors.params}
+          help="CoinGecko coin id — e.g. bitcoin, ethereum, solana.">
+          <input id="oracle-coin" className="form-control mono" value={String(params.id ?? "")}
+            placeholder="bitcoin" aria-invalid={Boolean(errors.params)}
+            onChange={(event) => setParam("id", event.target.value)} />
+        </FieldRow>
+      )}
+      {product === "fx-rate" && (
+        <div className="field-grid">
+          <FieldRow id="oracle-base" label="From currency" required error={errors.params} gatewayError={gatewayErrors.params}
+            help="ISO code, e.g. USD.">
+            <input id="oracle-base" className="form-control mono" value={String(params.base ?? "")}
+              placeholder="USD" aria-invalid={Boolean(errors.params)}
+              onChange={(event) => setParam("base", event.target.value)} />
+          </FieldRow>
+          <FieldRow id="oracle-quote" label="To currency" required
+            help="ISO code, e.g. EUR.">
+            <input id="oracle-quote" className="form-control mono" value={String(params.quote ?? "")}
+              placeholder="EUR" onChange={(event) => setParam("quote", event.target.value)} />
+          </FieldRow>
+        </div>
+      )}
+      {product === "chain-height" && (
+        <p className="field-hint">No parameters needed — this returns the latest Demos block height.</p>
+      )}
     </div>
   );
 }

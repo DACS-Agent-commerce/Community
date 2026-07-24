@@ -17,6 +17,6 @@ test("the recorded deal is inspectable and cannot dispatch a purchase", async ({
   await expect(page.locator(".tc-outcome-badge")).toContainText("Recorded deal settled & verified");
   await expect(page.locator(".tc-stage-done")).toHaveCount(5);
   const payment = page.getByRole("link", { name: /verify tx 53dd8a7b…e0ff24/ });
-  await expect(payment).toHaveAttribute("href", "https://explorer.demos.sh/tx/53dd8a7b34f7d29377c27599e17a5742b2c7296dd048b1235c04359957e0ff24");
+  await expect(payment).toHaveAttribute("href", "https://explorer.demos.sh/transactions/53dd8a7b34f7d29377c27599e17a5742b2c7296dd048b1235c04359957e0ff24");
   expect(procurementRequests).toBe(0);
 });
