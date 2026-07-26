@@ -455,10 +455,29 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   assert.equal(indexDivergence.divergent, true);
   assert.equal(indexDivergence.refsVerified, false, "#224 equal-length index-set mismatch must be excluded");
 
+  const kindFixture = await vector("kind-substitution-job", 30);
+  const kindScope = signedScope(kindFixture.sellerBundle, "bundle");
+  kindScope.phaseSummary = [{ index: 2, kind: "commit-agreement", outcome: "ok" }];
+  maps.set(kindFixture.locators.seller, {
+    ...kindScope,
+    signatures: [await sign(kindScope, "bundle", 0, true), await sign(kindScope, "bundle", 1, true)],
+    anchoredByRole: "seller",
+  });
+  const kindDeal = registeredDeal("kind-substitution-job", kindFixture.locators.buyer, kindFixture.locators.seller);
+  const kindDivergence = reconcileCurrentCopies(
+    kindDeal,
+    dids[1],
+    await graphAt(kindFixture.locators.buyer, kindFixture.listing, kindFixture.locators.listing),
+    await graphAt(kindFixture.locators.seller, kindFixture.listing, kindFixture.locators.listing),
+  );
+  assert.equal(kindDivergence.divergent, true);
+  assert.equal(kindDivergence.refsVerified, false, "#254 same-index phase kind mismatch must be excluded");
+
   const reputation = deriveSellerReputation([
     cleanRecord,
     dealRecord(outcomeDeal, outcomeDivergence),
     dealRecord(indexDeal, indexDivergence),
+    dealRecord(kindDeal, kindDivergence),
   ], 0, 200);
   assert.equal(reputation.bundleCount, 1);
   assert.equal(reputation.completionRate, 1);
@@ -466,7 +485,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
 });
 
 test("advisory skew stays unified and an invalid seller copy receipts the verified buyer locator", async () => {
-  const advisoryFixture = await vector("advisory-job", 30);
+  const advisoryFixture = await vector("advisory-job", 40);
   const advisoryScope = signedScope(advisoryFixture.sellerBundle, "bundle");
   advisoryScope.finalisedAt = 121;
   maps.set(advisoryFixture.locators.seller, {
@@ -484,7 +503,7 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   assert.equal(advisory.divergent, false);
   assert.equal(advisory.refsVerified, true);
 
-  const fallbackFixture = await vector("fallback-job", 40);
+  const fallbackFixture = await vector("fallback-job", 50);
   maps.set(fallbackFixture.locators.seller, { ...fallbackFixture.sellerBundle, signatures: [] });
   const fallbackDeal = registeredDeal("fallback-job", fallbackFixture.locators.buyer, fallbackFixture.locators.seller);
   const fallback = reconcileCurrentCopies(
@@ -495,13 +514,14 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   );
   assert.equal(fallback.buyerOk, true);
   assert.equal(fallback.sellerOk, false);
-  assert.equal(fallback.refsVerified, true);
+  assert.equal(fallback.refsVerified, false, "#255 requires authoritative absence before one-copy attribution");
   assert.equal(fallback.selectedLocator, fallbackFixture.locators.buyer);
   const reputation = deriveSellerReputation([dealRecord(fallbackDeal, fallback)], 0, 200);
-  assert.equal(reputation.bundleRefs?.[0]?.anchor.locator, fallbackFixture.locators.buyer);
+  assert.equal(reputation.bundleCount, 0);
+  assert.deepEqual(reputation.bundleRefs, []);
 });
 
-test("indexer reaches a valid current seller copy when the buyer anchor is unreadable", async () => {
+test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
   const fixture = await vector("seller-fallback-job", 80);
   maps.delete(fixture.locators.buyer);
   const originalFetch = globalThis.fetch;
@@ -524,9 +544,10 @@ test("indexer reaches a valid current seller copy when the buyer anchor is unrea
       deals: [deal],
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals.length, 1);
-    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].refsVerified, false);
     assert.equal(record.deals[0].anchoredByRole, "seller");
-    assert.equal(record.reputation.bundleRefs?.[0]?.anchor.locator, fixture.locators.seller);
+    assert.equal(record.reputation.bundleCount, 0);
+    assert.deepEqual(record.reputation.bundleRefs, []);
   } finally {
     globalThis.fetch = originalFetch;
   }

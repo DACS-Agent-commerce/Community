@@ -281,7 +281,7 @@ export async function indexRegistration(
     );
     const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
-    const strictRefsVerified = authoritative.refsOk && !divergent;
+    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {

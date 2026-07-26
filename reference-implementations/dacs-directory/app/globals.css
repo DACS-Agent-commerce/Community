@@ -380,6 +380,7 @@ main { max-width: 1200px; }
 .trust-checks p { color: var(--text-secondary); font-size: 0.78rem; }
 .check { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; border-radius: 50%; background: var(--chip-gray-bg); color: var(--text-muted); font-weight: 800; }
 .check.ok { background: var(--green-soft); color: var(--green-strong); }
+.inspection-card { margin-top: 20px; }
 .technical-disclosure { margin-top: 20px; border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; }
 .technical-disclosure summary { padding: 14px 18px; cursor: pointer; font-size: 0.82rem; font-weight: 700; }
 .technical-body { padding: 0 18px 18px; color: var(--text-secondary); font-size: 0.82rem; overflow-wrap: anywhere; }
