@@ -181,4 +181,34 @@ test.describe("/try procurement browser safety", () => {
     expect(submitted?.budgetUsdc).toBe(0.1);
     expect(submitted?.budgetDem).toBeUndefined();
   });
+
+  test("7. required Oracle parameters block dispatch and identify the invalid field", async ({ context, page }) => {
+    await installMockGateway(context);
+    await page.goto("/try");
+    await page.getByRole("button", { name: /Oracle Desk/ }).first().click();
+
+    const run = page.getByRole("button", { name: /Run the full deal/ });
+    const coin = page.getByLabel("Coin");
+    await expect(run).toBeEnabled();
+    await coin.fill("");
+    await expect(run).toBeDisabled();
+    await expect(coin).toHaveAttribute("aria-invalid", "true");
+    await expect(page.getByText("Required — enter a CoinGecko coin id.")).toBeVisible();
+
+    await page.getByLabel("Data product").selectOption("fx-rate");
+    const base = page.getByLabel("From currency");
+    const quote = page.getByLabel("To currency");
+    await expect(run).toBeEnabled();
+
+    await base.fill("");
+    await expect(run).toBeDisabled();
+    await expect(base).toHaveAttribute("aria-invalid", "true");
+    await expect(page.getByText("Required — enter the currency to convert from.")).toBeVisible();
+
+    await base.fill("USD");
+    await quote.fill("");
+    await expect(run).toBeDisabled();
+    await expect(quote).toHaveAttribute("aria-invalid", "true");
+    await expect(page.getByText("Required — enter the currency to convert to.")).toBeVisible();
+  });
 });

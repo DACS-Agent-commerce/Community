@@ -115,6 +115,36 @@ test("oracle product change resets params to the product defaults", () => {
   assert.deepEqual(height.params, {});
 });
 
+test("oracle validation requires the parameters for the selected product", () => {
+  assert.ok(validateAgentInput("oracle-desk", {
+    product: "crypto-price",
+    params: { id: "   " },
+  })["params.id"]);
+  assert.deepEqual(validateAgentInput("oracle-desk", {
+    product: "crypto-price",
+    params: { id: "bitcoin" },
+  }), {});
+
+  const missingBase = validateAgentInput("oracle-desk", {
+    product: "fx-rate",
+    params: { base: "", quote: "EUR" },
+  });
+  assert.ok(missingBase["params.base"]);
+  assert.equal(missingBase["params.quote"], undefined);
+
+  const missingQuote = validateAgentInput("oracle-desk", {
+    product: "fx-rate",
+    params: { base: "USD", quote: "" },
+  });
+  assert.equal(missingQuote["params.base"], undefined);
+  assert.ok(missingQuote["params.quote"]);
+
+  assert.deepEqual(validateAgentInput("oracle-desk", {
+    product: "chain-height",
+    params: {},
+  }), {});
+});
+
 test("repeatable rows add and remove with a minimum floor", () => {
   const one = [{ path: "a", content: "1" }];
   const two = addRow(one, { path: "", content: "" });
@@ -155,6 +185,14 @@ test("gateway validation errors map beside the relevant fields", () => {
   );
   assert.ok(oracle.byField.product?.includes("is not one of"));
   assert.deepEqual(oracle.global, []);
+
+  const oracleParam = mapGatewayErrors(
+    "input validation failed for oracle-desk",
+    ['field "params.id" is required'],
+    flattenInputKeys({ product: "crypto-price", params: { id: "" } }),
+  );
+  assert.ok(oracleParam.byField["params.id"]?.includes("is required"));
+  assert.deepEqual(oracleParam.global, []);
 
   // Real agent_error message observed live.
   const compliance = mapGatewayErrors(

@@ -164,25 +164,26 @@ function OracleForm({ value, onChange, errors, gatewayErrors }: AgentInputFormPr
         </select>
       </FieldRow>
       {product === "crypto-price" && (
-        <FieldRow id="oracle-coin" label="Coin" required error={errors.params} gatewayError={gatewayErrors.params}
+        <FieldRow id="oracle-coin" label="Coin" required error={errors["params.id"]} gatewayError={gatewayErrors["params.id"]}
           help="CoinGecko coin id — e.g. bitcoin, ethereum, solana.">
           <input id="oracle-coin" className="form-control mono" value={String(params.id ?? "")}
-            placeholder="bitcoin" aria-invalid={Boolean(errors.params)}
+            placeholder="bitcoin" aria-invalid={Boolean(errors["params.id"] || gatewayErrors["params.id"])}
             onChange={(event) => setParam("id", event.target.value)} />
         </FieldRow>
       )}
       {product === "fx-rate" && (
         <div className="field-grid">
-          <FieldRow id="oracle-base" label="From currency" required error={errors.params} gatewayError={gatewayErrors.params}
+          <FieldRow id="oracle-base" label="From currency" required error={errors["params.base"]} gatewayError={gatewayErrors["params.base"]}
             help="ISO code, e.g. USD.">
             <input id="oracle-base" className="form-control mono" value={String(params.base ?? "")}
-              placeholder="USD" aria-invalid={Boolean(errors.params)}
+              placeholder="USD" aria-invalid={Boolean(errors["params.base"] || gatewayErrors["params.base"])}
               onChange={(event) => setParam("base", event.target.value)} />
           </FieldRow>
-          <FieldRow id="oracle-quote" label="To currency" required
+          <FieldRow id="oracle-quote" label="To currency" required error={errors["params.quote"]} gatewayError={gatewayErrors["params.quote"]}
             help="ISO code, e.g. EUR.">
             <input id="oracle-quote" className="form-control mono" value={String(params.quote ?? "")}
-              placeholder="EUR" onChange={(event) => setParam("quote", event.target.value)} />
+              placeholder="EUR" aria-invalid={Boolean(errors["params.quote"] || gatewayErrors["params.quote"])}
+              onChange={(event) => setParam("quote", event.target.value)} />
           </FieldRow>
         </div>
       )}
