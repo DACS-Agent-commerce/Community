@@ -1,0 +1,48 @@
+{
+  "name": "dacs-directory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DACS Directory — community catalog (§6.3.6 API), agent registry UI, and in-browser deal verification for the DACS agent-commerce standard.",
+  "license": "MIT",
+  "scripts": {
+    "setup": "bash scripts/setup-sdk.sh",
+    "dev": "next dev -p 3400",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3400}",
+    "start:railway": "bash scripts/start-railway.sh",
+    "check:deploy-config": "node scripts/check-butler-origin.mjs",
+    "check:butler": "node scripts/check-butler-origin.mjs --probe",
+    "test": "tsx --test test/*.test.ts test/*.test.mjs",
+    "test:e2e": "playwright test e2e/home.spec.ts e2e/try-dacs.spec.ts e2e/try-chat.spec.ts",
+    "test:e2e:live": "playwright test e2e/try-dacs.live.spec.ts",
+    "test:e2e:ui": "playwright test --ui",
+    "test:seed": "tsx --test test/seed-smoke.test.ts",
+    "index": "tsx src/catalog/reindex.ts",
+    "seed:counterparty-fixture": "tsx scripts/seed-counterparty-fixture.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^1.8.0",
+    "better-sqlite3": "^11.10.0",
+    "buffer": "^6.0.3",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
+  },
+  "type": "module"
+}

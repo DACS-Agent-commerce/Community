@@ -1,0 +1,159 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import CounterpartyEvidenceRunner from "@/src/components/CounterpartyEvidenceRunner";
+import CopyText from "@/src/components/CopyText";
+import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
+import { inspectServicePath } from "@/src/catalog/inspection";
+import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
+import { loadCatalog } from "@/src/catalog/store";
+import { safeJsonLd } from "@/src/components/structuredData";
+import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
+
+export const dynamic = "force-dynamic";
+
+type Params = { seller: string; listingId: string; version: string };
+
+function findService(sellerClaim: string, listingId: string, version: string) {
+  const claim = decodeURIComponent(sellerClaim);
+  const id = decodeURIComponent(listingId);
+  for (const seller of loadCatalog().sellers) {
+    if (seller.primaryClaim !== claim) continue;
+    const listing = seller.listings.find((candidate) => candidate.listingId === id && String(candidate.version) === version);
+    if (listing) return { seller, listing };
+  }
+  return null;
+}
+
+export async function generateMetadata({ params }: { params: Promise<Params> }): Promise<Metadata> {
+  const { seller, listingId, version } = await params;
+  const found = findService(seller, listingId, version);
+  if (!found) return { title: "Service not found" };
+  const path = `/service/${encodeURIComponent(found.seller.primaryClaim)}/${encodeURIComponent(found.listing.listingId)}/${found.listing.version}`;
+  return {
+    title: found.listing.offering.title,
+    description: found.listing.offering.description ?? `A verifiable service offered by ${found.seller.displayName}.`,
+    alternates: {
+      canonical: path,
+      types: { "application/json": `/api/dacs/listings/${encodeURIComponent(found.listing.listingId)}/${found.listing.version}?seller=${encodeURIComponent(found.seller.primaryClaim)}` },
+    },
+  };
+}
+
+export default async function ServicePage({ params }: { params: Promise<Params> }) {
+  const { seller: sellerClaim, listingId, version } = await params;
+  const found = findService(sellerClaim, listingId, version);
+  if (!found) notFound();
+  const { seller, listing } = found;
+  const identity = tierMeta(seller.identityTier ?? "self-declared");
+  const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
+  const inspectHref = inspectServicePath(listing);
+  const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
+  const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
+  const isFixtureListing = listing.anchor.kind === "fixture";
+  const listingProfileLabel = isFixtureListing
+    ? "fixture listing"
+    : listing.artifactProfile === "dacs-v0.1"
+      ? "current DACS listing"
+      : "legacy SDK listing";
+  const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
+  const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
+  const noEndpointNote = isFixtureListing
+    ? "This fixture has no live engagement endpoint. Inspect the fixture contract before coordinating off-directory."
+    : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory.";
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "Service",
+    name: listing.offering.title,
+    description: listing.offering.description,
+    identifier: `${listing.listingId}@${listing.version}`,
+    provider: { "@type": "Organization", name: seller.displayName },
+    offers: listing.pricing.priceHint ? {
+      "@type": "Offer",
+      price: listing.pricing.priceHint,
+      priceCurrency: listing.pricing.currency,
+    } : undefined,
+  };
+
+  return (
+    <>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
+      <p className="meta"><Link href="/discover">← discover services</Link></p>
+      <section className="service-hero">
+        <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
+        <h1 className="h1">{listing.offering.title}</h1>
+        <p className="hero-sub">{listing.offering.description || "This seller has not supplied a service description."}</p>
+        <div className="service-provider-row">
+          <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
+          <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
+          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingProfileLabel}</span>
+          {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
+          {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
+          {isFixtureListing && <span className="badge">not chain anchored</span>}
+          {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
+            <span className="badge" title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listing itself is still verified from chain.">
+              unverified submission
+            </span>
+          )}
+        </div>
+        <div className="service-actions">
+          {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
+          <a className="btn secondary" href={inspectHref}>Inspect service</a>
+          <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
+        </div>
+        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : noEndpointNote}</p>
+      </section>
+
+      <div className="service-layout">
+        <section className="card" aria-labelledby="offer-heading">
+          <div className="eyebrow">the offer</div>
+          <h2 id="offer-heading" className="card-section-title">What to expect</h2>
+          <dl className="detail-list">
+            <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.pricing, listing.offering.negotiation)}</dd></div>
+            <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}${listing.pricing.unit ? ` · ${listing.pricing.unit}` : ""}` : "Not published"}</dd></div>
+            <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
+            <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>
+          </dl>
+          {listing.offering.tags.length > 0 && <div className="badges">{listing.offering.tags.map((tag) => <span className="badge" key={tag}>{tag}</span>)}</div>}
+        </section>
+
+        <aside className="card trust-card" aria-labelledby="trust-heading">
+          <div className="eyebrow">trust at a glance</div>
+          <h2 id="trust-heading" className="card-section-title">Three different checks</h2>
+          <ul className="trust-checks">
+            <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
+            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
+            <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed bundles passed strict verification</p></div></li>
+          </ul>
+        </aside>
+      </div>
+
+      <section className="card inspection-card" aria-labelledby="inspection-heading">
+        <div className="eyebrow">verifier handoff</div>
+        <h2 id="inspection-heading" className="card-section-title">Directory service profile</h2>
+        <dl className="detail-list compact">
+          <div><dt>Artifact</dt><dd className="mono">directory-service-profile</dd></div>
+          <div><dt>Maturity</dt><dd>listed</dd></div>
+          <div><dt>Limits</dt><dd>Roster maturity hint only; not reputation evidence and not source truth.</dd></div>
+        </dl>
+        <p className="note">This profile lets a verifier check the listing identity, artifact profile, and limitation flags before any service-specific sample or bundle adapter is trusted.</p>
+        <div className="button-row"><a className="btn secondary mono" href={inspectHref}>inspection JSON</a></div>
+      </section>
+
+      {isCounterpartyEvidenceDemo && <CounterpartyEvidenceRunner />}
+
+      <details className="technical-disclosure">
+        <summary>Technical listing details</summary>
+        <div className="technical-body">
+          <p><strong>Listing</strong> <span className="mono">{listing.listingId}@{listing.version}</span></p>
+          <p><strong>Artifact profile</strong> <span className="mono">{technicalArtifactProfile}</span></p>
+          <p><strong>Seller claim</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
+          <p><strong>Content hash</strong> <CopyText value={listing.contentHash} head={24} tail={8} /></p>
+          <p><strong>Anchor</strong> <CopyText value={listing.anchor.locator} head={24} tail={8} /></p>
+          <div className="button-row"><a href={apiHref} className="btn secondary mono">listing JSON</a><a href="/openapi.json" className="btn secondary mono">OpenAPI</a></div>
+        </div>
+      </details>
+    </>
+  );
+}

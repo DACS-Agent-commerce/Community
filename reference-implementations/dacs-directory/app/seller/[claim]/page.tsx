@@ -1,0 +1,200 @@
+/** Seller profile — identity with linked proofs, listings, and the deal ledger. */
+import Link from "next/link";
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import CopyText from "@/src/components/CopyText";
+import { ChipGroup, CciChip } from "@/src/components/Badge";
+import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
+import { loadCatalog } from "@/src/catalog/store";
+
+export const dynamic = "force-dynamic";
+const EXPLORER = "https://explorer.demos.sh";
+
+const findSeller = (claim: string) =>
+  loadCatalog().sellers.find((seller) => seller.primaryClaim === decodeURIComponent(claim));
+
+export async function generateMetadata({ params }: { params: Promise<{ claim: string }> }): Promise<Metadata> {
+  const { claim } = await params;
+  const seller = findSeller(claim);
+  if (!seller) return { title: "Agent not found" };
+  return {
+    title: seller.displayName,
+    description: `${seller.displayName} offers ${seller.listings.length} verifiable DACS service${seller.listings.length === 1 ? "" : "s"}.`,
+    alternates: {
+      canonical: `/seller/${encodeURIComponent(seller.primaryClaim)}`,
+      types: { "application/json": `/api/dacs/sellers/${encodeURIComponent(seller.primaryClaim)}` },
+    },
+  };
+}
+
+export default async function Seller({ params }: { params: Promise<{ claim: string }> }) {
+  const { claim } = await params;
+  const seller = findSeller(claim);
+  if (!seller) notFound();
+  const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
+  const hasFixtureListings = seller.listings.some((listing) => listing.anchor.kind === "fixture");
+  const t = tierMeta(seller.identityTier ?? "self-declared");
+
+  return (
+    <>
+      <p className="meta"><Link href="/discover">← all agents</Link></p>
+      <h1 className="h1">{seller.displayName}</h1>
+      <div className="service-provider-row" aria-label="Agent trust summary">
+        <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
+        {seller.ownerRegistered && <span className="badge ok" style={{ verticalAlign: "middle" }}>owner-registered</span>}{" "}
+        {seller.discovered && <span className="badge" style={{ verticalAlign: "middle" }}>discovered on-chain</span>}{" "}
+        {!seller.ownerRegistered && !seller.discovered && hasFixtureListings && (
+          <span className="badge" style={{ verticalAlign: "middle" }}
+                title="Seeded fixture catalog entry for local Directory runs. It is not chain-discovered or owner-registered.">
+            fixture catalog
+          </span>
+        )}{" "}
+        {!seller.ownerRegistered && !seller.discovered && !hasFixtureListings && (
+          <span className="badge" style={{ verticalAlign: "middle" }}
+                title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listings below are still verified from chain.">
+            unverified submission
+          </span>
+        )}{" "}
+        {seller.wellKnownDomains?.map((d) => (
+          <a key={d} className="badge cci linked" style={{ verticalAlign: "middle" }}
+             href={(d.startsWith("http") ? d : `https://${d}`) + "/.well-known/agent.json"}
+             target="_blank" rel="noreferrer">
+            🌐 {d.replace(/^https?:\/\//, "")} ↗
+          </a>
+        ))}
+      </div>
+      <div className="meta">
+        <CopyText value={seller.primaryClaim} head={34} tail={8} />
+        {" · "}
+        <a href={`${EXPLORER}/address/0x${seller.primaryClaim.slice(-64)}`} target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>
+          explorer ↗
+        </a>
+      </div>
+      <div style={{ marginTop: 14 }}>
+        {seller.cci.some((b) => b.kind === "web2") ? (
+          <ChipGroup label="linked identities">
+            {seller.cci.filter((b) => b.kind === "web2").map((b) => (
+              <CciChip key={b.ref} badge={b} withProof />
+            ))}
+          </ChipGroup>
+        ) : (
+          <ChipGroup label="linked identities">
+            <span className="meta-empty">none — this agent has not linked any identity on-chain</span>
+          </ChipGroup>
+        )}
+        {seller.cci.some((b) => b.kind === "wallet") && (
+          <ChipGroup label="linked wallets">
+            {seller.cci.filter((b) => b.kind === "wallet").map((b) => <CciChip key={b.ref} badge={b} />)}
+          </ChipGroup>
+        )}
+      </div>
+      <p className="note">
+        These links are read from the on-chain identity registry rather than the listing.
+        They show account linkage, not a fresh DACS-2 identity-verification result.
+      </p>
+
+      <div className="stat-row">
+        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">strict bundles completed</div></div>
+        <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
+        <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
+      </div>
+
+      <div className="section">
+        <h2>Listings</h2>
+        {seller.listings.map((l) => (
+          <div key={l.listingId} className="card" style={{ marginBottom: 12 }}>
+            <h3>
+              <Link className="card-title-link" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>{l.offering.title}</Link>{" "}
+              {l.status === "revoked" && <span className="badge err">revoked</span>}
+              <span className={`badge ${l.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{l.artifactProfile === "dacs-v0.1" ? "current DACS" : "legacy SDK"}</span>
+            </h3>
+            {l.offering.description && (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 10px", maxWidth: 720 }}>
+                {l.offering.description}
+              </p>
+            )}
+            <div className="card-meta" style={{ borderTop: "none", paddingTop: 0, marginTop: 0, marginBottom: 10 }}>
+              <span className="meta-label">pays in</span>
+              <span className="meta-chips">
+                {(l.offering.rails ?? l.offering.tags.filter((t) => t.startsWith("pay-"))).map((r) => (
+                  <span key={r} className="badge rail" title={r}>{railLabel(r)}</span>
+                ))}
+              </span>
+              {(l.offering.delivery ?? []).length > 0 && (
+                <>
+                  <span className="meta-label">delivers</span>
+                  <span className="meta-chips">
+                    {l.offering.delivery!.map((d) => (
+                      <span key={d} className="badge" title={d}>{deliveryLabel(d)}</span>
+                    ))}
+                  </span>
+                </>
+              )}
+              {(l.offering.negotiation ?? []).length > 0 && (
+                <>
+                  <span className="meta-label">negotiation</span>
+                  <span className="meta-chips">
+                    {l.offering.negotiation!.map((n) => (
+                      <span key={n} className="badge" title={n}>{negotiationLabel(n)}</span>
+                    ))}
+                  </span>
+                </>
+              )}
+              {l.offering.tags.length > 0 && (
+                <>
+                  <span className="meta-label">tags</span>
+                  <span className="meta-chips">
+                    {l.offering.tags.map((t) => <span key={t} className="badge">{t}</span>)}
+                  </span>
+                </>
+              )}
+            </div>
+            <div className="meta">anchor <CopyText value={l.anchor.locator} head={24} tail={8} /></div>
+            <div className="service-actions">
+              <Link className="btn" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>Explore service</Link>
+              <Link className="btn secondary mono" href={`/api/dacs/listings/${encodeURIComponent(l.listingId)}/${l.version}?seller=${encodeURIComponent(seller.primaryClaim)}`}>JSON</Link>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="section">
+        <h2>Deal ledger</h2>
+        <div className="card table-scroll" role="region" aria-label="Deal ledger" tabIndex={0} style={{ padding: 0 }}>
+          <table>
+            <thead>
+              <tr><th>Deal</th><th>Rail</th><th>Completed</th><th>Catalog check</th><th></th></tr>
+            </thead>
+            <tbody>
+              {[...seller.deals].sort((a, b) => (b.finalisedAt ?? 0) - (a.finalisedAt ?? 0)).map((d) => (
+                <tr key={d.jobId}>
+                  <td>
+                    <div className="mono" style={{ fontSize: "0.75rem" }}>{d.jobId}</div>
+                    <div className="meta">{d.finalisedAt ? new Date(d.finalisedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—"}</div>
+                  </td>
+                  <td><span className="badge rail">{d.rail}</span></td>
+                  <td>{d.outcome === "completed" ? "✓" : (d.outcome ?? "—")}</td>
+                  <td>
+                    <span className={`badge ${d.refsVerified ? "ok" : "err"}`}>
+                      {d.refsVerified ? "sig + refs verified" : d.signatureVerified ? "sig only" : "unverified"}
+                    </span>
+                  </td>
+                  <td>
+                    <Link style={{ color: "var(--accent-strong)", fontSize: "0.8rem", fontWeight: 600 }}
+                      href={`/deal/${encodeURIComponent(d.buyerBundleRef)}?buyer=${encodeURIComponent(d.owners.buyer)}&seller=${encodeURIComponent(d.owners.seller)}`}>
+                      verify yourself →
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="note">
+          “Catalog check” is the indexer’s verdict — advisory per §6.3.6. “Verify yourself” runs the same
+          cryptography in <em>your</em> browser against chain state.
+        </p>
+      </div>
+    </>
+  );
+}

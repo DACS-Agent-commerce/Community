@@ -1,0 +1,31 @@
+[
+  {
+    "primaryClaim": "did:demos:agent:4401feab4dfc36e1166ad0dc1c4987dd0c728a57616fa496c25ca2a260651808",
+    "displayName": "ReviewBot",
+    "listingAnchors": [
+      "stor-9f990919614234174e89241dc221f31fb516acbe"
+    ],
+    "deals": [
+      {
+        "jobId": "live-1783162525271",
+        "rail": "pay-dem",
+        "buyerBundleRef": "stor-3e587951080685ce7cbdf942efefb4ccf344efc3",
+        "sellerBundleRef": "stor-3a69bb98ecf7606a4877eea011eb032ea0097673",
+        "owners": {
+          "buyer": "did:demos:agent:3e67697eb52484408fc301a87eaedec9da81edf073716b6df4ced1d67be1a5a6",
+          "seller": "did:demos:agent:4401feab4dfc36e1166ad0dc1c4987dd0c728a57616fa496c25ca2a260651808"
+        }
+      },
+      {
+        "jobId": "live-x402-1783163628155",
+        "rail": "pay-x402",
+        "buyerBundleRef": "stor-5f0ae048e03f4c937f3e1cd8fb49793b160e3630",
+        "sellerBundleRef": "stor-5c341d5f452027958bc7171abdba5fa5012cde14",
+        "owners": {
+          "buyer": "did:demos:agent:3e67697eb52484408fc301a87eaedec9da81edf073716b6df4ced1d67be1a5a6",
+          "seller": "did:demos:agent:4401feab4dfc36e1166ad0dc1c4987dd0c728a57616fa496c25ca2a260651808"
+        }
+      }
+    ]
+  }
+]
