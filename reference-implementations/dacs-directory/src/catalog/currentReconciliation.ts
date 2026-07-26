@@ -15,11 +15,11 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
   const indexed = (value: unknown) => {
     const phases = records(value);
     if (!Array.isArray(value) || phases.length !== value.length) return null;
-    const byIndex = new Map<number, { outcome: unknown; errorClass: unknown }>();
+    const byIndex = new Map<number, { kind: unknown; outcome: unknown; errorClass: unknown }>();
     for (const phase of phases) {
       const index = phase.index;
       if (!Number.isSafeInteger(index) || Number(index) < 0 || byIndex.has(Number(index))) return null;
-      byIndex.set(Number(index), { outcome: phase.outcome, errorClass: phase.errorClass });
+      byIndex.set(Number(index), { kind: phase.kind, outcome: phase.outcome, errorClass: phase.errorClass });
     }
     return byIndex;
   };
@@ -28,9 +28,8 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
   if (!a || !b || a.size !== b.size) return true;
   for (const [index, facts] of a) {
     const other = b.get(index);
-    // The steward-defined predicate is closed: shared indices compare only
-    // outcome/errorClass. Widening it requires a new spec ruling.
-    if (!other || facts.outcome !== other.outcome || facts.errorClass !== other.errorClass) return true;
+    // DACS-5 §10.4.3 / §10.5.1: shared indices compare kind/outcome/errorClass.
+    if (!other || facts.kind !== other.kind || facts.outcome !== other.outcome || facts.errorClass !== other.errorClass) return true;
   }
   return false;
 }
@@ -65,7 +64,7 @@ export function reconcileCurrentCopies(
     buyerOk && sellerOk && currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph!.bundle),
   );
   const authoritative = sellerOk ? sellerGraph! : buyerGraph;
-  const refsVerified = Boolean((sellerOk || buyerOk) && !divergent && authoritative.refsVerified);
+  const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
   const sellerOutcome = authoritative === sellerGraph
     ? String(authoritative.bundle.outcome ?? "")
     : flipOutcome(String(authoritative.bundle.outcome ?? ""));

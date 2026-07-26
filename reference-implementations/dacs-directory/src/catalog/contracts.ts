@@ -39,6 +39,16 @@ export const listingSummarySchema = {
     status: { enum: ["active", "revoked"] },
     catalogObservedAt: { type: "integer" },
     reputationHint: { type: "object" },
+    inspection: {
+      type: "object",
+      required: ["artifactType", "maturity", "href"],
+      additionalProperties: false,
+      properties: {
+        artifactType: { const: "directory-service-profile" },
+        maturity: { enum: ["listed", "sample-backed", "callable", "strict-bundle-history", "live-paid"] },
+        href: { type: "string", format: "uri-reference" },
+      },
+    },
   },
 } as const;
 
@@ -131,6 +141,7 @@ export const directoryManifest = (origin: string) => ({
   openapi: `${origin}/openapi.json`,
   schemas: { listingSummary: `${origin}/schemas/listing-summary.schema.json` },
   status: `${origin}/api/dacs/status`,
+  inspectService: `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`,
   artifactProfiles: {
     current: "dacs-v0.1",
     compatibility: "legacy-sdk-v0.1",
@@ -189,6 +200,17 @@ export const openApiDocument = (origin: string) => ({
           { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
         ],
         responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+      },
+    },
+    "/api/dacs/inspect-service/{listingId}/{version}": {
+      get: {
+        summary: "Retrieve a verifier-ready Directory service profile envelope",
+        parameters: [
+          { name: "listingId", in: "path", required: true, schema: { type: "string" } },
+          { name: "version", in: "path", required: true, schema: { type: "integer" } },
+          { name: "seller", in: "query", required: true, description: "Identifies the seller-scoped listing ID", schema: { type: "string", minLength: 1, pattern: "\\S" } },
+        ],
+        responses: { "200": { description: "Directory service profile inspection envelope" }, "400": { description: "Seller is required" }, "404": { description: "Listing not found" } },
       },
     },
     "/api/dacs/sellers/{primaryClaimRef}": {

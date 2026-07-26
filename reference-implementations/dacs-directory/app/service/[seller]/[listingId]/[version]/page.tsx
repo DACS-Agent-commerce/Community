@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import CounterpartyEvidenceRunner from "@/src/components/CounterpartyEvidenceRunner";
 import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
+import { inspectServicePath } from "@/src/catalog/inspection";
 import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
@@ -46,6 +47,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const { seller, listing } = found;
   const identity = tierMeta(seller.identityTier ?? "self-declared");
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
+  const inspectHref = inspectServicePath(listing);
   const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
@@ -97,6 +99,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="service-actions">
           {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
           <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
+          <a className="btn secondary" href={inspectHref}>Inspect service</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
         <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : noEndpointNote}</p>
@@ -125,6 +128,18 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           </ul>
         </aside>
       </div>
+
+      <section className="card inspection-card" aria-labelledby="inspection-heading">
+        <div className="eyebrow">verifier handoff</div>
+        <h2 id="inspection-heading" className="card-section-title">Directory service profile</h2>
+        <dl className="detail-list compact">
+          <div><dt>Artifact</dt><dd className="mono">directory-service-profile</dd></div>
+          <div><dt>Maturity</dt><dd>listed</dd></div>
+          <div><dt>Limits</dt><dd>Roster maturity hint only; not reputation evidence and not source truth.</dd></div>
+        </dl>
+        <p className="note">This profile lets a verifier check the listing identity, artifact profile, and limitation flags before any service-specific sample or bundle adapter is trusted.</p>
+        <div className="button-row"><a className="btn secondary mono" href={inspectHref}>inspection JSON</a></div>
+      </section>
 
       {isCounterpartyEvidenceDemo && <CounterpartyEvidenceRunner />}
 
