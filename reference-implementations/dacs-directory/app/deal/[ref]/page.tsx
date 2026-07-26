@@ -70,7 +70,7 @@ export default async function Deal({
         <div className="badges" style={{ marginTop: 10 }}>
           {txRefs.map((t) => (
             <a key={t.txHash} className="badge rail linked" target="_blank" rel="noreferrer"
-               href={t.rail === "demos" ? `${EXPLORER}/tx/${t.txHash}` : `https://sepolia.basescan.org/tx/${t.txHash}`}>
+               href={t.rail === "demos" ? `${EXPLORER}/transactions/${t.txHash}` : `https://sepolia.basescan.org/tx/${t.txHash}`}>
               settlement tx · {t.rail} ↗
             </a>
           ))}

@@ -101,7 +101,7 @@ export default function HomeDealDemo() {
                   <div className="tc-receipt">
                     <span className="tc-receipt-tag">{turn.kind === "pay" ? "payment" : "receipt"}</span>
                     {turn.txRef
-                      ? <a href={`${EXPLORER}/tx/${turn.txRef}`} target="_blank" rel="noreferrer">tx {compact(turn.txRef)} ↗</a>
+                      ? <a href={`${EXPLORER}/transactions/${turn.txRef}`} target="_blank" rel="noreferrer">tx {compact(turn.txRef)} ↗</a>
                       : <code>{compact(turn.anchorRef, 10, 5)}</code>}
                   </div>
                 )}

@@ -256,8 +256,17 @@ export function validateAgentInput(name: string, input: Record<string, unknown>)
       break;
     }
     case "oracle-desk": {
-      if (!(ORACLE_PRODUCTS as readonly string[]).includes(str(input.product))) {
+      const product = str(input.product);
+      if (!(ORACLE_PRODUCTS as readonly string[]).includes(product)) {
         errors.product = `Pick one of: ${ORACLE_PRODUCTS.join(", ")}.`;
+        break;
+      }
+      const params = rec(input.params);
+      if (product === "crypto-price") {
+        requireText("params.id", params.id, "Required — enter a CoinGecko coin id.");
+      } else if (product === "fx-rate") {
+        requireText("params.base", params.base, "Required — enter the currency to convert from.");
+        requireText("params.quote", params.quote, "Required — enter the currency to convert to.");
       }
       break;
     }

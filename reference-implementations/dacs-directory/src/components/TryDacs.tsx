@@ -122,7 +122,7 @@ function paymentRailLabel(rail: PaymentRail): string {
 function transactionExplorer(txRef: string): string {
   return /^0x[0-9a-f]{64}$/i.test(txRef)
     ? `${BASE_SEPOLIA_EXPLORER}/tx/${encodeURIComponent(txRef)}`
-    : `${EXPLORER}/tx/${encodeURIComponent(txRef)}`;
+    : `${EXPLORER}/transactions/${encodeURIComponent(txRef)}`;
 }
 
 function defaultPaymentRail(profile: ProcurementProfile): PaymentRail {
