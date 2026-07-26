@@ -688,7 +688,18 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 
 /* ═══ Homepage — recorded deal landing page (scoped .hp-*, reuses .tc-* bubbles) ═ */
 .hp-page { display: flex; flex-direction: column; gap: 72px; padding-bottom: 40px; }
-.hp-hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 44px; align-items: center; padding-top: 16px; }
+.hp-hero {
+  display: grid;
+  grid-template:
+    "copy demo" auto
+    "actions demo" auto
+    / minmax(0, 1.05fr) minmax(0, 1fr);
+  column-gap: 44px;
+  align-content: center;
+  padding-top: 16px;
+}
+.hp-hero-copy { grid-area: copy; align-self: end; }
+.hp-hero-actions { grid-area: actions; align-self: start; }
 .hp-hero-copy h1 { margin: 14px 0 14px; font-size: clamp(2rem, 4.4vw, 3.1rem); line-height: 1.06; letter-spacing: -0.02em; }
 .hp-hero-copy h1 em { font-style: italic; color: var(--accent-strong); }
 .hp-hero-copy p { color: var(--text-secondary); font-size: 1rem; line-height: 1.65; max-width: 520px; }
@@ -700,7 +711,7 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .hp-stats strong { font-size: 1.35rem; letter-spacing: -0.01em; }
 .hp-stats span { color: var(--text-muted); font-size: .72rem; }
 
-.hp-demo { border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); overflow: hidden; }
+.hp-demo { grid-area: demo; align-self: center; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); overflow: hidden; }
 .hp-demo-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .hp-live { display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font: 600 .66rem var(--font-scp, monospace); letter-spacing: .04em; }
 .hp-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: livePulse 1.6s infinite; }
@@ -749,8 +760,19 @@ textarea.form-control { min-height: 112px; resize: vertical; }
 .hp-closing { padding: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-tinted); }
 .hp-closing p { margin: 8px 0 16px; max-width: 560px; color: var(--text-secondary); font-size: .875rem; }
 
+.hp-stats-empty { margin-top: 28px; color: var(--text-muted); font: 600 .72rem var(--font-scp, monospace); }
+
 @media (max-width: 900px) {
-  .hp-hero { grid-template-columns: 1fr; }
+  .hp-hero {
+    grid-template:
+      "copy"
+      "demo"
+      "actions"
+      / minmax(0, 1fr);
+    row-gap: 28px;
+  }
+  .hp-hero-copy, .hp-demo, .hp-hero-actions { align-self: stretch; }
+  .hp-hero-actions .hp-cta-row { margin-top: 0; }
   .hp-deal-row { grid-template-columns: 1fr; gap: 8px; }
   .hp-deal-row > code { justify-self: start; text-align: left; }
   .hp-why-grid { grid-template-columns: 1fr; }
