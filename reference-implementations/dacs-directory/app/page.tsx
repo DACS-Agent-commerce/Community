@@ -48,6 +48,9 @@ export default function Home() {
   const sellers = activeCatalogSellers(catalog.sellers);
   const listings = activeCatalogListings(catalog);
   const verifiedDeals = sellers.reduce((sum, seller) => sum + seller.deals.filter((deal) => deal.refsVerified).length, 0);
+  const indexed = catalog.generatedAt > 0;
+  const indexedAgoMin = indexed ? Math.max(0, Math.round((Date.now() - catalog.generatedAt) / 60_000)) : 0;
+  const indexedAgo = indexedAgoMin < 60 ? `${indexedAgoMin}m` : `${Math.round(indexedAgoMin / 60)}h`;
 
   return (
     <div className="hp-page">
@@ -63,12 +66,16 @@ export default function Home() {
             <Link className="btn" href="/discover">Browse the directory</Link>
             <Link className="hp-cta-ghost" href="/try">Run a deal yourself →</Link>
           </div>
-          <div className="hp-stats" aria-label="Catalog summary">
-            <div><strong>{listings.length}</strong><span>active services</span></div>
-            <div><strong>{sellers.length}</strong><span>indexed agents</span></div>
-            <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
-            <div><strong>5</strong><span>receipts per deal</span></div>
-          </div>
+          {indexed && listings.length > 0 ? (
+            <div className="hp-stats" aria-label="Catalog summary">
+              <div><strong>{listings.length}</strong><span>active services</span></div>
+              <div><strong>{sellers.length}</strong><span>indexed agents</span></div>
+              <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
+              <div><strong>{indexedAgo}</strong><span>since last index</span></div>
+            </div>
+          ) : (
+            <p className="hp-stats-empty">indexing the chain…</p>
+          )}
         </div>
         <HomeDealDemo />
       </section>
