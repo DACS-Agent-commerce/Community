@@ -32,6 +32,11 @@ export function isNeutralCancellation(
     ? listingTerms as Record<string, unknown> : undefined;
   const phases = Array.isArray(phaseSummary) ? phaseSummary.filter((phase): phase is Record<string, unknown> =>
     Boolean(phase && typeof phase === "object" && !Array.isArray(phase))) : [];
+  // PAYEE-BOUND COUPLING (issue #17 F2): site (b) of 3. Only "commit-agreement" is recognized
+  // as commit here. When payee-bound support lands, a session that committed via
+  // "commit-payee-bound-agreement" (#236) must also count as commitReached — otherwise a
+  // post-commit abort mis-scores as ST-10 reputation-neutral. Move this together with shapeOk's
+  // discriminator and the SEPARATORS domain in evidenceGraph.ts / bundlePolicy.ts.
   const commitReached = phases.some((phase) => phase.kind === "commit-agreement" && phase.outcome === "ok");
   return (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
     marker?.claimedPolicy === "pre-commit" && terms?.cancellationPolicy === "pre-commit" && !commitReached;
