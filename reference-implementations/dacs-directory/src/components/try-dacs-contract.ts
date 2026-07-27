@@ -48,7 +48,15 @@ export type ProcurementProfile = {
     hardTimeoutSec: number;
     protocolFloorSec: number;
   };
-  confirmationGates: string[];
+  executionControl: {
+    model: "server-orchestrated";
+    interactiveConfirmation: false;
+  };
+  buyerControl: {
+    model: "gateway-custodied-demo";
+    acceptsExternalDacsIdentity: false;
+    acceptsExternalPaymentSigner: false;
+  };
   paymentRails: PaymentRail[];
   railInputs: ProcurementRailInput[];
   railReadiness: Record<PaymentRail, ProcurementRailReadiness | undefined>;
@@ -346,6 +354,47 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
         throw new ButlerContractError(`${path}.railInputs`, `an input schema for ${rail}`);
       }
     }
+    let executionControl: ProcurementProfile["executionControl"];
+    if (profile.executionControl === undefined) {
+      // One-release compatibility for the already-deployed gateway contract.
+      // `confirmationGates` described phases but the gateway never paused;
+      // normalize that old shape to what it actually did.
+      requiredStringArray(profile.confirmationGates, `${path}.confirmationGates`);
+      executionControl = { model: "server-orchestrated", interactiveConfirmation: false };
+    } else {
+      const source = requiredRecord(profile.executionControl, `${path}.executionControl`);
+      if (source.model !== "server-orchestrated" || source.interactiveConfirmation !== false) {
+        throw new ButlerContractError(
+          `${path}.executionControl`,
+          'the supported server-orchestrated, non-interactive execution model',
+        );
+      }
+      executionControl = { model: "server-orchestrated", interactiveConfirmation: false };
+    }
+    let buyerControl: ProcurementProfile["buyerControl"];
+    if (profile.buyerControl === undefined) {
+      // The legacy gateway has always used its operator-held buyer wallets.
+      buyerControl = {
+        model: "gateway-custodied-demo",
+        acceptsExternalDacsIdentity: false,
+        acceptsExternalPaymentSigner: false,
+      };
+    } else {
+      const source = requiredRecord(profile.buyerControl, `${path}.buyerControl`);
+      if (source.model !== "gateway-custodied-demo"
+        || source.acceptsExternalDacsIdentity !== false
+        || source.acceptsExternalPaymentSigner !== false) {
+        throw new ButlerContractError(
+          `${path}.buyerControl`,
+          "the supported gateway-custodied demo buyer model",
+        );
+      }
+      buyerControl = {
+        model: "gateway-custodied-demo",
+        acceptsExternalDacsIdentity: false,
+        acceptsExternalPaymentSigner: false,
+      };
+    }
     return {
       id: requiredString(profile.id, `${path}.id`),
       title: requiredString(profile.title, `${path}.title`),
@@ -362,7 +411,8 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
         hardTimeoutSec: requiredNumber(timing.hardTimeoutSec, `${path}.timing.hardTimeoutSec`),
         protocolFloorSec: requiredNumber(timing.protocolFloorSec, `${path}.timing.protocolFloorSec`),
       },
-      confirmationGates: requiredStringArray(profile.confirmationGates, `${path}.confirmationGates`),
+      executionControl,
+      buyerControl,
       paymentRails,
       railInputs,
       railReadiness,

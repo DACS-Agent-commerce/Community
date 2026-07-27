@@ -1053,6 +1053,9 @@ export default function TryDacs() {
                   <span><strong>{selectedRailReadiness.railGovernance.conformantAuthority ? "Canonical rail authority" : "Operator-provisional rail authority"}</strong><small>{selectedRailReadiness.railGovernance.conformantAuthority ? "Authority conforms to the current DACS rail registry rules." : "Usable in this live demo while the standardised rail authority is being agreed."}</small></span>
                   <a href={selectedRailReadiness.railGovernance.disclosure} target="_blank" rel="noreferrer">Read disclosure ↗</a>
                 </div>}
+                <div className="rail-disclosure hosted-buyer" role="note">
+                  <span><strong>Hosted demo buyer · automatic execution</strong><small>The gateway runs every phase server-side with its demo identity and wallets. It does not pause for confirmations or accept your own DACS identity or payment signer.</small></span>
+                </div>
               </div>}
               <AgentInputForm agent={selected} value={inputValue} onChange={editInput} errors={localErrors} gatewayErrors={gatewayFieldErrors} />
               <div className="job-actions">

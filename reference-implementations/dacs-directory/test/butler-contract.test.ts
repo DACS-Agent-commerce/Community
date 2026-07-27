@@ -47,7 +47,12 @@ const oracleProfile = {
   fields: [{ name: "product", type: "string", required: true }],
   sampleInput: { product: "crypto-price", params: { id: "bitcoin" } },
   timing: { healthyMinSec: 60, healthyMaxSec: 90, hardTimeoutSec: 180, protocolFloorSec: 0 },
-  confirmationGates: ["commit-agreement", "pay-dem"],
+  executionControl: { model: "server-orchestrated", interactiveConfirmation: false },
+  buyerControl: {
+    model: "gateway-custodied-demo",
+    acceptsExternalDacsIdentity: false,
+    acceptsExternalPaymentSigner: false,
+  },
   paymentRails: ["pay-dem", "pay-x402"],
   railInputs: [
     {
@@ -113,6 +118,8 @@ test("parses the live procurement options and maps supported profiles to forms",
   assert.deepEqual(procurementProfileCard(profile!, "pay-x402").exampleInput, oracleProfile.railInputs[1]!.sampleInput);
   assert.equal(procurementRailInput(profile!, "pay-x402").rail, "pay-x402");
   assert.equal(profile!.railReadiness["pay-x402"]?.railGovernance?.status, "operator-provisional");
+  assert.equal(profile!.executionControl.interactiveConfirmation, false);
+  assert.equal(profile!.buyerControl.acceptsExternalPaymentSigner, false);
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, executable: "yes" }] }), ButlerContractError);
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railInputs: oracleProfile.railInputs.slice(0, 1) }] }), ButlerContractError);
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railInputs: [...oracleProfile.railInputs, oracleProfile.railInputs[0]] }] }), ButlerContractError);
@@ -120,6 +127,26 @@ test("parses the live procurement options and maps supported profiles to forms",
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, railReadiness: { ...oracleProfile.railReadiness, "pay-x402": { ...oracleProfile.railReadiness["pay-x402"], railGovernance: { ...oracleProfile.railReadiness["pay-x402"].railGovernance, disclosure: "javascript:alert(1)" } } } }] }), ButlerContractError);
   assert.throws(() => parseProcurementProfiles({ profiles: [{ ...oracleProfile, paymentRails: ["pay-magic"] }] }), ButlerContractError);
   assert.throws(() => procurementProfileCard({ ...profile!, id: "future-profile" }), ButlerContractError);
+});
+
+test("normalizes the deployed legacy control fields without claiming confirmations exist", () => {
+  const legacy = {
+    ...oracleProfile,
+    executionControl: undefined,
+    buyerControl: undefined,
+    confirmationGates: ["commit-agreement", "pay-dem"],
+  };
+  const [profile] = parseProcurementProfiles({ profiles: [legacy] });
+  assert.deepEqual(profile?.executionControl, {
+    model: "server-orchestrated",
+    interactiveConfirmation: false,
+  });
+  assert.deepEqual(profile?.buyerControl, {
+    model: "gateway-custodied-demo",
+    acceptsExternalDacsIdentity: false,
+    acceptsExternalPaymentSigner: false,
+  });
+  assert.equal("confirmationGates" in (profile ?? {}), false);
 });
 
 test("accepts running and completed procurement envelopes", () => {
