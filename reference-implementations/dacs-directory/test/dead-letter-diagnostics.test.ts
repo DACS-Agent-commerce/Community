@@ -115,12 +115,20 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   }
 });
 
-test("chain reset cleanup removes derived failures but preserves registrations", () => {
+test("chain reset cleanup removes active failures but preserves registrations and first-observation history", () => {
   const target = locator("6");
   store.saveRegistrations([{ primaryClaim: "did:demos:agent:registered", displayName: "registered", listingAnchors: [] }]);
   store.recordArtifactFailure(target, "listing", "STORAGE_UNREADABLE", "old chain", 1);
+  const firstSeenAt = store.indexerDiagnostics({ deadLetterLocator: target })
+    .deadLetterDiagnostics.items[0].firstSeenAt;
   store.clearChainDerivedArtifacts();
   assert.equal(store.indexerDiagnostics().deadLetters, 0);
   assert.equal(store.loadRetryableArtifacts(Date.now() + 60_000).length, 0);
   assert.equal(store.loadRegistrations()[0]?.displayName, "registered");
+
+  store.recordArtifactFailure(target, "listing", "STORAGE_UNREADABLE", "replacement chain", 1);
+  assert.equal(
+    store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items[0].firstSeenAt,
+    firstSeenAt,
+  );
 });
