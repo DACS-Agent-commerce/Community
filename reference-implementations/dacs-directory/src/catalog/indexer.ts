@@ -26,6 +26,7 @@ import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCo
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
@@ -75,8 +76,13 @@ export function listingBindingRejection(
   anchorOwner: string | undefined,
   registrationClaim: string,
 ): ListingRejectionCode | null {
-  const expected = registrationClaim.toLowerCase();
-  if (sellerClaim.toLowerCase() !== expected) return "SELLER_CLAIM_BINDING";
+  // §6.3.1 canonical comparison: only the `did` scheme token is case-forgiven.
+  // An uppercase key component, `did:DEMOS:…` method casing, or `demos:0x…`
+  // address notation never canonicalises, so it never binds.
+  const expected = canonicalDemosAgentClaim(registrationClaim);
+  if (expected === null || canonicalDemosAgentClaim(sellerClaim) !== expected) {
+    return "SELLER_CLAIM_BINDING";
+  }
   if (ownerClaim(anchorOwner) !== expected) return "OWNER_CLAIM_BINDING";
   return null;
 }
