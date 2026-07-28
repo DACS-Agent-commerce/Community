@@ -107,6 +107,17 @@ db.exec(`
     last_seen_at INTEGER NOT NULL,
     observations INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS listing_rejections (
+    locator TEXT NOT NULL,
+    registration_claim TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY(locator, registration_claim)
+  );
+  CREATE INDEX IF NOT EXISTS listing_rejections_recent_idx
+    ON listing_rejections(last_seen_at DESC, locator);
 `);
 
 const readLegacy = <T>(path: string, fallback: T): T =>
@@ -173,6 +184,7 @@ export const saveScanState = (state: ScanState): void => setJson("scan-state", s
  * not rewrite an old failure's origin time as the rebuild time.
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
 });
@@ -262,6 +274,29 @@ export function recordArtifactFailure(locator: string, kind: string, code: strin
   const retries = Number.isSafeInteger(maxRetries) && maxRetries >= 1 ? maxRetries : 5;
   recordArtifactFailureTransaction(locator, kind, code, message, retries);
 }
+
+export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
+
+export function recordListingRejection(
+  locator: string,
+  registrationClaim: string,
+  code: ListingRejectionCode,
+): void {
+  const now = Date.now();
+  db.prepare(`INSERT INTO listing_rejections(
+      locator,registration_claim,reason_code,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,1,?,?)
+    ON CONFLICT(locator,registration_claim) DO UPDATE SET
+      reason_code=excluded.reason_code,
+      occurrences=listing_rejections.occurrences+1,
+      last_seen_at=excluded.last_seen_at`)
+    .run(locator, registrationClaim.toLowerCase(), code, now, now);
+}
+
+export function clearListingRejection(locator: string, registrationClaim: string): void {
+  db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
+    .run(locator, registrationClaim.toLowerCase());
+}
 export const loadRetryableArtifacts = (now = Date.now()): string[] =>
   (db.prepare("SELECT locator FROM artifacts WHERE status='retry' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
 export const artifactAnchorTime = (locator: string): number | undefined =>
@@ -290,6 +325,15 @@ export interface PublicDeadLetterDiagnostic {
   firstSeenAt: number;
   lastSeenAt: number;
   retryState: "exhausted";
+}
+
+export interface PublicListingRejectionDiagnostic {
+  locator: string;
+  code: ListingRejectionCode;
+  message: string;
+  occurrences: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
 }
 
 export interface IndexerDiagnosticsOptions {
@@ -324,6 +368,15 @@ export interface IndexerDiagnostics {
     hasMore: boolean;
     items: PublicDeadLetterDiagnostic[];
   };
+  listingRejectionDiagnostics: {
+    scope: "listing-registration-binding";
+    total: number;
+    byCode: Record<string, number>;
+    query: { locator: string | null; limit: number };
+    returned: number;
+    hasMore: boolean;
+    items: PublicListingRejectionDiagnostic[];
+  };
   lastRun: PublicScanRun | null;
 }
 
@@ -331,6 +384,19 @@ interface DeadLetterRow {
   locator: string; kind: string; error_code: string; attempts: number;
   first_seen_at: number; last_seen_at: number;
 }
+
+interface ListingRejectionRow {
+  locator: string;
+  reason_code: ListingRejectionCode;
+  occurrences: number;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
+  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
+  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
+};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]
@@ -384,6 +450,27 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       retryState: "exhausted",
     };
   });
+  const listingRejectionTotal = (db.prepare("SELECT COUNT(*) count FROM listing_rejections")
+    .get() as { count: number }).count;
+  const listingRejectionCounts = db.prepare(
+    "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
+  ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
+  const listingWhere = locator ? " WHERE locator = ?" : "";
+  const listingStatement = db.prepare(`SELECT locator,reason_code,occurrences,first_seen_at,last_seen_at
+    FROM listing_rejections${listingWhere}
+    ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
+  const listingRows = (locator
+    ? listingStatement.all(locator, limit + 1)
+    : listingStatement.all(limit + 1)) as ListingRejectionRow[];
+  const listingHasMore = listingRows.length > limit;
+  const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
+    locator: row.locator,
+    code: row.reason_code,
+    message: LISTING_REJECTION_MESSAGES[row.reason_code],
+    occurrences: row.occurrences,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+  }));
   return {
     storage: "sqlite-wal",
     artifacts: Object.fromEntries(artifacts.map((row) => [row.status, row.count])),
@@ -391,6 +478,15 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     deadLetterDiagnostics: {
       scope: "storage-read", total: deadLetters, byCode, byKind,
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
+    },
+    listingRejectionDiagnostics: {
+      scope: "listing-registration-binding",
+      total: listingRejectionTotal,
+      byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
+      query: { locator: locator ?? null, limit },
+      returned: listingItems.length,
+      hasMore: listingHasMore,
+      items: listingItems,
     },
     lastRun: lastRun ?? null,
   };

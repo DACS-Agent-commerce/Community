@@ -6,6 +6,10 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
+import {
+  cursorProgressDiagnostics,
+  cursorStallThresholdSeconds,
+} from "../src/catalog/statusDiagnostics.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-dead-letters-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
@@ -84,6 +88,60 @@ test("dead-letter diagnostics are safe, bounded, filterable, and recoverable", (
   assert.equal(failedAgain.classification, "dacs-artifact");
 });
 
+test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
+  const target = locator("7");
+  const claim = `did:demos:agent:${"7".repeat(64)}`;
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
+
+  const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target });
+  assert.equal(diagnostics.listingRejectionDiagnostics.total, 1);
+  assert.equal(diagnostics.listingRejectionDiagnostics.returned, 1);
+  assert.equal(diagnostics.listingRejectionDiagnostics.byCode.OWNER_CLAIM_BINDING, 1);
+  assert.deepEqual(diagnostics.listingRejectionDiagnostics.items[0], {
+    locator: target,
+    code: "OWNER_CLAIM_BINDING",
+    message: "The listing anchor owner does not match the registration claim.",
+    occurrences: 2,
+    firstSeenAt: diagnostics.listingRejectionDiagnostics.items[0].firstSeenAt,
+    lastSeenAt: diagnostics.listingRejectionDiagnostics.items[0].lastSeenAt,
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostics.listingRejectionDiagnostics), new RegExp(claim));
+
+  store.clearListingRejection(target, claim);
+  assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).listingRejectionDiagnostics.returned, 0);
+});
+
+test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cursors", () => {
+  const now = 1_000_000;
+  assert.equal(cursorStallThresholdSeconds("60"), 60);
+  assert.equal(cursorStallThresholdSeconds("0"), 300);
+  assert.deepEqual(cursorProgressDiagnostics(
+    { lastSeenTxId: 10, cursorAdvancedAt: now - 61_000 },
+    12,
+    now,
+    60,
+  ), {
+    cursorAdvancedAt: now - 61_000,
+    secondsSinceCursorAdvanced: 61,
+    cursorStallThresholdSeconds: 60,
+    cursorStalled: true,
+  });
+  assert.equal(cursorProgressDiagnostics(
+    { lastSeenTxId: 12, cursorAdvancedAt: now - 61_000 },
+    12,
+    now,
+    60,
+  ).cursorStalled, false);
+  assert.equal(cursorProgressDiagnostics({ lastSeenTxId: 10 }, 12, now, 60).cursorStalled, null);
+  assert.equal(cursorProgressDiagnostics(
+    { lastSeenTxId: 10, cursorAdvancedAt: now },
+    null,
+    now,
+    60,
+  ).cursorStalled, null);
+});
+
 test("status route rejects unsafe queries and exposes a safe exact-locator result", async () => {
   const invalid = await statusRoute.GET(new NextRequest(
     "https://directory.example/api/dacs/status?deadLetterLimit=101",
@@ -105,6 +163,9 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
     assert.equal(body.chainLatestTx, 123);
     assert.equal(body.cursorAheadBy, 0);
     assert.equal(body.chainResetSuspected, false);
+    assert.equal(body.cursorAdvancedAt, null);
+    assert.equal(body.secondsSinceCursorAdvanced, null);
+    assert.equal(body.cursorStalled, null);
     const indexer = body.indexer as ReturnType<typeof store.indexerDiagnostics>;
     assert.equal(indexer.deadLetterDiagnostics.returned, 1);
     assert.equal(indexer.deadLetterDiagnostics.items[0].locator, target);
@@ -123,6 +184,7 @@ test("chain reset cleanup removes active failures but preserves registrations an
     .deadLetterDiagnostics.items[0].firstSeenAt;
   store.clearChainDerivedArtifacts();
   assert.equal(store.indexerDiagnostics().deadLetters, 0);
+  assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.total, 0);
   assert.equal(store.loadRetryableArtifacts(Date.now() + 60_000).length, 0);
   assert.equal(store.loadRegistrations()[0]?.displayName, "registered");
 

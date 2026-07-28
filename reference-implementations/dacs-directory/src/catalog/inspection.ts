@@ -39,6 +39,7 @@ export type DirectoryServiceProfile = {
 
 export type DirectoryServiceInspectionEnvelope = {
   artifactType: "directory-service-profile";
+  maturity: DirectoryServiceMaturity;
   source: {
     kind: "directory-api";
     label: string;
@@ -130,14 +131,16 @@ export function buildDirectoryServiceInspectionEnvelope(
   origin: string,
   listing: ListingSummary,
 ): DirectoryServiceInspectionEnvelope {
+  const artifact = buildDirectoryServiceProfile(origin, listing);
   return {
     artifactType: "directory-service-profile",
+    maturity: artifact.maturityProfile.maturity,
     source: {
       kind: "directory-api",
       label: "DACS Directory service inspection profile",
       url: inspectServiceUrl(origin, listing),
     },
-    artifact: buildDirectoryServiceProfile(origin, listing),
+    artifact,
     expectations: {
       listingId: listing.listingId,
       listingVersion: listing.version,

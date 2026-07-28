@@ -64,6 +64,7 @@ test("directory service profile envelope is listed-only and does not claim sourc
   const envelope = buildDirectoryServiceInspectionEnvelope("https://directory.example", listing);
 
   assert.equal(envelope.artifactType, "directory-service-profile");
+  assert.equal(envelope.maturity, "listed");
   assert.equal(envelope.source.kind, "directory-api");
   assert.equal(envelope.source.url, `https://directory.example${inspectServicePath(listing)}`);
   assert.equal(envelope.expectations.listingId, "dependency-upgrade-plan");
@@ -76,6 +77,7 @@ test("directory service profile envelope is listed-only and does not claim sourc
   assert.equal(envelope.artifact.listing.version, 1);
   assert.equal(envelope.artifact.listing.seller, "did:demos:agent:directory-sample-demo");
   assert.equal(envelope.artifact.maturityProfile.maturity, "listed");
+  assert.equal(envelope.maturity, envelope.artifact.maturityProfile.maturity);
   assert.equal(envelope.artifact.maturityProfile.noReputationClaim, true);
   assert.equal(envelope.artifact.maturityProfile.noLivePaymentClaim, true);
   assert.deepEqual(envelope.artifact.limitations, [

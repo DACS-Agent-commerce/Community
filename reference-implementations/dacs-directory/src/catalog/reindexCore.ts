@@ -117,7 +117,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   for (const observation of scan.observations) recordArtifact(observation);
   for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
-  state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
+  const nextCursor = Math.max(state.lastSeenTxId, scan.highestTxId);
+  if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
+  // Seed upgraded state once so an already-frozen cursor becomes diagnosable
+  // after the configured interval instead of remaining "unknown" forever.
+  else state.cursorAdvancedAt ??= Date.now();
+  state.lastSeenTxId = nextCursor;
   state.lastChainTip = scan.chainTip;
   state.schemaVersion = 4;
   saveScanState(state);

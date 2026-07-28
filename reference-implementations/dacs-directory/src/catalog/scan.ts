@@ -16,6 +16,7 @@
  * rather than assuming one schema (testnet payloads vary across versions).
  */
 import { programBindingKey } from "./store.js";
+import { agreementRail } from "./agreementMetadata.js";
 import type { RegisteredDeal } from "./types.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -246,7 +247,7 @@ export async function scanChain(
       ? candidates.find((copy) => didOf(copy.owner) === sellerFromAgreement)
       : candidates.length === 1 ? candidates[0] : undefined;
     const seller = sellerFromAgreement ?? (sellerCopy ? didOf(sellerCopy.owner) : undefined);
-    const rail =
+    const rail = agreementRail(agreementData) ??
       ((agreementData?.price as { rail?: string } | undefined)?.rail) ??
       (((agreementData?.terms as Record<string, unknown> | undefined)?.price as { rail?: string } | undefined)?.rail) ?? "unknown";
     deals.set(jobId, {
