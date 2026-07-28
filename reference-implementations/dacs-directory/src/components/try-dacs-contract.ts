@@ -354,13 +354,21 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
         throw new ButlerContractError(`${path}.railInputs`, `an input schema for ${rail}`);
       }
     }
+    const hasExecutionControl = profile.executionControl !== undefined;
+    const hasBuyerControl = profile.buyerControl !== undefined;
     let executionControl: ProcurementProfile["executionControl"];
-    if (profile.executionControl === undefined) {
+    let buyerControl: ProcurementProfile["buyerControl"];
+    if (!hasExecutionControl && !hasBuyerControl) {
       // One-release compatibility for the already-deployed gateway contract.
       // `confirmationGates` described phases but the gateway never paused;
       // normalize that old shape to what it actually did.
       requiredStringArray(profile.confirmationGates, `${path}.confirmationGates`);
       executionControl = { model: "server-orchestrated", interactiveConfirmation: false };
+      buyerControl = {
+        model: "gateway-custodied-demo",
+        acceptsExternalDacsIdentity: false,
+        acceptsExternalPaymentSigner: false,
+      };
     } else {
       const source = requiredRecord(profile.executionControl, `${path}.executionControl`);
       if (source.model !== "server-orchestrated" || source.interactiveConfirmation !== false) {
@@ -370,20 +378,10 @@ export function parseProcurementProfiles(value: unknown): ProcurementProfile[] {
         );
       }
       executionControl = { model: "server-orchestrated", interactiveConfirmation: false };
-    }
-    let buyerControl: ProcurementProfile["buyerControl"];
-    if (profile.buyerControl === undefined) {
-      // The legacy gateway has always used its operator-held buyer wallets.
-      buyerControl = {
-        model: "gateway-custodied-demo",
-        acceptsExternalDacsIdentity: false,
-        acceptsExternalPaymentSigner: false,
-      };
-    } else {
-      const source = requiredRecord(profile.buyerControl, `${path}.buyerControl`);
-      if (source.model !== "gateway-custodied-demo"
-        || source.acceptsExternalDacsIdentity !== false
-        || source.acceptsExternalPaymentSigner !== false) {
+      const buyerSource = requiredRecord(profile.buyerControl, `${path}.buyerControl`);
+      if (buyerSource.model !== "gateway-custodied-demo"
+        || buyerSource.acceptsExternalDacsIdentity !== false
+        || buyerSource.acceptsExternalPaymentSigner !== false) {
         throw new ButlerContractError(
           `${path}.buyerControl`,
           "the supported gateway-custodied demo buyer model",

@@ -149,6 +149,22 @@ test("normalizes the deployed legacy control fields without claiming confirmatio
   assert.equal("confirmationGates" in (profile ?? {}), false);
 });
 
+test("rejects hybrid legacy and current procurement control fields", () => {
+  const legacyGates = { confirmationGates: ["commit-agreement", "pay-dem"] };
+  assert.throws(
+    () => parseProcurementProfiles({
+      profiles: [{ ...oracleProfile, ...legacyGates, executionControl: undefined }],
+    }),
+    (error: unknown) => error instanceof ButlerContractError && /executionControl/.test(error.message),
+  );
+  assert.throws(
+    () => parseProcurementProfiles({
+      profiles: [{ ...oracleProfile, ...legacyGates, buyerControl: undefined }],
+    }),
+    (error: unknown) => error instanceof ButlerContractError && /buyerControl/.test(error.message),
+  );
+});
+
 test("accepts running and completed procurement envelopes", () => {
   const running = parseProcurementJob({
     id: "job-1",
