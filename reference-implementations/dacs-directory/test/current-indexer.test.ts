@@ -101,6 +101,30 @@ test("listing Gate-2 binding failures have stable rejection classes", () => {
   ), "OWNER_CLAIM_BINDING");
 });
 
+test("listing binding compares canonical §6.3.1 forms, not lowercased strings", () => {
+  const owner = `0x${dids[1].slice(-64)}`;
+  const hexTail = dids[1].slice(-64);
+  // The `did` scheme token is case-insensitive on read (CF-2)…
+  assert.equal(listingBindingRejection(`DID:${dids[1].slice(4)}`, owner, dids[1]), null);
+  // …but an uppercase key is non-canonical and must not lowercase-match,
+  assert.equal(
+    listingBindingRejection(`did:demos:agent:${hexTail.toUpperCase()}`, owner, dids[1]),
+    "SELLER_CLAIM_BINDING",
+  );
+  // method casing is strict,
+  assert.equal(
+    listingBindingRejection(`did:DEMOS:agent:${hexTail}`, owner, dids[1]),
+    "SELLER_CLAIM_BINDING",
+  );
+  // and demos:0x… substrate-address notation is not a ClaimReference alias.
+  assert.equal(
+    listingBindingRejection(`demos:0x${hexTail}`, owner, dids[1]),
+    "SELLER_CLAIM_BINDING",
+  );
+  // A registration stored in a legacy non-canonical form never binds.
+  assert.equal(listingBindingRejection(dids[1], owner, `0x${hexTail}`), "SELLER_CLAIM_BINDING");
+});
+
 function dealRecord(
   deal: RegisteredDeal,
   reconciled: ReturnType<typeof reconcileCurrentCopies>,
