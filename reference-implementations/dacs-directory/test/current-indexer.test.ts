@@ -5,7 +5,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration } from "../src/catalog/indexer.js";
+import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
@@ -78,6 +78,24 @@ async function graphAt(at: string, listing: Obj, listingLocator: string) {
 function registeredDeal(jobId: string, buyer: string, seller: string): RegisteredDeal {
   return { jobId, rail: "pay-dem", buyerBundleRef: buyer, sellerBundleRef: seller, owners: { buyer: dids[0], seller: dids[1] } };
 }
+
+test("listing Gate-2 binding failures have stable rejection classes", () => {
+  assert.equal(listingBindingRejection(
+    dids[1],
+    `0x${dids[1].slice(-64)}`,
+    dids[1],
+  ), null);
+  assert.equal(listingBindingRejection(
+    dids[0],
+    `0x${dids[1].slice(-64)}`,
+    dids[1],
+  ), "SELLER_CLAIM_BINDING");
+  assert.equal(listingBindingRejection(
+    dids[1],
+    `0x${dids[0].slice(-64)}`,
+    dids[1],
+  ), "OWNER_CLAIM_BINDING");
+});
 
 function dealRecord(
   deal: RegisteredDeal,
