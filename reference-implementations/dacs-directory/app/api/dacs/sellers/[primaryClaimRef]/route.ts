@@ -7,13 +7,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
+import { canonicalDemosAgentClaim } from "@/src/catalog/claimRef";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ primaryClaimRef: string }> },
 ) {
   const { primaryClaimRef } = await params;
-  const claim = decodeURIComponent(primaryClaimRef);
+  const raw = decodeURIComponent(primaryClaimRef);
+  // CF-2: the `did` scheme token is case-insensitive on read; canonicalise it
+  // before matching. Non-canonical key material stays raw and simply misses.
+  const claim = canonicalDemosAgentClaim(raw) ?? raw;
   const seller = loadCatalog().sellers.find((s) => s.primaryClaim === claim);
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
   const origin = requestBaseUrl(req);

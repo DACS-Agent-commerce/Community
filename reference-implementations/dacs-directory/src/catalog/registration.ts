@@ -1,6 +1,6 @@
 import type { RegisteredDeal, Registration } from "./types.js";
+import { isCanonicalDemosAgentClaim } from "./claimRef.js";
 
-const CLAIM = /^(?:did:demos:agent:|0x)?[0-9a-fA-F]{64}$/;
 const ANCHOR = /^stor-[0-9a-f]{40}$/;
 
 const stringField = (v: unknown, max: number): v is string =>
@@ -19,10 +19,8 @@ function parseDeal(v: unknown): RegisteredDeal | null {
     !ANCHOR.test(d.buyerBundleRef) ||
     (d.sellerBundleRef !== undefined &&
       (!stringField(d.sellerBundleRef, 80) || !ANCHOR.test(d.sellerBundleRef))) ||
-    !stringField(o.buyer, 256) ||
-    !stringField(o.seller, 256) ||
-    !CLAIM.test(o.buyer) ||
-    !CLAIM.test(o.seller)
+    !isCanonicalDemosAgentClaim(o.buyer) ||
+    !isCanonicalDemosAgentClaim(o.seller)
   ) return null;
   return {
     jobId: d.jobId,
@@ -42,8 +40,8 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
     return { ok: false, error: "registration must be a JSON object" };
   }
   const b = v as Record<string, unknown>;
-  if (!stringField(b.primaryClaim, 256) || !CLAIM.test(b.primaryClaim)) {
-    return { ok: false, error: "primaryClaim must be a Demos ed25519 claim" };
+  if (!isCanonicalDemosAgentClaim(b.primaryClaim)) {
+    return { ok: false, error: "primaryClaim must be the canonical did:demos:agent:<64 lowercase hex> ClaimReference" };
   }
   if (!stringField(b.displayName, 100)) {
     return { ok: false, error: "displayName must be 1-100 characters" };

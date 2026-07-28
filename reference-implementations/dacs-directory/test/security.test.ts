@@ -32,6 +32,31 @@ test("registration parser rejects type-confusion and oversized collections", () 
   }).ok, false);
 });
 
+test("registration parser requires the canonical Demos agent ClaimReference", () => {
+  const base = { displayName: "x", listingAnchors: [] };
+  const hex = "a".repeat(64);
+  assert.equal(parseRegistration({ ...base, primaryClaim: `did:demos:agent:${hex}` }).ok, true);
+  for (const bad of [
+    hex,                                        // bare key material
+    `0x${hex}`,                                 // address notation
+    `demos:0x${hex}`,                           // substrate-address notation (§6.3.1)
+    `did:demos:agent:${hex.toUpperCase()}`,     // non-canonical uppercase key
+    `DID:demos:agent:${hex}`,                   // scheme case is a reader concession, not a write form
+    `did:DEMOS:agent:${hex}`,                   // method casing is strict
+  ]) {
+    const result = parseRegistration({ ...base, primaryClaim: bad });
+    assert.equal(result.ok, false, `must reject ${bad}`);
+    if (!result.ok) assert.match(result.error, /canonical did:demos:agent/);
+  }
+  const deal = {
+    jobId: "j", rail: "pay-dem", buyerBundleRef: `stor-${"c".repeat(40)}`,
+    owners: { buyer: `0x${hex}`, seller: `did:demos:agent:${hex}` },
+  };
+  assert.equal(parseRegistration({
+    ...base, primaryClaim: `did:demos:agent:${hex}`, deals: [deal],
+  }).ok, false, "deal owners must also be canonical claim references");
+});
+
 test("registration parser accepts and normalizes a bounded registration", () => {
   const result = parseRegistration({
     primaryClaim: claim,
