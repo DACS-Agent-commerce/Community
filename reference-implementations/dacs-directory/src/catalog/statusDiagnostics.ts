@@ -1,5 +1,7 @@
 export const DEAD_LETTER_DEFAULT_LIMIT = 20;
 export const DEAD_LETTER_MAX_LIMIT = 100;
+export const CURSOR_STALL_DEFAULT_SECONDS = 5 * 60;
+export const CURSOR_STALL_MAX_SECONDS = 24 * 60 * 60;
 
 export type StatusDiagnosticsQuery =
   | { ok: true; deadLetterLimit: number; deadLetterLocator?: string }
@@ -20,4 +22,45 @@ export function parseStatusDiagnosticsQuery(params: URLSearchParams): StatusDiag
     return { ok: false, error: "locator must be a lowercase stor- address" };
   }
   return { ok: true, deadLetterLimit, deadLetterLocator };
+}
+
+export function cursorStallThresholdSeconds(
+  raw = process.env.DACS_CURSOR_STALL_SECONDS,
+): number {
+  const configured = raw === undefined ? CURSOR_STALL_DEFAULT_SECONDS : Number(raw);
+  return Number.isSafeInteger(configured) && configured >= 1 && configured <= CURSOR_STALL_MAX_SECONDS
+    ? configured
+    : CURSOR_STALL_DEFAULT_SECONDS;
+}
+
+export function cursorProgressDiagnostics(
+  scan: { lastSeenTxId: number; cursorAdvancedAt?: number },
+  chainLatestTx: number | null,
+  now = Date.now(),
+  stallThresholdSeconds = cursorStallThresholdSeconds(),
+): {
+  cursorAdvancedAt: number | null;
+  secondsSinceCursorAdvanced: number | null;
+  cursorStallThresholdSeconds: number;
+  cursorStalled: boolean | null;
+} {
+  const cursorAdvancedAt = typeof scan.cursorAdvancedAt === "number"
+    ? scan.cursorAdvancedAt
+    : null;
+  const secondsSinceCursorAdvanced = cursorAdvancedAt === null
+    ? null
+    : Math.max(0, Math.floor((now - cursorAdvancedAt) / 1_000));
+  const cursorStalled = chainLatestTx === null
+    ? null
+    : chainLatestTx <= scan.lastSeenTxId
+      ? false
+      : secondsSinceCursorAdvanced === null
+        ? null
+        : secondsSinceCursorAdvanced >= stallThresholdSeconds;
+  return {
+    cursorAdvancedAt,
+    secondsSinceCursorAdvanced,
+    cursorStallThresholdSeconds: stallThresholdSeconds,
+    cursorStalled,
+  };
 }
