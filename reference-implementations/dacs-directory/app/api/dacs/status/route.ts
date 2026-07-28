@@ -6,7 +6,10 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { indexerDiagnostics, loadCatalog, loadScanState } from "@/src/catalog/store";
-import { parseStatusDiagnosticsQuery } from "@/src/catalog/statusDiagnostics";
+import {
+  cursorProgressDiagnostics,
+  parseStatusDiagnosticsQuery,
+} from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -46,6 +49,7 @@ export async function GET(req: NextRequest) {
 
   const resetThreshold = chainResetThreshold();
   const aheadBy = chainLatestTx !== null ? cursorAheadBy(scan, chainLatestTx) : null;
+  const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
     syncedToTx: scan.lastSeenTxId,
@@ -55,6 +59,7 @@ export async function GET(req: NextRequest) {
     chainResetSuspected: chainLatestTx !== null
       ? chainResetRequired(scan, chainLatestTx, resetThreshold)
       : null,
+    ...cursorProgress,
     indexer: indexerDiagnostics({
       deadLetterLimit: diagnosticsQuery.deadLetterLimit,
       deadLetterLocator: diagnosticsQuery.deadLetterLocator,

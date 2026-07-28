@@ -3,9 +3,10 @@ import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
+import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration } from "../src/catalog/indexer.js";
+import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
@@ -45,7 +46,10 @@ async function vector(jobId = "job-1", offset = 0) {
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
-    terms: { price: { amount: "1.25", currency: "DEM" } } };
+    terms: {
+      price: { amount: "1.25", currency: "DEM" },
+      rail: { railId: "pay-dem" },
+    } };
   const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [`tx-${jobId}`], observedAt: 100 };
   const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
@@ -79,6 +83,24 @@ function registeredDeal(jobId: string, buyer: string, seller: string): Registere
   return { jobId, rail: "pay-dem", buyerBundleRef: buyer, sellerBundleRef: seller, owners: { buyer: dids[0], seller: dids[1] } };
 }
 
+test("listing Gate-2 binding failures have stable rejection classes", () => {
+  assert.equal(listingBindingRejection(
+    dids[1],
+    `0x${dids[1].slice(-64)}`,
+    dids[1],
+  ), null);
+  assert.equal(listingBindingRejection(
+    dids[0],
+    `0x${dids[1].slice(-64)}`,
+    dids[1],
+  ), "SELLER_CLAIM_BINDING");
+  assert.equal(listingBindingRejection(
+    dids[1],
+    `0x${dids[0].slice(-64)}`,
+    dids[1],
+  ), "OWNER_CLAIM_BINDING");
+});
+
 function dealRecord(
   deal: RegisteredDeal,
   reconciled: ReturnType<typeof reconcileCurrentCopies>,
@@ -106,6 +128,12 @@ const resignBundle = async (scope: Obj): Promise<Obj> => ({
 test("current evidence graph verifies full references and rejects cross-job ratings", async () => {
   const { listing, buyerBundle: bundle, agreement, evidence, rating, locators } = await vector();
   assert.ok(await verifyListing(listing), "listing fixture must verify");
+  assert.equal(agreementRail(agreement), "pay-dem");
+  assert.equal(agreementRail({
+    terms: { rail: { railId: "ap2:stripe-paymentintents" } },
+  }), "ap2:stripe-paymentintents");
+  assert.equal(agreementRail({ terms: { rail: { railId: "" } } }), null);
+  assert.equal(agreementRail({ terms: { rail: "pay-dem" } }), null);
   const graph = await buildCurrentEvidenceGraph(locators.buyer, { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, true, graph.reason); assert.equal(graph.ratings.length, 1);
@@ -536,7 +564,10 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     });
   };
   try {
-    const deal = registeredDeal("seller-fallback-job", fixture.locators.buyer, fixture.locators.seller);
+    const deal = {
+      ...registeredDeal("seller-fallback-job", fixture.locators.buyer, fixture.locators.seller),
+      rail: "unknown",
+    };
     const record = await indexRegistration({
       primaryClaim: dids[1],
       displayName: "seller",
@@ -546,6 +577,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     assert.equal(record.deals.length, 1);
     assert.equal(record.deals[0].refsVerified, false);
     assert.equal(record.deals[0].anchoredByRole, "seller");
+    assert.equal(record.deals[0].rail, "pay-dem");
     assert.equal(record.reputation.bundleCount, 0);
     assert.deepEqual(record.reputation.bundleRefs, []);
   } finally {

@@ -101,6 +101,23 @@ db.exec(`
     last_seen_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS dead_letters_recent_idx ON dead_letters(last_seen_at DESC, locator);
+  CREATE TABLE IF NOT EXISTS artifact_failure_history (
+    locator TEXT PRIMARY KEY,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    observations INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS listing_rejections (
+    locator TEXT NOT NULL,
+    registration_claim TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY(locator, registration_claim)
+  );
+  CREATE INDEX IF NOT EXISTS listing_rejections_recent_idx
+    ON listing_rejections(last_seen_at DESC, locator);
 `);
 
 const readLegacy = <T>(path: string, fallback: T): T =>
@@ -161,8 +178,13 @@ export const loadRegistrations = (): Registration[] => getJson("registrations", 
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = (): ScanState => getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
 export const saveScanState = (state: ScanState): void => setJson("scan-state", state);
-/** Remove cache rows that belong to a replaced chain. Registrations survive. */
+/**
+ * Remove active cache rows that belong to a replaced chain. Registrations and
+ * the append-only first-observation history survive so operator diagnostics do
+ * not rewrite an old failure's origin time as the rebuild time.
+ */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
 });
@@ -225,6 +247,12 @@ const recordArtifactFailureTransaction = db.transaction(
     const next = dead ? null : now + Math.min(60 * 60_000, 2 ** attempts * 5_000);
     const storedCode = code.slice(0, 100);
     const storedMessage = message.slice(0, 1000);
+    db.prepare(`INSERT INTO artifact_failure_history(locator,first_seen_at,last_seen_at,observations)
+      VALUES (?,?,?,1) ON CONFLICT(locator) DO UPDATE SET
+      last_seen_at=excluded.last_seen_at,observations=artifact_failure_history.observations+1`)
+      .run(locator, now, now);
+    const history = db.prepare("SELECT first_seen_at FROM artifact_failure_history WHERE locator = ?")
+      .get(locator) as { first_seen_at: number };
     db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
       VALUES (?,?,?,? ,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
       error_message=excluded.error_message,retry_count=excluded.retry_count,next_retry_at=excluded.next_retry_at`)
@@ -233,7 +261,7 @@ const recordArtifactFailureTransaction = db.transaction(
       db.prepare(`INSERT INTO dead_letters(locator,kind,error_code,error_message,attempts,first_seen_at,last_seen_at)
         VALUES (?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind,error_code=excluded.error_code,
         error_message=excluded.error_message,attempts=excluded.attempts,last_seen_at=excluded.last_seen_at`)
-        .run(locator, failureKind, storedCode, storedMessage, attempts, now, now);
+        .run(locator, failureKind, storedCode, storedMessage, attempts, history.first_seen_at, now);
     } else {
       // Repair any legacy mismatch where a locator is retryable but still has
       // a stale row in the exhausted queue.
@@ -245,6 +273,29 @@ const recordArtifactFailureTransaction = db.transaction(
 export function recordArtifactFailure(locator: string, kind: string, code: string, message: string, maxRetries = 5): void {
   const retries = Number.isSafeInteger(maxRetries) && maxRetries >= 1 ? maxRetries : 5;
   recordArtifactFailureTransaction(locator, kind, code, message, retries);
+}
+
+export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
+
+export function recordListingRejection(
+  locator: string,
+  registrationClaim: string,
+  code: ListingRejectionCode,
+): void {
+  const now = Date.now();
+  db.prepare(`INSERT INTO listing_rejections(
+      locator,registration_claim,reason_code,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,1,?,?)
+    ON CONFLICT(locator,registration_claim) DO UPDATE SET
+      reason_code=excluded.reason_code,
+      occurrences=listing_rejections.occurrences+1,
+      last_seen_at=excluded.last_seen_at`)
+    .run(locator, registrationClaim.toLowerCase(), code, now, now);
+}
+
+export function clearListingRejection(locator: string, registrationClaim: string): void {
+  db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
+    .run(locator, registrationClaim.toLowerCase());
 }
 export const loadRetryableArtifacts = (now = Date.now()): string[] =>
   (db.prepare("SELECT locator FROM artifacts WHERE status='retry' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
@@ -274,6 +325,15 @@ export interface PublicDeadLetterDiagnostic {
   firstSeenAt: number;
   lastSeenAt: number;
   retryState: "exhausted";
+}
+
+export interface PublicListingRejectionDiagnostic {
+  locator: string;
+  code: ListingRejectionCode;
+  message: string;
+  occurrences: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
 }
 
 export interface IndexerDiagnosticsOptions {
@@ -308,6 +368,15 @@ export interface IndexerDiagnostics {
     hasMore: boolean;
     items: PublicDeadLetterDiagnostic[];
   };
+  listingRejectionDiagnostics: {
+    scope: "listing-registration-binding";
+    total: number;
+    byCode: Record<string, number>;
+    query: { locator: string | null; limit: number };
+    returned: number;
+    hasMore: boolean;
+    items: PublicListingRejectionDiagnostic[];
+  };
   lastRun: PublicScanRun | null;
 }
 
@@ -315,6 +384,19 @@ interface DeadLetterRow {
   locator: string; kind: string; error_code: string; attempts: number;
   first_seen_at: number; last_seen_at: number;
 }
+
+interface ListingRejectionRow {
+  locator: string;
+  reason_code: ListingRejectionCode;
+  occurrences: number;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
+  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
+  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
+};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]
@@ -332,7 +414,9 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
   // URLs. Keep the public status projection explicit so it cannot leak.
   const lastRun = db.prepare(`SELECT id,started_at,finished_at,from_tx,to_tx,chain_tip,
     txs_scanned,artifacts_observed,rejected,status FROM scan_runs ORDER BY id DESC LIMIT 1`).get() as PublicScanRun | undefined;
-  const activeJoin = "FROM dead_letters dl INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'";
+  const activeJoin = `FROM dead_letters dl
+    INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'
+    LEFT JOIN artifact_failure_history fh ON fh.locator=dl.locator`;
   const deadLetters = (db.prepare(`SELECT COUNT(*) count ${activeJoin}`).get() as { count: number }).count;
   const counts = db.prepare(`SELECT dl.error_code, COUNT(*) count ${activeJoin} GROUP BY dl.error_code`).all() as Array<{ error_code: string; count: number }>;
   const byCode: Record<string, number> = {};
@@ -347,7 +431,8 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     byKind[kind] = (byKind[kind] ?? 0) + row.count;
   }
   const where = locator ? " WHERE dl.locator = ?" : "";
-  const statement = db.prepare(`SELECT dl.locator,dl.kind,dl.error_code,dl.attempts,dl.first_seen_at,dl.last_seen_at
+  const statement = db.prepare(`SELECT dl.locator,dl.kind,dl.error_code,dl.attempts,
+    COALESCE(fh.first_seen_at,dl.first_seen_at) first_seen_at,dl.last_seen_at
     ${activeJoin}${where} ORDER BY dl.last_seen_at DESC, dl.locator ASC LIMIT ?`);
   const rows = (locator ? statement.all(locator, limit + 1) : statement.all(limit + 1)) as DeadLetterRow[];
   const hasMore = rows.length > limit;
@@ -365,6 +450,27 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       retryState: "exhausted",
     };
   });
+  const listingRejectionTotal = (db.prepare("SELECT COUNT(*) count FROM listing_rejections")
+    .get() as { count: number }).count;
+  const listingRejectionCounts = db.prepare(
+    "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
+  ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
+  const listingWhere = locator ? " WHERE locator = ?" : "";
+  const listingStatement = db.prepare(`SELECT locator,reason_code,occurrences,first_seen_at,last_seen_at
+    FROM listing_rejections${listingWhere}
+    ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
+  const listingRows = (locator
+    ? listingStatement.all(locator, limit + 1)
+    : listingStatement.all(limit + 1)) as ListingRejectionRow[];
+  const listingHasMore = listingRows.length > limit;
+  const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
+    locator: row.locator,
+    code: row.reason_code,
+    message: LISTING_REJECTION_MESSAGES[row.reason_code],
+    occurrences: row.occurrences,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+  }));
   return {
     storage: "sqlite-wal",
     artifacts: Object.fromEntries(artifacts.map((row) => [row.status, row.count])),
@@ -372,6 +478,15 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     deadLetterDiagnostics: {
       scope: "storage-read", total: deadLetters, byCode, byKind,
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
+    },
+    listingRejectionDiagnostics: {
+      scope: "listing-registration-binding",
+      total: listingRejectionTotal,
+      byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
+      query: { locator: locator ?? null, limit },
+      returned: listingItems.length,
+      hasMore: listingHasMore,
+      items: listingItems,
     },
     lastRun: lastRun ?? null,
   };
