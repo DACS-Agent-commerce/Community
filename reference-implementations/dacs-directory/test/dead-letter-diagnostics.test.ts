@@ -194,3 +194,52 @@ test("chain reset cleanup removes active failures but preserves registrations an
     firstSeenAt,
   );
 });
+
+test("failure history is bounded: fabricated locators cannot grow it past the ceiling", () => {
+  process.env.DACS_FAILURE_HISTORY_MAX_ROWS = "100";
+  try {
+    const before = store.failureHistorySize();
+    for (let i = 0; i < 130; i++) {
+      store.recordArtifactFailure(
+        `stor-${i.toString(16).padStart(40, "f")}`, "listing", "STORAGE_UNREADABLE", "fabricated",
+      );
+    }
+    assert.ok(before < 100, "fixture assumes the suite starts under the test ceiling");
+    assert.equal(store.failureHistorySize(), 100, "ceiling holds no matter how many unique locators arrive");
+    // Retention config is clamped, not trusted.
+    assert.deepEqual(store.failureHistoryRetention("50", "0"), { maxRows: 5_000, maxAgeMs: 30 * 86_400_000 });
+    assert.deepEqual(store.failureHistoryRetention("1000", "7"), { maxRows: 1_000, maxAgeMs: 7 * 86_400_000 });
+  } finally {
+    delete process.env.DACS_FAILURE_HISTORY_MAX_ROWS;
+  }
+});
+
+test("age pruning is batched, spares active dead-letters, and resets firstSeenAt on rediscovery", () => {
+  const target = locator("9");
+  // Promote to an active dead-letter (maxRetries=1) so we can watch its
+  // firstSeenAt survive history pruning via the dead_letters copy.
+  store.recordArtifactFailure(target, "listing", "STORAGE_UNREADABLE", "boom", 1);
+  const original = store.indexerDiagnostics({ deadLetterLocator: target })
+    .deadLetterDiagnostics.items[0].firstSeenAt;
+
+  // Everything currently in history is "old" relative to a far-future clock.
+  const future = Date.now() + 31 * 86_400_000;
+  const populated = store.failureHistorySize();
+  assert.ok(populated > 2, "fixture assumes prior tests left history rows");
+  // Bounded batches: a single call may not drain, repeated calls do.
+  const firstBatch = store.pruneFailureHistory(future, 2);
+  assert.equal(firstBatch, 2);
+  let guard = 0;
+  while (store.pruneFailureHistory(future, 2) > 0 && guard++ < 1_000) { /* drain */ }
+  assert.equal(store.failureHistorySize(), 0);
+
+  // The active dead-letter still reports its original firstSeenAt (own copy).
+  assert.equal(
+    store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items[0].firstSeenAt,
+    original,
+  );
+
+  // Documented rediscovery semantics: pruned history restarts.
+  store.recordArtifactFailure(locator("8"), "listing", "STORAGE_UNREADABLE", "fresh", 1);
+  assert.equal(store.failureHistorySize(), 1);
+});
