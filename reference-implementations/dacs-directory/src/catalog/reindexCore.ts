@@ -22,6 +22,7 @@ import {
   loadRetryableArtifacts,
   clearChainDerivedArtifacts,
   recordArtifact,
+  pruneFailureHistory,
   recordArtifactFailure,
 } from "./store";
 import type { Registration } from "./types";
@@ -117,6 +118,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   for (const observation of scan.observations) recordArtifact(observation);
   for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
+  // One bounded age-prune batch per pass keeps failure telemetry from growing
+  // without limit (issue #51) while never becoming a blocking maintenance job.
+  pruneFailureHistory();
   const nextCursor = Math.max(state.lastSeenTxId, scan.highestTxId);
   if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
   // Seed upgraded state once so an already-frozen cursor becomes diagnosable

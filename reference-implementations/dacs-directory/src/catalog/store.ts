@@ -107,6 +107,8 @@ db.exec(`
     last_seen_at INTEGER NOT NULL,
     observations INTEGER NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS artifact_failure_history_age_idx
+    ON artifact_failure_history(last_seen_at ASC, locator);
   CREATE TABLE IF NOT EXISTS listing_rejections (
     locator TEXT NOT NULL,
     registration_claim TEXT NOT NULL,
@@ -251,6 +253,19 @@ const recordArtifactFailureTransaction = db.transaction(
       VALUES (?,?,?,1) ON CONFLICT(locator) DO UPDATE SET
       last_seen_at=excluded.last_seen_at,observations=artifact_failure_history.observations+1`)
       .run(locator, now, now);
+    // Hard row ceiling, enforced incrementally: fabricated unique locators can
+    // arrive from arbitrary chain transactions, so at steady state each insert
+    // evicts at most the few oldest-seen rows. Active dead-letters are safe —
+    // dead_letters keeps its own first_seen_at copy (see COALESCE fallback in
+    // indexerDiagnostics), so history eviction never rewrites the active queue.
+    const { maxRows } = failureHistoryRetention();
+    const excess = (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history")
+      .get() as { count: number }).count - maxRows;
+    if (excess > 0) {
+      db.prepare(`DELETE FROM artifact_failure_history WHERE locator IN (
+        SELECT locator FROM artifact_failure_history
+        ORDER BY last_seen_at ASC, locator ASC LIMIT ?)`).run(excess);
+    }
     const history = db.prepare("SELECT first_seen_at FROM artifact_failure_history WHERE locator = ?")
       .get(locator) as { first_seen_at: number };
     db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
@@ -274,6 +289,42 @@ export function recordArtifactFailure(locator: string, kind: string, code: strin
   const retries = Number.isSafeInteger(maxRetries) && maxRetries >= 1 ? maxRetries : 5;
   recordArtifactFailureTransaction(locator, kind, code, message, retries);
 }
+
+/**
+ * Retention policy for artifact_failure_history (issue #51). The table is
+ * telemetry, not the active retry/dead-letter queue: pruning it only affects
+ * the historical firstSeenAt/observations record. A locator pruned here and
+ * failing again later starts a fresh history (firstSeenAt = rediscovery time);
+ * an entry already promoted to dead_letters keeps its original first_seen_at
+ * because that copy lives in dead_letters and is never updated on conflict.
+ */
+export function failureHistoryRetention(
+  rawRows = process.env.DACS_FAILURE_HISTORY_MAX_ROWS,
+  rawDays = process.env.DACS_FAILURE_HISTORY_MAX_AGE_DAYS,
+): { maxRows: number; maxAgeMs: number } {
+  const rows = rawRows === undefined ? 5_000 : Number(rawRows);
+  const days = rawDays === undefined ? 30 : Number(rawDays);
+  return {
+    maxRows: Number.isSafeInteger(rows) && rows >= 100 && rows <= 100_000 ? rows : 5_000,
+    maxAgeMs: (Number.isSafeInteger(days) && days >= 1 && days <= 365 ? days : 30) * 86_400_000,
+  };
+}
+
+/**
+ * Age-based prune, bounded per call so a pass after long downtime cannot
+ * become a blocking maintenance operation. Called once per reindex pass;
+ * returns rows removed (callers may loop while > 0 if they want to drain).
+ */
+export function pruneFailureHistory(now = Date.now(), batch = 500): number {
+  const { maxAgeMs } = failureHistoryRetention();
+  const limit = Number.isSafeInteger(batch) && batch >= 1 && batch <= 10_000 ? batch : 500;
+  return db.prepare(`DELETE FROM artifact_failure_history WHERE locator IN (
+    SELECT locator FROM artifact_failure_history WHERE last_seen_at < ?
+    ORDER BY last_seen_at ASC, locator ASC LIMIT ?)`).run(now - maxAgeMs, limit).changes;
+}
+
+export const failureHistorySize = (): number =>
+  (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
 export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
 
