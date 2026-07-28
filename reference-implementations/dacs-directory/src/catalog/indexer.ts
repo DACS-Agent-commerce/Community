@@ -31,6 +31,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import { artifactAnchorTime, findProgramAddress, loadScanState } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
+import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
@@ -221,6 +222,7 @@ export async function indexRegistration(
       );
       dealCandidates.push({
         ...deal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
+        rail: agreementRail(authoritative?.agreement) ?? "unknown",
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
