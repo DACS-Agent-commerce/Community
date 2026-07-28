@@ -62,20 +62,27 @@ async function readStorage(address: string, attempts = 3): Promise<StorageRead |
   return null;
 }
 
-/** Deep-walk any value collecting `stor-…` addresses (shape-agnostic). */
-function collectStorageAddresses(value: unknown, out: Set<string>, depth = 0): void {
+/**
+ * Deep-walk any value collecting Demos-native `stor-…` addresses.
+ *
+ * DACS-5 logical bundle addresses carry 64 hex characters while Demos-native
+ * locators carry 40. The trailing boundary is security-significant: without
+ * it a logical address is silently truncated into a different, usually
+ * unreadable native locator.
+ */
+export function collectNativeStorageAddresses(value: unknown, out: Set<string>, depth = 0): void {
   if (depth > 8 || value == null) return;
   if (typeof value === "string") {
-    for (const m of value.matchAll(/stor-[0-9a-f]{40}/g)) out.add(m[0]);
+    for (const m of value.matchAll(/stor-[0-9a-f]{40}(?![0-9a-f])/g)) out.add(m[0]);
     return;
   }
   if (Array.isArray(value)) {
-    for (const v of value) collectStorageAddresses(v, out, depth + 1);
+    for (const v of value) collectNativeStorageAddresses(v, out, depth + 1);
     return;
   }
   if (typeof value === "object") {
     for (const v of Object.values(value as Record<string, unknown>)) {
-      collectStorageAddresses(v, out, depth + 1);
+      collectNativeStorageAddresses(v, out, depth + 1);
     }
   }
 }
@@ -165,7 +172,7 @@ export async function scanChain(
     highestTxId = Math.max(highestTxId, ...(freshIds.length ? freshIds : [highestTxId]));
     scanned += fresh.length;
     for (const tx of fresh) {
-      const inTx = new Set<string>(); collectStorageAddresses(tx, inTx);
+      const inTx = new Set<string>(); collectNativeStorageAddresses(tx, inTx);
       const timestamp = typeof (tx as { timestamp?: unknown }).timestamp === "number" ? (tx as { timestamp: number }).timestamp : undefined;
       for (const address of inTx) { addresses.add(address); if (timestamp !== undefined && !addressTimes.has(address)) addressTimes.set(address, timestamp); }
     }

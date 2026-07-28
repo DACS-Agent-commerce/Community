@@ -101,6 +101,12 @@ db.exec(`
     last_seen_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS dead_letters_recent_idx ON dead_letters(last_seen_at DESC, locator);
+  CREATE TABLE IF NOT EXISTS artifact_failure_history (
+    locator TEXT PRIMARY KEY,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    observations INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS listing_rejections (
     locator TEXT NOT NULL,
     registration_claim TEXT NOT NULL,
@@ -172,7 +178,11 @@ export const loadRegistrations = (): Registration[] => getJson("registrations", 
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = (): ScanState => getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
 export const saveScanState = (state: ScanState): void => setJson("scan-state", state);
-/** Remove cache rows that belong to a replaced chain. Registrations survive. */
+/**
+ * Remove active cache rows that belong to a replaced chain. Registrations and
+ * the append-only first-observation history survive so operator diagnostics do
+ * not rewrite an old failure's origin time as the rebuild time.
+ */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
@@ -237,6 +247,12 @@ const recordArtifactFailureTransaction = db.transaction(
     const next = dead ? null : now + Math.min(60 * 60_000, 2 ** attempts * 5_000);
     const storedCode = code.slice(0, 100);
     const storedMessage = message.slice(0, 1000);
+    db.prepare(`INSERT INTO artifact_failure_history(locator,first_seen_at,last_seen_at,observations)
+      VALUES (?,?,?,1) ON CONFLICT(locator) DO UPDATE SET
+      last_seen_at=excluded.last_seen_at,observations=artifact_failure_history.observations+1`)
+      .run(locator, now, now);
+    const history = db.prepare("SELECT first_seen_at FROM artifact_failure_history WHERE locator = ?")
+      .get(locator) as { first_seen_at: number };
     db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
       VALUES (?,?,?,? ,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
       error_message=excluded.error_message,retry_count=excluded.retry_count,next_retry_at=excluded.next_retry_at`)
@@ -245,7 +261,7 @@ const recordArtifactFailureTransaction = db.transaction(
       db.prepare(`INSERT INTO dead_letters(locator,kind,error_code,error_message,attempts,first_seen_at,last_seen_at)
         VALUES (?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind,error_code=excluded.error_code,
         error_message=excluded.error_message,attempts=excluded.attempts,last_seen_at=excluded.last_seen_at`)
-        .run(locator, failureKind, storedCode, storedMessage, attempts, now, now);
+        .run(locator, failureKind, storedCode, storedMessage, attempts, history.first_seen_at, now);
     } else {
       // Repair any legacy mismatch where a locator is retryable but still has
       // a stale row in the exhausted queue.
@@ -398,7 +414,9 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
   // URLs. Keep the public status projection explicit so it cannot leak.
   const lastRun = db.prepare(`SELECT id,started_at,finished_at,from_tx,to_tx,chain_tip,
     txs_scanned,artifacts_observed,rejected,status FROM scan_runs ORDER BY id DESC LIMIT 1`).get() as PublicScanRun | undefined;
-  const activeJoin = "FROM dead_letters dl INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'";
+  const activeJoin = `FROM dead_letters dl
+    INNER JOIN artifacts a ON a.locator=dl.locator AND a.status='dead-letter'
+    LEFT JOIN artifact_failure_history fh ON fh.locator=dl.locator`;
   const deadLetters = (db.prepare(`SELECT COUNT(*) count ${activeJoin}`).get() as { count: number }).count;
   const counts = db.prepare(`SELECT dl.error_code, COUNT(*) count ${activeJoin} GROUP BY dl.error_code`).all() as Array<{ error_code: string; count: number }>;
   const byCode: Record<string, number> = {};
@@ -413,7 +431,8 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     byKind[kind] = (byKind[kind] ?? 0) + row.count;
   }
   const where = locator ? " WHERE dl.locator = ?" : "";
-  const statement = db.prepare(`SELECT dl.locator,dl.kind,dl.error_code,dl.attempts,dl.first_seen_at,dl.last_seen_at
+  const statement = db.prepare(`SELECT dl.locator,dl.kind,dl.error_code,dl.attempts,
+    COALESCE(fh.first_seen_at,dl.first_seen_at) first_seen_at,dl.last_seen_at
     ${activeJoin}${where} ORDER BY dl.last_seen_at DESC, dl.locator ASC LIMIT ?`);
   const rows = (locator ? statement.all(locator, limit + 1) : statement.all(limit + 1)) as DeadLetterRow[];
   const hasMore = rows.length > limit;
