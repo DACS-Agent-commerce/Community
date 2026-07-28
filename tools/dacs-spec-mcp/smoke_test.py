@@ -77,9 +77,12 @@ def main() -> int:
           f"{len((idx.manifest or {}).get('cases', [])) if idx.manifest else 'N/A'}")
 
     # Locked count assertions reporting requirement.
-    assert len(idx.sections) == 196, f"section count: expected 196, got {len(idx.sections)}"
-    assert len(idx.rules)    == 152, f"rule count: expected 152, got {len(idx.rules)}"
-    assert len(idx.schemas)  ==  64, f"schema count: expected 64, got {len(idx.schemas)}"
+    # Refreshed for v0.4 (SPEC_PIN 4bb9e48): 196->204 sections, 152->226 rules,
+    # 64->87 schemas — spec grew with the #248 bundle-binding (BB-1..8),
+    # metering (MTR-1..5), and fault/replayable-derivation additions.
+    assert len(idx.sections) == 204, f"section count: expected 204, got {len(idx.sections)}"
+    assert len(idx.rules)    == 226, f"rule count: expected 226, got {len(idx.rules)}"
+    assert len(idx.schemas)  ==  87, f"schema count: expected 87, got {len(idx.schemas)}"
 
     # ── TOOL 1/7 — dacs_get_artifact_schema ────────────────────────────
     out = idx.get_artifact_schema("VerifyResult")
@@ -222,8 +225,10 @@ def main() -> int:
         print(f"      {s['form']:<10s} {s['section']:<8s} {s['file']}:{s['line_in_file']}")
 
     cd1 = idx.get_rule("CD-1")
-    assert cd1.get("site_count") == 5, \
-        f"CD-1 site_count expected 5, got {cd1.get('site_count')}"
+    # v0.4: 5->6 sites — new word-def at DACS-4 §9.7.2 (FR-2 "rateBps -> amount
+    # (canonical decimal, rule CD-1, CORE §B.2)"), DACS-4-SETTLE.md:923.
+    assert cd1.get("site_count") == 6, \
+        f"CD-1 site_count expected 6, got {cd1.get('site_count')}"
     # Must contain CORE §B.2 word-def AND DACS-3 §8.5.1 paren-def per JB's spec.
     has_core_b2_worddef = any(
         s["form"] == "word-def" and s["section"] == "§B.2"
@@ -237,15 +242,15 @@ def main() -> int:
     )
     assert has_core_b2_worddef, "CD-1 missing CORE §B.2 word-def site"
     assert has_dacs3_851_parendef, "CD-1 missing DACS-3 §8.5.1 paren-def site"
-    print(f"  ✓ CD-1: 5 sites incl. CORE §B.2 word-def + DACS-3 §8.5.1 paren-def")
+    print(f"  ✓ CD-1: 6 sites incl. CORE §B.2 word-def + DACS-3 §8.5.1 paren-def")
     for s in cd1["sites"]:
         print(f"      {s['form']:<10s} {s['section']:<8s} {s['file']}:{s['line_in_file']}")
 
     # ── PHASE 4 — conformance-vector reachability ──────────────────────
     banner("PHASE 4 — CONFORMANCE-VECTOR REACHABILITY")
     no_arg = idx.get_conformance_vectors()
-    assert no_arg.get("case_count") == 186, \
-        f"manifest case count: expected 186, got {no_arg.get('case_count')}"
+    assert no_arg.get("case_count") == 234, \
+        f"manifest case count: expected 234, got {no_arg.get('case_count')}"
     vfiles = no_arg.get("vector_files", [])
     vfile_names = {f["filename"] for f in vfiles}
     assert "dacs-v0.1-happy-path.json" in vfile_names
@@ -254,7 +259,7 @@ def main() -> int:
     for f in vfiles:
         assert set(f.keys()) == {"filename", "size_bytes"}, \
             f"vector_files entry carries invented metadata: {set(f.keys())}"
-    print(f"  ✓ no-arg: 186 manifest cases + {len(vfiles)} vector_files entries")
+    print(f"  ✓ no-arg: 234 manifest cases + {len(vfiles)} vector_files entries")
     print(f"    filenames: {sorted(vfile_names)}")
 
     hp = idx.get_conformance_vectors(vector_file="dacs-v0.1-happy-path.json")
