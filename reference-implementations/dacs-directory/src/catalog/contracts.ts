@@ -69,6 +69,20 @@ export const deadLetterDiagnosticSchema = {
   },
 } as const;
 
+export const listingRejectionDiagnosticSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
+  properties: {
+    locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
+    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
+    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    occurrences: { type: "integer", minimum: 1 },
+    firstSeenAt: { type: "integer", minimum: 0 },
+    lastSeenAt: { type: "integer", minimum: 0 },
+  },
+} as const;
+
 export const indexerScanRunSchema = {
   type: "object",
   additionalProperties: false,
@@ -89,7 +103,11 @@ export const indexerScanRunSchema = {
 
 export const catalogStatusSchema = {
   type: "object",
-  required: ["generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy", "chainResetSuspected", "indexer"],
+  required: [
+    "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
+    "cursorStallThresholdSeconds", "cursorStalled", "indexer",
+  ],
   properties: {
     generatedAt: { type: "integer" },
     syncedToTx: { type: "integer" },
@@ -97,9 +115,16 @@ export const catalogStatusSchema = {
     txsBehind: { type: ["integer", "null"] },
     cursorAheadBy: { type: ["integer", "null"], minimum: 0 },
     chainResetSuspected: { type: ["boolean", "null"] },
+    cursorAdvancedAt: { type: ["integer", "null"], minimum: 0 },
+    secondsSinceCursorAdvanced: { type: ["integer", "null"], minimum: 0 },
+    cursorStallThresholdSeconds: { type: "integer", minimum: 1, maximum: 86400 },
+    cursorStalled: { type: ["boolean", "null"] },
     indexer: {
       type: "object",
-      required: ["storage", "artifacts", "deadLetters", "deadLetterDiagnostics", "lastRun"],
+      required: [
+        "storage", "artifacts", "deadLetters", "deadLetterDiagnostics",
+        "listingRejectionDiagnostics", "lastRun",
+      ],
       properties: {
         storage: { const: "sqlite-wal" },
         artifacts: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
@@ -122,6 +147,25 @@ export const catalogStatusSchema = {
             returned: { type: "integer", minimum: 0, maximum: 100 },
             hasMore: { type: "boolean" },
             items: { type: "array", maxItems: 100, items: { $ref: "#/components/schemas/DeadLetterDiagnostic" } },
+          },
+        },
+        listingRejectionDiagnostics: {
+          type: "object",
+          required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
+          properties: {
+            scope: { const: "listing-registration-binding" },
+            total: { type: "integer", minimum: 0 },
+            byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
+            query: {
+              type: "object", required: ["locator", "limit"], additionalProperties: false,
+              properties: {
+                locator: { type: ["string", "null"], pattern: "^stor-[0-9a-f]{40}$" },
+                limit: { type: "integer", minimum: 1, maximum: 100 },
+              },
+            },
+            returned: { type: "integer", minimum: 0, maximum: 100 },
+            hasMore: { type: "boolean" },
+            items: { type: "array", maxItems: 100, items: { $ref: "#/components/schemas/ListingRejectionDiagnostic" } },
           },
         },
         lastRun: { anyOf: [{ $ref: "#/components/schemas/IndexerScanRun" }, { type: "null" }] },
@@ -228,7 +272,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "locator", in: "query", description: "Return diagnostics for one exact lowercase storage locator.", schema: { type: "string", pattern: "^stor-[0-9a-f]{40}$" } },
         ],
         responses: {
-          "200": { description: "Indexer, chain-tip, and public-safe dead-letter state", content: { "application/json": { schema: { $ref: "#/components/schemas/CatalogStatus" } } } },
+          "200": { description: "Indexer freshness, cursor-stall, and public-safe rejection state", content: { "application/json": { schema: { $ref: "#/components/schemas/CatalogStatus" } } } },
           "400": { description: "Invalid diagnostics query" },
         },
       },
@@ -237,6 +281,7 @@ export const openApiDocument = (origin: string) => ({
   components: { schemas: {
     ListingSummary: listingSummarySchema,
     DeadLetterDiagnostic: deadLetterDiagnosticSchema,
+    ListingRejectionDiagnostic: listingRejectionDiagnosticSchema,
     IndexerScanRun: indexerScanRunSchema,
     CatalogStatus: catalogStatusSchema,
   } },

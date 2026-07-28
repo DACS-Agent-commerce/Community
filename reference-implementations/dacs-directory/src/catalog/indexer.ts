@@ -28,7 +28,14 @@ import { gcrGetIdentities } from "./gcr.js";
 import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
-import { artifactAnchorTime, findProgramAddress, loadScanState } from "./store.js";
+import {
+  artifactAnchorTime,
+  clearListingRejection,
+  findProgramAddress,
+  loadScanState,
+  recordListingRejection,
+  type ListingRejectionCode,
+} from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
@@ -62,6 +69,17 @@ const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
 
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
+
+export function listingBindingRejection(
+  sellerClaim: string,
+  anchorOwner: string | undefined,
+  registrationClaim: string,
+): ListingRejectionCode | null {
+  const expected = registrationClaim.toLowerCase();
+  if (sellerClaim.toLowerCase() !== expected) return "SELLER_CLAIM_BINDING";
+  if (ownerClaim(anchorOwner) !== expected) return "OWNER_CLAIM_BINDING";
+  return null;
+}
 
 /**
  * Index one registration into a verified SellerRecord.
@@ -115,8 +133,16 @@ export async function indexRegistration(
     const verified = await verifyListing(anchored.data);
     if (!verified) continue;
     const { scope } = verified;
-    if (verified.sellerClaim.toLowerCase() !== reg.primaryClaim.toLowerCase()) continue;
-    if (ownerClaim(anchored.owner) !== reg.primaryClaim.toLowerCase()) continue;
+    const bindingRejection = listingBindingRejection(
+      verified.sellerClaim,
+      anchored.owner,
+      reg.primaryClaim,
+    );
+    if (bindingRejection) {
+      recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
+      continue;
+    }
+    clearListingRejection(anchor, reg.primaryClaim);
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
     if (declaredHash && declaredHash !== verified.contentHash) continue;
     const listingId = typeof scope.listingId === "string" ? scope.listingId

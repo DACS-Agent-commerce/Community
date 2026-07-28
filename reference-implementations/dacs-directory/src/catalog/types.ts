@@ -213,6 +213,8 @@ export interface ScanState {
   schemaVersion?: 4;
   lastSeenTxId: number;
   lastChainTip?: number;
+  /** Wall-clock time when lastSeenTxId most recently increased. */
+  cursorAdvancedAt?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
   /** listing content hash → every observed revocation marker candidate. */
