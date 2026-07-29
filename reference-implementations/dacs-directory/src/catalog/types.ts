@@ -80,10 +80,11 @@ export interface ListingSummary {
     deliverable?: Record<string, unknown>;
   };
   pricing: {
-    kind?: "fixed" | "negotiable" | "auction";
+    kind?: "fixed" | "negotiable" | "auction" | "metered";
     priceHint?: string;
     currency?: string;
     unit?: string;
+    minTotalHint?: string;
     minPct?: number;
     maxPct?: number;
     selectionRule?: string;

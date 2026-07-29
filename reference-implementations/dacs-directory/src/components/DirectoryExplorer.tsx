@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
-import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "./labels";
+import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "./labels";
 
 const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declared";
 
@@ -229,7 +229,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               </p>
               <p className="agent-desc clamp2">{listing.offering.description || "No description supplied."}</p>
               <div className="service-facts">
-                <div><span>pricing</span><strong>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}` : pricingModelLabel(listing.pricing, listing.offering.negotiation)}</strong></div>
+                <div><span>pricing</span><strong>{listing.pricing.priceHint ? publishedPriceLabel(listing.pricing) : pricingModelLabel(listing.pricing, listing.offering.negotiation)}</strong></div>
                 <div><span>delivery</span><strong>{listing.offering.delivery?.[0] ? deliveryLabel(listing.offering.delivery[0]) : "Not stated"}</strong></div>
               </div>
               <div className="card-meta">

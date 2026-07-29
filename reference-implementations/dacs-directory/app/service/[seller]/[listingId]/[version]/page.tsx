@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import CounterpartyEvidenceRunner from "@/src/components/CounterpartyEvidenceRunner";
 import CopyText from "@/src/components/CopyText";
-import { deliveryLabel, pricingModelLabel, railLabel, tierMeta } from "@/src/components/labels";
+import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { inspectServicePath } from "@/src/catalog/inspection";
 import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
 import { loadCatalog } from "@/src/catalog/store";
@@ -111,7 +111,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="offer-heading" className="card-section-title">What to expect</h2>
           <dl className="detail-list">
             <div><dt>Pricing model</dt><dd>{pricingModelLabel(listing.pricing, listing.offering.negotiation)}</dd></div>
-            <div><dt>Published amount</dt><dd>{listing.pricing.priceHint ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}${listing.pricing.unit ? ` · ${listing.pricing.unit}` : ""}` : "Not published"}</dd></div>
+            <div><dt>Published amount</dt><dd>{publishedPriceLabel(listing.pricing)}</dd></div>
             <div><dt>Payment</dt><dd>{(listing.offering.rails ?? []).map(railLabel).join(", ") || "Not stated"}</dd></div>
             <div><dt>Delivery</dt><dd>{(listing.offering.delivery ?? []).map(deliveryLabel).join(", ") || "Not stated"}</dd></div>
           </dl>

@@ -59,6 +59,8 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
   assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
   assert.ok(listingSummarySchema.properties.artifactProfile.enum.includes("fixture-listing"));
+  assert.ok(listingSummarySchema.properties.pricing.properties.kind.enum.includes("metered"));
+  assert.equal(listingSummarySchema.properties.pricing.properties.minTotalHint.type, "string");
   assert.ok(listingSummarySchema.allOf[0].then.required.includes("revocationBinding"));
   assert.equal(
     listingSummarySchema.properties.revocationBinding.properties.markerContentHash.pattern,

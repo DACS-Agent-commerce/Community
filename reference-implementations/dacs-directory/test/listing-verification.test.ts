@@ -98,3 +98,45 @@ test("verifyListing refuses unknown executable phase kinds even with a valid sig
 
   assert.equal(await verifyListing(listing), null);
 });
+
+test("verifyListing accepts normative metered pricing bound to an AP2 rail", async () => {
+  const metered = {
+    kind: "metered",
+    unitPrice: { amount: "0.02", currency: "USD" },
+    unit: "API call",
+    minTotal: { amount: "1", currency: "USD" },
+  };
+  const pipeline = [
+    { kind: "negotiate-fixed-price" },
+    { kind: "commit-agreement" },
+    { kind: "pay-ap2", parameters: { rail: "ap2:stripe-paymentintents" } },
+    { kind: "deliver-storage-program" },
+  ];
+  const listing = signedCurrentListing({
+    pricing: metered,
+    pipeline,
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+  });
+
+  assert.ok(await verifyListing(listing));
+  assert.ok(await verifyListing(signedCurrentListing({
+    pricing: metered,
+    pipeline: [{ kind: "negotiate-rfq" }, ...pipeline.slice(1)],
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+  })));
+  assert.equal(await verifyListing(signedCurrentListing({
+    pricing: { ...metered, minTotal: { amount: "1", currency: "EUR" } },
+    pipeline,
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+  })), null);
+  assert.equal(await verifyListing(signedCurrentListing({
+    pricing: { ...metered, unit: "" },
+    pipeline,
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+  })), null);
+  assert.equal(await verifyListing(signedCurrentListing({
+    pricing: metered,
+    pipeline: [{ kind: "negotiate-sealed-envelope" }, ...pipeline.slice(1)],
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+  })), null);
+});

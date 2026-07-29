@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pricingModelLabel } from "../src/components/labels.js";
+import { pricingModelLabel, publishedPriceLabel, railLabel } from "../src/components/labels.js";
 
 test("pricing label reflects the structured pricing model, not the negotiation pattern", () => {
   // The core fix: a negotiable-band listing that fronts negotiate-fixed-price
@@ -21,4 +21,20 @@ test("pricing label falls back to an honest negotiation basis for legacy listing
   assert.equal(pricingModelLabel({}, []), "Not stated");
   // An unknown future pricing.kind is ignored in favor of the honest fallback.
   assert.equal(pricingModelLabel({ kind: "surge" }, ["negotiate-rfq"]), "by negotiation (RFQ)");
+});
+
+test("AP2 provider rail keeps its human-readable provider identity", () => {
+  assert.equal(railLabel("ap2:stripe-paymentintents"), "Stripe PaymentIntents · AP2");
+});
+
+test("published metered prices retain their unit and minimum", () => {
+  assert.equal(publishedPriceLabel({
+    kind: "metered",
+    priceHint: "0.02",
+    currency: "USD",
+    unit: "API call",
+    minTotalHint: "1.00",
+  }), "0.02 USD per API call · 1.00 USD minimum");
+  assert.equal(publishedPriceLabel({ kind: "fixed", priceHint: "10", currency: "DEM" }), "10 DEM");
+  assert.equal(publishedPriceLabel({ kind: "metered" }), "Not published");
 });

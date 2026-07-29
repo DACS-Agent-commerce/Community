@@ -31,9 +31,9 @@ export const listingSummarySchema = {
     },
     pricing: {
       type: "object", properties: {
-        kind: { enum: ["fixed", "negotiable", "auction"] }, priceHint: { type: "string" },
+        kind: { enum: ["fixed", "negotiable", "auction", "metered"] }, priceHint: { type: "string" },
         currency: { type: "string" }, unit: { type: "string" }, minPct: { type: "number" },
-        maxPct: { type: "number" }, selectionRule: { type: "string" },
+        maxPct: { type: "number" }, selectionRule: { type: "string" }, minTotalHint: { type: "string" },
       },
     },
     status: { enum: ["active", "revoked"] },
