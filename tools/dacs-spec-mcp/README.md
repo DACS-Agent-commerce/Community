@@ -28,9 +28,9 @@ Every tool response is wrapped in:
 
 ```json
 {
-  "dacs_version":  "0.1",
-  "version_date":  "2026-05-31",
-  "commit":        "b3646aa4eea10226e5c0a45175c8f9708df9d758",
+  "dacs_version":  "0.4",
+  "version_date":  "2026-07-27",
+  "commit":        "4bb9e48a1095ab32c06c25b7c0b52018d3ce4091",
   "spec_path":     "<vendor>/spec/CORE.md",
   "spec_paths":    [ "<vendor>/spec/CORE.md", …, "<vendor>/spec/CONFORMANCE-PLAN.md" ],
   "result":        { … }
@@ -92,8 +92,8 @@ python3.12 -m venv venv
 ```
 
 The smoke test exercises all seven tools, asserts the locked counts
-(196 sections / 152 rules / 64 schemas at the pinned commit), checks
-multi-residence (CF-4 has five sites; CD-1 has five including the
+(204 sections / 226 rules / 87 schemas at the pinned commit), checks
+multi-residence (CF-4 has five sites; CD-1 has six including the
 CORE §B.2 word-def and DACS-3 §8.5.1 paren-def), and verifies that
 three rules (one CF in CORE §B.1, one VP-R in DACS-2, one HTLC in
 DACS-4) return text byte-equal to the source file lines at their
@@ -123,6 +123,24 @@ is accepted as a flag but falls back to `stdio` with a stderr notice.
    update those assertions deliberately, and re-verify the byte-equal
    trio and multi-residence assertions, before considering the new pin
    trusted.
+
+## Known errata at this pin (v0.4)
+
+Pinned to DACS-Standard **v0.4** (annotated tag → commit
+`4bb9e48a1095ab32c06c25b7c0b52018d3ce4091`). Two corrections merged to
+`next` after the tag and are NOT in this pin:
+
+- **#297 — flow-trace signing preimage.** The tagged `docs/flow-trace.md`
+  walkthrough constructs a signing preimage that does not verify.
+  CORE §B.7 is authoritative. (Note: `docs/` is not part of this server's
+  index; this erratum concerns the pinned checkout implementers read
+  alongside it.)
+- **#296 — identity profile.** `did:demos:agent:<64-lowercase-hex>` is a
+  profile under `did`; `demos:0x...` is NOT aliased and is rejected by the
+  production directory. The tagged DACS-1 identity text predates this
+  ruling (corrected on `next` at `31d0629`).
+
+This pin will be re-bumped when a 0.4.1 or later tag exists.
 
 ## Layout
 
