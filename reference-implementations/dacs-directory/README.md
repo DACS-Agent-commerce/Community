@@ -109,6 +109,7 @@ vendor directory.
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
+| `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
