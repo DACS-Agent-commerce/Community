@@ -25,7 +25,7 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
-import { hasValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
@@ -164,7 +164,7 @@ export async function indexRegistration(
     const revocationAddresses = Array.isArray(storedCandidates)
       ? storedCandidates
       : storedCandidates ? [storedCandidates] : [];
-    const revoked = await hasValidListingRevocation(
+    const revocationBinding = await findValidListingRevocation(
       revocationAddresses,
       verified,
       version,
@@ -202,7 +202,8 @@ export async function indexRegistration(
         ? scope.buyerRequirement as Record<string, unknown> : undefined,
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
-      status: revoked ? "revoked" : "active",
+      status: revocationBinding ? "revoked" : "active",
+      ...(revocationBinding ? { revocationBinding } : {}),
       catalogObservedAt: now,
     });
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
