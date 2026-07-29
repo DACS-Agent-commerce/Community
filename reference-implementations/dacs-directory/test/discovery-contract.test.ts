@@ -59,6 +59,11 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
   assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
   assert.ok(listingSummarySchema.properties.artifactProfile.enum.includes("fixture-listing"));
+  assert.ok(listingSummarySchema.allOf[0].then.required.includes("revocationBinding"));
+  assert.equal(
+    listingSummarySchema.properties.revocationBinding.properties.markerContentHash.pattern,
+    "^[0-9a-f]{64}$",
+  );
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
   assert.ok(filters.includes("identityTier"));
   const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");

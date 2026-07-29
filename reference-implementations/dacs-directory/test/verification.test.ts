@@ -22,11 +22,13 @@ import {
 import { activeCatalogListings, activeCatalogSellers } from "../src/catalog/discovery.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import {
+  findValidListingRevocation,
   hasValidListingRevocation,
   ownerClaim,
+  revocationLogicalAddress,
   verifyListing,
 } from "../src/catalog/listingVerification.js";
-import { addRevocationCandidate } from "../src/catalog/scan.js";
+import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
@@ -542,12 +544,31 @@ test("any valid revocation candidate wins and scanner candidates accumulate", as
   const read = async (ref: string) => records.get(ref) ?? null;
   assert.equal(await hasValidListingRevocation(["bogus", "valid"], verified, 1, read), true);
   assert.equal(await hasValidListingRevocation(["bogus"], verified, 1, read), false);
+  const binding = await findValidListingRevocation(["bogus", "valid"], verified, 1, read);
+  assert.deepEqual(binding, {
+    sellerPrimaryClaim: did,
+    listingId: listing.listingId,
+    listingVersion: 1,
+    listingContentHash: verified.contentHash,
+    logicalAddress: `dacs1-revoked:did%3Ademos%3Aagent%3A${did.slice(-64)}:svc:v1`,
+    markerAnchor: { kind: "storage-program", locator: "valid" },
+    markerContentHash: contentHash(scope),
+  });
+  assert.equal(
+    revocationLogicalAddress("cci-xm:evm:mainnet:0x1234", "offer", 3),
+    "dacs1-revoked:cci-xm%3Aevm%3Amainnet%3A0x1234:offer:v3",
+  );
 
   const candidates = new Map<string, string[]>();
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
   addRevocationCandidate(candidates, verified.contentHash, "stor-new");
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
   assert.deepEqual(candidates.get(verified.contentHash), ["stor-old", "stor-new"]);
+
+  // Discovery is value-based: a conforming producer may use any colon-free,
+  // opaque StorageProgram name and the marker remains discoverable.
+  assert.equal(isListingRevocationCandidate(valid), true);
+  assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
 });
 
 test("public discovery excludes revoked listings and empty sellers", () => {

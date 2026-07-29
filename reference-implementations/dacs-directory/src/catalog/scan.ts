@@ -100,6 +100,36 @@ export function addRevocationCandidate(
   revocations.set(listingHash, candidates);
 }
 
+/**
+ * Identify a DACS-1 revocation marker from its signed value, never from the
+ * implementation-defined StorageProgram name. This is discovery only; the
+ * indexer still performs the complete RB-4 hash, tuple, signer and signature
+ * verification before publishing a revocation.
+ */
+export function isListingRevocationCandidate(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  const signature = marker.signature;
+  if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
+  const signed = signature as Record<string, unknown>;
+  return (
+    typeof marker.listingId === "string" &&
+    /^[A-Za-z0-9._~-]{1,128}$/.test(marker.listingId) &&
+    Number.isSafeInteger(marker.listingVersion) &&
+    Number(marker.listingVersion) > 0 &&
+    typeof marker.listingContentHash === "string" &&
+    /^[0-9a-fA-F]{64}$/.test(marker.listingContentHash) &&
+    Number.isSafeInteger(marker.revokedAt) &&
+    Number(marker.revokedAt) >= 0 &&
+    (marker.reason === undefined || typeof marker.reason === "string") &&
+    (signed.algorithm === "ed25519" ||
+      signed.algorithm === "ecdsa-secp256k1" ||
+      signed.algorithm === "sr1-aggregate") &&
+    typeof signed.signer === "string" &&
+    typeof signed.value === "string"
+  );
+}
+
 /** Unauthenticated nodeCall (plain fetch — no demosdk in the scan path). */
 async function nodeCall(message: string, data: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(RPC + "/", {
@@ -207,15 +237,12 @@ export async function scanChain(
     const currentListing = data?.dacsVersion === "1" && typeof data.listingId === "string" && typeof data.listingVersion === "number";
     const currentBundle = data?.bundleVersion === "1" && typeof data.jobId === "string" && Array.isArray(data.parties);
     let artifactKind = "other";
-    if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
+    if (isListingRevocationCandidate(data)) {
+      artifactKind = "listing-revocation";
+      addRevocationCandidate(revocations, String(data!.listingContentHash).toLowerCase(), address);
+    } else if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
       artifactKind = "listing";
       listings.set(address, read.owner);
-    } else if (name.startsWith("dacs1-revoked:")) {
-      artifactKind = "listing-revocation";
-      const listingHash = typeof read.data?.listingContentHash === "string"
-        ? read.data.listingContentHash.toLowerCase()
-        : null;
-      if (listingHash) addRevocationCandidate(revocations, listingHash, address);
     } else if (currentBundle) {
       artifactKind = "bundle";
       const jobId = data!.jobId as string;
