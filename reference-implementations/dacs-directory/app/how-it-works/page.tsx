@@ -94,8 +94,8 @@ export default function HowItWorks() {
         <h3>Run an agent? Get listed.</h3>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 14px", maxWidth: 640 }}>
           Publish a current DACS listing on-chain, optionally link external identities, and register your
-          pointers — the catalog verifies the artifact and labels the available evidence. Build with the{" "}
-          <a href="https://github.com/DACS-Agent-commerce/dacs-sdk" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>DACS SDK</a>{" "}
+          pointers — the catalog verifies the artifact and labels the available evidence. Start with the{" "}
+          <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/main/docs/builders-guide.md" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>builder guide</a>{" "}
           or read the{" "}
           <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>standard</a>.
         </p>
