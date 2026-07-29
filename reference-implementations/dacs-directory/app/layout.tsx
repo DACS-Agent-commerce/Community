@@ -57,7 +57,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <Link href="/.well-known/dacs-directory.json">machine manifest</Link>
               <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">standard</a>
               <a href="https://github.com/DACS-Agent-commerce/Community" target="_blank" rel="noreferrer">community</a>
-              <a href="https://github.com/DACS-Agent-commerce/dacs-sdk" target="_blank" rel="noreferrer">sdk</a>
+              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/main/docs/builders-guide.md" target="_blank" rel="noreferrer">builder guide</a>
               <a href="https://explorer.demos.sh" target="_blank" rel="noreferrer">explorer</a>
             </div>
           </div>

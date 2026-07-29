@@ -2,6 +2,7 @@ import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
 
@@ -65,7 +66,13 @@ function currentListing(scope: Record<string, unknown>): {
   const tags = Array.isArray(offering?.tags) ? offering.tags : [];
   const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
     : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter) && typeof pricing.minPct === "number" && pricing.minPct >= 0 && pricing.minPct < 100 && typeof pricing.maxPct === "number" && pricing.maxPct >= 0
-      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && typeof pricing.selectionRule === "string" : false;
+      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && typeof pricing.selectionRule === "string"
+        : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
+          typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
+          (pricing.minTotal === undefined || (
+            validPriceTerm(pricing.minTotal) &&
+            record(pricing.minTotal)?.currency === record(pricing.unitPrice)?.currency
+          )) : false;
   const hasPayPhase = pipeline.some((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"));
   const rails = Array.isArray(scope.acceptedRails) ? scope.acceptedRails.map(record).filter(Boolean) : [];
   const railIds = new Set(rails.map((rail) => rail?.railId).filter((rail): rail is string => typeof rail === "string"));
@@ -74,6 +81,11 @@ function currentListing(scope: Record<string, unknown>): {
   const negotiationKinds = pipeline.map((step) => step.kind).filter((kind) => typeof kind === "string" && kind.startsWith("negotiate-"));
   const expectedNegotiation = pricing?.kind === "fixed" ? "negotiate-fixed-price"
     : pricing?.kind === "negotiable" ? "negotiate-rfq" : pricing?.kind === "auction" ? "negotiate-sealed-envelope" : "";
+  const negotiationOk = pricing?.kind === "metered"
+    ? negotiationKinds.length === 1 && (
+      negotiationKinds[0] === "negotiate-fixed-price" || negotiationKinds[0] === "negotiate-rfq"
+    )
+    : negotiationKinds.length === 1 && negotiationKinds[0] === expectedNegotiation;
   const signer = typeof signature?.signer === "string" ? signature.signer : "";
   const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
   if (
@@ -85,7 +97,7 @@ function currentListing(scope: Record<string, unknown>): {
     typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
     typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) || !record(offering.deliverable) ||
     !record(scope.buyerRequirement) || pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || negotiationKinds.length !== 1 || negotiationKinds[0] !== expectedNegotiation ||
+    !pricingOk || !negotiationOk ||
     (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || !record(scope.terms) || typeof validity?.notBefore !== "number" ||
     (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
   ) return null;
@@ -187,11 +199,52 @@ export async function hasValidListingRevocation(
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
 ): Promise<boolean> {
+  return Boolean(await findValidListingRevocation(
+    candidateRefs,
+    listing,
+    expectedVersion,
+    readCandidate,
+  ));
+}
+
+/** Encode the delimiter-bearing ClaimReference segment required by CF-4. */
+export function revocationLogicalAddress(
+  sellerPrimaryClaim: string,
+  listingId: string,
+  listingVersion: number,
+): string {
+  const encodedClaim = sellerPrimaryClaim.replace(
+    /[:?&=%]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
+}
+
+/**
+ * Fully verify discovered candidates and return the RB-2 binding this catalog
+ * can publish. A bogus candidate never shadows a later valid marker.
+ */
+export async function findValidListingRevocation(
+  candidateRefs: string[],
+  listing: VerifiedListing,
+  expectedVersion: number,
+  readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
+): Promise<RevocationBinding | null> {
   for (const ref of candidateRefs) {
     const candidate = await readCandidate(ref);
-    if (candidate && await verifyListingRevocation(candidate, listing, expectedVersion)) return true;
+    if (!candidate || !(await verifyListingRevocation(candidate, listing, expectedVersion))) continue;
+    const scope = stripSignature(candidate);
+    return {
+      sellerPrimaryClaim: listing.sellerClaim,
+      listingId: String(scope.listingId),
+      listingVersion: expectedVersion,
+      listingContentHash: listing.contentHash,
+      logicalAddress: revocationLogicalAddress(listing.sellerClaim, String(scope.listingId), expectedVersion),
+      markerAnchor: { kind: "storage-program", locator: ref },
+      markerContentHash: contentHash(scope),
+    };
   }
-  return false;
+  return null;
 }
 
 export function ownerClaim(owner: string | undefined): string | null {

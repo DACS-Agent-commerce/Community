@@ -2,6 +2,7 @@
 export const RAIL_LABELS: Record<string, string> = {
   "pay-dem": "DEM",
   "pay-x402": "USDC · x402",
+  "ap2:stripe-paymentintents": "Stripe PaymentIntents · AP2",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");
 /** "negotiate-fixed-price" → "fixed price"; acronym ids get proper casing. */
@@ -34,6 +35,24 @@ export const pricingModelLabel = (
   if (kind && PRICING_MODEL_LABELS[kind]) return PRICING_MODEL_LABELS[kind];
   if (negotiation?.length) return `by negotiation (${negotiation.map(negotiationLabel).join(", ")})`;
   return "Not stated";
+};
+
+/** Display a published amount without dropping metered units or minimums. */
+export const publishedPriceLabel = (
+  pricing: {
+    kind?: string;
+    priceHint?: string;
+    currency?: string;
+    unit?: string;
+    minTotalHint?: string;
+  },
+  fallback = "Not published",
+): string => {
+  if (!pricing.priceHint) return fallback;
+  const currency = pricing.currency ? ` ${pricing.currency}` : "";
+  const unit = pricing.kind === "metered" && pricing.unit ? ` per ${pricing.unit}` : pricing.unit ? ` · ${pricing.unit}` : "";
+  const minimum = pricing.minTotalHint ? ` · ${pricing.minTotalHint}${currency} minimum` : "";
+  return `${pricing.priceHint}${currency}${unit}${minimum}`;
 };
 /** "deliver-attested-payload" → "attested payload" */
 export const deliveryLabel = (d: string) =>

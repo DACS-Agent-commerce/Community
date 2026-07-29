@@ -16,6 +16,9 @@ const boundedStrings = (
   return out;
 };
 
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
 /** Normalize signed-but-extensible listing fields before they reach the UI. */
 export function listingPresentation(scope: Record<string, unknown>) {
   const currentOffering = scope.offering && typeof scope.offering === "object" && !Array.isArray(scope.offering)
@@ -42,11 +45,13 @@ export function listingPresentation(scope: Record<string, unknown>) {
     : null;
   const price = pricing?.kind === "fixed" ? pricing.price
     : pricing?.kind === "negotiable" ? pricing.bandCenter
-      : pricing?.kind === "auction" ? pricing.reservePrice : null;
+      : pricing?.kind === "auction" ? pricing.reservePrice
+        : pricing?.kind === "metered" ? pricing.unitPrice : null;
   const priceTerm = price && typeof price === "object" && !Array.isArray(price)
     ? price as Record<string, unknown> : null;
-  const pricingKind: "fixed" | "negotiable" | "auction" | undefined =
-    pricing?.kind === "fixed" || pricing?.kind === "negotiable" || pricing?.kind === "auction"
+  const minimum = pricing?.kind === "metered" ? record(pricing.minTotal) : null;
+  const pricingKind: "fixed" | "negotiable" | "auction" | "metered" | undefined =
+    pricing?.kind === "fixed" || pricing?.kind === "negotiable" || pricing?.kind === "auction" || pricing?.kind === "metered"
     ? pricing.kind : undefined;
   return {
     title: typeof currentOffering?.title === "string" ? currentOffering.title.slice(0, 200)
@@ -68,7 +73,10 @@ export function listingPresentation(scope: Record<string, unknown>) {
       kind: pricingKind,
       priceHint: typeof priceTerm?.amount === "string" ? priceTerm.amount : undefined,
       currency: typeof priceTerm?.currency === "string" ? priceTerm.currency : undefined,
-      unit: typeof priceTerm?.unit === "string" ? priceTerm.unit : undefined,
+      unit: pricing?.kind === "metered" && typeof pricing.unit === "string"
+        ? pricing.unit
+        : typeof priceTerm?.unit === "string" ? priceTerm.unit : undefined,
+      minTotalHint: typeof minimum?.amount === "string" ? minimum.amount : undefined,
       minPct: typeof pricing.minPct === "number" ? pricing.minPct : undefined,
       maxPct: typeof pricing.maxPct === "number" ? pricing.maxPct : undefined,
       selectionRule: typeof pricing.selectionRule === "string" ? pricing.selectionRule : undefined,

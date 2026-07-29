@@ -66,7 +66,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -80,7 +80,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
     );
   }
-  const needsBindingBackfill = state.schemaVersion !== 4;
+  // v5 replays history because older scans attempted to recognise revocation
+  // markers from an impossible colon-bearing StorageProgram name.
+  const needsBindingBackfill = state.schemaVersion !== 5;
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -128,7 +130,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   else state.cursorAdvancedAt ??= Date.now();
   state.lastSeenTxId = nextCursor;
   state.lastChainTip = scan.chainTip;
-  state.schemaVersion = 4;
+  state.schemaVersion = 5;
   saveScanState(state);
   finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
     artifacts: scan.observations.length, rejected: scan.failures.length });

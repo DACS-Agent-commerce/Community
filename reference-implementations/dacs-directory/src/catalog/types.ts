@@ -41,6 +41,19 @@ export interface RegisteredDeal {
 
 export type ArtifactProfile = "dacs-v0.1" | "legacy-sdk-v0.1" | "fixture-listing";
 
+/** DACS-1 RB-2/RB-3 logical-to-native discovery record for a revocation marker. */
+export interface RevocationBinding {
+  sellerPrimaryClaim: string;
+  listingId: string;
+  listingVersion: number;
+  listingContentHash: string;
+  logicalAddress: string;
+  markerAnchor: { kind: string; locator: string };
+  markerContentHash: string;
+}
+
+export type RevocationCheck = "absent" | "revoked" | "indeterminate";
+
 /** §6.3.6 ListingSummary (subset the MVP populates; shape per spec). */
 export interface ListingSummary {
   listingId: string;
@@ -67,10 +80,11 @@ export interface ListingSummary {
     deliverable?: Record<string, unknown>;
   };
   pricing: {
-    kind?: "fixed" | "negotiable" | "auction";
+    kind?: "fixed" | "negotiable" | "auction" | "metered";
     priceHint?: string;
     currency?: string;
     unit?: string;
+    minTotalHint?: string;
     minPct?: number;
     maxPct?: number;
     selectionRule?: string;
@@ -78,6 +92,8 @@ export interface ListingSummary {
   buyerRequirement?: Record<string, unknown>;
   terms?: Record<string, unknown>;
   status: "active" | "revoked";
+  /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
+  revocationBinding?: RevocationBinding;
   catalogObservedAt: number;
   reputationHint?: ReputationHint;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
@@ -210,7 +226,8 @@ export interface Catalog {
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  schemaVersion?: 4;
+  /** Historic values remain readable so migrations can trigger a full replay. */
+  schemaVersion?: number;
   lastSeenTxId: number;
   lastChainTip?: number;
   /** Wall-clock time when lastSeenTxId most recently increased. */
