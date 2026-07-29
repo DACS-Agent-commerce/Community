@@ -17,6 +17,7 @@ import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
 import { parsePagination } from "../src/catalog/pagination.js";
 import { primaryClaimMatches } from "../src/catalog/discovery.js";
+import { publicDemosRpcUrl } from "../src/catalog/substrateDiscovery.js";
 
 test("public navigation never sends visitors to the private SDK repository", () => {
   const files = [
@@ -32,14 +33,42 @@ test("public navigation never sends visitors to the private SDK repository", () 
 
 test("directory manifest lets an agent discover every contract from the origin", () => {
   const origin = "https://directory.example";
-  const manifest = directoryManifest(origin);
+  const rpc = "https://node.example/demos";
+  const manifest = directoryManifest(origin, rpc);
   assert.equal(manifest.humanUrl, origin);
   assert.equal(manifest.agentCard, `${origin}/.well-known/agent.json`);
   assert.equal(manifest.catalog, `${origin}/api/dacs/listings`);
   assert.equal(manifest.inspectService, `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
   assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
+  assert.equal(manifest.substrates.demos.rpcUrl, rpc);
+  assert.equal(
+    manifest.substrates.demos.anchors["storage-program"].read.urlTemplate,
+    `${rpc}/storage-program/{locator}`,
+  );
+  assert.equal(manifest.substrates.demos.anchors["storage-program"].read.authentication, "none");
+  assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseDataPointer, "/data");
+  assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseOwnerPointer, "/owner");
   assert.ok(manifest.filters.includes("identityTier"));
+});
+
+test("public substrate discovery never leaks the indexer's private RPC setting", () => {
+  const priorInternal = process.env.DEMOS_RPC;
+  const priorPublic = process.env.NEXT_PUBLIC_DEMOS_RPC;
+  process.env.DEMOS_RPC = "http://10.0.0.8:9944/private";
+  delete process.env.NEXT_PUBLIC_DEMOS_RPC;
+  try {
+    assert.equal(publicDemosRpcUrl(), "https://demosnode.discus.sh");
+    assert.equal(publicDemosRpcUrl("https://public.example/rpc///"), "https://public.example/rpc");
+    assert.throws(() => publicDemosRpcUrl("http://public.example"), /credential-free HTTPS origin/);
+    assert.throws(() => publicDemosRpcUrl("https://user:secret@public.example"), /credential-free HTTPS origin/);
+    assert.throws(() => publicDemosRpcUrl("https://public.example?token=secret"), /credential-free HTTPS origin/);
+  } finally {
+    if (priorInternal === undefined) delete process.env.DEMOS_RPC;
+    else process.env.DEMOS_RPC = priorInternal;
+    if (priorPublic === undefined) delete process.env.NEXT_PUBLIC_DEMOS_RPC;
+    else process.env.NEXT_PUBLIC_DEMOS_RPC = priorPublic;
+  }
 });
 
 test("OpenAPI and JSON Schema describe the listing discovery surface", () => {

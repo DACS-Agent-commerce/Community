@@ -1,3 +1,5 @@
+import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
 export const listingSummarySchema = {
@@ -199,7 +201,7 @@ export const catalogStatusSchema = {
   },
 } as const;
 
-export const directoryManifest = (origin: string) => ({
+export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()) => ({
   name: "DACS Directory",
   description: "A discovery catalog for signed, chain-anchored DACS agent services.",
   dacsDirectoryVersion: "1",
@@ -209,6 +211,26 @@ export const directoryManifest = (origin: string) => ({
   catalog: `${origin}/api/dacs/listings`,
   openapi: `${origin}/openapi.json`,
   schemas: { listingSummary: `${origin}/schemas/listing-summary.schema.json` },
+  substrates: {
+    demos: {
+      network: "testnet",
+      rpcUrl: demosRpc,
+      anchors: {
+        "storage-program": {
+          locatorPattern: "^stor-[0-9a-f]{40}$",
+          read: {
+            method: "GET",
+            urlTemplate: `${demosRpc}/storage-program/{locator}`,
+            authentication: "none",
+            responseSuccessPointer: "/success",
+            responseDataPointer: "/data",
+            responseOwnerPointer: "/owner",
+            responseProgramNamePointer: "/programName",
+          },
+        },
+      },
+    },
+  },
   status: `${origin}/api/dacs/status`,
   inspectService: `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`,
   artifactProfiles: {
