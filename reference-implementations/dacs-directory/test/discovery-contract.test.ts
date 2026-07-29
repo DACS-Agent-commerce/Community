@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
@@ -16,6 +17,18 @@ import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
 import { parsePagination } from "../src/catalog/pagination.js";
 import { primaryClaimMatches } from "../src/catalog/discovery.js";
+
+test("public navigation never sends visitors to the private SDK repository", () => {
+  const files = [
+    new URL("../app/layout.tsx", import.meta.url),
+    new URL("../app/how-it-works/page.tsx", import.meta.url),
+  ];
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(source, /github\.com\/DACS-Agent-commerce\/dacs-sdk/);
+    assert.match(source, /DACS-Standard\/blob\/main\/docs\/builders-guide\.md/);
+  }
+});
 
 test("directory manifest lets an agent discover every contract from the origin", () => {
   const origin = "https://directory.example";
@@ -48,6 +61,11 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(listingSummarySchema.properties.artifactProfile.enum.includes("fixture-listing"));
   assert.ok(listingSummarySchema.properties.pricing.properties.kind.enum.includes("metered"));
   assert.equal(listingSummarySchema.properties.pricing.properties.minTotalHint.type, "string");
+  assert.ok(listingSummarySchema.allOf[0].then.required.includes("revocationBinding"));
+  assert.equal(
+    listingSummarySchema.properties.revocationBinding.properties.markerContentHash.pattern,
+    "^[0-9a-f]{64}$",
+  );
   const filters = document.paths["/api/dacs/listings"].get.parameters.map((parameter) => parameter.name);
   assert.ok(filters.includes("identityTier"));
   const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");

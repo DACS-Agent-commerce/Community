@@ -37,6 +37,26 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
+    revocationBinding: {
+      type: "object",
+      required: [
+        "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
+        "logicalAddress", "markerAnchor", "markerContentHash",
+      ],
+      additionalProperties: false,
+      properties: {
+        sellerPrimaryClaim: { type: "string", minLength: 1 },
+        listingId: { type: "string", minLength: 1 },
+        listingVersion: { type: "integer", minimum: 1 },
+        listingContentHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        logicalAddress: { type: "string", pattern: "^dacs1-revoked:" },
+        markerAnchor: {
+          type: "object", required: ["kind", "locator"], additionalProperties: false,
+          properties: { kind: { type: "string" }, locator: { type: "string" } },
+        },
+        markerContentHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      },
+    },
     catalogObservedAt: { type: "integer" },
     reputationHint: { type: "object" },
     inspection: {
@@ -50,6 +70,11 @@ export const listingSummarySchema = {
       },
     },
   },
+  allOf: [{
+    if: { properties: { status: { const: "revoked" } }, required: ["status"] },
+    then: { required: ["revocationBinding"] },
+    else: { not: { required: ["revocationBinding"] } },
+  }],
 } as const;
 
 export const deadLetterDiagnosticSchema = {

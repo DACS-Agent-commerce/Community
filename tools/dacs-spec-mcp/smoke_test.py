@@ -6,7 +6,7 @@ modules + 4 companions) at the pinned vendor commit, plus targeted assertions:
 - Byte-equal trio: site.line_text == source-file line for CF (CORE §B.1),
   VP-family (DACS-2 §7.6.1), HTLC-family (DACS-4 §9.5.4).
 - Multi-residence: CF-4 has 5 sites (1 paren-def + 4 word-def at the
-  reported locations); CD-1 has 5 sites including CORE §B.2 word-def AND
+  reported locations); CD-1 has 6 sites including CORE §B.2 word-def AND
   DACS-3 §8.5.1 paren-def.
 - Lifecycle-vector reachability: vector_files list surfaces
   dacs-v0.1-happy-path.json + dacs-v0.1-negative-paths.json; vector_file=
