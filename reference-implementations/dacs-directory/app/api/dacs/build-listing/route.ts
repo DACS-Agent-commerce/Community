@@ -19,10 +19,15 @@ import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
+import {
+  negotiationPhaseForPricing,
+  publishableRail,
+  PUBLISHABLE_PRICING_KINDS,
+  type PublishablePricingKind,
+} from "@/src/catalog/listingOptions";
 
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
-const PUBLISHABLE_RAILS = new Set(["pay-dem", "pay-x402"]);
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -49,7 +54,7 @@ export async function POST(req: NextRequest) {
     rails?: string[]; delivery?: string[]; category?: string; tags?: string[];
     publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string;
     pricing?: {
-      kind?: "fixed" | "negotiable" | "auction"; amount?: string; currency?: string; unit?: string;
+      kind?: PublishablePricingKind; amount?: string; currency?: string; unit?: string; minTotal?: string;
       minPct?: number; maxPct?: number; selectionRule?: "lowest-price" | "highest-price" | "first-acceptable";
     };
   } | null;
@@ -76,7 +81,8 @@ export async function POST(req: NextRequest) {
   }
   const rails = body.rails.filter(Boolean);
   const delivery = body.delivery.filter(Boolean);
-  if (rails.length !== 1 || delivery.length !== 1 || !PUBLISHABLE_RAILS.has(rails[0]) || !PUBLISHABLE_DELIVERY.has(delivery[0])) {
+  const selectedRail = rails.length === 1 ? publishableRail(rails[0]) : undefined;
+  if (!selectedRail || delivery.length !== 1 || !PUBLISHABLE_DELIVERY.has(delivery[0])) {
     return NextResponse.json({ error: "pick one supported payment rail and one delivery method" }, { status: 400 });
   }
 
@@ -106,7 +112,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "public endpoint must be a safe HTTPS URL of at most 2048 characters" }, { status: 400 });
   }
   const pricingKind = body.pricing?.kind ?? "fixed";
-  if (pricingKind !== "fixed" && pricingKind !== "negotiable" && pricingKind !== "auction") {
+  if (!PUBLISHABLE_PRICING_KINDS.includes(pricingKind)) {
     return NextResponse.json({ error: "unsupported pricing model" }, { status: 400 });
   }
   const amount = body.pricing?.amount?.trim() ?? "";
@@ -122,6 +128,14 @@ export async function POST(req: NextRequest) {
   if (pricingKind === "auction" && body.pricing?.selectionRule && !["lowest-price", "highest-price", "first-acceptable"].includes(body.pricing.selectionRule)) {
     return NextResponse.json({ error: "unsupported auction selection rule" }, { status: 400 });
   }
+  const meteredUnit = body.pricing?.unit?.trim() ?? "";
+  const minTotal = body.pricing?.minTotal?.trim() ?? "";
+  if (pricingKind === "metered" && (!meteredUnit || meteredUnit.length > 64)) {
+    return NextResponse.json({ error: "metered pricing needs a unit of at most 64 characters" }, { status: 400 });
+  }
+  if (pricingKind === "metered" && minTotal && (
+    !decimal.test(minTotal) || !Number.isFinite(Number(minTotal)) || Number(minTotal) <= 0
+  )) return NextResponse.json({ error: "metered minimum must be a positive canonical amount" }, { status: 400 });
 
   // A current Listing embeds a separately signed IdentityBundle. The first
   // request returns that preimage; the second includes the wallet signature
@@ -157,7 +171,9 @@ export async function POST(req: NextRequest) {
   const pricingTerm = {
     amount,
     currency,
-    ...(body.pricing?.unit?.trim() ? { unit: body.pricing.unit.trim().slice(0, 64) } : {}),
+    ...(pricingKind !== "metered" && body.pricing?.unit?.trim()
+      ? { unit: body.pricing.unit.trim().slice(0, 64) }
+      : {}),
   };
   const pricing = pricingKind === "negotiable" ? {
     kind: "negotiable",
@@ -168,6 +184,11 @@ export async function POST(req: NextRequest) {
     kind: "auction",
     reservePrice: pricingTerm,
     selectionRule: body.pricing?.selectionRule ?? "first-acceptable",
+  } : pricingKind === "metered" ? {
+    kind: "metered",
+    unitPrice: { amount, currency },
+    unit: meteredUnit,
+    ...(minTotal ? { minTotal: { amount: minTotal, currency } } : {}),
   } : { kind: "fixed", price: pricingTerm };
   const deliverableKind = delivery[0].replace(/^deliver-/, "");
   const deliverable = deliverableKind === "storage-program"
@@ -176,13 +197,16 @@ export async function POST(req: NextRequest) {
       ? { kind: "entitlement", durationSec: 2_592_000, renewable: false }
       : { kind: "attested-payload", payloadFormat: "application/json" };
   const auctionDeadline = identityPresentedAt + 7 * 24 * 60 * 60 * 1000;
-  const negotiationStep = pricingKind === "fixed" ? { kind: "negotiate-fixed-price" }
-    : pricingKind === "negotiable" ? { kind: "negotiate-rfq", parameters: { maxTurns: 8, timeoutSec: 300, rfqInitiator: "buyer" } }
-      : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: auctionDeadline, revealWindow: 3600, selectionRule: body.pricing?.selectionRule ?? "first-acceptable" } };
+  const negotiationKind = negotiationPhaseForPricing(pricingKind);
+  const negotiationStep = negotiationKind === "negotiate-rfq"
+    ? { kind: negotiationKind, parameters: { maxTurns: 8, timeoutSec: 300, rfqInitiator: "buyer" } }
+    : negotiationKind === "negotiate-sealed-envelope"
+      ? { kind: negotiationKind, parameters: { commitDeadline: auctionDeadline, revealWindow: 3600, selectionRule: body.pricing?.selectionRule ?? "first-acceptable" } }
+      : { kind: negotiationKind };
   const pipeline = [
     negotiationStep,
     { kind: "commit-agreement" },
-    { kind: rails[0], parameters: { rail: rails[0] } },
+    { kind: selectedRail.phaseKind, parameters: { rail: selectedRail.railId } },
     { kind: delivery[0] },
   ];
   const listing = {
@@ -202,7 +226,7 @@ export async function POST(req: NextRequest) {
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline,
     pricing,
-    acceptedRails: rails.map((railId) => ({ railId })),
+    acceptedRails: [{ railId: selectedRail.railId }],
     terms: {},
     validity: { notBefore: identityPresentedAt, ...(pricingKind === "auction" ? { notAfter: auctionDeadline } : {}) },
   };

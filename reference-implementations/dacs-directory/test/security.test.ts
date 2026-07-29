@@ -3,6 +3,11 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 
 import { listingPresentation } from "../src/catalog/listingMetadata.js";
+import {
+  negotiationPhaseForPricing,
+  publishableRail,
+  PUBLISHABLE_PRICING_KINDS,
+} from "../src/catalog/listingOptions.js";
 import { safePublicEndpoint } from "../src/catalog/publicEndpoint.js";
 import { parsePagination } from "../src/catalog/pagination.js";
 import { parseRegistration } from "../src/catalog/registration.js";
@@ -119,6 +124,36 @@ test("extensible listing metadata is normalized before catalog persistence", () 
   assert.deepEqual(hostile.rails, ["pay-dem"]);
   assert.equal(hostile.delivery.length, 16);
   assert.deepEqual(hostile.negotiation, []);
+});
+
+test("publisher options bind AP2 rail ids to phases and project metered pricing", () => {
+  assert.equal(publishableRail("ap2:stripe-paymentintents")?.phaseKind, "pay-ap2");
+  assert.equal(publishableRail("ap2:stripe-paymentintents")?.availability, "operator_gated");
+  assert.ok(PUBLISHABLE_PRICING_KINDS.includes("metered"));
+  assert.equal(negotiationPhaseForPricing("metered"), "negotiate-fixed-price");
+
+  const presentation = listingPresentation({
+    offering: { title: "Metered API", description: "Per call", category: "services.api", tags: [] },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "pay-ap2" }],
+    acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
+    pricing: {
+      kind: "metered",
+      unitPrice: { amount: "0.02", currency: "USD" },
+      unit: "API call",
+      minTotal: { amount: "1", currency: "USD" },
+    },
+  });
+  assert.deepEqual(presentation.rails, ["ap2:stripe-paymentintents"]);
+  assert.deepEqual(presentation.pricing, {
+    kind: "metered",
+    priceHint: "0.02",
+    currency: "USD",
+    unit: "API call",
+    minTotalHint: "1",
+    minPct: undefined,
+    maxPct: undefined,
+    selectionRule: undefined,
+  });
 });
 
 test("signed public endpoints are safe before they become browser links", () => {

@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useDemosWallet } from "@/src/components/useDemosWallet";
+import {
+  negotiationPhaseForPricing,
+  publishableRail,
+  PUBLISHABLE_PRICING_KINDS,
+  PUBLISHABLE_RAIL_OPTIONS,
+  type PublishablePricingKind,
+} from "@/src/catalog/listingOptions";
 
 const WALLET_URL = "https://chromewebstore.google.com/detail/demos-wallet/nefongcpmdahjaijjkihgieiamoahcoo";
-const RAIL_OPTIONS = [
-  { id: "pay-dem", label: "DEM on Demos" },
-  { id: "pay-x402", label: "USDC via x402" },
-];
 const DELIVERY_OPTIONS = [
   { id: "deliver-attested-payload", label: "Verified result", hint: "A result such as data, analysis, or code with an authenticity attestation." },
   { id: "deliver-storage-program", label: "On-chain result", hint: "The deliverable is stored on-chain or bound to an external payload by hash." },
@@ -31,10 +34,11 @@ export default function Register() {
   const [category, setCategory] = useState("services.other");
   const [tags, setTags] = useState("");
   const [delivery, setDelivery] = useState(DELIVERY_OPTIONS[0].id);
-  const [pricingKind, setPricingKind] = useState<"fixed" | "negotiable" | "auction">("fixed");
+  const [pricingKind, setPricingKind] = useState<PublishablePricingKind>("fixed");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState("DEM");
   const [unit, setUnit] = useState("per-job");
+  const [minTotal, setMinTotal] = useState("");
   const [minPct, setMinPct] = useState("20");
   const [maxPct, setMaxPct] = useState("20");
   const [selectionRule, setSelectionRule] = useState<"lowest-price" | "highest-price" | "first-acceptable">("first-acceptable");
@@ -44,8 +48,23 @@ export default function Register() {
 
   const claim = wallet.address ? `did:demos:agent:${wallet.address.replace(/^0x/, "")}` : null;
   const slug = serviceId.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  const validDescription = name.trim() && description.trim() && slug && rails.length > 0 && delivery && Number(amount) > 0 && currency.trim();
+  const selectedRail = publishableRail(rails[0] ?? "");
+  const validDescription = name.trim() && description.trim() && slug && selectedRail && delivery &&
+    Number(amount) > 0 && currency.trim() &&
+    (pricingKind !== "metered" || (unit.trim() && (!minTotal.trim() || Number(minTotal) > 0)));
   const activeIndex = screen === "connect" ? 0 : screen === "describe" ? 1 : screen === "review" ? 2 : 3;
+  const priceTermPreview = { amount, currency, ...(pricingKind !== "metered" && unit ? { unit } : {}) };
+  const pricingPreview = pricingKind === "negotiable"
+    ? { kind: pricingKind, bandCenter: priceTermPreview, minPct: Number(minPct), maxPct: Number(maxPct) }
+    : pricingKind === "auction"
+      ? { kind: pricingKind, reservePrice: priceTermPreview, selectionRule }
+      : pricingKind === "metered"
+        ? {
+            kind: pricingKind, unitPrice: { amount, currency }, unit,
+            ...(minTotal.trim() ? { minTotal: { amount: minTotal.trim(), currency } } : {}),
+          }
+        : { kind: pricingKind, price: priceTermPreview };
+  const negotiationPhase = negotiationPhaseForPricing(pricingKind);
 
   const publish = async () => {
     if (!claim || !validDescription) return;
@@ -60,7 +79,7 @@ export default function Register() {
         tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
         pricing: {
           kind: pricingKind, amount: amount.trim(), currency: currency.trim(), unit: unit.trim() || undefined,
-          minPct: Number(minPct), maxPct: Number(maxPct), selectionRule,
+          minTotal: minTotal.trim() || undefined, minPct: Number(minPct), maxPct: Number(maxPct), selectionRule,
         },
       };
       const identityBuild = await fetch("/api/dacs/build-listing", {
@@ -177,12 +196,13 @@ export default function Register() {
           <div className="form-field"><label htmlFor="tags">Search tags</label><input id="tags" className="form-control" aria-describedby="tags-hint" placeholder="github, code-review, llm" value={tags} onChange={(event) => setTags(event.target.value)} /><span id="tags-hint" className="field-hint">Optional, comma separated, maximum 16; each tag can be 32 characters.</span></div>
           <div className="form-field"><label htmlFor="public-endpoint">Agent endpoint</label><input id="public-endpoint" className="form-control mono" type="url" placeholder="https://agent.example.com/a2a" value={publicEndpoint} onChange={(event) => setPublicEndpoint(event.target.value)} /><span className="field-hint">Optional HTTPS endpoint buyers and agents can use to begin negotiation.</span></div>
 
-          <fieldset className="form-field"><legend className="form-legend">Pricing model</legend><div className="badges">{(["fixed", "negotiable", "auction"] as const).map((kind) => <button key={kind} type="button" aria-pressed={pricingKind === kind} className={`badge filter ${pricingKind === kind ? "active" : ""}`} onClick={() => setPricingKind(kind)}>{kind === "negotiable" ? "negotiation" : kind}</button>)}</div></fieldset>
+          <fieldset className="form-field"><legend className="form-legend">Pricing model</legend><div className="badges">{PUBLISHABLE_PRICING_KINDS.map((kind) => <button key={kind} type="button" aria-pressed={pricingKind === kind} className={`badge filter ${pricingKind === kind ? "active" : ""}`} onClick={() => setPricingKind(kind)}>{kind === "negotiable" ? "negotiation" : kind}</button>)}</div></fieldset>
           <div className="choice-grid">
-            <div className="form-field"><label htmlFor="price-amount">{pricingKind === "fixed" ? "Fixed amount" : pricingKind === "negotiable" ? "Negotiation centre" : "Reserve amount"}</label><input id="price-amount" className="form-control" inputMode="decimal" placeholder="1" value={amount} onChange={(event) => setAmount(event.target.value)} /></div>
+            <div className="form-field"><label htmlFor="price-amount">{pricingKind === "fixed" ? "Fixed amount" : pricingKind === "negotiable" ? "Negotiation centre" : pricingKind === "auction" ? "Reserve amount" : "Price per unit"}</label><input id="price-amount" className="form-control" inputMode="decimal" placeholder="1" value={amount} onChange={(event) => setAmount(event.target.value)} /></div>
             <div className="form-field"><label htmlFor="price-currency">Currency or asset</label><input id="price-currency" className="form-control mono" maxLength={32} placeholder="DEM or usd-stablecoin" value={currency} onChange={(event) => setCurrency(event.target.value)} /></div>
-            <div className="form-field"><label htmlFor="price-unit">Unit</label><input id="price-unit" className="form-control" maxLength={64} placeholder="per-job" value={unit} onChange={(event) => setUnit(event.target.value)} /></div>
+            <div className="form-field"><label htmlFor="price-unit">{pricingKind === "metered" ? "Metered unit" : "Unit"}</label><input id="price-unit" className="form-control" maxLength={64} placeholder={pricingKind === "metered" ? "API call" : "per-job"} value={unit} onChange={(event) => setUnit(event.target.value)} /></div>
           </div>
+          {pricingKind === "metered" && <div className="form-field"><label htmlFor="price-minimum">Minimum total</label><input id="price-minimum" className="form-control" inputMode="decimal" placeholder="Optional" value={minTotal} onChange={(event) => setMinTotal(event.target.value)} /><span className="field-hint">Optional floor in {currency || "the selected currency"}. The agreement total is the greater of this floor or unit price × whole-unit quantity.</span></div>}
           {pricingKind === "negotiable" && <div className="choice-grid">
             <div className="form-field"><label htmlFor="price-min">Maximum discount (%)</label><input id="price-min" className="form-control" type="number" min="0" max="99" value={minPct} onChange={(event) => setMinPct(event.target.value)} /></div>
             <div className="form-field"><label htmlFor="price-max">Maximum uplift (%)</label><input id="price-max" className="form-control" type="number" min="0" value={maxPct} onChange={(event) => setMaxPct(event.target.value)} /></div>
@@ -190,8 +210,9 @@ export default function Register() {
           {pricingKind === "auction" && <div className="form-field"><label htmlFor="selection-rule">Selection rule</label><select id="selection-rule" className="form-control" value={selectionRule} onChange={(event) => setSelectionRule(event.target.value as typeof selectionRule)}><option value="first-acceptable">First acceptable</option><option value="lowest-price">Lowest price</option><option value="highest-price">Highest price</option></select></div>}
           {pricingKind === "negotiable" && <p className="field-hint">The signed RFQ allows up to 8 turns and a 5-minute session timeout.</p>}
           {pricingKind === "auction" && <p className="field-hint">The signed sealed-envelope window closes 7 days after publication, followed by a 1-hour reveal window.</p>}
+          {pricingKind === "metered" && <p className="field-hint">Metered listings use deterministic fixed-price acceptance; buyer and seller co-sign the whole-unit quantity and computed total at agreement commit.</p>}
 
-          <fieldset className="form-field"><legend className="form-legend">Payment rail</legend><div className="badges">{RAIL_OPTIONS.map((option) => <button key={option.id} type="button" aria-pressed={rails.includes(option.id)} className={`badge rail filter ${rails.includes(option.id) ? "active" : ""}`} onClick={() => setRails([option.id])}>{option.label}</button>)}</div><span className="field-hint">The selected rail becomes the signed payment step and accepted rail.</span></fieldset>
+          <fieldset className="form-field"><legend className="form-legend">Payment rail</legend><div className="badges">{PUBLISHABLE_RAIL_OPTIONS.map((option) => <button key={option.railId} type="button" aria-pressed={rails.includes(option.railId)} className={`badge rail filter ${rails.includes(option.railId) ? "active" : ""}`} onClick={() => setRails([option.railId])}>{option.label}</button>)}</div><span className="field-hint">{selectedRail?.availability === "operator_gated" ? "AP2 is operator-gated in v0.1 and requires Stripe provider onboarding; the listing records that rail without claiming it is publicly live." : "The selected rail becomes the signed payment step and accepted rail."}</span></fieldset>
           <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div></fieldset>
 
           <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("connect")}>Back</button><button className="btn" type="button" disabled={!validDescription} onClick={() => setScreen("review")}>Review listing</button></div>
@@ -206,8 +227,8 @@ export default function Register() {
           <div className="card service-card" style={{ background: "var(--bg-subtle)" }}>
             <div className="service-card-topline"><span className="eyebrow">{category.replaceAll(".", " / ")}</span><span className="badge ok">will be signed</span></div>
             <h3>{name}</h3><p className="agent-desc">{description}</p>
-            <div className="service-facts"><div><span>pricing</span><strong>{amount} {currency}{unit ? ` · ${unit}` : ""}</strong></div><div><span>model</span><strong>{pricingKind}{pricingKind === "negotiable" ? ` (-${minPct}% / +${maxPct}%)` : pricingKind === "auction" ? ` · ${selectionRule}` : ""}</strong></div></div>
-            <div className="badges">{rails.map((value) => <span className="badge rail" key={value}>{RAIL_OPTIONS.find((option) => option.id === value)?.label ?? value}</span>)}<span className="badge">{DELIVERY_OPTIONS.find((option) => option.id === delivery)?.label}</span></div>
+            <div className="service-facts"><div><span>pricing</span><strong>{amount} {currency}{unit ? pricingKind === "metered" ? ` per ${unit}` : ` · ${unit}` : ""}{pricingKind === "metered" && minTotal ? ` · ${minTotal} minimum` : ""}</strong></div><div><span>model</span><strong>{pricingKind}{pricingKind === "negotiable" ? ` (-${minPct}% / +${maxPct}%)` : pricingKind === "auction" ? ` · ${selectionRule}` : ""}</strong></div></div>
+            <div className="badges">{rails.map((value) => <span className="badge rail" key={value}>{PUBLISHABLE_RAIL_OPTIONS.find((option) => option.railId === value)?.label ?? value}</span>)}<span className="badge">{DELIVERY_OPTIONS.find((option) => option.id === delivery)?.label}</span></div>
             <p className="meta mono">{slug} · {claim}</p>
           </div>
           <details className="technical-disclosure">
@@ -217,8 +238,13 @@ export default function Register() {
               seller: { identity: "separately signed IdentityBundle", displayName: name.trim(), publicEndpoint: publicEndpoint || undefined },
               offering: { title: name.trim(), description: description.trim(), category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), deliverable: delivery.replace("deliver-", "") },
               buyerRequirement: { requirementVersion: "1", required: [] },
-              pricing: { kind: pricingKind, amount, currency, unit, ...(pricingKind === "negotiable" ? { minPct: Number(minPct), maxPct: Number(maxPct) } : {}), ...(pricingKind === "auction" ? { selectionRule } : {}) }, acceptedRails: rails,
-              pipeline: [pricingKind === "fixed" ? "negotiate-fixed-price" : pricingKind === "negotiable" ? "negotiate-rfq" : "negotiate-sealed-envelope", "commit-agreement", rails[0], delivery],
+              pricing: pricingPreview, acceptedRails: selectedRail ? [{ railId: selectedRail.railId }] : [],
+              pipeline: selectedRail ? [
+                { kind: negotiationPhase },
+                { kind: "commit-agreement" },
+                { kind: selectedRail.phaseKind, parameters: { rail: selectedRail.railId } },
+                { kind: delivery },
+              ] : [],
             }, null, 2)}</pre>
           </details>
           <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("describe")}>Edit details</button><button className="btn" type="button" onClick={publish}>Sign and publish</button></div>
