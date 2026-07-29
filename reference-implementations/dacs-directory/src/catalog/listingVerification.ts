@@ -2,6 +2,7 @@ import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
 
@@ -187,11 +188,52 @@ export async function hasValidListingRevocation(
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
 ): Promise<boolean> {
+  return Boolean(await findValidListingRevocation(
+    candidateRefs,
+    listing,
+    expectedVersion,
+    readCandidate,
+  ));
+}
+
+/** Encode the delimiter-bearing ClaimReference segment required by CF-4. */
+export function revocationLogicalAddress(
+  sellerPrimaryClaim: string,
+  listingId: string,
+  listingVersion: number,
+): string {
+  const encodedClaim = sellerPrimaryClaim.replace(
+    /[:?&=%]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
+}
+
+/**
+ * Fully verify discovered candidates and return the RB-2 binding this catalog
+ * can publish. A bogus candidate never shadows a later valid marker.
+ */
+export async function findValidListingRevocation(
+  candidateRefs: string[],
+  listing: VerifiedListing,
+  expectedVersion: number,
+  readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
+): Promise<RevocationBinding | null> {
   for (const ref of candidateRefs) {
     const candidate = await readCandidate(ref);
-    if (candidate && await verifyListingRevocation(candidate, listing, expectedVersion)) return true;
+    if (!candidate || !(await verifyListingRevocation(candidate, listing, expectedVersion))) continue;
+    const scope = stripSignature(candidate);
+    return {
+      sellerPrimaryClaim: listing.sellerClaim,
+      listingId: String(scope.listingId),
+      listingVersion: expectedVersion,
+      listingContentHash: listing.contentHash,
+      logicalAddress: revocationLogicalAddress(listing.sellerClaim, String(scope.listingId), expectedVersion),
+      markerAnchor: { kind: "storage-program", locator: ref },
+      markerContentHash: contentHash(scope),
+    };
   }
-  return false;
+  return null;
 }
 
 export function ownerClaim(owner: string | undefined): string | null {
