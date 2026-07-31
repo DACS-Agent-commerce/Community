@@ -19,7 +19,9 @@ import {
   type OutputReceipt,
   type PaymentRail,
   type ProcurementEvent,
+  type ProcurementFinalisation,
   type ProcurementJob,
+  type ProcurementPreview,
   type ProcurementProfile,
 } from "./try-dacs-contract.js";
 import {
@@ -254,6 +256,65 @@ function ProcurementReport({ value, events, profile, rail }: { value: unknown; e
   );
 }
 
+function ProcurementPreviewReport({
+  preview,
+  finalisation,
+  profile,
+}: {
+  preview: ProcurementPreview;
+  finalisation: ProcurementFinalisation;
+  profile: ProcurementProfile;
+}) {
+  const report = preview.delivery.report;
+  const hasFindingList = Array.isArray(report.findings);
+  const findings = hasFindingList ? (report.findings as unknown[]).map(record) : [];
+  const summary = record(report.summary);
+  const primitiveFields = Object.entries(report).filter(([, value]) =>
+    value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean",
+  ).slice(0, 8);
+  const anchorEntries = Object.entries(preview.anchors).filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  const finalising = finalisation.status === "running";
+  const heading = preview.status === "report-verified-finalising-dacs5"
+    ? "Verified security report is ready"
+    : `Verified ${profile.agentName} delivery is ready`;
+
+  return (
+    <div className={`proc-preview ${finalisation.status}`} role="status" aria-live="polite">
+      <div className="proc-preview-head">
+        <div><span>VERIFIED DELIVERY · NONTERMINAL</span><h2>{heading}</h2></div>
+        <span className={`badge ${finalising ? "pending" : "err"}`}>{finalising ? "DACS-5 finalising" : "DACS-5 needs recovery"}</span>
+      </div>
+      <div className="proc-preview-state">
+        <div><strong>Result available now</strong><small>The seller-signed delivery and confirmed payment evidence have been verified.</small></div>
+        <div><strong>{finalising ? "Two bundle copies anchoring" : "Finalisation stopped safely"}</strong><small>{finalising ? `Attempt ${finalisation.attempts} · the job remains running until both sides reconcile.` : finalisation.lastError ?? "The verified delivery remains inspectable while the gateway recovers DACS-5."}</small></div>
+      </div>
+      {profile.id === "oracle-auto-accept" ? (
+        <div className="oracle-delivery preview-delivery">
+          <span>{String(report.preset ?? report.kind ?? "attested value")}</span>
+          <strong>{String(report.value ?? report.extract ?? "reported")}</strong>
+          <small>{String(report.url ?? "Source recorded in the signed delivery attestation")}</small>
+        </div>
+      ) : hasFindingList ? (
+        findings.length ? (
+          <div className="finding-list preview-delivery">{findings.map((finding, index) => (
+            <article key={`${String(finding.id ?? finding.ruleId ?? "finding")}-${index}`}>
+              <span className={`severity ${String(finding.severity ?? "info").toLowerCase()}`}>{String(finding.severity ?? "info")}</span>
+              <div><strong>{String(finding.title ?? finding.ruleId ?? finding.id ?? "Finding")}</strong><p>{String(finding.detail ?? finding.rationale ?? "Attested finding")}</p><code>{String(finding.file ?? finding.rule ?? "evidence")}{finding.line !== undefined ? `:${String(finding.line)}` : ""}</code></div>
+            </article>
+          ))}</div>
+        ) : <p className="empty-report preview-delivery">No findings were returned by the verified security report.</p>
+      ) : primitiveFields.length ? (
+        <div className="preview-fields">{primitiveFields.map(([key, value]) => <div key={key}><span>{key.replaceAll(/[-_]/g, " ")}</span><strong>{String(value ?? "null")}</strong></div>)}</div>
+      ) : (
+        <p className="empty-report">{String(summary.text ?? "The signed deliverable is verified and available in the raw preview below.")}</p>
+      )}
+      <div className="proc-preview-warning"><strong>Not settled-and-accepted yet</strong><span>DACS-5 is still mandatory. The Directory will only show final acceptance after the buyer and seller bundles verify and reconcile.</span></div>
+      <details className="anchor-details"><summary>Verified preview anchors</summary><div className="preview-anchor-list">{anchorEntries.map(([name, anchor]) => <div key={name}><span>{name}</span><code>{anchor}</code></div>)}</div></details>
+      <details className="raw-result"><summary>Raw verified delivery preview</summary><pre>{JSON.stringify(preview, null, 2)}</pre></details>
+    </div>
+  );
+}
+
 /**
  * The five DACS stages, in the standard's own words (see /how-it-works:
  * Identify → Vet → Negotiate → Settle → Verify, "one deal · five receipts").
@@ -429,6 +490,8 @@ export default function TryDacs() {
   const resultFields = Object.keys(record(resultPayload));
   const isProcurementSel = selectedProfileId !== null;
   const procEvents = procurementJob?.events ?? [];
+  const procurementPreview = procurementJob?.preview;
+  const procurementFinalisation = procurementJob?.finalisation;
   const procurementWaiting = phase === "running" && procurementJob?.queue?.status === "waiting";
   // Fail-closed staging: a terminal "failed" (or unknown-phase) event attaches
   // to the stage the run had actually reached and never advances progress.
@@ -442,6 +505,22 @@ export default function TryDacs() {
     const chain = events.filter((event) => event.txRef || event.anchorRef);
     const jobComplete = procurementJob?.status === "complete";
     const jobFailed = procurementJob?.status === "failed" || phase === "error";
+    if (stageIdx === 3 && procurementPreview) {
+      return {
+        state: "complete",
+        summary: "Payment evidence and seller delivery verified",
+        detail: "The verified result is available; two-sided DACS-5 reconciliation continues separately",
+        chain,
+      };
+    }
+    if (stageIdx === 4 && procurementPreview && procurementFinalisation?.status === "running") {
+      return {
+        state: "active",
+        summary: "Verified delivery ready; two DACS-5 copies are finalising",
+        detail: `Attempt ${procurementFinalisation.attempts} · completion remains pending until both bundles reconcile`,
+        chain,
+      };
+    }
     if (stageIdx === 4 && jobComplete) {
       return {
         state: procurementAccepted ? "complete" : "warning",
@@ -1065,7 +1144,7 @@ export default function TryDacs() {
               </div>
             </div>
           ) : phase === "running" && isProcurementSel ? (
-            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> {procurementWaiting ? `QUEUED · POSITION ${procurementJob?.queue?.position ?? "…"} · ${elapsedLabel(elapsedMs)}` : `FULL DACS FLOW · ${paymentRailLabel(selectedPaymentRail)} · ${elapsedLabel(elapsedMs)}`}</div><small>{procurementWaiting ? "Your purchase is safely queued behind the active buyer-wallet deal. No payment has started yet." : "Keep this page open — settlement and chain confirmations appear here live."}</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
+            <div className="live-flow"><div className="live-flow-head"><div><span className="live-pulse" /> {procurementWaiting ? `QUEUED · POSITION ${procurementJob?.queue?.position ?? "…"} · ${elapsedLabel(elapsedMs)}` : procurementPreview ? `DELIVERY VERIFIED · DACS-5 FINALISING · ${elapsedLabel(elapsedMs)}` : `FULL DACS FLOW · ${paymentRailLabel(selectedPaymentRail)} · ${elapsedLabel(elapsedMs)}`}</div><small>{procurementWaiting ? "Your purchase is safely queued behind the active buyer-wallet deal. No payment has started yet." : procurementPreview ? "The result is available below. Keep this page open while both mandatory bundle copies reconcile." : "Keep this page open — settlement and chain confirmations appear here live."}</small></div>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}<div className="live-events">{(procurementJob?.events ?? []).map((event, index) => <div key={`${event.at}-${index}`} className={index === (procurementJob?.events.length ?? 0) - 1 ? "active" : "done"}><i>{index === (procurementJob?.events.length ?? 0) - 1 ? "·" : "✓"}</i><span><strong>{event.label}</strong><small>{new Date(event.at).toLocaleTimeString()}{event.txRef ? ` · tx ${compact(event.txRef, 12, 6)}` : ""}</small></span></div>)}</div><div className="live-flow-actions"><button className="ghost-btn" onClick={cancelRun}>Stop watching (the job continues)</button></div></div>
           ) : phase === "running" ? <div className="job-box working-box"><div><span className="live-pulse" /><strong>Specialist is working</strong><small>Agent execution · {elapsedLabel(elapsedMs)} elapsed · 2-minute deadline</small>{submittedSummary.length > 0 && <div className="submitted-summary"><span>SUBMITTED</span><ul>{submittedSummary.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}</div><button className="ghost-btn" onClick={cancelRun}>Cancel</button></div>
           : null}
         </div>
@@ -1119,6 +1198,12 @@ export default function TryDacs() {
           <div className="journey-note"><strong>Evidence, not theatre</strong><p>Each box reports data already returned by that stage. Pending work stays visibly pending, skipped stages say so, and full artifacts remain inspectable below.</p></div>
         </aside>
       </section>
+
+      {procurementPreview && procurementFinalisation && selectedProfile && result === undefined && (
+        <section className="try-result preview-proc-result">
+          <ProcurementPreviewReport preview={procurementPreview} finalisation={procurementFinalisation} profile={selectedProfile} />
+        </section>
+      )}
 
       {result !== undefined && selectedProfile && <section className="try-result full-proc-result"><div className="result-title"><div><span className={`badge ${procurementAccepted ? "ok" : "err"}`}>{procurementAccepted ? "verified" : "verification incomplete"}</span><h2>{selected?.label ?? "Agent"} result</h2>{specialistDurationMs !== undefined && <small>Specialist completed in {elapsedLabel(specialistDurationMs)} · {paymentRailLabel(selectedPaymentRail)}</small>}</div><button className="ghost-btn" onClick={() => { runAbort.current?.abort(); receiptAbort.current?.abort(); setPhase("idle"); setPlan(null); setSelectedProfileId(null); setResult(undefined); setProcurementJob(null); setReceipt(null); setReceiptMessage(""); }}>Try another procurement</button></div><ProcurementReport value={result} events={procurementJob?.events ?? []} profile={selectedProfile} rail={selectedPaymentRail} /></section>}
 
