@@ -28,7 +28,11 @@ import {
   revocationLogicalAddress,
   verifyListing,
 } from "../src/catalog/listingVerification.js";
-import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
+import {
+  addRevocationCandidate,
+  isListingRevocationCandidate,
+  MAX_REVOCATION_CANDIDATES_PER_LISTING,
+} from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
@@ -518,7 +522,7 @@ test("evidence ref must be signed by a bundle party", async () => {
   );
 });
 
-test("any valid revocation candidate wins and scanner candidates accumulate", async () => {
+test("any valid revocation candidate wins and scanner candidates deduplicate", async () => {
   const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const listingSignature = Buffer.from(
     await ed25519Sign(listingMessage, privateKeyFromSeed(seed)),
@@ -569,6 +573,43 @@ test("any valid revocation candidate wins and scanner candidates accumulate", as
   // opaque StorageProgram name and the marker remains discoverable.
   assert.equal(isListingRevocationCandidate(valid), true);
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
+});
+
+test("revocation candidate discovery is bounded per listing hash", () => {
+  const candidates = new Map<string, string[]>();
+  const listingHash = "a".repeat(64);
+  for (let index = 0; index < 20; index++) {
+    addRevocationCandidate(candidates, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
+  }
+  assert.equal(candidates.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
+});
+
+test("candidate pruning preserves an RB-4-verified locator across restart", () => {
+  const listingHash = "b".repeat(64);
+  const verified = `stor-${"f".repeat(40)}`;
+  const beforeRestart = new Map<string, string[]>();
+  for (let index = 0; index < MAX_REVOCATION_CANDIDATES_PER_LISTING; index++) {
+    addRevocationCandidate(beforeRestart, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
+  }
+  addRevocationCandidate(beforeRestart, listingHash, verified, new Set([verified]));
+
+  const persisted = JSON.parse(JSON.stringify(Object.fromEntries(beforeRestart))) as Record<string, string[]>;
+  const afterRestart = new Map(Object.entries(persisted));
+  for (let index = 16; index < 32; index++) {
+    addRevocationCandidate(
+      afterRestart,
+      listingHash,
+      `stor-${index.toString(16).padStart(40, "0")}`,
+      new Set([verified]),
+    );
+  }
+
+  assert.equal(afterRestart.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
+  assert.equal(afterRestart.get(listingHash)?.includes(verified), true);
+
+  const staleState = new Map([[listingHash, afterRestart.get(listingHash)!.filter((address) => address !== verified)]]);
+  addRevocationCandidate(staleState, listingHash, `stor-${"e".repeat(40)}`, new Set([verified]));
+  assert.equal(staleState.get(listingHash)?.includes(verified), true);
 });
 
 test("public discovery excludes revoked listings and empty sellers", () => {

@@ -5,7 +5,7 @@
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { readChainTip, scanChain } from "./scan";
+import { boundedRevocationCandidates, readChainTip, scanChain } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
@@ -73,6 +73,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       deals: {},
       programs: {},
       revocations: {},
+      verifiedRevocations: {},
     };
     saveScanState(state);
     log(
@@ -88,10 +89,21 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
   const sinceTxId = needsBindingBackfill ? 0 : Math.max(0, state.lastSeenTxId - overlap);
+  state.verifiedRevocations ??= {};
+  for (const seller of prior.sellers) for (const listing of seller.listings) {
+    const locator = listing.revocationBinding?.markerAnchor.locator;
+    if (!locator) continue;
+    const verified = state.verifiedRevocations[listing.contentHash] ?? [];
+    if (!verified.includes(locator)) verified.push(locator);
+    state.verifiedRevocations[listing.contentHash] = verified;
+  }
+  const verifiedRevocations = new Map(
+    Object.entries(state.verifiedRevocations).map(([hash, addresses]) => [hash, new Set(addresses)]),
+  );
   const runId = beginScanRun(sinceTxId);
   let scan;
   try {
-    scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts() });
+    scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(), verifiedRevocations });
   } catch (error) {
     finishScanRun(runId, { toTx: state.lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error: error instanceof Error ? error.message : String(error) });
     throw error;
@@ -111,12 +123,26 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const [key, address] of scan.programs) state.programs[key] = address;
   if (needsBindingBackfill) state.revocations = {};
   state.revocations ??= {};
+  let revocationCandidatesTruncated = scan.revocationCandidatesTruncated;
   for (const [hash, addresses] of scan.revocations) {
     const priorCandidates = state.revocations[hash];
     const prior = Array.isArray(priorCandidates)
       ? priorCandidates
       : priorCandidates ? [priorCandidates] : [];
-    state.revocations[hash] = [...new Set([...addresses, ...prior])];
+    const merged = boundedRevocationCandidates(
+      [...addresses, ...prior],
+      verifiedRevocations.get(hash),
+    );
+    state.revocations[hash] = merged.candidates;
+    revocationCandidatesTruncated += merged.truncated;
+  }
+  // Bound legacy and inactive hashes too; a hash need not reappear in the
+  // current scan window for old persisted state to remain attacker-inflated.
+  for (const [hash, stored] of Object.entries(state.revocations)) {
+    const candidates = Array.isArray(stored) ? stored : [stored];
+    const bounded = boundedRevocationCandidates(candidates, verifiedRevocations.get(hash));
+    state.revocations[hash] = bounded.candidates;
+    revocationCandidatesTruncated += bounded.truncated;
   }
   for (const observation of scan.observations) recordArtifact(observation);
   for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
@@ -139,6 +165,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
       `accumulated: ${Object.keys(state.listings).length} listing(s), ${Object.keys(state.deals).length} deal(s)`,
   );
+  if (revocationCandidatesTruncated > 0) {
+    log(`revocation candidates: truncated ${revocationCandidatesTruncated} unverified locator(s) at the per-listing bound`);
+  }
   const didOf = (addr: string) => `did:demos:agent:${addr.replace(/^0x/, "")}`;
   const known = new Set(regs.map((r) => r.primaryClaim));
 
@@ -214,6 +243,21 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   if (fixtureSeeds.includes("counterparty-evidence")) {
     log("fixture: Counterparty Evidence Desk preserved");
   }
+
+  for (const seller of catalogSellers) for (const listing of seller.listings) {
+    const locator = listing.revocationBinding?.markerAnchor.locator;
+    if (!locator) continue;
+    const verified = state.verifiedRevocations[listing.contentHash] ?? [];
+    if (!verified.includes(locator)) verified.push(locator);
+    state.verifiedRevocations[listing.contentHash] = verified;
+    const stored = state.revocations?.[listing.contentHash];
+    const candidates = Array.isArray(stored) ? stored : stored ? [stored] : [];
+    state.revocations![listing.contentHash] = boundedRevocationCandidates(
+      [locator, ...candidates],
+      new Set(verified),
+    ).candidates;
+  }
+  saveScanState(state);
 
   saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
   log(`catalog written: ${catalogSellers.length} seller(s)`);
