@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
+import { directoryEvidenceState } from "./directory-evidence-state";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "./labels";
 
 const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declared";
@@ -13,13 +14,6 @@ const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declar
 // unsigned third-party submission (whose chosen name is not owner-attested).
 const provenance = (seller: SellerRecord) =>
   seller.ownerRegistered ? "owner-registered" : seller.discovered ? "found on-chain" : "unverified submission";
-
-const listingTrustLabel = (listing: ListingSummary) =>
-  listing.anchor.kind === "fixture"
-    ? "fixture listing"
-    : listing.artifactProfile === "dacs-v0.1"
-      ? "current DACS listing"
-      : "legacy SDK listing";
 
 const listingProvenance = (seller: SellerRecord, listing: ListingSummary) =>
   listing.anchor.kind === "fixture" ? "fixture catalog" : provenance(seller);
@@ -213,14 +207,15 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
 
       <div className="service-grid">
         {filtered.map(({ listing, seller }) => {
-          const trust = tierMeta(sellerTier(seller));
+          const evidence = directoryEvidenceState(listing, seller);
+          const trust = tierMeta(evidence.identityTier);
           const href = `/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(listing.listingId)}/${listing.version}`;
           const jsonHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
           return (
             <article key={`${seller.primaryClaim}/${listing.listingId}/${listing.version}`} className="card service-card">
               <div className="service-card-topline">
                 <span className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</span>
-                <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingTrustLabel(listing)}</span>
+                <span className={`badge ${evidence.listing.kind === "current" ? "ok" : ""}`}>{evidence.listing.label}</span>
               </div>
               <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
               <p className="byline">
@@ -231,6 +226,8 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               <div className="service-facts">
                 <div><span>pricing</span><strong>{listing.pricing.priceHint ? publishedPriceLabel(listing.pricing) : pricingModelLabel(listing.pricing, listing.offering.negotiation)}</strong></div>
                 <div><span>delivery</span><strong>{listing.offering.delivery?.[0] ? deliveryLabel(listing.offering.delivery[0]) : "Not stated"}</strong></div>
+                <div><span>endpoint</span><strong>{evidence.endpoint.label}</strong></div>
+                <div><span>reachability</span><strong>{evidence.reachability.label}</strong></div>
               </div>
               <div className="card-meta">
                 <span className="meta-label">identity</span>
@@ -242,7 +239,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
                 </span>
                 <span className="meta-label">record</span>
                 <span className="meta-chips"><span className={seller.reputation.completed ? "badge ok" : "badge"}>
-                  {seller.reputation.completed}/{seller.reputation.totalAgreements} strict bundles
+                  {evidence.deals.label}
                 </span></span>
               </div>
               <div className="service-actions">
