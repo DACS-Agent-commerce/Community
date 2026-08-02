@@ -178,6 +178,9 @@ payloads, internal URLs and stack traces are never returned.
    hits the cap fails rather than advancing the cursor and silently skipping history.
    Revocation discovery retains at most 16 candidates per listing hash, except for
    locators that already passed RB-4 verification; truncation is recorded in reindex logs.
+   New scan observations precede prior unverified state in that window. A valid marker
+   outside the retained window is not evaluated, so its publisher must anchor a fresh
+   marker; after one marker verifies, later pruning cannot make it disappear.
 3. **Evidence graph**: current bundles recursively resolve and validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
    records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
