@@ -145,6 +145,14 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("schema-version", 1);
 })();
 
+// Every anchor_time written before this migration came from the transaction's
+// producer-controlled timestamp. Remove those values once so reputation falls
+// back honestly until the consensus-attributed backfill replaces them.
+if (getJson("sr2-anchor-schema-version", 0) < 1) db.transaction(() => {
+  db.prepare("UPDATE artifacts SET anchor_time = NULL").run();
+  setJson("sr2-anchor-schema-version", 1);
+})();
+
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Cross-process/instance lease. SQLite serializes acquisition; expired leases recover automatically. */
@@ -224,7 +232,13 @@ const recordArtifactTransaction = db.transaction((observation: StoredArtifactObs
     VALUES (@locator,@kind,@profile,@owner,@contentHash,@observedAt,@anchorTime,@status,@dataJson)
     ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind, profile=excluded.profile, owner=excluded.owner,
       content_hash=COALESCE(excluded.content_hash,artifacts.content_hash), observed_at=excluded.observed_at,
-      anchor_time=COALESCE(excluded.anchor_time,artifacts.anchor_time), status=excluded.status,
+      anchor_time=CASE
+        WHEN excluded.content_hash IS NOT NULL AND artifacts.content_hash IS NOT excluded.content_hash
+          THEN excluded.anchor_time
+        WHEN excluded.anchor_time IS NULL THEN artifacts.anchor_time
+        WHEN artifacts.anchor_time IS NULL THEN excluded.anchor_time
+        ELSE MIN(excluded.anchor_time,artifacts.anchor_time)
+      END, status=excluded.status,
       data_json=COALESCE(excluded.data_json,artifacts.data_json), error_code=NULL, error_message=NULL,
       retry_count=0, next_retry_at=NULL`)
     .run(observation);
@@ -238,6 +252,34 @@ export function recordArtifact(observation: ArtifactObservation): void {
     owner: observation.owner ?? null, anchorTime: observation.anchorTime ?? null,
     status: observation.status ?? "observed", dataJson: observation.data ? JSON.stringify(observation.data) : null });
 }
+
+export interface ConsensusAnchorObservation {
+  locator: string;
+  contentHash: string;
+  anchorTime: number;
+}
+
+/**
+ * Return only reputation-relevant artifacts that still need SR-2 time. The v6
+ * history replay re-reads artifacts and supplies their current canonical hash
+ * before this query runs; rows without one cannot be safely attributed.
+ */
+export const loadUnanchoredBundleTargets = db.transaction((): Map<string, string> => {
+  const rows = db.prepare(`SELECT locator,content_hash FROM artifacts
+    WHERE kind='bundle' AND anchor_time IS NULL AND status='observed' AND content_hash IS NOT NULL
+    ORDER BY locator`).all() as Array<{ locator: string; content_hash: string }>;
+  return new Map(rows.map((row) => [row.locator, row.content_hash]));
+});
+
+/** Keep the earliest consensus observation, but only for the exact current content. */
+export const recordConsensusAnchors = db.transaction((observations: ConsensusAnchorObservation[]): number => {
+  const update = db.prepare(`UPDATE artifacts SET anchor_time = CASE
+      WHEN anchor_time IS NULL THEN @anchorTime ELSE MIN(anchor_time,@anchorTime) END
+    WHERE locator=@locator AND content_hash=@contentHash`);
+  let changed = 0;
+  for (const observation of observations) changed += update.run(observation).changes;
+  return changed;
+});
 
 const recordArtifactFailureTransaction = db.transaction(
   (locator: string, kind: string, code: string, message: string, maxRetries: number) => {
