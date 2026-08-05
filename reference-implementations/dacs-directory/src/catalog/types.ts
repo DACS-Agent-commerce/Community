@@ -232,6 +232,12 @@ export interface ScanState {
   lastChainTip?: number;
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;
+  /** Descending transaction cursor for the bounded SR-2 consensus-time backfill. */
+  anchorBackfillCursor?: number;
+  /** Hash of the unresolved bundle locator/content-hash set for this backfill cycle. */
+  anchorBackfillTargetKey?: string;
+  /** True when the current unresolved target set has been searched to genesis. */
+  anchorBackfillComplete?: boolean;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
   /** listing content hash → bounded, deterministic revocation candidates. */

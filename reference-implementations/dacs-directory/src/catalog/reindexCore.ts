@@ -4,8 +4,14 @@
  * chain state and rewrite the catalog cache. Used by the CLI (npm run index)
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
+import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { boundedRevocationCandidates, readChainTip, scanChain } from "./scan";
+import {
+  boundedRevocationCandidates,
+  readChainTip,
+  scanChain,
+  scanConsensusAnchorBackfill,
+} from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
@@ -24,6 +30,8 @@ import {
   recordArtifact,
   pruneFailureHistory,
   recordArtifactFailure,
+  loadUnanchoredBundleTargets,
+  recordConsensusAnchors,
 } from "./store";
 import type { Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
@@ -66,7 +74,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = {
-      schemaVersion: 5,
+      schemaVersion: 6,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -74,6 +82,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       programs: {},
       revocations: {},
       verifiedRevocations: {},
+      anchorBackfillComplete: false,
     };
     saveScanState(state);
     log(
@@ -81,9 +90,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
     );
   }
-  // v5 replays history because older scans attempted to recognise revocation
-  // markers from an impossible colon-bearing StorageProgram name.
-  const needsBindingBackfill = state.schemaVersion !== 5;
+  // v6 replays history so every previously discovered artifact is re-read
+  // after unsafe producer timestamps are cleared. It also retains v5's
+  // revocation-marker binding replay.
+  const needsBindingBackfill = state.schemaVersion !== 6;
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -149,6 +159,47 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   // One bounded age-prune batch per pass keeps failure telemetry from growing
   // without limit (issue #51) while never becoming a blocking maintenance job.
   pruneFailureHistory();
+
+  // SR-2: bounded historical walk over only unresolved bundle content. The
+  // target fingerprint prevents permanently-unresolvable rows from causing a
+  // full-history rescan on every indexing pass, while a changed/new target set
+  // automatically starts a fresh resumable cycle.
+  let anchorTargets = loadUnanchoredBundleTargets();
+  const targetKey = (targets: ReadonlyMap<string, string>) => createHash("sha256")
+    .update([...targets].sort(([a], [b]) => a.localeCompare(b)).map(([locator, hash]) => `${locator}:${hash}`).join("\n"))
+    .digest("hex");
+  let unresolvedKey = targetKey(anchorTargets);
+  if (state.anchorBackfillTargetKey !== unresolvedKey) {
+    state.anchorBackfillCursor = undefined;
+    state.anchorBackfillComplete = false;
+    state.anchorBackfillTargetKey = unresolvedKey;
+  }
+  if (anchorTargets.size > 0 && !state.anchorBackfillComplete) {
+    try {
+      const configuredBackfillMax = Number(process.env.DACS_ANCHOR_BACKFILL_MAX_TXS ?? 500);
+      const configuredBackfillBudget = Number(process.env.DACS_ANCHOR_BACKFILL_BUDGET_MS ?? 10_000);
+      const backfill = await scanConsensusAnchorBackfill(anchorTargets, {
+        cursor: state.anchorBackfillCursor,
+        maxTxs: configuredBackfillMax,
+        budgetMs: configuredBackfillBudget,
+      });
+      const updated = recordConsensusAnchors(backfill.observations);
+      state.anchorBackfillCursor = backfill.nextCursor;
+      state.anchorBackfillComplete = backfill.complete;
+      anchorTargets = loadUnanchoredBundleTargets();
+      unresolvedKey = targetKey(anchorTargets);
+      state.anchorBackfillTargetKey = unresolvedKey;
+      if (anchorTargets.size === 0) state.anchorBackfillComplete = true;
+      log(`SR-2 anchor backfill: scanned ${backfill.txsScanned} tx(s), resolved ${updated}, ` +
+        `${anchorTargets.size} bundle(s) remain${backfill.complete ? " (history exhausted)" : ""}`);
+    } catch (error) {
+      log(`SR-2 anchor backfill deferred: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else if (anchorTargets.size === 0) {
+    state.anchorBackfillCursor = undefined;
+    state.anchorBackfillComplete = true;
+    state.anchorBackfillTargetKey = unresolvedKey;
+  }
   const nextCursor = Math.max(state.lastSeenTxId, scan.highestTxId);
   if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
   // Seed upgraded state once so an already-frozen cursor becomes diagnosable
@@ -156,7 +207,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   else state.cursorAdvancedAt ??= Date.now();
   state.lastSeenTxId = nextCursor;
   state.lastChainTip = scan.chainTip;
-  state.schemaVersion = 5;
+  state.schemaVersion = 6;
   saveScanState(state);
   finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
     artifacts: scan.observations.length, rejected: scan.failures.length });

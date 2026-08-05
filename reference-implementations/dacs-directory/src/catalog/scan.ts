@@ -18,6 +18,7 @@
 import { programBindingKey } from "./store.js";
 import { agreementRail } from "./agreementMetadata.js";
 import type { RegisteredDeal } from "./types.js";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -41,7 +42,7 @@ export interface ScannedArtifacts {
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
   chainTip: number;
-  observations: Array<{ locator: string; kind: string; profile: string; owner?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown> }>;
+  observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown> }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
 }
@@ -159,11 +160,11 @@ export function isListingRevocationCandidate(value: unknown): boolean {
 }
 
 /** Unauthenticated nodeCall (plain fetch — no demosdk in the scan path). */
-async function nodeCall(message: string, data: Record<string, unknown>): Promise<unknown> {
+async function nodeCall(message: string, data: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
   const res = await fetch(RPC + "/", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({
       method: "nodeCall",
       params: [{ type: "nodeCall", message, sender: null, receiver: null, timestamp: null, data, extra: "" }],
@@ -172,6 +173,151 @@ async function nodeCall(message: string, data: Record<string, unknown>): Promise
   const json = (await res.json()) as { result?: number; response?: unknown };
   if (json?.result !== 200) throw new Error(`nodeCall ${message} → ${json?.result}`);
   return json.response;
+}
+
+interface StorageWriteCandidate {
+  locator: string;
+  contentHash: string;
+  blockNumber: number;
+  transactionHash: string;
+}
+
+interface ConsensusAnchorObservation {
+  locator: string;
+  contentHash: string;
+  anchorTime: number;
+}
+
+const objectValue = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+
+const parsedObject = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== "string") return objectValue(value);
+  try { return objectValue(JSON.parse(value)); } catch { return null; }
+};
+
+/** Exact target/content attribution for a whole-value StorageProgram write. */
+export function storageWriteCandidate(value: unknown): StorageWriteCandidate | null {
+  const tx = objectValue(value);
+  if (!tx || tx.status !== "confirmed" || tx.type !== "storageProgram") return null;
+  if (!Number.isSafeInteger(tx.blockNumber) || Number(tx.blockNumber) < 0) return null;
+  if (typeof tx.hash !== "string" || !/^[0-9a-fA-F]{64}$/.test(tx.hash)) return null;
+  if (typeof tx.to !== "string" || !/^stor-[0-9a-f]{40}$/.test(tx.to)) return null;
+  const envelope = parsedObject(tx.content);
+  if (!envelope || envelope.type !== "storageProgram" || envelope.to !== tx.to) return null;
+  if (!Array.isArray(envelope.data) || envelope.data.length !== 2 || envelope.data[0] !== "storageProgram") return null;
+  const write = objectValue(envelope.data[1]);
+  if (!write || (write.operation !== "CREATE_STORAGE_PROGRAM" && write.operation !== "WRITE_STORAGE")) return null;
+  if (write.storageAddress !== tx.to) return null;
+  const data = objectValue(write.data);
+  if (!data) return null;
+  return {
+    locator: tx.to,
+    contentHash: contentHash(data),
+    blockNumber: Number(tx.blockNumber),
+    transactionHash: tx.hash.toLowerCase(),
+  };
+}
+
+interface ConfirmedBlock {
+  number: number;
+  timestamp: number;
+  transactionHashes: Set<string>;
+}
+
+async function confirmedBlock(
+  blockNumber: number,
+  cache: Map<number, Promise<ConfirmedBlock | null>>,
+  timeoutMs = 30_000,
+): Promise<ConfirmedBlock | null> {
+  let pending = cache.get(blockNumber);
+  if (!pending) {
+    pending = (async () => {
+      const block = objectValue(await nodeCall("getBlockByNumber", { blockNumber }, timeoutMs));
+      const body = parsedObject(block?.content);
+      if (!block || block.status !== "confirmed" || block.number !== blockNumber || !body) return null;
+      if (!Number.isSafeInteger(body.timestamp) || Number(body.timestamp) < 0) return null;
+      if (!Array.isArray(body.ordered_transactions)) return null;
+      const timestamp = Number(body.timestamp) * 1_000;
+      if (!Number.isSafeInteger(timestamp)) return null;
+      return {
+        number: blockNumber,
+        timestamp,
+        transactionHashes: new Set(body.ordered_transactions
+          .filter((hash): hash is string => typeof hash === "string")
+          .map((hash) => hash.toLowerCase())),
+      };
+    })();
+    cache.set(blockNumber, pending);
+  }
+  return pending;
+}
+
+async function resolveConsensusAnchors(
+  candidates: StorageWriteCandidate[],
+  targets: ReadonlyMap<string, string>,
+  deadline?: number,
+): Promise<ConsensusAnchorObservation[]> {
+  const blocks = new Map<number, Promise<ConfirmedBlock | null>>();
+  const resolved = new Map<string, ConsensusAnchorObservation>();
+  for (const candidate of candidates) {
+    if (targets.get(candidate.locator) !== candidate.contentHash) continue;
+    if (deadline !== undefined && Date.now() >= deadline) throw new Error("anchor backfill wall-clock budget exhausted");
+    const timeoutMs = deadline === undefined ? 30_000 : Math.max(1, deadline - Date.now());
+    const block = await confirmedBlock(candidate.blockNumber, blocks, timeoutMs);
+    if (!block?.transactionHashes.has(candidate.transactionHash)) continue;
+    const key = `${candidate.locator}\n${candidate.contentHash}`;
+    const prior = resolved.get(key);
+    if (!prior || block.timestamp < prior.anchorTime) {
+      resolved.set(key, { locator: candidate.locator, contentHash: candidate.contentHash, anchorTime: block.timestamp });
+    }
+  }
+  return [...resolved.values()];
+}
+
+export interface AnchorBackfillResult {
+  observations: ConsensusAnchorObservation[];
+  txsScanned: number;
+  nextCursor?: number;
+  complete: boolean;
+}
+
+/** Bounded, resumable descending history scan for current bundle content. */
+export async function scanConsensusAnchorBackfill(
+  targets: ReadonlyMap<string, string>,
+  opts: { cursor?: number; maxTxs?: number; budgetMs?: number } = {},
+): Promise<AnchorBackfillResult> {
+  if (targets.size === 0) return { observations: [], txsScanned: 0, complete: true };
+  const maxTxs = Math.max(1, Math.min(5_000, nonNegativeInt(opts.maxTxs, 500)));
+  const budgetMs = Math.max(1_000, Math.min(60_000, nonNegativeInt(opts.budgetMs, 10_000)));
+  const deadline = Date.now() + budgetMs;
+  let cursor: number | "latest" = opts.cursor ?? "latest";
+  let nextCursor: number | undefined = opts.cursor;
+  let scanned = 0;
+  let complete = false;
+  const candidates: StorageWriteCandidate[] = [];
+  while (scanned < maxTxs && Date.now() < deadline) {
+    const limit = Math.min(100, maxTxs - scanned);
+    const remaining = Math.max(1_000, deadline - Date.now());
+    const page = ((await nodeCall("getTransactions", { start: cursor, limit }, remaining)) ?? []) as unknown[];
+    if (page.length === 0) { complete = true; break; }
+    const ids = page.map((tx) => objectValue(tx)?.id)
+      .filter((id): id is number => Number.isSafeInteger(id) && Number(id) >= 0);
+    for (const tx of page) {
+      const candidate = storageWriteCandidate(tx);
+      if (candidate && targets.get(candidate.locator) === candidate.contentHash) candidates.push(candidate);
+    }
+    scanned += page.length;
+    if (ids.length === 0) throw new Error("anchor backfill page contained no valid transaction ids");
+    const lowest = Math.min(...ids);
+    if (lowest <= 1) { complete = true; nextCursor = undefined; break; }
+    nextCursor = lowest - 1;
+    cursor = nextCursor;
+  }
+  const observations = await resolveConsensusAnchors(candidates, targets, deadline);
+  return { observations, txsScanned: scanned, nextCursor, complete };
 }
 
 /** Read the node's current transaction tip without advancing scan state. */
@@ -204,7 +350,7 @@ export async function scanChain(
   const since = nonNegativeInt(opts.sinceTxId, 0);
   const addresses = new Set<string>();
   for (const locator of opts.retryLocators ?? []) if (/^stor-[0-9a-f]{40}$/.test(locator)) addresses.add(locator);
-  const addressTimes = new Map<string, number>();
+  const writeCandidates: StorageWriteCandidate[] = [];
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
@@ -236,8 +382,9 @@ export async function scanChain(
     scanned += fresh.length;
     for (const tx of fresh) {
       const inTx = new Set<string>(); collectNativeStorageAddresses(tx, inTx);
-      const timestamp = typeof (tx as { timestamp?: unknown }).timestamp === "number" ? (tx as { timestamp: number }).timestamp : undefined;
-      for (const address of inTx) { addresses.add(address); if (timestamp !== undefined && !addressTimes.has(address)) addressTimes.set(address, timestamp); }
+      for (const address of inTx) addresses.add(address);
+      const candidate = storageWriteCandidate(tx);
+      if (candidate) writeCandidates.push(candidate);
     }
     if (ids.length === 0) break;
     const lowest = Math.min(...ids);
@@ -297,7 +444,20 @@ export async function scanChain(
       bundleOwners.set(name.slice("dacs5:bundle:".length), { address, owner: read.owner });
     }
     observations.push({ locator: address, kind: artifactKind, profile: currentListing || currentBundle ? "dacs-v0.1" : "legacy-sdk-v0.1", owner: read.owner,
-      observedAt: Date.now(), anchorTime: addressTimes.get(address), data });
+      contentHash: data ? contentHash(data) : undefined, observedAt: Date.now(), data });
+  }
+
+  const targets = new Map(observations
+    .filter((observation): observation is typeof observation & { contentHash: string } =>
+      observation.kind === "bundle" && typeof observation.contentHash === "string")
+    .map((observation) => [observation.locator, observation.contentHash]));
+  try {
+    const anchors = await resolveConsensusAnchors(writeCandidates, targets);
+    const byLocator = new Map(anchors.map((anchor) => [anchor.locator, anchor.anchorTime]));
+    for (const observation of observations) observation.anchorTime = byLocator.get(observation.locator);
+  } catch {
+    // Consensus attribution is optional metadata. A block RPC failure must
+    // retain the honest finalisedAt fallback and will be retried by backfill.
   }
 
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
