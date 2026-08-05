@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, ScanState } from "./types.js";
+import { deriveSellerReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -145,12 +146,29 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("schema-version", 1);
 })();
 
-// Every anchor_time written before this migration came from the transaction's
-// producer-controlled timestamp. Remove those values once so reputation falls
-// back honestly until the consensus-attributed backfill replaces them.
-if (getJson("sr2-anchor-schema-version", 0) < 1) db.transaction(() => {
+// Every persisted anchor time written before this migration came from the
+// transaction's producer-controlled timestamp. Remove both the artifact rows
+// and their already-materialised catalog derivatives atomically. Keeping the
+// listings while recomputing seller reputation on the permitted finalisedAt
+// fallback avoids serving stale SR-2 claims before the first v6 reindex; per-
+// listing hints return only after that successful reindex.
+if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   db.prepare("UPDATE artifacts SET anchor_time = NULL").run();
-  setJson("sr2-anchor-schema-version", 1);
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  const windowEnd = catalog.generatedAt || Date.now();
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => {
+      const deals = seller.deals.map(({ anchorTimestamp: _unsafeAnchorTimestamp, ...deal }) => deal);
+      return {
+        ...seller,
+        deals,
+        listings: seller.listings.map(({ reputationHint: _unsafeReputationHint, ...listing }) => listing),
+        reputation: deriveSellerReputation(deals, 0, windowEnd),
+      };
+    }),
+  });
+  setJson("sr2-anchor-schema-version", 2);
 })();
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
