@@ -19,7 +19,9 @@ const maps = new Map<string, Obj>();
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefixes[kind] + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
+  const prefix = kind === "agreement" && raw.payeeBoundAgreementVersion === "1"
+    ? "dacs-payee-bound-agreement:v1:" : prefixes[kind];
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
@@ -70,6 +72,68 @@ async function vector(jobId = "job-1", offset = 0) {
     listing, buyerBundle, sellerBundle, agreement, evidence, rating,
     locators: { listing: at(1), agreement: at(2), evidence: at(3), rating: at(4), buyer: at(5), seller: at(6) },
   };
+}
+
+async function installAgreement(
+  fixture: Awaited<ReturnType<typeof vector>>,
+  agreementScope: Obj,
+  signaturePrefix?: string,
+) {
+  const agreementSignatures = await Promise.all([0, 1].map(async (signer) => {
+    if (!signaturePrefix) return sign(agreementScope, "agreement", signer, true);
+    const value = Buffer.from(await ed25519Sign(
+      Buffer.from(signaturePrefix + artifactHash(agreementScope, "agreement")),
+      privateKeyFromSeed(seeds[signer]),
+    )).toString("hex");
+    return { party: dids[signer], algorithm: "ed25519", value };
+  }));
+  const agreement = { ...agreementScope, signatures: agreementSignatures };
+  maps.set(fixture.locators.agreement, agreement);
+
+  const installBundle = async (raw: Obj, role: "buyer" | "seller") => {
+    const scope = signedScope(raw, "bundle");
+    scope.agreementRef = ref(fixture.locators.agreement, agreement, "agreement");
+    const signatures = [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)];
+    const bundle = { ...scope, signatures, anchoredByRole: role };
+    maps.set(role === "buyer" ? fixture.locators.buyer : fixture.locators.seller, bundle);
+    return bundle;
+  };
+  fixture.agreement = agreement;
+  fixture.buyerBundle = await installBundle(fixture.buyerBundle, "buyer");
+  fixture.sellerBundle = await installBundle(fixture.sellerBundle, "seller");
+}
+
+async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
+  const fixture = await vector(jobId, offset);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.pipeline = (listingScope.pipeline as Obj[]).map((phase) =>
+    phase.kind === "commit-agreement" ? { ...phase, kind: "commit-payee-bound-agreement" } : phase);
+  const listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, listing);
+  fixture.listing = listing;
+
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
+  const agreementScope: Obj = {
+    payeeBoundAgreementVersion: "1",
+    jobId,
+    listingRef,
+    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    terms: {
+      price: { amount: "1.25", currency: "DEM" },
+      rail: { railId: "pay-dem" },
+      payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
+    },
+  };
+
+  const updateListingRef = (raw: Obj) => {
+    const scope = signedScope(raw, "bundle");
+    scope.listingRef = listingRef;
+    return { ...scope, signatures: raw.signatures, anchoredByRole: raw.anchoredByRole };
+  };
+  fixture.buyerBundle = updateListingRef(fixture.buyerBundle);
+  fixture.sellerBundle = updateListingRef(fixture.sellerBundle);
+  await installAgreement(fixture, agreementScope);
+  return fixture;
 }
 
 async function graphAt(at: string, listing: Obj, listingLocator: string) {
@@ -354,6 +418,85 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const replay = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(replay.ok, false);
+});
+
+test("current evidence graph verifies payee-bound agreements under their distinct domain", async () => {
+  const fixture = await payeeBoundVector();
+  assert.ok(await verifyListing(fixture.listing), "payee-bound commitment listing must verify");
+  const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+  assert.equal(graph.ok, true, graph.reason);
+  assert.equal(graph.agreement?.payeeBoundAgreementVersion, "1");
+  assert.equal(graph.agreement?.agreementVersion, undefined);
+});
+
+test("payee-bound agreements fail closed on discriminator, domain and payout coverage", async () => {
+  const cases: Array<{
+    name: string;
+    mutate: (scope: Obj) => void;
+    signaturePrefix?: string;
+  }> = [
+    {
+      name: "both discriminators",
+      mutate: (scope) => { scope.agreementVersion = "1"; },
+    },
+    {
+      name: "unsupported extra discriminator",
+      mutate: (scope) => { scope.agreementVersion = "2"; },
+    },
+    {
+      name: "legacy signature domain",
+      mutate: () => {},
+      signaturePrefix: "dacs-agreement:v1:",
+    },
+    {
+      name: "missing payout binding",
+      mutate: (scope) => { (scope.terms as Obj).payoutBindings = []; },
+    },
+    {
+      name: "wrong payout rail",
+      mutate: (scope) => {
+        (scope.terms as Obj).payoutBindings = [{ railId: "pay-x402", phaseIndex: 2, payeeAddress: dids[1] }];
+      },
+    },
+    {
+      name: "duplicate payout key",
+      mutate: (scope) => {
+        const binding = { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] };
+        (scope.terms as Obj).payoutBindings = [binding, { ...binding }];
+      },
+    },
+  ];
+
+  for (const [index, candidate] of cases.entries()) {
+    const fixture = await payeeBoundVector(`payee-bound-invalid-${index}`, 200 + index * 10);
+    const scope = signedScope(fixture.agreement, "agreement");
+    candidate.mutate(scope);
+    await installAgreement(fixture, scope, candidate.signaturePrefix);
+    const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+    assert.equal(graph.ok, false, `${candidate.name} must fail closed`);
+  }
+
+  const legacy = await vector("legacy-with-payout-binding", 300);
+  const legacyScope = signedScope(legacy.agreement, "agreement");
+  (legacyScope.terms as Obj).payoutBindings = [
+    { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] },
+  ];
+  await installAgreement(legacy, legacyScope);
+  const legacyGraph = await graphAt(legacy.locators.buyer, legacy.listing, legacy.locators.listing);
+  assert.equal(legacyGraph.ok, false, "legacy agreement must not acquire payee-bound semantics");
+
+  const mismatchedCommitment = await payeeBoundVector("legacy-artifact-under-payee-commit", 320);
+  const mismatchedScope = signedScope(mismatchedCommitment.agreement, "agreement");
+  delete mismatchedScope.payeeBoundAgreementVersion;
+  mismatchedScope.agreementVersion = "1";
+  delete (mismatchedScope.terms as Obj).payoutBindings;
+  await installAgreement(mismatchedCommitment, mismatchedScope);
+  const mismatchedGraph = await graphAt(
+    mismatchedCommitment.locators.buyer,
+    mismatchedCommitment.listing,
+    mismatchedCommitment.locators.listing,
+  );
+  assert.equal(mismatchedGraph.ok, false, "agreement artifact type must match the listing commitment phase");
 });
 
 test("current evidence graph accepts a verified vet record as its phase attestation", async () => {
@@ -719,6 +862,8 @@ test("current pre-commit policy cancellations are reputation-neutral", () => {
     { cancellationPolicy: "pre-commit" }, [{ kind: "negotiate-fixed-price", outcome: "ok" }]), true);
   assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
     { cancellationPolicy: "pre-commit" }, [{ kind: "commit-agreement", outcome: "ok" }]), false);
+  assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
+    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-payee-bound-agreement", outcome: "ok" }]), false);
 });
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {
