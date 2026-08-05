@@ -115,7 +115,11 @@ test("listing binding rejections are persistent, public-safe, filterable, and re
 test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cursors", () => {
   const now = 1_000_000;
   assert.equal(cursorStallThresholdSeconds("60"), 60);
-  assert.equal(cursorStallThresholdSeconds("0"), 300);
+  assert.equal(cursorStallThresholdSeconds(undefined, "900"), 1_800);
+  assert.equal(cursorStallThresholdSeconds(undefined, "60"), 300);
+  assert.equal(cursorStallThresholdSeconds(undefined, "600"), 1_200);
+  assert.equal(cursorStallThresholdSeconds("0", "600"), 1_200);
+  assert.equal(cursorStallThresholdSeconds(undefined, "invalid"), 1_800);
   assert.deepEqual(cursorProgressDiagnostics(
     { lastSeenTxId: 10, cursorAdvancedAt: now - 61_000 },
     12,
