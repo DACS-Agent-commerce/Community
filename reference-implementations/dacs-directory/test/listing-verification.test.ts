@@ -99,6 +99,43 @@ test("verifyListing refuses unknown executable phase kinds even with a valid sig
   assert.equal(await verifyListing(listing), null);
 });
 
+test("verifyListing requires exactly one adjacent supported commitment phase", async () => {
+  const payeeBound = signedCurrentListing({
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "commit-payee-bound-agreement" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+      { kind: "deliver-storage-program" },
+    ],
+  });
+  assert.ok(await verifyListing(payeeBound));
+
+  assert.equal(await verifyListing(signedCurrentListing({
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+      { kind: "deliver-storage-program" },
+    ],
+  })), null);
+  assert.equal(await verifyListing(signedCurrentListing({
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "commit-agreement" },
+      { kind: "commit-payee-bound-agreement" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+      { kind: "deliver-storage-program" },
+    ],
+  })), null);
+  assert.equal(await verifyListing(signedCurrentListing({
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+      { kind: "commit-payee-bound-agreement" },
+      { kind: "deliver-storage-program" },
+    ],
+  })), null);
+});
+
 test("verifyListing accepts normative metered pricing bound to an AP2 rail", async () => {
   const metered = {
     kind: "metered",

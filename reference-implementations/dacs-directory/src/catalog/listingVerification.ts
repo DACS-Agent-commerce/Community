@@ -29,7 +29,7 @@ export interface VerifiedListing {
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const PHASES = new Set([
-  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "commit-agreement",
+  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "commit-agreement", "commit-payee-bound-agreement",
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
@@ -79,6 +79,10 @@ function currentListing(scope: Record<string, unknown>): {
   const payBindingsOk = pipeline.filter((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"))
     .every((step) => { const parameters = record(step.parameters); return typeof parameters?.rail === "string" && railIds.has(parameters.rail); });
   const negotiationKinds = pipeline.map((step) => step.kind).filter((kind) => typeof kind === "string" && kind.startsWith("negotiate-"));
+  const negotiationIndex = pipeline.findIndex((step) => typeof step.kind === "string" && step.kind.startsWith("negotiate-"));
+  const commitmentIndexes = pipeline.flatMap((step, index) =>
+    step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? [index] : []);
+  const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
   const expectedNegotiation = pricing?.kind === "fixed" ? "negotiate-fixed-price"
     : pricing?.kind === "negotiable" ? "negotiate-rfq" : pricing?.kind === "auction" ? "negotiate-sealed-envelope" : "";
   const negotiationOk = pricing?.kind === "metered"
@@ -97,7 +101,7 @@ function currentListing(scope: Record<string, unknown>): {
     typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
     typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) || !record(offering.deliverable) ||
     !record(scope.buyerRequirement) || pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || !negotiationOk ||
+    !pricingOk || !negotiationOk || !commitmentOk ||
     (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || !record(scope.terms) || typeof validity?.notBefore !== "number" ||
     (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
   ) return null;

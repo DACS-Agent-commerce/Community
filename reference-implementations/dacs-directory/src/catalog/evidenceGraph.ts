@@ -38,14 +38,64 @@ const priceTermOk = (value: unknown): boolean => {
   return Boolean(price && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
-// PAYEE-BOUND COUPLING (issue #17 F2): site (c) of 3. No `dacs-payee-bound-agreement:v1:`
-// domain yet. When payee-bound support lands, add it here AND in bundlePolicy.ts SEPARATORS,
-// alongside shapeOk's discriminator (above) and isNeutralCancellation's commit-kind
-// (reputation.ts). §8.5.1: SELECT the domain from the required discriminator — never strip-and-retry.
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
   agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", "verify-result": "dacs-verifyresult:v1:",
   composite: "dacs-composite:v1:", rating: "dacs-rating:v1:", listing: "dacs-listing:v1:", bundle: "dacs-bundle:v1:",
 };
+const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
+
+type AgreementProfile = "legacy" | "payee-bound";
+
+/** Select the agreement type before interpreting fields; never strip-and-retry. */
+function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
+  const hasLegacy = Object.prototype.hasOwnProperty.call(raw, "agreementVersion");
+  const hasPayeeBound = Object.prototype.hasOwnProperty.call(raw, "payeeBoundAgreementVersion");
+  if (hasLegacy === hasPayeeBound) return null;
+  if (hasLegacy) return raw.agreementVersion === "1" ? "legacy" : null;
+  return raw.payeeBoundAgreementVersion === "1" ? "payee-bound" : null;
+}
+
+function separatorFor(raw: Record<string, unknown>, kind: Exclude<ArtifactKind, "attestation">): string | null {
+  if (kind !== "agreement") return SEPARATORS[kind];
+  const profile = agreementProfile(raw);
+  return profile === "legacy" ? SEPARATORS.agreement
+    : profile === "payee-bound" ? PAYEE_BOUND_AGREEMENT_SEPARATOR : null;
+}
+
+function payoutBindingShapeOk(value: unknown): boolean {
+  const binding = rec(value);
+  return Boolean(binding && typeof binding.railId === "string" && binding.railId.length > 0 &&
+    Number.isSafeInteger(binding.phaseIndex) && Number(binding.phaseIndex) >= 0 &&
+    typeof binding.payeeAddress === "string" && binding.payeeAddress.length > 0);
+}
+
+/** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
+function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
+  const profile = agreementProfile(agreement);
+  const terms = rec(agreement.terms);
+  const pipeline = arr(listing.pipeline);
+  if (!profile || !terms || !Array.isArray(listing.pipeline) || pipeline.length !== listing.pipeline.length) return false;
+
+  const commitmentKinds = pipeline.map((phase) => phase.kind).filter((kind) =>
+    kind === "commit-agreement" || kind === "commit-payee-bound-agreement");
+  const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
+  if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
+
+  if (profile === "legacy") return terms.payoutBindings === undefined;
+  if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
+
+  const expected = pipeline.flatMap((phase, phaseIndex) => {
+    if (typeof phase.kind !== "string" || !phase.kind.startsWith("pay-")) return [];
+    const railId = rec(phase.parameters)?.rail;
+    return typeof railId === "string" ? [JSON.stringify([railId, phaseIndex])] : [];
+  });
+  const actual = terms.payoutBindings.map((value) => {
+    const binding = rec(value)!;
+    return JSON.stringify([binding.railId, binding.phaseIndex]);
+  });
+  return expected.length === actual.length && new Set(actual).size === actual.length &&
+    expected.every((key) => actual.includes(key));
+}
 
 export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): Record<string, unknown> {
   if (kind === "attestation") return { ...raw };
@@ -75,8 +125,9 @@ export function verifyComponentSignature(raw: Record<string, unknown>, kind: Art
   if (kind === "attestation") return false;
   if (signature.algorithm !== "ed25519" || typeof signature.signer !== "string") return false;
   const key = claimKey(signature.signer); const value = decodeSignature(signature.value);
-  if (!key || !value) return false;
-  return ed25519Verify(Buffer.from(SEPARATORS[kind] + artifactHash(raw, kind), "utf8"), value, key);
+  const separator = separatorFor(raw, kind);
+  if (!key || !value || !separator) return false;
+  return ed25519Verify(Buffer.from(separator + artifactHash(raw, kind), "utf8"), value, key);
 }
 function verifyBundleSignature(raw: Record<string, unknown>, signature: Record<string, unknown>): boolean {
   const party = signature.party;
@@ -91,13 +142,15 @@ export function isCurrentRef(value: unknown): value is CurrentRef {
   return Boolean(anchor && anchor.kind === "storage-program" && typeof anchor.locator === "string" && /^stor-[0-9a-f]{40}$/.test(anchor.locator) && /^[0-9a-f]{64}$/.test(normalizedHash(ref?.contentHash)));
 }
 function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
-  // PAYEE-BOUND COUPLING (issue #17 F2): site (a) of 3. Today this accepts only
-  // `agreementVersion === "1"`, so a payee-bound agreement ref (#236) fails shape →
-  // bundle never refsVerified → excluded (fail-closed, CORE §11.1.2). When payee-bound
-  // support lands, this discriminator, isNeutralCancellation's commit-kind (reputation.ts
-  // ~L35), and the SEPARATORS domain (below ~L41 + bundlePolicy.ts ~L10) MUST move together
-  // — accept exactly-one of agreementVersion / payeeBoundAgreementVersion (§8.5.1), never both.
-  if (kind === "agreement") return raw.agreementVersion === "1" && typeof raw.jobId === "string" && rec(raw.listingRef) !== null && arr(raw.parties).length >= 2 && priceTermOk(rec(raw.terms)?.price);
+  if (kind === "agreement") {
+    const profile = agreementProfile(raw);
+    const terms = rec(raw.terms);
+    return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
+      (profile === "legacy"
+        ? terms.payoutBindings === undefined
+        : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
+  }
   if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
   if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
   if (kind === "composite") {
@@ -269,6 +322,9 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     const agreementParties = arr(agreement.parties);
     if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) => candidate.role === role && parties.some((party) => party.role === role && party.primaryClaim === candidate.primaryClaim)))) {
       return { ...fail("agreement party binding failed"), signaturesVerified };
+    }
+    if (!agreementMatchesListing(agreement, listed.raw)) {
+      return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
