@@ -1,7 +1,9 @@
 export const DEAD_LETTER_DEFAULT_LIMIT = 20;
 export const DEAD_LETTER_MAX_LIMIT = 100;
-export const CURSOR_STALL_DEFAULT_SECONDS = 5 * 60;
+export const CURSOR_STALL_MIN_SECONDS = 5 * 60;
 export const CURSOR_STALL_MAX_SECONDS = 24 * 60 * 60;
+export const INDEX_INTERVAL_DEFAULT_SECONDS = 15 * 60;
+export const INDEX_INTERVAL_MAX_SECONDS = 12 * 60 * 60;
 
 export type StatusDiagnosticsQuery =
   | { ok: true; deadLetterLimit: number; deadLetterLocator?: string }
@@ -26,11 +28,21 @@ export function parseStatusDiagnosticsQuery(params: URLSearchParams): StatusDiag
 
 export function cursorStallThresholdSeconds(
   raw = process.env.DACS_CURSOR_STALL_SECONDS,
+  rawIndexInterval = process.env.DACS_INDEX_INTERVAL_SECONDS,
 ): number {
-  const configured = raw === undefined ? CURSOR_STALL_DEFAULT_SECONDS : Number(raw);
+  const indexInterval = Number(rawIndexInterval ?? INDEX_INTERVAL_DEFAULT_SECONDS);
+  const boundedInterval = Number.isSafeInteger(indexInterval) && indexInterval >= 1 && indexInterval <= INDEX_INTERVAL_MAX_SECONDS
+    ? indexInterval
+    : INDEX_INTERVAL_DEFAULT_SECONDS;
+  const scheduleAwareDefault = Math.min(
+    CURSOR_STALL_MAX_SECONDS,
+    Math.max(CURSOR_STALL_MIN_SECONDS, boundedInterval * 2),
+  );
+  if (raw === undefined) return scheduleAwareDefault;
+  const configured = Number(raw);
   return Number.isSafeInteger(configured) && configured >= 1 && configured <= CURSOR_STALL_MAX_SECONDS
     ? configured
-    : CURSOR_STALL_DEFAULT_SECONDS;
+    : scheduleAwareDefault;
 }
 
 export function cursorProgressDiagnostics(
