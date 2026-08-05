@@ -234,8 +234,10 @@ export interface ScanState {
   cursorAdvancedAt?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
-  /** listing content hash → every observed revocation marker candidate. */
+  /** listing content hash → bounded, deterministic revocation candidates. */
   revocations?: Record<string, string[] | string>;
+  /** RB-4-verified marker locators that candidate pruning must preserve. */
+  verifiedRevocations?: Record<string, string[]>;
   /** listing anchor address → owner address */
   listings: Record<string, string>;
   /** jobId → discovered deal */

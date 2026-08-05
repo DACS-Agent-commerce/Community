@@ -176,6 +176,13 @@ payloads, internal URLs and stack traces are never returned.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
+   Revocation discovery retains at most 16 candidates per listing hash, except for
+   locators that already passed RB-4 verification; truncation is recorded in reindex logs.
+   New scan observations precede prior unverified state in that window; within each
+   group, the first distinct locators in scan iteration order survive. A valid marker
+   outside the retained window is not evaluated. Its publisher can anchor a fresh
+   marker to re-enter discovery, but continued overflow can exclude that marker again.
+   After one marker verifies, later pruning cannot make it disappear.
 3. **Evidence graph**: current bundles recursively resolve and validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
    records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled

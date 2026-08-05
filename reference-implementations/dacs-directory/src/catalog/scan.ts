@@ -31,8 +31,10 @@ export interface ScannedArtifacts {
   deals: Map<string, RegisteredDeal & { sellerFromAgreement?: string }>;
   /** owner + programName → observed native address. */
   programs: Map<string, string>;
-  /** listing content hash → every observed revocation marker candidate. */
+  /** listing content hash → bounded, deterministic revocation candidates. */
   revocations: Map<string, string[]>;
+  /** Candidate locators discarded by the per-listing resource bound. */
+  revocationCandidatesTruncated: number;
   txsScanned: number;
   /** Highest tx id observed — the next pass's cursor. */
   highestTxId: number;
@@ -94,10 +96,36 @@ export function addRevocationCandidate(
   revocations: Map<string, string[]>,
   listingHash: string,
   address: string,
-): void {
+  verifiedAddresses: ReadonlySet<string> = new Set(),
+): number {
   const candidates = revocations.get(listingHash) ?? [];
-  if (!candidates.includes(address)) candidates.push(address);
-  revocations.set(listingHash, candidates);
+  const merged = boundedRevocationCandidates([...candidates, address], verifiedAddresses);
+  revocations.set(listingHash, merged.candidates);
+  return merged.truncated;
+}
+
+export const MAX_REVOCATION_CANDIDATES_PER_LISTING = 16;
+
+/**
+ * Keep discovery state deterministic and bounded while never evicting a marker
+ * that already passed RB-4 verification. Verified markers are signer-controlled
+ * rather than public-shape-controlled, so they form the explicit bound exception.
+ */
+export function boundedRevocationCandidates(
+  addresses: Iterable<string>,
+  verifiedAddresses: ReadonlySet<string> = new Set(),
+  limit = MAX_REVOCATION_CANDIDATES_PER_LISTING,
+): { candidates: string[]; truncated: number } {
+  // Include the persisted verified set even when an older scan-state snapshot
+  // omitted that locator from its candidate array.
+  const unique = [...new Set([...verifiedAddresses, ...addresses])];
+  const verified = unique.filter((address) => verifiedAddresses.has(address));
+  const unverified = unique.filter((address) => !verifiedAddresses.has(address));
+  const candidates = [
+    ...verified,
+    ...unverified.slice(0, Math.max(0, limit - verified.length)),
+  ];
+  return { candidates, truncated: unique.length - candidates.length };
 }
 
 /**
@@ -163,7 +191,12 @@ export async function readChainTip(): Promise<number> {
  */
 export async function scanChain(
   _demos: unknown,
-  opts: { maxTxs?: number; sinceTxId?: number; retryLocators?: string[] } = {},
+  opts: {
+    maxTxs?: number;
+    sinceTxId?: number;
+    retryLocators?: string[];
+    verifiedRevocations?: ReadonlyMap<string, ReadonlySet<string>>;
+  } = {},
 ): Promise<ScannedArtifacts> {
   // Incremental: walk latest → sinceTxId (exclusive) and stop. First run
   // (no cursor) backfills the whole history up to maxTxs.
@@ -218,6 +251,7 @@ export async function scanChain(
   const listings = new Map<string, string>();
   const programs = new Map<string, string>();
   const revocations = new Map<string, string[]>();
+  let revocationCandidatesTruncated = 0;
   const observations: ScannedArtifacts["observations"] = [];
   const failures: ScannedArtifacts["failures"] = [];
   const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
@@ -239,7 +273,13 @@ export async function scanChain(
     let artifactKind = "other";
     if (isListingRevocationCandidate(data)) {
       artifactKind = "listing-revocation";
-      addRevocationCandidate(revocations, String(data!.listingContentHash).toLowerCase(), address);
+      const listingHash = String(data!.listingContentHash).toLowerCase();
+      revocationCandidatesTruncated += addRevocationCandidate(
+        revocations,
+        listingHash,
+        address,
+        opts.verifiedRevocations?.get(listingHash),
+      );
     } else if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
       artifactKind = "listing";
       listings.set(address, read.owner);
@@ -287,5 +327,6 @@ export async function scanChain(
     });
   }
 
-  return { listings, deals, programs, revocations, txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
+  return { listings, deals, programs, revocations, revocationCandidatesTruncated,
+    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
 }
