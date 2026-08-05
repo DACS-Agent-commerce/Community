@@ -1,7 +1,8 @@
 import { safePublicEndpoint } from "../catalog/publicEndpoint.js";
+import { effectiveReachabilityStatus } from "../catalog/reachabilityStatus.js";
 import type { IdentityTier, ListingSummary, SellerRecord } from "../catalog/types.js";
 
-export const UNMEASURED_REACHABILITY_LABEL = "Not measured by Directory";
+export const UNMEASURED_REACHABILITY_LABEL = "Not measured by Directory" as const;
 
 export type DirectoryEvidenceState = Readonly<{
   listing: Readonly<{
@@ -14,10 +15,12 @@ export type DirectoryEvidenceState = Readonly<{
     explanation: string;
     url?: string;
   }>;
-  reachability: Readonly<{
-    kind: "not-measured";
-    label: typeof UNMEASURED_REACHABILITY_LABEL;
-  }>;
+  reachability: Readonly<
+    | { kind: "not-measured"; label: typeof UNMEASURED_REACHABILITY_LABEL }
+    | { kind: "reachable"; label: "Reachable in latest bounded Directory probe" }
+    | { kind: "unreachable"; label: "Unreachable in latest bounded Directory probe" }
+    | { kind: "unknown"; label: "Not recently confirmed by Directory" }
+  >;
   identityTier: IdentityTier;
   deals: Readonly<{
     completed: number;
@@ -30,6 +33,7 @@ export type DirectoryEvidenceState = Readonly<{
 export function directoryEvidenceState(
   listing: ListingSummary,
   seller: Pick<SellerRecord, "identityTier" | "reputation">,
+  now = Date.now(),
 ): DirectoryEvidenceState {
   const endpoint = safePublicEndpoint(listing.publicEndpoint);
   const hasEndpointDeclaration = typeof listing.publicEndpoint === "string" && listing.publicEndpoint.length > 0;
@@ -40,6 +44,16 @@ export function directoryEvidenceState(
       : { kind: "legacy" as const, label: "legacy SDK listing" as const };
   const completed = seller.reputation.completed;
   const total = seller.reputation.totalAgreements;
+  const reachabilityStatus = listing.reachabilityHint
+    ? effectiveReachabilityStatus(listing.reachabilityHint, now)
+    : undefined;
+  const reachability = reachabilityStatus === "reachable"
+    ? { kind: "reachable" as const, label: "Reachable in latest bounded Directory probe" as const }
+    : reachabilityStatus === "unreachable"
+      ? { kind: "unreachable" as const, label: "Unreachable in latest bounded Directory probe" as const }
+      : reachabilityStatus === "unknown"
+        ? { kind: "unknown" as const, label: "Not recently confirmed by Directory" as const }
+        : { kind: "not-measured" as const, label: UNMEASURED_REACHABILITY_LABEL };
 
   return Object.freeze({
     listing: Object.freeze(listingState),
@@ -61,7 +75,7 @@ export function directoryEvidenceState(
           label: "No endpoint declared" as const,
           explanation: "The listing declares no engagement endpoint",
         }),
-    reachability: Object.freeze({ kind: "not-measured" as const, label: UNMEASURED_REACHABILITY_LABEL }),
+    reachability: Object.freeze(reachability),
     identityTier: seller.identityTier ?? "self-declared",
     deals: Object.freeze({
       completed,

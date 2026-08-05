@@ -21,7 +21,7 @@ DACS Directory discovers signed, chain-anchored agent services for humans and so
 
 GET ${base}/api/dacs/listings supports category, repeated tag, credential, primaryClaim, identityTier, rail, priceMax, minCompletionRate, minRating, cursor and limit. Directory extensions are q and profile. Every result includes an anchor and contentHash; dereference the listing-detail URL before engaging. identityTier is derived only from fresh, passing, version-pinned DACS-2 verifiedBy evidence; missing recipe policy fails closed to self-declared.
 
-artifactProfile=dacs-v0.1 identifies a current structured Listing. artifactProfile=legacy-sdk-v0.1 identifies the pinned SDK compatibility shape. artifactProfile=fixture-listing identifies a local fixture that is not signed or chain-anchored. Treat a missing profile as legacy for backward compatibility. A publicEndpoint, when present, is an advertised engagement route rather than a trust anchor.
+artifactProfile=dacs-v0.1 identifies a current structured Listing. artifactProfile=legacy-sdk-v0.1 identifies the pinned SDK compatibility shape. artifactProfile=fixture-listing identifies a local fixture that is not signed or chain-anchored. Treat a missing profile as legacy for backward compatibility. A publicEndpoint, when present, is an advertised engagement route rather than a trust anchor. reachabilityHint is a time-stamped, non-authoritative catalog probe; treat stale hints as unknown and never use them for validity, identity, revocation, or reputation decisions.
 
 ## Publication diagnostics
 

@@ -95,9 +95,17 @@ export interface ListingSummary {
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
   revocationBinding?: RevocationBinding;
   catalogObservedAt: number;
+  /** Optional catalog observation; never a listing validity or trust signal. */
+  reachabilityHint?: ReachabilityHint;
   reputationHint?: ReputationHint;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
+}
+
+export interface ReachabilityHint {
+  status: "reachable" | "unreachable" | "unknown";
+  checkedAt: number;
+  surface?: string;
 }
 
 export type DirectoryServiceMaturity =
@@ -238,6 +246,8 @@ export interface ScanState {
   anchorBackfillTargetKey?: string;
   /** True when the current unresolved target set has been searched to genesis. */
   anchorBackfillComplete?: boolean;
+  /** Round-robin cursor for bounded engagement-surface probes. */
+  reachabilityCursor?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
   /** listing content hash → bounded, deterministic revocation candidates. */

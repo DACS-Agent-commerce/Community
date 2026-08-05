@@ -15,6 +15,7 @@ import {
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
+import { refreshReachabilityHints } from "./reachability";
 import {
   loadCatalog,
   loadDomains,
@@ -308,6 +309,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       new Set(verified),
     ).candidates;
   }
+  state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
+    cursor: state.reachabilityCursor,
+  });
   saveScanState(state);
 
   saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });

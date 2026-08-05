@@ -22,6 +22,16 @@ export const listingSummarySchema = {
     },
     artifactProfile: { enum: artifactProfiles },
     publicEndpoint: { type: "string", format: "uri" },
+    reachabilityHint: {
+      type: "object",
+      required: ["status", "checkedAt"],
+      additionalProperties: false,
+      properties: {
+        status: { enum: ["reachable", "unreachable", "unknown"] },
+        checkedAt: { type: "integer", minimum: 0 },
+        surface: { type: "string", format: "uri" },
+      },
+    },
     offering: {
       type: "object", required: ["title", "category", "tags"],
       properties: {

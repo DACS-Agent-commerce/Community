@@ -37,6 +37,36 @@ test("separates listing evidence, endpoint declaration, and unmeasured reachabil
   assert.match(state.deals.explanation, /Both parties/);
 });
 
+test("projects fresh and stale bounded probes through the evidence boundary", () => {
+  const now = 2_000_000_000_000;
+  const reachable = directoryEvidenceState(listing({
+    publicEndpoint: "https://agent.example/jobs",
+    reachabilityHint: { status: "reachable", checkedAt: now, surface: "https://agent.example/jobs" },
+  }), seller(), now);
+  assert.deepEqual(reachable.reachability, {
+    kind: "reachable",
+    label: "Reachable in latest bounded Directory probe",
+  });
+
+  const unreachable = directoryEvidenceState(listing({
+    publicEndpoint: "https://agent.example/jobs",
+    reachabilityHint: { status: "unreachable", checkedAt: now, surface: "https://agent.example/jobs" },
+  }), seller(), now);
+  assert.deepEqual(unreachable.reachability, {
+    kind: "unreachable",
+    label: "Unreachable in latest bounded Directory probe",
+  });
+
+  const stale = directoryEvidenceState(listing({
+    publicEndpoint: "https://agent.example/jobs",
+    reachabilityHint: { status: "reachable", checkedAt: now - 60 * 60_000 - 1, surface: "https://agent.example/jobs" },
+  }), seller(), now);
+  assert.deepEqual(stale.reachability, {
+    kind: "unknown",
+    label: "Not recently confirmed by Directory",
+  });
+});
+
 test("does not turn a missing endpoint into a service failure", () => {
   const state = directoryEvidenceState(listing({ publicEndpoint: undefined }), seller());
   assert.deepEqual(state.endpoint, {
