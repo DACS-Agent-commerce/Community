@@ -84,6 +84,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
           <span className={`badge ${evidence.listing.kind === "current" ? "ok" : ""}`}>{evidence.listing.label}</span>
           {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
+          {engagementEndpoint && <span className={`badge ${evidence.reachability.kind === "reachable" ? "ok" : ""}`}>{evidence.reachability.label}</span>}
           {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
           {isFixtureListing && <span className="badge">not chain anchored</span>}
           {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
@@ -124,7 +125,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
             <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
             <li><span className="check">{engagementEndpoint ? "•" : "–"}</span><div><strong>Endpoint declaration</strong><p>{evidence.endpoint.label}; this says nothing about availability</p></div></li>
-            <li><span className="check">–</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>
+            <li><span className={evidence.reachability.kind === "reachable" ? "check ok" : "check"}>{evidence.reachability.kind === "reachable" ? "✓" : "–"}</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>
             <li><span className={evidence.deals.completed ? "check ok" : "check"}>{evidence.deals.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{evidence.deals.label}. {evidence.deals.explanation}.</p></div></li>
           </ul>
         </aside>
