@@ -60,17 +60,65 @@ interface StorageRead {
   owner?: string;
   programName?: string;
   data?: Record<string, unknown>;
+  errorCode?: string;
+  failureCode?: StorageReadFailureCode;
 }
 
-async function readStorage(address: string, attempts = 3): Promise<StorageRead | null> {
-  for (let attempt = 1; attempt <= attempts; attempt++) try {
-    const res = await fetch(`${RPC}/storage-program/${address}`, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return (await res.json()) as StorageRead;
-  } catch { if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1))); }
-  return null;
+export type StorageReadFailureCode =
+  | "STORAGE_NOT_FOUND"
+  | "STORAGE_NOT_PUBLIC"
+  | "STORAGE_RPC_UNAVAILABLE"
+  | "STORAGE_INVALID_RESPONSE";
+
+/** Safe cause classification; response bodies and upstream text are never persisted. */
+export function storageReadFailureCode(status: number, errorCode?: string): StorageReadFailureCode {
+  const normalized = typeof errorCode === "string" ? errorCode.trim().toUpperCase() : undefined;
+  if (status === 404) {
+    return "STORAGE_NOT_FOUND";
+  }
+  if (status === 401 || status === 403) {
+    return "STORAGE_NOT_PUBLIC";
+  }
+  // A server-side or transport-class status remains retryable even if an
+  // untrusted error body happens to carry a terminal-looking code.
+  if (status >= 500 || status < 100) return "STORAGE_RPC_UNAVAILABLE";
+  if (normalized === "NOT_FOUND" || normalized === "STORAGE_NOT_FOUND" || normalized === "PROGRAM_NOT_FOUND") {
+    return "STORAGE_NOT_FOUND";
+  }
+  if (normalized === "PERMISSION_DENIED" || normalized === "UNAUTHORIZED") return "STORAGE_NOT_PUBLIC";
+  return status >= 200 && status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE";
+}
+
+export async function readStorage(address: string, attempts = 3): Promise<StorageRead> {
+  let lastFailure: StorageReadFailureCode = "STORAGE_RPC_UNAVAILABLE";
+  const boundedAttempts = Number.isSafeInteger(attempts) && attempts >= 1 && attempts <= 5 ? attempts : 3;
+  for (let attempt = 1; attempt <= boundedAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${RPC}/storage-program/${address}`, {
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      lastFailure = "STORAGE_RPC_UNAVAILABLE";
+      if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));
+      continue;
+    }
+
+    const statusFailure = storageReadFailureCode(res.status);
+    if (statusFailure === "STORAGE_NOT_FOUND" || statusFailure === "STORAGE_NOT_PUBLIC") {
+      return { success: false, failureCode: statusFailure };
+    }
+    let body: StorageRead | null = null;
+    try { body = (await res.json()) as StorageRead; } catch { /* classified below */ }
+    const failure = storageReadFailureCode(res.status, body?.errorCode);
+    if (failure === "STORAGE_NOT_FOUND" || failure === "STORAGE_NOT_PUBLIC") {
+      return { success: false, failureCode: failure };
+    }
+    if (res.ok && body?.success && body.programName && body.owner) return body;
+    lastFailure = failure;
+    if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));
+  }
+  return { success: false, failureCode: lastFailure };
 }
 
 /**
@@ -421,7 +469,15 @@ export async function scanChain(
 
   for (const address of addresses) {
     const read = await readStorage(address);
-    if (!read?.success || !read.programName || !read.owner) { failures.push({ locator: address, kind: "unknown", code: "STORAGE_UNREADABLE", message: "storage program could not be read after retries" }); continue; }
+    if (!read?.success || !read.programName || !read.owner) {
+      failures.push({
+        locator: address,
+        kind: "unknown",
+        code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
+        message: "storage program could not be read under the public indexer policy",
+      });
+      continue;
+    }
     const name = read.programName;
     programs.set(programBindingKey(read.owner, name), address);
     const data = read.data as Record<string, unknown> | undefined;

@@ -76,7 +76,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = {
-      schemaVersion: 7,
+      schemaVersion: 8,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -94,14 +94,15 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
     );
   }
-  // v7 replays history to discover BB-4-valid DACS-5 BundleBindings. It also
-  // retains v6's consensus-time and v5's revocation-marker binding replays.
-  const needsBindingBackfill = state.schemaVersion !== 7;
+  // v8 replays history to classify stable storage failures without the legacy
+  // STORAGE_UNREADABLE bucket. It retains v7's BundleBinding, v6's consensus-
+  // time and v5's revocation-marker binding replays.
+  const needsHistoryReplay = state.schemaVersion !== 8;
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
-  const sinceTxId = needsBindingBackfill ? 0 : Math.max(0, state.lastSeenTxId - overlap);
+  const sinceTxId = needsHistoryReplay ? 0 : Math.max(0, state.lastSeenTxId - overlap);
   state.verifiedRevocations ??= {};
   state.bundleBindings ??= {};
   state.bundleBindingOverflow ??= [];
@@ -150,7 +151,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const [jobId, deal] of scan.deals) state.deals[jobId] = deal;
   state.programs ??= {};
   for (const [key, address] of scan.programs) state.programs[key] = address;
-  if (needsBindingBackfill) state.revocations = {};
+  if (needsHistoryReplay) state.revocations = {};
   state.revocations ??= {};
   let revocationCandidatesTruncated = scan.revocationCandidatesTruncated;
   for (const [hash, addresses] of scan.revocations) {
@@ -186,7 +187,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     revocationCandidatesTruncated += bounded.truncated;
   }
   for (const observation of scan.observations) recordArtifact(observation);
-  for (const failure of scan.failures) recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message);
+  for (const failure of scan.failures) {
+    const stable = failure.code === "STORAGE_NOT_FOUND" || failure.code === "STORAGE_NOT_PUBLIC";
+    recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message, stable ? 1 : 5);
+  }
   // One bounded age-prune batch per pass keeps failure telemetry from growing
   // without limit (issue #51) while never becoming a blocking maintenance job.
   pruneFailureHistory();
@@ -238,7 +242,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   else state.cursorAdvancedAt ??= Date.now();
   state.lastSeenTxId = nextCursor;
   state.lastChainTip = scan.chainTip;
-  state.schemaVersion = 7;
+  state.schemaVersion = 8;
   saveScanState(state);
   finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
     artifacts: scan.observations.length, rejected: scan.failures.length });

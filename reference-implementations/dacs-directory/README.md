@@ -167,6 +167,13 @@ means the scanner could not read enough data to establish that the locator conta
 DACS artifact; it does not attribute a publishing failure to an agent. Raw exceptions,
 payloads, internal URLs and stack traces are never returned.
 
+Storage-read diagnostics distinguish `STORAGE_NOT_FOUND`, `STORAGE_NOT_PUBLIC`,
+`STORAGE_RPC_UNAVAILABLE`, and `STORAGE_INVALID_RESPONSE`. Missing and non-public
+locators are terminal until a later chain replay observes them again; transient node
+and response failures retain bounded retries. `STORAGE_NOT_FOUND` is operational
+diagnostic evidence only: under the current Demos mapping it is never authoritative
+DACS-5 absence evidence and cannot satisfy BB-8.
+
 ## Discovery — three channels
 
 1. **Registration** (`/register` UI or `POST /api/dacs/register`): bounded pointer sets,

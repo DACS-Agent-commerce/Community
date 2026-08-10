@@ -88,6 +88,26 @@ test("dead-letter diagnostics are safe, bounded, filterable, and recoverable", (
   assert.equal(failedAgain.classification, "dacs-artifact");
 });
 
+test("storage cause diagnostics are actionable without claiming DACS absence", () => {
+  const missing = locator("a");
+  const privateLocator = locator("b");
+  store.recordArtifactFailure(missing, "unknown", "STORAGE_NOT_FOUND", "raw 404 response", 1);
+  store.recordArtifactFailure(privateLocator, "unknown", "STORAGE_NOT_PUBLIC", "raw 403 response", 1);
+
+  const missingDiagnostic = store.indexerDiagnostics({ deadLetterLocator: missing })
+    .deadLetterDiagnostics.items[0];
+  assert.equal(missingDiagnostic.code, "STORAGE_NOT_FOUND");
+  assert.match(missingDiagnostic.message, /operational evidence only/);
+  assert.match(missingDiagnostic.message, /not authoritative DACS absence evidence/);
+  assert.doesNotMatch(JSON.stringify(missingDiagnostic), /raw 404 response/);
+
+  const privateDiagnostic = store.indexerDiagnostics({ deadLetterLocator: privateLocator })
+    .deadLetterDiagnostics.items[0];
+  assert.equal(privateDiagnostic.code, "STORAGE_NOT_PUBLIC");
+  assert.match(privateDiagnostic.message, /not publicly readable/);
+  assert.doesNotMatch(JSON.stringify(privateDiagnostic), /raw 403 response/);
+});
+
 test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
   const target = locator("7");
   const claim = `did:demos:agent:${"7".repeat(64)}`;

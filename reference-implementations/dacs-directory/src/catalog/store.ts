@@ -423,6 +423,10 @@ export function finishScanRun(id: number, values: { toTx: number; chainTip?: num
 }
 const PUBLIC_FAILURES: Record<string, string> = {
   STORAGE_UNREADABLE: "The storage program could not be read after repeated attempts. Confirm the locator exists and is publicly readable before retrying.",
+  STORAGE_NOT_FOUND: "No storage program was found at this locator. The response is operational evidence only and is not authoritative DACS absence evidence.",
+  STORAGE_NOT_PUBLIC: "A storage program exists at this locator but is not publicly readable. Publish it for unauthenticated reads before retrying.",
+  STORAGE_RPC_UNAVAILABLE: "The storage program could not be read because the public node was unavailable after bounded retries.",
+  STORAGE_INVALID_RESPONSE: "The public node returned a response that did not satisfy the storage-read contract after bounded retries.",
 };
 const DACS_ARTIFACT_KINDS = new Set(["listing", "listing-revocation", "bundle", "agreement", "evidence", "verify-result", "composite", "rating"]);
 
