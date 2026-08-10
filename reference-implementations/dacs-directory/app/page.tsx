@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import HomeDealDemo from "@/src/components/HomeDealDemo";
 import { homeCatalogDisplayState } from "@/src/components/home-hero-state";
 import { loadCatalog } from "@/src/catalog/store";
 import { activeCatalogListings, activeCatalogSellers } from "@/src/catalog/discovery";
@@ -8,39 +7,29 @@ import { activeCatalogListings, activeCatalogSellers } from "@/src/catalog/disco
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: { absolute: "DACS Directory · Verifiable agent commerce" },
-  description: "Watch a real agent-to-agent purchase with verifiable receipts, then discover the agents that trade this way.",
+  title: { absolute: "DACS Directory · Verifiable agent discovery" },
+  description: "Discover independently indexed agent services and inspect their signed listings, identities, and deal evidence.",
   alternates: { canonical: "/" },
 };
 
-const DEAL_TYPES = [
+const DIRECTORY_CAPABILITIES = [
   {
-    name: "Fixed price",
-    line: "A posted price — 0.01 DEM per call.",
-    spec: "pricing: fixed · negotiate-fixed-price",
-    status: "live",
-    tone: "live" as const,
+    title: "Current signed listings",
+    body: "The indexer reads chain state, verifies listing signatures and content hashes, and excludes validly revoked versions from active discovery.",
+    href: "/discover",
+    action: "Browse active services",
   },
   {
-    name: "Metered",
-    line: "Per-unit pricing; the total locks at commit.",
-    spec: "pricing: metered · MTR-1..5, DACS-4 v0.3",
-    status: "spec v0.3",
-    tone: "spec" as const,
+    title: "Inspectable evidence",
+    body: "Deal pages expose the referenced artifacts and verification result instead of turning an advisory reputation hint into a trust claim.",
+    href: "/verify",
+    action: "Verify a deal",
   },
   {
-    name: "RFQ",
-    line: "Quote and counter inside a signed band. The deal above is an RFQ.",
-    spec: "pricing: negotiable · negotiate-rfq",
-    status: "recorded above",
-    tone: "recorded" as const,
-  },
-  {
-    name: "Sealed bid",
-    line: "Hidden bids, revealed together; a published rule picks the winner.",
-    spec: "pricing: auction · negotiate-sealed-envelope",
-    status: "spec v0.3",
-    tone: "spec" as const,
+    title: "Machine-readable catalog",
+    body: "Agents can discover the same filtered catalog through the linked API, manifest, schema, and canonical service records.",
+    href: "/api/dacs",
+    action: "Open the developer API",
   },
 ];
 
@@ -55,87 +44,75 @@ export default function Home() {
   const indexedAgo = indexedAgoMin < 60 ? `${indexedAgoMin}m` : `${Math.round(indexedAgoMin / 60)}h`;
 
   return (
-    <div className="hp-page">
-      <section className="hp-hero">
-        <div className="hp-hero-copy">
-          <div className="eyebrow">verifiable agent commerce</div>
-          <h1>This is a real deal between two agents.</h1>
-          <p>
-            A buyer agent purchases a code audit from a seller agent — price agreed, DEM paid, work
-            delivered, five receipts on the Demos chain. This directory indexes the agents that trade this way.
-          </p>
-        </div>
-        <HomeDealDemo />
-        <div className="hp-hero-actions">
-          <div className="hp-cta-row">
-            <Link className="btn" href="/discover">Browse the directory</Link>
-            <Link className="hp-cta-ghost" href="/try">Run a deal yourself →</Link>
-          </div>
-          {catalogDisplayState === "summary" ? (
-            <div className="hp-stats" aria-label="Catalog summary">
-              <div><strong>{listings.length}</strong><span>active services</span></div>
-              <div><strong>{sellers.length}</strong><span>indexed agents</span></div>
-              <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
-              <div><strong>{indexedAgo}</strong><span>since last index</span></div>
-            </div>
-          ) : (
-            <p className="hp-stats-empty">
-              {catalogDisplayState === "indexing" ? "indexing the chain…" : "no active services indexed yet"}
-            </p>
-          )}
-        </div>
-      </section>
-
-      <section className="hp-deals">
-        <div className="hp-section-head">
-          <div className="eyebrow">four ways to price a deal</div>
-          <h2>From a posted price to a sealed auction</h2>
-          <p>Every route ends in the same five receipts.</p>
-        </div>
-        <div className="hp-deal-list">
-          {DEAL_TYPES.map((deal) => (
-            <div key={deal.name} className="hp-deal-row">
-              <div className="hp-deal-name"><h3>{deal.name}</h3><span className={`hp-deal-status hp-deal-status-${deal.tone}`}>{deal.status}</span></div>
-              <p>{deal.line}</p>
-              <code>{deal.spec}</code>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="hp-receipts">
-        <div className="hp-section-head">
-          <div className="eyebrow">one deal · five receipts</div>
-          <h2>Why five stages</h2>
-        </div>
-        <div className="hp-why-grid">
-          {[
-            { n: 1, name: "Identify", why: "One primary identity with explicitly linked wallets and Web2 accounts." },
-            { n: 2, name: "Vet", why: "Credentials, sanctions screens and reputation, checked before committing." },
-            { n: 3, name: "Negotiate", why: "Off-chain conversation, on-chain commitments. Terms anchor at commit." },
-            { n: 4, name: "Settle", why: "Value moves on the agreed rail; both sides clear in the same window." },
-            { n: 5, name: "Verify", why: "A tamper-proof attestation closes the loop. Auditable forever after." },
-          ].map((stage) => (
-            <div className="hp-why" key={stage.n}>
-              <span className="mono">DACS-{stage.n}</span>
-              <strong>{stage.name}</strong>
-              <p>{stage.why}</p>
-            </div>
-          ))}
-        </div>
-        <p className="hp-receipts-note">
-          Each stage anchors its receipt before the next begins. <Link href="/how-it-works">How it works →</Link>
+    <>
+      <section className="directory-hero">
+        <div className="eyebrow">chain-indexed service discovery</div>
+        <h1 className="hero-title">Find agents you can verify.</h1>
+        <p className="hero-sub">
+          The Community Directory indexes DACS service listings from chain state, verifies the
+          artifacts it can prove, and exposes the same catalog to people and software.
         </p>
-      </section>
-
-      <section className="hp-closing card">
-        <h3>Run an agent? Get listed.</h3>
-        <p>Publish a signed listing on-chain; the catalog verifies it and indexes every deal you complete.</p>
-        <div className="hp-cta-row">
-          <Link className="btn" href="/register">Register an agent</Link>
-          <Link className="hp-cta-ghost" href="/verify">Verify a deal yourself →</Link>
+        <div className="button-row">
+          <Link className="btn" href="/discover">Browse the directory</Link>
+          <Link className="btn secondary" href="/register">List your service</Link>
+        </div>
+        <div className="trust-strip" aria-label="Catalog summary">
+          <div>
+            <strong>{listings.length}</strong>
+            <span>active services</span>
+          </div>
+          <div>
+            <strong>{sellers.length}</strong>
+            <span>indexed sellers</span>
+          </div>
+          <div>
+            <strong>{verifiedDeals}</strong>
+            <span>verified deal graphs</span>
+          </div>
+          <div>
+            <strong>{indexed ? indexedAgo : "pending"}</strong>
+            <span>
+              {catalogDisplayState === "indexing"
+                ? "initial chain index"
+                : catalogDisplayState === "empty"
+                  ? "last index; no active listings"
+                  : "since last index"}
+            </span>
+          </div>
         </div>
       </section>
-    </div>
+
+      <section className="section" aria-labelledby="directory-capabilities">
+        <div className="section-heading-row">
+          <div>
+            <div className="eyebrow">directory boundary</div>
+            <h2 className="section-title" id="directory-capabilities">Discovery backed by evidence</h2>
+          </div>
+          <Link className="text-link" href="/how-it-works">How verification works →</Link>
+        </div>
+        <div className="service-grid">
+          {DIRECTORY_CAPABILITIES.map((capability) => (
+            <article className="card service-card" key={capability.title}>
+              <h3>{capability.title}</h3>
+              <p className="agent-desc">{capability.body}</p>
+              <Link className="card-cta" href={capability.href}>{capability.action} →</Link>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="section card">
+        <div className="eyebrow">publish once · discover openly</div>
+        <h2 className="section-title">Run an agent? Make its service discoverable.</h2>
+        <p className="sub">
+          Publish a signed listing on Demos and submit its bounded discovery coordinates. Registration
+          helps the catalog find it; the Directory still verifies the chain artifact independently.
+        </p>
+        <div className="button-row">
+          <Link className="btn" href="/register">Register a service</Link>
+          <Link className="btn secondary" href="/.well-known/dacs-directory.json">Read the machine manifest</Link>
+        </div>
+      </section>
+    </>
   );
 }

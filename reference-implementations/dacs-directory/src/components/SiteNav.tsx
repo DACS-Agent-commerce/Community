@@ -6,9 +6,7 @@ import ThemeToggle from "./ThemeToggle";
 
 const LINKS = [
   { href: "/", label: "home" },
-  { href: "/discover", label: "discover" },
-  { href: "/try-chat", label: "watch a deal" },
-  { href: "/try", label: "try dacs", featured: true },
+  { href: "/discover", label: "discover", featured: true },
   { href: "/how-it-works", label: "how it works" },
   { href: "/verify", label: "verify" },
   { href: "/register", label: "list your service" },
@@ -65,7 +63,7 @@ export default function SiteNav() {
             <Link
               key={link.href}
               href={link.href}
-              className={link.featured ? "nav-try" : undefined}
+              className={link.featured ? "nav-featured" : undefined}
               onClick={() => setOpen(false)}
             >
               {link.label}{link.featured ? <span aria-hidden> →</span> : null}
