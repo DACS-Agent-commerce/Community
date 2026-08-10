@@ -1,8 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDemosWallet } from "@/src/components/useDemosWallet";
+import {
+  clearPendingListingPublication,
+  readPendingListingPublication,
+  writePendingListingPublication,
+  type PendingListingPublication,
+} from "@/src/components/listing-publication-recovery";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -21,6 +27,20 @@ const SCREENS = ["Connect", "Describe", "Review", "Publish"];
 
 type Screen = "connect" | "describe" | "review" | "publish" | "done";
 type PublishStep = "idle" | "building" | "signing" | "anchoring" | "confirming" | "registering" | "failed" | "complete";
+
+type BuiltListing = {
+  listing: Record<string, unknown>;
+  message?: string;
+  contentHash: string;
+  logicalAddress: string;
+  programName: string;
+  anchorAddress: string;
+  exists: boolean;
+  tx: Record<string, unknown> | null;
+  registration: Record<string, unknown> & {
+    ownerSignature?: { message?: string; signedAt?: number };
+  };
+};
 
 export default function Register() {
   const wallet = useDemosWallet();
@@ -45,8 +65,11 @@ export default function Register() {
   const [publicEndpoint, setPublicEndpoint] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [profileUrl, setProfileUrl] = useState<string | null>(null);
+  const [pendingPublication, setPendingPublication] = useState<PendingListingPublication | null>(null);
 
-  const claim = wallet.address ? `did:demos:agent:${wallet.address.replace(/^0x/, "")}` : null;
+  useEffect(() => { setPendingPublication(readPendingListingPublication(window.localStorage)); }, []);
+
+  const claim = wallet.address ? `did:demos:agent:${wallet.address.replace(/^0x/, "").toLowerCase()}` : null;
   const slug = serviceId.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
   const selectedRail = publishableRail(rails[0] ?? "");
   const validDescription = name.trim() && description.trim() && slug && selectedRail && delivery &&
@@ -66,8 +89,109 @@ export default function Register() {
         : { kind: pricingKind, price: priceTermPreview };
   const negotiationPhase = negotiationPhaseForPricing(pricingKind);
 
+  const savePending = (pending: PendingListingPublication): boolean => {
+    const saved = writePendingListingPublication(window.localStorage, pending);
+    if (saved) setPendingPublication(pending);
+    return saved;
+  };
+
+  const confirmAnchoredListing = async (pending: PendingListingPublication): Promise<void> => {
+    setPublishStep("confirming");
+    setStatus("Waiting for the exact signed listing to become readable and independently verifiable…");
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await fetch("/api/dacs/confirm-listing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          anchorAddress: pending.anchorAddress,
+          programName: pending.programName,
+          contentHash: pending.contentHash,
+          sellerClaim: pending.claim,
+          listingId: pending.listingId,
+          listingVersion: pending.listingVersion,
+        }),
+      });
+      const body = await response.json();
+      if (response.ok && body.confirmed === true) return;
+      if (response.status !== 202) {
+        throw new Error(body.error ?? "The anchored listing failed independent verification.");
+      }
+      if (attempt < 19) await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    throw new Error("The exact listing is not visible yet. No new transaction was sent; use Check chain and resume to follow this same anchor.");
+  };
+
+  const registerPendingListing = async (pending: PendingListingPublication): Promise<void> => {
+    const registering = { ...pending, stage: "registering" as const };
+    if (!savePending(registering)) {
+      throw new Error("This browser cannot preserve the listing recovery record, so directory registration was not attempted.");
+    }
+    setPublishStep("registering");
+    setStatus("One final wallet signature connects this verified listing to the directory.");
+    const prepared = await fetch("/api/dacs/prepare-registration", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(registering.registration),
+    });
+    const preparedBody = await prepared.json();
+    if (!prepared.ok) throw new Error(preparedBody.error ?? "Could not prepare the directory registration.");
+    const registration = preparedBody.registration as Record<string, unknown> & {
+      ownerSignature?: { message?: string; signedAt?: number };
+    };
+    const message = registration.ownerSignature?.message;
+    if (!message) throw new Error("The directory returned no registration signing message.");
+    const registrationSignature = await wallet.sign(message);
+    if (!registrationSignature) throw new Error(wallet.error ?? "The directory registration signature was declined.");
+    const signedRegistration = {
+      ...registration,
+      ownerSignature: {
+        ...registration.ownerSignature,
+        signature: registrationSignature.replace(/^(0x)+/i, ""),
+      },
+    };
+    const registered = await fetch("/api/dacs/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(signedRegistration),
+    });
+    const registeredBody = await registered.json();
+    if (!registered.ok) throw new Error(registeredBody.error ?? "Directory registration failed.");
+
+    clearPendingListingPublication(window.localStorage);
+    setPendingPublication(null);
+    setPublishStep("complete");
+    setStatus("Your signed listing is anchored, independently verified, and queued for the next index pass.");
+    setProfileUrl(`/seller/${encodeURIComponent(pending.claim)}`);
+    setScreen("done");
+  };
+
+  const finishPendingPublication = async (pending: PendingListingPublication): Promise<void> => {
+    await confirmAnchoredListing(pending);
+    const confirmed = { ...pending, stage: "registering" as const };
+    if (!savePending(confirmed)) {
+      throw new Error("The listing verified, but this browser cannot preserve its recovery record; directory registration was not attempted.");
+    }
+    await registerPendingListing(confirmed);
+  };
+
+  const resumePublication = async () => {
+    if (!claim || !pendingPublication || pendingPublication.claim !== claim) return;
+    setScreen("publish");
+    setStatus(null); setFailedAt(null);
+    const activeStep: PublishStep = "confirming";
+    try {
+      // Re-verify on every resume even when the prior browser session had
+      // already reached registration; persisted client state is only a hint.
+      await finishPendingPublication(pendingPublication);
+    } catch (error) {
+      setFailedAt(activeStep);
+      setPublishStep("failed");
+      setStatus((error as Error).message);
+    }
+  };
+
   const publish = async () => {
-    if (!claim || !validDescription) return;
+    if (!claim || !validDescription || pendingPublication) return;
     setScreen("publish");
     setStatus(null); setFailedAt(null);
     let activeStep: PublishStep = "building";
@@ -105,48 +229,64 @@ export default function Register() {
       });
       const built = await build.json();
       if (!build.ok) throw new Error(built.error);
-      setStatus("Now approve the complete structured listing.");
-      const signature = await wallet.sign(built.message);
-      if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
-      const signedListing = {
-        ...built.listing,
-        signature: { algorithm: "ed25519", signer: claim, value: signature.replace(/^(0x)+/i, "") },
-      };
-
-      activeStep = "anchoring"; setPublishStep("anchoring");
-      setStatus("Approve the on-chain anchor transaction.");
-      built.tx.content.data[1].data = signedListing;
-      const sent = await wallet.send(built.tx);
-      if (!sent) throw new Error(wallet.error ?? "The anchor transaction was declined.");
-
-      activeStep = "confirming"; setPublishStep("confirming");
-      setStatus("The transaction was sent. Waiting for the listing to become readable…");
-      let confirmed = false;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        const probe = await fetch(`/api/dacs/artifact?ref=${encodeURIComponent(built.anchorAddress)}`).then((response) => response.json());
-        if (probe.value) { confirmed = true; break; }
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+      const publication = built as BuiltListing;
+      const { ownerSignature: _ownerSignature, ...unsignedRegistration } = publication.registration;
+      let signedListing = publication.listing;
+      let transaction = publication.tx;
+      if (!publication.exists) {
+        if (!publication.message || !transaction) throw new Error("The listing builder returned an incomplete create transaction.");
+        setStatus("Now approve the complete structured listing.");
+        const signature = await wallet.sign(publication.message);
+        if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
+        signedListing = {
+          ...publication.listing,
+          signature: { algorithm: "ed25519", signer: claim, value: signature.replace(/^(0x)+/i, "") },
+        };
+        transaction = structuredClone(transaction);
+        const content = transaction.content as Record<string, unknown> | undefined;
+        const data = content?.data;
+        if (!Array.isArray(data) || !data[1] || typeof data[1] !== "object" || Array.isArray(data[1])) {
+          throw new Error("The listing builder returned an invalid StorageProgram transaction.");
+        }
+        (data[1] as Record<string, unknown>).data = signedListing;
       }
-      if (!confirmed) throw new Error("The anchor is not visible yet. Your transaction may still confirm; retry publishing without re-entering the form.");
-
-      activeStep = "registering"; setPublishStep("registering");
-      setStatus("One final wallet signature connects this listing to the directory.");
-      const registrationSignature = await wallet.sign(built.registration.ownerSignature.message);
-      if (!registrationSignature) throw new Error(wallet.error ?? "The directory registration signature was declined.");
-      const registration = {
-        ...built.registration,
-        ownerSignature: { ...built.registration.ownerSignature, signature: registrationSignature.replace(/^(0x)+/i, "") },
+      const listingVersion = Number(signedListing.listingVersion);
+      if (!Number.isSafeInteger(listingVersion) || listingVersion < 1) {
+        throw new Error("The listing builder returned an invalid listing version.");
+      }
+      let pending: PendingListingPublication = {
+        version: 1,
+        claim,
+        listingId: slug,
+        listingVersion,
+        anchorAddress: publication.anchorAddress,
+        programName: publication.programName,
+        contentHash: publication.contentHash,
+        signedListing,
+        transaction,
+        registration: unsignedRegistration,
+        stage: publication.exists ? "confirming" : "broadcast-uncertain",
+        createdAt: Date.now(),
       };
-      const registered = await fetch("/api/dacs/register", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(registration),
-      });
-      const registeredBody = await registered.json();
-      if (!registered.ok) throw new Error(registeredBody.error ?? "Directory registration failed.");
+      if (!savePending(pending)) {
+        throw new Error("This browser cannot durably save the listing recovery record, so no on-chain transaction was sent.");
+      }
 
-      setPublishStep("complete");
-      setStatus("Your signed listing is anchored and queued for the next index pass.");
-      setProfileUrl(`/seller/${encodeURIComponent(claim)}`);
-      setScreen("done");
+      if (!publication.exists) {
+        activeStep = "anchoring"; setPublishStep("anchoring");
+        setStatus("Approve the on-chain anchor transaction. Its recovery coordinates are already saved in this browser.");
+        const sent = await wallet.send(transaction);
+        if (!sent) throw new Error(wallet.error ?? "The anchor transaction was not acknowledged; check this same anchor before trying anything else.");
+        pending = { ...pending, stage: "confirming" };
+        if (!savePending(pending)) {
+          throw new Error("The transaction was sent, but this browser could not update its recovery record. Do not publish again; preserve this page and check the anchor.");
+        }
+      } else {
+        setStatus("Recovered the existing immutable listing version; no new chain transaction will be sent.");
+      }
+
+      activeStep = "confirming";
+      await finishPendingPublication(pending);
     } catch (error) {
       setFailedAt(activeStep);
       setPublishStep("failed");
@@ -172,7 +312,16 @@ export default function Register() {
           {wallet.address ? (
             <>
               <div className="badges"><span className="badge ok">connected</span><span className="badge mono">{wallet.address.slice(0, 22)}…</span></div>
-              <button className="btn" type="button" onClick={() => setScreen("describe")}>Continue</button>
+              {pendingPublication?.claim === claim ? (
+                <div className="recovery-box">
+                  <p className="note">A listing publication from this browser is still unresolved. Resume its exact saved anchor; starting another transaction could create a duplicate version.</p>
+                  <button className="btn" type="button" onClick={resumePublication}>Check chain and resume</button>
+                </div>
+              ) : pendingPublication ? (
+                <p className="verdict err" role="alert">This browser has an unresolved listing for a different Demos wallet. Reconnect that wallet to recover it before publishing another listing.</p>
+              ) : (
+                <button className="btn" type="button" onClick={() => setScreen("describe")}>Continue</button>
+              )}
             </>
           ) : wallet.available ? (
             <button className="btn" type="button" onClick={wallet.connect} disabled={wallet.connecting}>{wallet.connecting ? "Connecting…" : "Connect Demos wallet"}</button>
@@ -263,7 +412,11 @@ export default function Register() {
             <Progress label="Register the catalog pointer" state={progressState(publishStep, "registering", failedAt)} />
           </ul>
           {status && <p className={publishStep === "failed" ? "verdict err" : publishStep === "complete" ? "verdict ok" : "note"} role={publishStep === "failed" ? "alert" : "status"}>{status}</p>}
-          {publishStep === "failed" && <div className="button-row"><button className="btn" type="button" onClick={publish}>Retry publish</button><button className="btn secondary" type="button" onClick={() => setScreen("review")}>Review details</button></div>}
+          {publishStep === "failed" && pendingPublication ? (
+            <div className="button-row"><button className="btn" type="button" onClick={resumePublication}>{pendingPublication.stage === "registering" ? "Retry directory registration" : "Check chain and resume"}</button></div>
+          ) : publishStep === "failed" ? (
+            <div className="button-row"><button className="btn" type="button" onClick={publish}>Retry publish</button><button className="btn secondary" type="button" onClick={() => setScreen("review")}>Review details</button></div>
+          ) : null}
           {screen === "done" && profileUrl && <div className="button-row"><Link className="btn" href={profileUrl}>View seller profile</Link><Link className="btn secondary" href="/discover">Browse directory</Link></div>}
         </section>
       )}

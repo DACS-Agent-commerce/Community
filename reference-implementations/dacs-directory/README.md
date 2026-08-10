@@ -20,6 +20,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Surface | Spec | How |
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Seller publication | DACS-1 §6.3.4 | `/register` builds and wallet-signs a current Listing, creates its StorageProgram with the live next-nonce/empty-salt mapping from SDK #70, persists non-secret recovery coordinates before broadcast, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
 | Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
@@ -223,6 +224,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   `DACS_ADMIN_TOKEN` as a Bearer token. Run indexing from cron/CI, not public UI.
 - **Wallet publication uses three signatures**: the embedded IdentityBundle presentation,
   the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
+  Before any StorageProgram broadcast, the browser persists the public signed artifact,
+  exact native/write coordinates and unsigned registration. A reload re-verifies that
+  same anchor and refreshes only the catalog-pointer signature; it never creates another
+  listing version or re-sends a chain transaction automatically.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot

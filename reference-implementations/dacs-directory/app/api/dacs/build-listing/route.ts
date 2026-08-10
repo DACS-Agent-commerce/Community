@@ -4,21 +4,26 @@
  *   { claim, serviceId, name, description, rails[], delivery[] }
  * →  { listing, message, anchorAddress, exists, tx }
  *
- * The client then: (1) wallet-signs `message` (it IS the §B.7 signing
- * preimage — "dacs-listing:v1:" + contentHash, plain ASCII), (2) drops the
- * signed listing into tx.content.data[1].data, (3) sends the tx through the
- * wallet (sendTransaction signs + broadcasts). Ownership is intrinsic: the
- * anchor address is derived from the SIGNER's account, and the listing's
- * agentId must match it.
+ * For a new version the client wallet-signs `message`, inserts the signed
+ * listing into `tx`, and broadcasts it. When the same owner/name already holds
+ * a verified immutable version, the response carries `exists:true` and no
+ * transaction so the client can resume registration without another write.
+ * Ownership is intrinsic: the native address uses the seller's next account
+ * nonce plus the live empty salt, and readback re-binds owner/name/content.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash, listingAddress } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
-import { deriveAnchorAddress, readAnchor } from "@/src/catalog/chain";
+import {
+  deriveStorageAddress,
+  LIVE_STORAGE_SALT,
+  resolveOwnedAnchorByName,
+} from "@/src/catalog/chain";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
+import { verifyListing } from "@/src/catalog/listingVerification";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -41,9 +46,12 @@ async function accountNonce(addressHex: string): Promise<number> {
       params: [{ type: "nodeCall", message: "getAddressNonce", sender: null, receiver: null, timestamp: null, data: { address: `0x${addressHex}` }, extra: "" }],
     }),
   });
+  if (!res.ok) throw new Error("could not fetch account nonce");
   const json = (await res.json()) as { result?: number; response?: number };
   if (json?.result !== 200) throw new Error("could not fetch account nonce");
-  return Number(json.response ?? 0);
+  const nonce = Number(json.response);
+  if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("node returned an invalid account nonce");
+  return nonce;
 }
 
 export async function POST(req: NextRequest) {
@@ -58,7 +66,7 @@ export async function POST(req: NextRequest) {
       minPct?: number; maxPct?: number; selectionRule?: "lowest-price" | "highest-price" | "first-acceptable";
     };
   } | null;
-  const hex = body?.claim?.match(/([0-9a-fA-F]{64})$/)?.[1];
+  const hex = body?.claim?.match(/([0-9a-fA-F]{64})$/)?.[1]?.toLowerCase();
   if (!hex || !body?.serviceId?.trim() || !body?.name?.trim() || !body?.description?.trim()) {
     return NextResponse.json({ error: "need claim, serviceId, name, description" }, { status: 400 });
   }
@@ -233,60 +241,104 @@ export async function POST(req: NextRequest) {
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
 
-  const logicalAddress = `dacs1:${encodeURIComponent(did)}:${serviceId}:v${listingVersion}`;
+  const logicalAddress = listingAddress(did, serviceId, listingVersion);
+  // StorageProgram names are producer-held write inputs, not public resolution
+  // keys. This deterministic colon-free encoding lets THIS producer recover a
+  // broadcast whose response was lost without pretending consumers can derive
+  // the native address from the logical one.
   const programName = `dacs1-${Buffer.from(logicalAddress, "utf8").toString("base64url")}`;
-  const nonce = await accountNonce(hex);
-  const txNonce = nonce + 1;
-  const anchorAddress = deriveAnchorAddress(did, programName, txNonce);
-  const exists = (await readAnchor(anchorAddress)) != null;
+  const resolution = await resolveOwnedAnchorByName(programName, owner);
+  if (resolution.status === "indeterminate") {
+    return NextResponse.json(
+      { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
+      { status: 503 },
+    );
+  }
 
-  // Storage-program payload (mirrors demosdk's create/write shapes).
-  const payload = exists
-    ? { operation: "WRITE_STORAGE", storageAddress: anchorAddress, data: "__SIGNED_LISTING__", encoding: "json" }
-    : {
-        operation: "CREATE_STORAGE_PROGRAM",
-        storageAddress: anchorAddress,
-        programName,
-        encoding: "json",
-        data: "__SIGNED_LISTING__",
-        metadata: { logicalAddress },
-        acl: { mode: "public" },
-        salt: "dacs:v1",
-        storageLocation: "onchain",
-      };
-
-  const tx = {
-    content: {
-      type: "storageProgram",
-      from: owner,
-      to: anchorAddress,
-      amount: 0,
-      data: ["storageProgram", payload],
-      nonce: txNonce,
-      timestamp: Date.now(),
-      transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
-    },
-    signature: null,
-    hash: "",
-    status: "",
-    blockNumber: null,
-  };
+  let anchorAddress: string;
+  let publishedListing: Record<string, unknown> = listing;
+  let publishedHash = hash;
+  let tx: Record<string, unknown> | null = null;
+  const exists = resolution.status === "present";
+  if (resolution.status === "present") {
+    const verified = await verifyListing(resolution.record.data);
+    if (
+      !verified ||
+      verified.profile !== "dacs-v0.1" ||
+      verified.sellerClaim !== did ||
+      verified.scope.listingId !== serviceId ||
+      verified.scope.listingVersion !== listingVersion
+    ) {
+      return NextResponse.json(
+        { error: "the existing owner-bound program does not contain the expected verified listing version" },
+        { status: 409 },
+      );
+    }
+    // Listing versions are immutable. Recover the already-signed artifact and
+    // continue registration; never overwrite it with newly generated bytes.
+    anchorAddress = resolution.address;
+    publishedListing = verified.listing as Record<string, unknown>;
+    publishedHash = verified.contentHash;
+  } else {
+    const nonce = await accountNonce(hex);
+    const txNonce = nonce + 1;
+    anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
+    const payload = {
+      operation: "CREATE_STORAGE_PROGRAM",
+      storageAddress: anchorAddress,
+      programName,
+      encoding: "json",
+      data: "__SIGNED_LISTING__",
+      metadata: { logicalAddress },
+      acl: { mode: "public" },
+      salt: LIVE_STORAGE_SALT,
+      storageLocation: "onchain",
+    };
+    tx = {
+      content: {
+        type: "storageProgram",
+        from: owner,
+        to: anchorAddress,
+        amount: 0,
+        data: ["storageProgram", payload],
+        nonce: txNonce,
+        timestamp: Date.now(),
+        transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
+      },
+      signature: null,
+      hash: "",
+      status: "",
+      blockNumber: null,
+    };
+  }
 
   const priorRegistration = loadRegistrations().find((r) => r.primaryClaim === did);
+  const recoveredSeller = publishedListing.seller && typeof publishedListing.seller === "object" && !Array.isArray(publishedListing.seller)
+    ? publishedListing.seller as Record<string, unknown>
+    : null;
+  const displayName = typeof recoveredSeller?.displayName === "string"
+    ? recoveredSeller.displayName
+    : knownSeller?.displayName ?? body.name.trim();
   const registration = {
     primaryClaim: did,
-    displayName: knownSeller?.displayName ?? body.name.trim(),
-    listingAnchors: [...new Set([...(knownSeller?.listings.map((l) => l.anchor.locator) ?? []), anchorAddress])],
+    displayName,
+    listingAnchors: [...new Set([
+      ...(priorRegistration?.listingAnchors ?? []),
+      ...(knownSeller?.listings.map((l) => l.anchor.locator) ?? []),
+      anchorAddress,
+    ])],
     deals: priorRegistration?.deals ?? [],
     ...(priorRegistration?.bundleBindings ? { bundleBindings: priorRegistration.bundleBindings } : {}),
   };
   const signedAt = Date.now();
 
   return NextResponse.json({
-    listing,
-    message,
+    listing: publishedListing,
+    ...(exists ? {} : { message }),
+    contentHash: publishedHash,
     artifactProfile: "dacs-v0.1",
     logicalAddress,
+    programName,
     anchorAddress,
     exists,
     tx,
