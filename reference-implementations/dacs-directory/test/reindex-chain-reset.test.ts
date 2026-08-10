@@ -55,6 +55,7 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
   const result = await reindexAll({ log: (line) => logs.push(line) });
 
   assert.equal(result.cursor, 3, "finality depth leaves the newest two transactions for replay");
+  assert.equal(store.loadScanState().schemaVersion, 8);
   assert.deepEqual(store.loadScanState().listings, {});
   assert.equal(store.indexerDiagnostics().deadLetters, 0);
   assert.match(logs[0] ?? "", /chain replacement detected/);

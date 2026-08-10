@@ -9,6 +9,7 @@ import { verifyOwnerSignature } from "@/src/catalog/registrationSig";
 import { parseRegistration } from "@/src/catalog/registration";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadRegistrations, saveRegistrations, withDataLock } from "@/src/catalog/store";
+import { verifyBundleBinding } from "@/src/catalog/bundleBinding";
 
 // Hard caps bound the reindex cost: every stored registration is re-read and
 // re-verified from chain each pass (up to 32 anchors + 200 deals apiece), so
@@ -25,6 +26,17 @@ export async function POST(req: NextRequest) {
   const parsed = parseRegistration(await req.json().catch(() => null));
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const body = parsed.value;
+
+  // A catalog that carries BundleBindings must serve only BB-4-valid records.
+  // Verify at ingress as well as at use so invalid carrier data never enters
+  // persistent registration state.
+  if (body.bundleBindings) {
+    const verified = await Promise.all(body.bundleBindings.map((binding) => verifyBundleBinding(binding)));
+    if (verified.some((binding) => binding === null)) {
+      return NextResponse.json({ error: "one or more bundleBindings fail DACS-5 BB-4" }, { status: 400 });
+    }
+    body.bundleBindings = verified.filter((binding) => binding !== null);
+  }
 
   // Owner signature (optional): verified NOW so the submitter gets immediate
   // feedback; a bad signature rejects rather than silently downgrading.

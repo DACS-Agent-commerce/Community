@@ -1,7 +1,15 @@
 import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import {
+  canonicalSigningIdentity,
+  resolvePrimaryClaimKey,
+  resolveDemosPrimaryClaimKey,
+  sameResolvedPrimaryClaim,
+  verifyPrimaryClaimSignature,
+  type ResolvedPrimaryClaimKey,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -29,7 +37,7 @@ export interface VerifiedListing {
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const PHASES = new Set([
-  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "commit-agreement",
+  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "commit-agreement", "commit-payee-bound-agreement",
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
@@ -79,6 +87,10 @@ function currentListing(scope: Record<string, unknown>): {
   const payBindingsOk = pipeline.filter((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"))
     .every((step) => { const parameters = record(step.parameters); return typeof parameters?.rail === "string" && railIds.has(parameters.rail); });
   const negotiationKinds = pipeline.map((step) => step.kind).filter((kind) => typeof kind === "string" && kind.startsWith("negotiate-"));
+  const negotiationIndex = pipeline.findIndex((step) => typeof step.kind === "string" && step.kind.startsWith("negotiate-"));
+  const commitmentIndexes = pipeline.flatMap((step, index) =>
+    step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? [index] : []);
+  const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
   const expectedNegotiation = pricing?.kind === "fixed" ? "negotiate-fixed-price"
     : pricing?.kind === "negotiable" ? "negotiate-rfq" : pricing?.kind === "auction" ? "negotiate-sealed-envelope" : "";
   const negotiationOk = pricing?.kind === "metered"
@@ -88,47 +100,61 @@ function currentListing(scope: Record<string, unknown>): {
     : negotiationKinds.length === 1 && negotiationKinds[0] === expectedNegotiation;
   const signer = typeof signature?.signer === "string" ? signature.signer : "";
   const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
+  const signerIdentity = canonicalSigningIdentity(signer);
+  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
   if (
     scope.dacsVersion !== "1" || !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
     typeof scope.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(scope.listingId) ||
     typeof seller?.displayName !== "string" || seller.displayName.length > 200 ||
     (seller.publicEndpoint !== undefined && !safePublicEndpoint(seller.publicEndpoint)) || !sellerClaim || claims.length === 0 ||
-    !claims.some((claim) => claim.ref === sellerClaim) || !claims.some((claim) => claim.ref === signer) ||
+    !claims.some((claim) => typeof claim.ref === "string" &&
+      canonicalSigningIdentity(claim.ref) === sellerIdentity) ||
+    !claims.some((claim) => typeof claim.ref === "string" &&
+      canonicalSigningIdentity(claim.ref) === signerIdentity) ||
     typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
     typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) || !record(offering.deliverable) ||
     !record(scope.buyerRequirement) || pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || !negotiationOk ||
+    !pricingOk || !negotiationOk || !commitmentOk ||
     (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || !record(scope.terms) || typeof validity?.notBefore !== "number" ||
     (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
   ) return null;
   return { signer, sellerClaim, signature };
 }
 
-async function verifyEd25519(message: Uint8Array, signer: string, value: unknown): Promise<boolean> {
-  const keyHex = signer.match(/([0-9a-fA-F]{64})$/)?.[1];
+async function verifyEd25519(
+  message: Uint8Array,
+  signer: string,
+  value: unknown,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<ResolvedPrimaryClaimKey | null> {
   const sig = typeof value === "string" ? decodeSignature(value) : null;
-  if (!keyHex || !sig) return false;
-  try {
-    const key = publicKeyFromRaw(Uint8Array.from(Buffer.from(keyHex, "hex")));
-    return await ed25519Verify(message, sig, key);
-  } catch {
-    return false;
-  }
+  return sig
+    ? verifyPrimaryClaimSignature(message, sig, signer, "ed25519", resolveKey)
+    : null;
 }
 
-async function verifyIdentityPresentation(identity: Record<string, unknown>, sellerClaim: string): Promise<boolean> {
+async function verifyIdentityPresentation(
+  identity: Record<string, unknown>,
+  sellerClaim: string,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
-  if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return false;
-  const signature = presentation.signatures.map(record).find((item) => item?.ref === sellerClaim);
-  if (!signature) return false;
+  if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
+  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
+  const signature = presentation.signatures.map(record).find((item) =>
+    typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === sellerIdentity);
+  if (!signature) return null;
   const bundleScope = { ...identity };
   delete bundleScope.presentation;
   const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
-  return verifyEd25519(message, sellerClaim, signature.signature);
+  return verifyEd25519(message, sellerClaim, signature.signature, resolveKey);
 }
 
 /** Verify either the current normative Listing or the pinned SDK compatibility profile. */
-export async function verifyListing(raw: Record<string, unknown>): Promise<VerifiedListing | null> {
+export async function verifyListing(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
   const current = currentListing(raw);
   if (current) {
@@ -137,18 +163,21 @@ export async function verifyListing(raw: Record<string, unknown>): Promise<Verif
     if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) return null;
     if (current.signature.algorithm !== "ed25519" || typeof current.signature.value !== "string") return null;
     const hash = contentHash(scope);
-    const signatureOk = await verifyEd25519(
-      Buffer.from(SEPARATOR + hash, "utf8"), current.signer, current.signature.value,
+    const verifiedSigner = await verifyEd25519(
+      Buffer.from(SEPARATOR + hash, "utf8"), current.signer, current.signature.value, resolveKey,
     );
     const seller = record(raw.seller);
     const identity = record(seller?.identity);
-    if (!signatureOk || !identity || !(await verifyIdentityPresentation(identity, current.sellerClaim))) return null;
+    const verifiedSeller = identity
+      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey)
+      : null;
+    if (!verifiedSigner || !verifiedSeller) return null;
     return {
       listing: raw,
       scope,
       contentHash: hash,
-      signer: current.signer,
-      sellerClaim: current.sellerClaim,
+      signer: verifiedSigner.canonicalClaim,
+      sellerClaim: verifiedSeller.canonicalClaim,
       profile: "dacs-v0.1",
     };
   }
@@ -168,26 +197,23 @@ export async function verifyListing(raw: Record<string, unknown>): Promise<Verif
   if (
     s.algorithm !== "ed25519" ||
     typeof s.signer !== "string" ||
-    typeof s.value !== "string" ||
-    s.signer !== listing.agentId
+    typeof s.value !== "string"
   ) return null;
-  const keyHex = s.signer.match(/([0-9a-fA-F]{64})$/)?.[1];
   const sig = decodeSignature(s.value);
-  if (!keyHex || !sig) return null;
+  if (!sig) return null;
   const hash = contentHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
-  try {
-    const key = publicKeyFromRaw(Uint8Array.from(Buffer.from(keyHex, "hex")));
-    if (!(await ed25519Verify(message, sig, key))) return null;
-  } catch {
-    return null;
-  }
+  const verifiedSigner = await verifyPrimaryClaimSignature(
+    message, sig, s.signer, s.algorithm, resolveKey,
+  );
+  const verifiedAgent = await resolvePrimaryClaimKey(listing.agentId, s.algorithm, resolveKey);
+  if (!verifiedSigner || !verifiedAgent || !sameResolvedPrimaryClaim(verifiedSigner, verifiedAgent)) return null;
   return {
     listing,
     scope,
     contentHash: hash,
-    signer: s.signer,
-    sellerClaim: listing.agentId,
+    signer: verifiedSigner.canonicalClaim,
+    sellerClaim: verifiedSigner.canonicalClaim,
     profile: "legacy-sdk-v0.1",
   };
 }
@@ -198,12 +224,14 @@ export async function hasValidListingRevocation(
   listing: VerifiedListing,
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
   return Boolean(await findValidListingRevocation(
     candidateRefs,
     listing,
     expectedVersion,
     readCandidate,
+    resolveKey,
   ));
 }
 
@@ -229,10 +257,13 @@ export async function findValidListingRevocation(
   listing: VerifiedListing,
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<RevocationBinding | null> {
   for (const ref of candidateRefs) {
     const candidate = await readCandidate(ref);
-    if (!candidate || !(await verifyListingRevocation(candidate, listing, expectedVersion))) continue;
+    if (!candidate || !(await verifyListingRevocation(
+      candidate, listing, expectedVersion, resolveKey,
+    ))) continue;
     const scope = stripSignature(candidate);
     return {
       sellerPrimaryClaim: listing.sellerClaim,
@@ -256,6 +287,7 @@ export async function verifyListingRevocation(
   raw: Record<string, unknown>,
   listing: VerifiedListing,
   expectedVersion: number,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
   const scope = stripSignature(raw);
   if (
@@ -269,17 +301,18 @@ export async function verifyListingRevocation(
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
   const s = signature as Record<string, unknown>;
   if (
-    s.algorithm !== "ed25519" || s.signer !== listing.signer ||
+    s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return false;
-  const keyHex = listing.signer.match(/([0-9a-fA-F]{64})$/)?.[1];
   const sig = decodeSignature(s.value);
-  if (!keyHex || !sig) return false;
-  try {
-    const key = publicKeyFromRaw(Uint8Array.from(Buffer.from(keyHex, "hex")));
-    const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
-    return await ed25519Verify(message, sig, key);
-  } catch {
-    return false;
-  }
+  if (!sig) return false;
+  const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
+  const verifiedSigner = await verifyPrimaryClaimSignature(
+    message, sig, listing.signer, s.algorithm, resolveKey,
+  );
+  const verifiedEnvelopeSigner = await resolvePrimaryClaimKey(s.signer, s.algorithm, resolveKey);
+  return Boolean(
+    verifiedSigner && verifiedEnvelopeSigner &&
+    sameResolvedPrimaryClaim(verifiedSigner, verifiedEnvelopeSigner),
+  );
 }

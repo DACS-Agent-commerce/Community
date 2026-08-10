@@ -22,6 +22,16 @@ export const listingSummarySchema = {
     },
     artifactProfile: { enum: artifactProfiles },
     publicEndpoint: { type: "string", format: "uri" },
+    reachabilityHint: {
+      type: "object",
+      required: ["status", "checkedAt"],
+      additionalProperties: false,
+      properties: {
+        status: { enum: ["reachable", "unreachable", "unknown"] },
+        checkedAt: { type: "integer", minimum: 0 },
+        surface: { type: "string", format: "uri" },
+      },
+    },
     offering: {
       type: "object", required: ["title", "category", "tags"],
       properties: {
@@ -209,6 +219,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
   agentCard: `${origin}/.well-known/agent.json`,
   api: `${origin}/api/dacs`,
   catalog: `${origin}/api/dacs/listings`,
+  bundleBindings: `${origin}/api/dacs/bundles/{jobId}`,
   openapi: `${origin}/openapi.json`,
   schemas: { listingSummary: `${origin}/schemas/listing-summary.schema.json` },
   substrates: {
@@ -291,6 +302,13 @@ export const openApiDocument = (origin: string) => ({
           { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
         ],
         responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+      },
+    },
+    "/api/dacs/bundles/{jobId}": {
+      get: {
+        summary: "Retrieve BB-4-verified DACS-5 BundleBindings known to this catalog",
+        parameters: [{ name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } }],
+        responses: { "200": { description: "Signed BundleBinding candidates" }, "400": { description: "Invalid jobId" } },
       },
     },
     "/api/dacs/inspect-service/{listingId}/{version}": {

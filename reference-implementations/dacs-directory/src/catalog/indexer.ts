@@ -27,6 +27,7 @@ import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
@@ -41,6 +42,11 @@ import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./re
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import {
+  bundleBindingRoleKey,
+  resolveBundleSide,
+  verifyBundleBinding,
+} from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
@@ -56,15 +62,12 @@ import {
 import type {
   CciBadge,
   DealRecord,
+  BundleBinding,
   ListingSummary,
   Registration,
   SellerRecord,
 } from "./types.js";
 
-const keyFromDid = (did: string): Uint8Array | null => {
-  const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
-  return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
-};
 const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
   ed25519Verify(b, s, publicKeyFromRaw(p));
 
@@ -102,7 +105,7 @@ export async function indexRegistration(
   const now = Date.now();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
-  const hex = reg.primaryClaim.match(/([0-9a-fA-F]{64})$/)?.[1] ?? reg.primaryClaim;
+  const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
   let cci: CciBadge[] = prior?.cci ?? [];
   try {
     const resolved = await resolveIdentities(hex);
@@ -212,7 +215,17 @@ export async function indexRegistration(
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
   const categoriesByListing = new Map(listings.map((l) => [l.listingId, l.offering.category]));
+  const scanState = loadScanState();
+  const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
+  const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
+  const rawBindings = [
+    ...[...relevantJobs].flatMap((jobId) => scanState.bundleBindings?.[jobId] ?? []),
+    ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
+  ];
+  const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
+    .filter((binding): binding is BundleBinding => binding !== null);
   for (const deal of reg.deals ?? []) {
+    const jobBindings = verifiedBindings.filter((binding) => binding.jobId === deal.jobId);
     const buyerInitial = await readAnchor(deal.buyerBundleRef);
     const resolveListing = async (ref: Record<string, unknown>) => {
       const id = String(ref.listingId ?? "");
@@ -221,17 +234,91 @@ export async function indexRegistration(
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
-    const sellerCurrentProbe = buyerInitial?.bundleVersion === "1" || !deal.sellerBundleRef
+    const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
+    const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
       : await graphFor(deal.sellerBundleRef);
     // Profile selection is based on the signed format discriminator, not on
     // whether verification succeeds. A malformed current bundle must fail in
     // the current verifier instead of being retried by the legacy verifier.
-    if (buyerInitial?.bundleVersion === "1" || sellerCurrentProbe?.bundle.bundleVersion === "1") {
-      const buyerGraph = await graphFor(deal.buyerBundleRef);
-      const sellerGraph = sellerCurrentProbe ?? (deal.sellerBundleRef ? await graphFor(deal.sellerBundleRef) : null);
+    if (jobBindings.length > 0 || buyerIsCurrent || sellerCurrentProbe?.bundle.bundleVersion === "1" || sellerCurrentProbe?.bundle.faultBundleVersion === "1") {
+      const graphCache = new Map<string, Promise<EvidenceGraph>>();
+      if (sellerCurrentProbe && deal.sellerBundleRef) {
+        graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
+      }
+      const inspect = async (binding: BundleBinding) => {
+        let pending = graphCache.get(binding.nativeAddress);
+        if (!pending) {
+          pending = graphFor(binding.nativeAddress);
+          graphCache.set(binding.nativeAddress, pending);
+        }
+        const graph = await pending;
+        const parties = Array.isArray(graph.bundle.parties)
+          ? graph.bundle.parties.filter((party): party is Record<string, unknown> =>
+            Boolean(party && typeof party === "object" && !Array.isArray(party)))
+          : [];
+        const roleHolder = parties.find((party) => party.role === binding.role)?.primaryClaim;
+        if (
+          !graph.ok || graph.bundle.jobId !== binding.jobId ||
+          graph.bundle.anchoredByRole !== binding.role ||
+          typeof roleHolder !== "string" ||
+          canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
+        ) return null;
+        const signed = new Set(
+          (Array.isArray(graph.bundle.signatures) ? graph.bundle.signatures : [])
+            .map((signature) => signature && typeof signature === "object" && !Array.isArray(signature)
+              ? (signature as Record<string, unknown>).party : undefined)
+            .filter((party): party is string => typeof party === "string")
+            .map(canonicalDemosAgentClaim)
+            .filter((party): party is string => party !== null),
+        );
+        const required = parties.filter((party) =>
+          party.role === "buyer" || party.role === "seller" || party.role === "orchestrator")
+          .map((party) => party.primaryClaim)
+          .filter((claim): claim is string => typeof claim === "string")
+          .map(canonicalDemosAgentClaim)
+          .filter((claim): claim is string => claim !== null);
+        return {
+          value: graph,
+          bundleContentHash: graph.bundleContentHash,
+          fullSignatureStanding: required.length >= 2 && required.every((claim) => signed.has(claim)),
+        };
+      };
+      const buyerResolution = await resolveBundleSide({
+        jobId: deal.jobId,
+        role: "buyer",
+        expectedSigner: deal.owners.buyer,
+        bindings: jobBindings,
+        overflow: overflowBindings.has(bundleBindingRoleKey(deal.jobId, "buyer")),
+        inspect,
+      });
+      const sellerResolution = await resolveBundleSide({
+        jobId: deal.jobId,
+        role: "seller",
+        expectedSigner: deal.owners.seller,
+        bindings: jobBindings,
+        overflow: overflowBindings.has(bundleBindingRoleKey(deal.jobId, "seller")),
+        inspect,
+      });
+      if (buyerResolution.disposition !== "present" || sellerResolution.disposition !== "present") {
+        dealCandidates.push({
+          ...deal,
+          signatureVerified: false,
+          refsVerified: false,
+          reputationEligible: false,
+          verifiedAt: now,
+        });
+        continue;
+      }
+      const resolvedDeal = {
+        ...deal,
+        buyerBundleRef: buyerResolution.binding.nativeAddress,
+        sellerBundleRef: sellerResolution.binding.nativeAddress,
+      };
+      const buyerGraph = buyerResolution.inspected.value;
+      const sellerGraph = sellerResolution.inspected.value;
       const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
-        reconcileCurrentCopies(deal, reg.primaryClaim, buyerGraph, sellerGraph);
+        reconcileCurrentCopies(resolvedDeal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
       const ratings = (authoritative?.ratings ?? []).filter((rating) =>
         rating.jobId === deal.jobId && parties.some((party) => party.primaryClaim === rating.rater),
@@ -254,7 +341,7 @@ export async function indexRegistration(
         sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
       );
       dealCandidates.push({
-        ...deal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
+        ...resolvedDeal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
         rail: agreementRail(authoritative?.agreement) ?? "unknown",
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
@@ -291,7 +378,8 @@ export async function indexRegistration(
           if (raw) resolvedArtifacts.push({ kind, raw });
           return raw;
         },
-        resolvePublicKey: async (did) => keyFromDid(did),
+        resolvePublicKey: async (claim) =>
+          (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
       }).catch(() => null);
       const bundle = verification?.bundle;

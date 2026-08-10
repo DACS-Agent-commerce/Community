@@ -88,6 +88,11 @@ test("registration owner message binds offered reputation deals", () => {
     }],
   }, 1);
   assert.notEqual(withoutDeal, withDeal);
+  const withBindings = registrationMessage({
+    ...base,
+    bundleBindings: [],
+  }, 1);
+  assert.notEqual(withoutDeal, withBindings);
 });
 
 test("pagination rejects negative, fractional, and oversized inputs", () => {
