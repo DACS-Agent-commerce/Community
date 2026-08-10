@@ -1,4 +1,4 @@
-import type { RegisteredDeal, Registration } from "./types.js";
+import type { BundleBinding, RegisteredDeal, Registration } from "./types.js";
 import { isCanonicalDemosAgentClaim } from "./claimRef.js";
 
 const ANCHOR = /^stor-[0-9a-f]{40}$/;
@@ -60,6 +60,14 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
   if (deals?.some((d) => d === null)) {
     return { ok: false, error: "one or more deal entries are malformed" };
   }
+  if (
+    b.bundleBindings !== undefined &&
+    (!Array.isArray(b.bundleBindings) || b.bundleBindings.length > 256 ||
+      b.bundleBindings.some((binding) => !binding || typeof binding !== "object" || Array.isArray(binding) ||
+        Buffer.byteLength(JSON.stringify(binding), "utf8") > 16_384))
+  ) {
+    return { ok: false, error: "bundleBindings must contain at most 256 bounded JSON objects" };
+  }
 
   let ownerSignature: Registration["ownerSignature"];
   if (b.ownerSignature !== undefined) {
@@ -81,6 +89,7 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
       displayName: b.displayName.trim(),
       listingAnchors: [...new Set(b.listingAnchors as string[])],
       ...(deals ? { deals: deals as RegisteredDeal[] } : {}),
+      ...(Array.isArray(b.bundleBindings) ? { bundleBindings: b.bundleBindings as BundleBinding[] } : {}),
       ...(ownerSignature ? { ownerSignature } : {}),
     },
   };

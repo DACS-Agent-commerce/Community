@@ -4,12 +4,13 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
-import { reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
-import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
+import { logicalBundleAddress } from "../src/catalog/bundleBinding.js";
+import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -20,7 +21,10 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
   const prefix = kind === "agreement" && raw.payeeBoundAgreementVersion === "1"
-    ? "dacs-payee-bound-agreement:v1:" : prefixes[kind];
+    ? "dacs-payee-bound-agreement:v1:"
+    : kind === "bundle" && raw.faultBundleVersion === "1"
+      ? "dacs-fault-bundle:v1:"
+      : prefixes[kind];
   const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
@@ -72,6 +76,29 @@ async function vector(jobId = "job-1", offset = 0) {
     listing, buyerBundle, sellerBundle, agreement, evidence, rating,
     locators: { listing: at(1), agreement: at(2), evidence: at(3), rating: at(4), buyer: at(5), seller: at(6) },
   };
+}
+
+async function bindingFor(
+  jobId: string,
+  role: "buyer" | "seller",
+  nativeAddress: string,
+  rawBundle: Obj,
+  signer: number,
+): Promise<BundleBinding> {
+  const scope = {
+    bindingVersion: "1" as const,
+    jobId,
+    role,
+    logicalAddress: logicalBundleAddress(jobId, role),
+    nativeAddress,
+    bundleContentHash: artifactHash(rawBundle, "bundle"),
+    signer: dids[signer],
+  };
+  const value = Buffer.from(await ed25519Sign(
+    Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`),
+    privateKeyFromSeed(seeds[signer]),
+  )).toString("base64url");
+  return { ...scope, signature: { algorithm: "ed25519", signer: dids[signer], value } };
 }
 
 async function installAgreement(
@@ -429,6 +456,36 @@ test("current evidence graph verifies payee-bound agreements under their distinc
   assert.equal(graph.agreement?.agreementVersion, undefined);
 });
 
+test("current evidence graph verifies v0.3 FaultAttestationBundle attribution and domain", async () => {
+  const fixture = await vector("fault-bundle-job", 20);
+  const install = async (raw: Obj, role: "buyer" | "seller") => {
+    const scope = signedScope(raw, "bundle");
+    delete scope.bundleVersion;
+    scope.faultBundleVersion = "1";
+    scope.faultedParty = "none";
+    const signatures = [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)];
+    const fault = { ...scope, signatures, anchoredByRole: role };
+    maps.set(role === "buyer" ? fixture.locators.buyer : fixture.locators.seller, fault);
+    return fault;
+  };
+  const buyer = await install(fixture.buyerBundle, "buyer");
+  const seller = await install(fixture.sellerBundle, "seller");
+  assert.equal((await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing)).ok, true);
+  assert.equal((await graphAt(fixture.locators.seller, fixture.listing, fixture.locators.listing)).ok, true);
+  assert.equal(currentBundleCopiesDiverge(buyer, seller), false);
+
+  const invalidScope = signedScope(buyer, "bundle");
+  invalidScope.faultedParty = "buyer";
+  maps.set(fixture.locators.buyer, {
+    ...invalidScope,
+    signatures: [await sign(invalidScope, "bundle", 0, true), await sign(invalidScope, "bundle", 1, true)],
+    anchoredByRole: "buyer",
+  });
+  const invalid = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.reason, "invalid fault attribution");
+});
+
 test("payee-bound agreements fail closed on discriminator, domain and payout coverage", async () => {
   const cases: Array<{
     name: string;
@@ -716,6 +773,46 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   assert.deepEqual(reputation.bundleRefs, []);
 });
 
+test("indexer resolves current copies through BundleBindings rather than submitted native pointers", async () => {
+  const fixture = await vector("binding-resolved-job", 70);
+  const submittedBuyerPointer = locator(998);
+  const submittedSellerPointer = locator(999);
+  const deal = registeredDeal("binding-resolved-job", submittedBuyerPointer, submittedSellerPointer);
+  const bundleBindings = [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const locatorValue = String(input).split("/").pop() ?? "";
+    const data = maps.get(locatorValue);
+    return new Response(JSON.stringify(data
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      : { success: false }), {
+      status: data ? 200 : 404,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const record = await indexRegistration({
+      primaryClaim: dids[1],
+      displayName: "seller",
+      listingAnchors: [fixture.locators.listing],
+      deals: [deal],
+      bundleBindings,
+    }, undefined, async () => { throw new Error("identity unavailable"); });
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
+    assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
+    assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
+    assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
+    assert.equal(record.deals[0].rail, "pay-dem");
+    assert.equal(record.reputation.bundleCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
   const fixture = await vector("seller-fallback-job", 80);
   maps.delete(fixture.locators.buyer);
@@ -735,16 +832,21 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
       ...registeredDeal("seller-fallback-job", fixture.locators.buyer, fixture.locators.seller),
       rail: "unknown",
     };
+    const bundleBindings = [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ];
     const record = await indexRegistration({
       primaryClaim: dids[1],
       displayName: "seller",
       listingAnchors: [fixture.locators.listing],
       deals: [deal],
+      bundleBindings,
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals.length, 1);
     assert.equal(record.deals[0].refsVerified, false);
-    assert.equal(record.deals[0].anchoredByRole, "seller");
-    assert.equal(record.deals[0].rail, "pay-dem");
+    assert.equal(record.deals[0].anchoredByRole, undefined, "an unresolved side makes the lookup indeterminate");
+    assert.equal(record.deals[0].rail, "unknown");
     assert.equal(record.reputation.bundleCount, 0);
     assert.deepEqual(record.reputation.bundleRefs, []);
   } finally {
@@ -777,11 +879,16 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
   };
   try {
     const deal = registeredDeal("malformed-current-job", fixture.locators.buyer, fixture.locators.seller);
+    const bundleBindings = [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, maps.get(fixture.locators.seller)!, 1),
+    ];
     const record = await indexRegistration({
       primaryClaim: dids[1],
       displayName: "seller",
       listingAnchors: [fixture.locators.listing],
       deals: [deal],
+      bundleBindings,
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals.length, 1);
     assert.equal(record.deals[0].refsVerified, false);

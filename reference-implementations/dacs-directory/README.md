@@ -19,10 +19,10 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings and explicitly labelled legacy SDK artifacts |
-| Registration | — (catalog-side) | `POST /api/dacs/register` with a **pointer set** (primary claim + anchor addresses). Nothing in the payload is trusted: listings are read from chain and shape-validated, CCI badges resolved from the on-chain GCR, every offered bundle dereferenced and cryptographically verified before it counts |
+| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.5 | strict evidence-graph validation, two-sided reconciliation, seller perspective, fault metrics, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -170,8 +170,9 @@ payloads, internal URLs and stack traces are never returned.
 ## Discovery — three channels
 
 1. **Registration** (`/register` UI or `POST /api/dacs/register`): bounded pointer sets,
-   verified from chain. Third parties may submit a new candidate, but only the owner
-   key can replace an existing registration.
+   plus self-authenticating BundleBinding carriage, all independently verified. Third
+   parties may submit a new candidate, but only the owner key can replace an existing
+   registration.
 2. **Chain scanning** (passive): the reindex pass walks the node's transaction history
    (`nodeCall getTransactions`, plain fetch), spots storage-program writes, classifies
    anchored DACS artifacts by their self-describing program names, and attributes deals
@@ -185,7 +186,13 @@ payloads, internal URLs and stack traces are never returned.
    outside the retained window is not evaluated. Its publisher can anchor a fresh
    marker to re-enter discovery, but continued overflow can exclude that marker again.
    After one marker verifies, later pruning cannot make it disappear.
-3. **Evidence graph**: current bundles recursively resolve and validate listings,
+   BB-4-valid BundleBindings are also classified and accumulated under a deterministic
+   per-job/role total-work ceiling; any overflow is sticky and makes that side
+   `indeterminate`, never absent.
+3. **Evidence graph and federation**: current bundle copies are reached only after
+   deriving the role-specific logical address and resolving a signed BundleBinding.
+   The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
+   Resolved bundles recursively validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
    records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
    compatibility path.
@@ -214,6 +221,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
   present in `DACS_RECIPE_POLICIES`; missing policy fails closed.
+- **BundleBinding key resolution currently implements the directory's canonical Demos
+  agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
+  binding signed through another ClaimReference/key-resolution method is not carried or
+  used until that resolver is configured; it fails closed to `indeterminate` rather
+  than being relabelled as verified.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can

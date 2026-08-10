@@ -22,6 +22,12 @@ export interface Registration {
    */
   deals?: RegisteredDeal[];
   /**
+   * Signed DACS-5 logical-to-native bundle mappings carried by this catalog
+   * registration. The carrier is not trusted: every record is independently
+   * verified under BB-4 before it can be persisted, served, or used.
+   */
+  bundleBindings?: BundleBinding[];
+  /**
    * Optional owner signature: ed25519 over the canonical registration message
    * (see register route) by the primaryClaim's key, produced by the Demos
    * wallet extension. Verified server-side; grants the "owner-registered"
@@ -29,6 +35,25 @@ export interface Registration {
    * chain-verified).
    */
   ownerSignature?: { message: string; signature: string; signedAt: number };
+}
+
+/** DACS-5 §10.4.2 signed logical-to-native mapping for one anchored copy. */
+export interface BundleBinding {
+  bindingVersion: "1";
+  jobId: string;
+  role: "buyer" | "seller" | "orchestrator";
+  logicalAddress: string;
+  nativeAddress: string;
+  bundleContentHash: string;
+  anchorTx?: string;
+  signer: string;
+  signature: {
+    algorithm: "ed25519";
+    signer: string;
+    value: string;
+  };
+  /** Preserve signed additive fields even when this reader does not interpret them. */
+  [key: string]: unknown;
 }
 
 export interface RegisteredDeal {
@@ -254,6 +279,10 @@ export interface ScanState {
   revocations?: Record<string, string[] | string>;
   /** RB-4-verified marker locators that candidate pruning must preserve. */
   verifiedRevocations?: Record<string, string[]>;
+  /** jobId → BB-4-verified BundleBindings known to the catalog. */
+  bundleBindings?: Record<string, BundleBinding[]>;
+  /** jobId + role keys whose total discovery cap was exhausted (BB-7 indeterminate). */
+  bundleBindingOverflow?: string[];
   /** listing anchor address → owner address */
   listings: Record<string, string>;
   /** jobId → discovered deal */

@@ -13,18 +13,24 @@ import { canonicalize, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import type { Registration } from "./types.js";
 
 export function registrationMessage(
-  reg: Pick<Registration, "primaryClaim" | "displayName" | "listingAnchors" | "deals">,
+  reg: Pick<Registration, "primaryClaim" | "displayName" | "listingAnchors" | "deals" | "bundleBindings">,
   signedAt: number,
 ): string {
   // Stable, human-inspectable signing payload (what the wallet shows).
-  return [
+  const lines = [
     "dacs-directory registration",
     `claim:${reg.primaryClaim}`,
     `name:${reg.displayName}`,
     `anchors:${sha256Hex(JSON.stringify([...reg.listingAnchors].sort()))}`,
     `deals:${sha256Hex(canonicalize(reg.deals ?? []))}`,
-    `at:${signedAt}`,
-  ].join("\n");
+  ];
+  // Preserve existing signed registrations byte-for-byte when no bindings
+  // were carried; new registrations bind the self-authenticating carrier set.
+  if (reg.bundleBindings !== undefined) {
+    lines.push(`bundle-bindings:${sha256Hex(canonicalize(reg.bundleBindings))}`);
+  }
+  lines.push(`at:${signedAt}`);
+  return lines.join("\n");
 }
 
 function sigBytes(signature: string): Uint8Array | null {
