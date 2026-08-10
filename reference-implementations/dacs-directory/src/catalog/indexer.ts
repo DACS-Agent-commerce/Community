@@ -27,6 +27,7 @@ import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
@@ -67,10 +68,6 @@ import type {
   SellerRecord,
 } from "./types.js";
 
-const keyFromDid = (did: string): Uint8Array | null => {
-  const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
-  return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
-};
 const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
   ed25519Verify(b, s, publicKeyFromRaw(p));
 
@@ -108,7 +105,7 @@ export async function indexRegistration(
   const now = Date.now();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
-  const hex = reg.primaryClaim.match(/([0-9a-fA-F]{64})$/)?.[1] ?? reg.primaryClaim;
+  const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
   let cci: CciBadge[] = prior?.cci ?? [];
   try {
     const resolved = await resolveIdentities(hex);
@@ -225,7 +222,7 @@ export async function indexRegistration(
     ...[...relevantJobs].flatMap((jobId) => scanState.bundleBindings?.[jobId] ?? []),
     ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
   ];
-  const verifiedBindings = (await Promise.all(rawBindings.map(verifyBundleBinding)))
+  const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
   for (const deal of reg.deals ?? []) {
     const jobBindings = verifiedBindings.filter((binding) => binding.jobId === deal.jobId);
@@ -381,7 +378,8 @@ export async function indexRegistration(
           if (raw) resolvedArtifacts.push({ kind, raw });
           return raw;
         },
-        resolvePublicKey: async (did) => keyFromDid(did),
+        resolvePublicKey: async (claim) =>
+          (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
       }).catch(() => null);
       const bundle = verification?.bundle;

@@ -60,6 +60,10 @@ test("listing verification requires a valid signer-bound envelope", async () => 
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
   assert.ok(await verifyListing(signed));
+  assert.equal((await verifyListing({
+    ...listing,
+    signature: { ...signed.signature, signer: `DID:demos:agent:${did.slice(-64)}` },
+  }))?.signer, did, "scheme casing is canonicalized when comparing envelope and scope identities");
   assert.equal(await verifyListing({ ...signed, name: "tampered" }), null);
   assert.equal(await verifyListing({ ...listing, signature: "deadbeef" }), null);
   assert.equal(await verifyListing({ ...signed, signatures: [null] }), null);
@@ -519,6 +523,18 @@ test("evidence ref must be signed by a bundle party", async () => {
     await verifyReferencedArtifactSignature({ kind: "dacs-4-evidence", raw: evidence },
       new Set([`did:demos:agent:${"9".repeat(64)}`, "seller"])),
     false,
+  );
+  const suffixAlias = `domain:${did.slice(-64)}`;
+  assert.equal(
+    await verifyReferencedArtifactSignature({
+      kind: "dacs-4-evidence",
+      raw: {
+        ...evidenceScope,
+        signatures: [{ algorithm: "ed25519", signer: suffixAlias, value }],
+      },
+    }, new Set([suffixAlias, "seller"])),
+    false,
+    "matching key-shaped suffixes are not an implicit ClaimReference resolver",
   );
 });
 

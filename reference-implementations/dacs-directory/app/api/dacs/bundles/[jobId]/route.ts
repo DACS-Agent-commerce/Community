@@ -11,7 +11,7 @@ export async function GET(
     return NextResponse.json({ error: "jobId must be 1-160 characters" }, { status: 400 });
   }
   const candidates = loadScanState().bundleBindings?.[jobId] ?? [];
-  const bindings = (await Promise.all(candidates.map(verifyBundleBinding)))
+  const bindings = (await Promise.all(candidates.map((binding) => verifyBundleBinding(binding))))
     .filter((binding) => binding !== null);
   return NextResponse.json({ bindings });
 }

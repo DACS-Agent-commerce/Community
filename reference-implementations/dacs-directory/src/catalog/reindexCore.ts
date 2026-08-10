@@ -109,7 +109,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
   // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
   for (const reg of regs) {
-    const verified = (await Promise.all((reg.bundleBindings ?? []).map(verifyBundleBinding)))
+    const verified = (await Promise.all((reg.bundleBindings ?? []).map((binding) => verifyBundleBinding(binding))))
       .filter((binding) => binding !== null);
     for (const binding of verified) {
       const bounded = boundedBundleBindings([...(state.bundleBindings[binding.jobId] ?? []), binding]);

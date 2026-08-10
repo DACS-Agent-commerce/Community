@@ -1,6 +1,12 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { readAnchor } from "./chain.js";
 import { artifactHash, isCurrentRef, verifyComponentSignature } from "./evidenceGraph.js";
+import {
+  resolveDemosPrimaryClaimKey,
+  resolvePrimaryClaimKey,
+  sameResolvedPrimaryClaim,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 import type { IdentityTier } from "./types.js";
 
 type Obj = Record<string, unknown>;
@@ -36,17 +42,28 @@ function claimParts(ref: unknown): { scheme: string; identifier: string } | null
     ? { scheme: value.scheme, identifier: value.identifier } : null;
 }
 
-async function verifiedClaim(claim: Obj, now: number, resolveRecipe: ResolveRecipe, read: typeof readAnchor): Promise<{ scheme: string } | null> {
+async function verifiedClaim(
+  claim: Obj,
+  now: number,
+  resolveRecipe: ResolveRecipe,
+  read: typeof readAnchor,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<{ scheme: string } | null> {
   const parts = claimParts(claim.ref); const ref = obj(claim.verifiedBy);
   if (!parts || !ref || !isCurrentRef(ref) || !Number.isSafeInteger(ref.recipeVersion)) return null;
   const raw = await read(ref.anchor.locator); if (!raw) return null;
   if (artifactHash(raw, "verify-result") !== normalizeHash(ref.contentHash)) return null;
   if (raw.resultVersion !== "1" || raw.scheme !== parts.scheme || raw.identifier !== parts.identifier ||
       raw.decision !== "pass" || raw.recipeVersion !== ref.recipeVersion || typeof raw.verifiedAt !== "number") return null;
-  const signature = obj(raw.signature); if (!signature || !verifyComponentSignature(raw, "verify-result", signature)) return null;
+  const signature = obj(raw.signature);
+  if (!signature || !(await verifyComponentSignature(raw, "verify-result", signature, resolveKey))) return null;
+  const verifiedSigner = await resolvePrimaryClaimKey(signature.signer, signature.algorithm, resolveKey);
+  if (!verifiedSigner) return null;
   const recipe = await resolveRecipe(parts.scheme, Number(ref.recipeVersion));
-  if (!recipe || !recipe.methods.includes(String(raw.method)) || ["mocked", "disabled", "failed"].includes(recipe.availability) ||
-      !recipe.trustedResultSigners.includes(String(signature.signer))) return null;
+  if (!recipe || !recipe.methods.includes(String(raw.method)) || ["mocked", "disabled", "failed"].includes(recipe.availability)) return null;
+  const trustedSigners = await Promise.all(recipe.trustedResultSigners.map((claim) =>
+    resolvePrimaryClaimKey(claim, signature.algorithm, resolveKey)));
+  if (!trustedSigners.some((claim) => claim && sameResolvedPrimaryClaim(claim, verifiedSigner))) return null;
   const authorityExpiry = typeof raw.validUntil === "number" ? raw.validUntil : raw.verifiedAt + recipe.defaultMaxAgeSec * 1000;
   const wrapperExpiry = typeof claim.expiresAt === "number" ? claim.expiresAt : Infinity;
   if (authorityExpiry < raw.verifiedAt || now > Math.min(authorityExpiry, wrapperExpiry)) return null;
@@ -63,9 +80,11 @@ export async function deriveIdentityTier(
   resolveRecipe: ResolveRecipe = resolveConfiguredRecipe,
   now = Date.now(),
   read: typeof readAnchor = readAnchor,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<IdentityTier> {
   const claims = Array.isArray(identityBundle?.claims) ? identityBundle.claims.map(obj).filter(Boolean) as Obj[] : [];
-  const verified = (await Promise.all(claims.map((claim) => verifiedClaim(claim, now, resolveRecipe, read)))).filter(Boolean) as Array<{ scheme: string }>;
+  const verified = (await Promise.all(claims.map((claim) =>
+    verifiedClaim(claim, now, resolveRecipe, read, resolveKey)))).filter(Boolean) as Array<{ scheme: string }>;
   if (verified.some((claim) => INSTITUTIONAL.has(claim.scheme))) return "institutional";
   return verified.length ? "verified" : "self-declared";
 }

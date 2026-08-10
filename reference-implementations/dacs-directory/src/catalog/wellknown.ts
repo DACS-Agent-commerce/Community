@@ -134,7 +134,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
     if (!Array.isArray(carried) || carried.length > 256) {
       return { domain, error: "bundle-binding index must contain at most 256 records" };
     }
-    const verified = await Promise.all(carried.map(verifyBundleBinding));
+    const verified = await Promise.all(carried.map((binding) => verifyBundleBinding(binding)));
     for (const binding of verified) if (binding) bundleBindings.push(binding);
   }
   return { domain, seller, displayName, listingAnchors, contentHashes, bundleBindings };
