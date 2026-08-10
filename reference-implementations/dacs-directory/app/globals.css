@@ -401,6 +401,23 @@ main { max-width: 1200px; }
 }
 textarea.form-control { min-height: 112px; resize: vertical; }
 .field-hint { color: var(--text-muted); font-size: 0.72rem; }
+.form-readiness, .wallet-approval-note {
+  margin-top: 16px; padding: 11px 13px; border: 1px solid var(--accent-border);
+  border-radius: var(--radius-button); background: var(--accent-soft);
+  color: var(--text-secondary); font-size: 0.78rem; line-height: 1.5;
+}
+.form-readiness.ready { border-color: var(--green-border); background: var(--green-soft); color: var(--green-strong); font-weight: 700; }
+.seller-recovery {
+  margin-top: 14px; padding: 16px; border: 1px solid var(--accent-border);
+  border-radius: var(--radius-card); background: var(--accent-soft);
+}
+.seller-recovery strong { display: block; margin-top: 3px; font-size: 0.9rem; }
+.seller-recovery .note { color: var(--text-secondary); }
+.seller-recovery .btn { margin-top: 14px; }
+.recovery-coordinate {
+  display: block; margin-top: 5px; color: var(--text-muted);
+  font: 0.68rem/1.45 var(--font-scp, monospace); overflow-wrap: anywhere;
+}
 .choice-grid { display: grid; gap: 8px; margin-top: 8px; }
 .choice-card { display: flex; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-button); cursor: pointer; }
 .choice-card:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }

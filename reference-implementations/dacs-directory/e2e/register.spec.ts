@@ -91,10 +91,13 @@ test("seller publication survives registration failure and reload without rebroa
   await page.getByLabel("What the buyer receives").fill("A signed result with restart-safe publication recovery.");
   await page.getByLabel("Service ID").fill("recovery-service");
   await page.getByLabel("Fixed amount").fill("1");
+  await expect(page.getByText("Ready for review.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review listing" }).click();
+  await expect(page.getByText(/expect four wallet approvals/i)).toBeVisible();
   await page.getByRole("button", { name: "Sign and publish" }).click();
 
   await expect(page.getByText("temporary registry write failure", { exact: true })).toBeVisible();
+  await expect(page.locator(".progress-list li.failed")).toContainText("Register the catalog pointer");
   await expect.poll(() => page.evaluate(() => (
     (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
       .filter((call) => call.method === "sendTransaction").length
@@ -113,7 +116,8 @@ test("seller publication survives registration failure and reload without rebroa
 
   await page.reload();
   await page.getByRole("button", { name: "Connect Demos wallet" }).click();
-  await expect(page.getByText(/listing publication from this browser is still unresolved/)).toBeVisible();
+  await expect(page.getByText("recovery-service · version 1", { exact: true })).toBeVisible();
+  await expect(page.getByText(anchorAddress, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Check chain and resume" }).click();
 
   await expect(page.getByText(/anchored, independently verified, and queued/)).toBeVisible();
@@ -124,4 +128,47 @@ test("seller publication survives registration failure and reload without rebroa
   await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).toBeNull();
   expect(registrationPosts).toBe(2);
   expect(confirmationPosts).toBe(2);
+});
+
+test("unfinished publication blocks another wallet with actionable mobile-safe guidance", async ({ page }) => {
+  const otherKeyHex = "78".repeat(32);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(({ key, savedClaim, savedAnchor, savedProgram, savedHash, connectedAddress }) => {
+    localStorage.setItem(key, JSON.stringify({
+      version: 1,
+      claim: savedClaim,
+      listingId: "saved-service",
+      listingVersion: 2,
+      anchorAddress: savedAnchor,
+      programName: savedProgram,
+      contentHash: savedHash,
+      signedListing: { dacsVersion: "1", listingId: "saved-service", listingVersion: 2, signature: {} },
+      transaction: null,
+      registration: { primaryClaim: savedClaim, displayName: "Saved service", listingAnchors: [savedAnchor], deals: [] },
+      stage: "registering",
+      createdAt: Date.now(),
+    }));
+    Object.assign(window, {
+      demos: {
+        request: async (request: { method: string }) => {
+          if (request.method === "connect") return { success: true, data: { address: connectedAddress } };
+          throw new Error(`unexpected wallet method ${request.method}`);
+        },
+      },
+    });
+  }, {
+    key: LISTING_PUBLICATION_KEY,
+    savedClaim: claim,
+    savedAnchor: anchorAddress,
+    savedProgram: programName,
+    savedHash: contentHash,
+    connectedAddress: `0x${otherKeyHex}`,
+  });
+
+  await page.goto("/register");
+  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
+  await expect(page.getByText(/Switch to that account in Demos Wallet, then reload this page/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toHaveCount(0);
+  const dimensions = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: window.innerWidth }));
+  expect(dimensions.width).toBeLessThanOrEqual(dimensions.viewport);
 });
