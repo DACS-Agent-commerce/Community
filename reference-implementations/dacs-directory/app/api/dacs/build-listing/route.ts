@@ -272,11 +272,13 @@ export async function POST(req: NextRequest) {
     blockNumber: null,
   };
 
+  const priorRegistration = loadRegistrations().find((r) => r.primaryClaim === did);
   const registration = {
     primaryClaim: did,
     displayName: knownSeller?.displayName ?? body.name.trim(),
     listingAnchors: [...new Set([...(knownSeller?.listings.map((l) => l.anchor.locator) ?? []), anchorAddress])],
-    deals: loadRegistrations().find((r) => r.primaryClaim === did)?.deals ?? [],
+    deals: priorRegistration?.deals ?? [],
+    ...(priorRegistration?.bundleBindings ? { bundleBindings: priorRegistration.bundleBindings } : {}),
   };
   const signedAt = Date.now();
 

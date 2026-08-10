@@ -43,6 +43,7 @@ const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
   composite: "dacs-composite:v1:", rating: "dacs-rating:v1:", listing: "dacs-listing:v1:", bundle: "dacs-bundle:v1:",
 };
 const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
+const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
 type AgreementProfile = "legacy" | "payee-bound";
 
@@ -129,12 +130,37 @@ export function verifyComponentSignature(raw: Record<string, unknown>, kind: Art
   if (!key || !value || !separator) return false;
   return ed25519Verify(Buffer.from(separator + artifactHash(raw, kind), "utf8"), value, key);
 }
+type BundleProfile = "legacy" | "fault";
+
+function bundleProfile(raw: Record<string, unknown>): BundleProfile | null {
+  const legacy = Object.prototype.hasOwnProperty.call(raw, "bundleVersion");
+  const fault = Object.prototype.hasOwnProperty.call(raw, "faultBundleVersion");
+  if (legacy === fault) return null;
+  if (legacy) return raw.bundleVersion === "1" && raw.faultedParty === undefined ? "legacy" : null;
+  return raw.faultBundleVersion === "1" ? "fault" : null;
+}
+
 function verifyBundleSignature(raw: Record<string, unknown>, signature: Record<string, unknown>): boolean {
   const party = signature.party;
   if (signature.algorithm !== "ed25519" || typeof party !== "string") return false;
   const key = claimKey(party); const value = decodeSignature(signature.value);
-  if (!key || !value) return false;
-  return ed25519Verify(Buffer.from(SEPARATORS.bundle + artifactHash(raw, "bundle"), "utf8"), value, key);
+  const profile = bundleProfile(raw);
+  if (!key || !value || !profile) return false;
+  const separator = profile === "fault" ? FAULT_BUNDLE_SEPARATOR : SEPARATORS.bundle;
+  return ed25519Verify(Buffer.from(separator + artifactHash(raw, "bundle"), "utf8"), value, key);
+}
+
+function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string, unknown>[]): boolean {
+  if (bundleProfile(raw) !== "fault") return true;
+  const anchored = raw.anchoredByRole;
+  const faulted = raw.faultedParty;
+  const roles = new Set(parties.map((party) => party.role));
+  if (raw.outcome === "completed" || raw.outcome === "failed-substrate") return faulted === "none";
+  if (raw.outcome === "failed-perm" || raw.outcome === "aborted-by-self") return faulted === anchored;
+  if (raw.outcome === "failed-counterparty" || raw.outcome === "aborted-by-other") {
+    return typeof faulted === "string" && roles.has(faulted) && faulted !== anchored;
+  }
+  return false;
 }
 
 export function isCurrentRef(value: unknown): value is CurrentRef {
@@ -196,11 +222,12 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
-  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
       parties.some((party) => !["buyer", "seller", "orchestrator"].includes(String(party.role)) || typeof party.primaryClaim !== "string" || !/^[0-9a-f]{64}$/.test(normalizedHash(party.bundleHash)))) return fail("invalid or duplicate bundle parties");
+  if (!faultAttributionOk(raw, parties)) return fail("invalid fault attribution");
   if (!Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) {
     return fail("bundle signatures contain malformed entries");
   }

@@ -6,6 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
+import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   boundedRevocationCandidates,
   readChainTip,
@@ -75,7 +76,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -83,6 +84,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       programs: {},
       revocations: {},
       verifiedRevocations: {},
+      bundleBindings: {},
+      bundleBindingOverflow: [],
       anchorBackfillComplete: false,
     };
     saveScanState(state);
@@ -91,16 +94,31 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
     );
   }
-  // v6 replays history so every previously discovered artifact is re-read
-  // after unsafe producer timestamps are cleared. It also retains v5's
-  // revocation-marker binding replay.
-  const needsBindingBackfill = state.schemaVersion !== 6;
+  // v7 replays history to discover BB-4-valid DACS-5 BundleBindings. It also
+  // retains v6's consensus-time and v5's revocation-marker binding replays.
+  const needsBindingBackfill = state.schemaVersion !== 7;
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
   const sinceTxId = needsBindingBackfill ? 0 : Math.max(0, state.lastSeenTxId - overlap);
   state.verifiedRevocations ??= {};
+  state.bundleBindings ??= {};
+  state.bundleBindingOverflow ??= [];
+  // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
+  // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
+  for (const reg of regs) {
+    const verified = (await Promise.all((reg.bundleBindings ?? []).map(verifyBundleBinding)))
+      .filter((binding) => binding !== null);
+    for (const binding of verified) {
+      const bounded = boundedBundleBindings([...(state.bundleBindings[binding.jobId] ?? []), binding]);
+      state.bundleBindings[binding.jobId] = bounded.bindings;
+      state.bundleBindingOverflow = [...new Set([
+        ...state.bundleBindingOverflow,
+        ...bounded.overflowKeys,
+      ])].sort();
+    }
+  }
   for (const seller of prior.sellers) for (const listing of seller.listings) {
     const locator = listing.revocationBinding?.markerAnchor.locator;
     if (!locator) continue;
@@ -147,6 +165,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.revocations[hash] = merged.candidates;
     revocationCandidatesTruncated += merged.truncated;
   }
+  for (const [jobId, bindings] of scan.bundleBindings) {
+    const bounded = boundedBundleBindings([...(state.bundleBindings[jobId] ?? []), ...bindings]);
+    state.bundleBindings[jobId] = bounded.bindings;
+    state.bundleBindingOverflow = [...new Set([
+      ...state.bundleBindingOverflow,
+      ...bounded.overflowKeys,
+    ])].sort();
+  }
+  state.bundleBindingOverflow = [...new Set([
+    ...state.bundleBindingOverflow,
+    ...scan.bundleBindingOverflow,
+  ])].sort();
   // Bound legacy and inactive hashes too; a hash need not reappear in the
   // current scan window for old persisted state to remain attacker-inflated.
   for (const [hash, stored] of Object.entries(state.revocations)) {
@@ -208,7 +238,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   else state.cursorAdvancedAt ??= Date.now();
   state.lastSeenTxId = nextCursor;
   state.lastChainTip = scan.chainTip;
-  state.schemaVersion = 6;
+  state.schemaVersion = 7;
   saveScanState(state);
   finishScanRun(runId, { toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
     artifacts: scan.observations.length, rejected: scan.failures.length });
@@ -248,6 +278,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const reg = sellerReg(deal.owners.seller);
     reg.deals ??= [];
     if (!reg.deals.some((d) => d.jobId === deal.jobId)) reg.deals.push(deal);
+    const bindings = state.bundleBindings[deal.jobId] ?? [];
+    if (bindings.length > 0) {
+      reg.bundleBindings ??= [];
+      const knownBindings = new Set(reg.bundleBindings.map((binding) => JSON.stringify(binding)));
+      for (const binding of bindings) {
+        const key = JSON.stringify(binding);
+        if (!knownBindings.has(key)) {
+          reg.bundleBindings.push(binding);
+          knownBindings.add(key);
+        }
+      }
+    }
   }
   // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
   const domains = loadDomains();
@@ -268,7 +310,22 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         }
       }
       reg.wellKnownDomains = [...new Set([...(reg.wellKnownDomains ?? []), agent.domain])];
-      log(`well-known: ${agent.domain} → ${agent.seller.slice(0, 30)}… (+${agent.listingAnchors.length} anchor(s), index hash ✓)`);
+      if (agent.bundleBindings.length > 0) {
+        reg.bundleBindings ??= [];
+        const carried = boundedBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
+        reg.bundleBindings = carried.bindings;
+        for (const binding of carried.bindings) {
+          const accumulated = boundedBundleBindings([...(state.bundleBindings[binding.jobId] ?? []), binding]);
+          state.bundleBindings[binding.jobId] = accumulated.bindings;
+          state.bundleBindingOverflow = [...new Set([
+            ...state.bundleBindingOverflow,
+            ...carried.overflowKeys,
+            ...accumulated.overflowKeys,
+          ])].sort();
+        }
+      }
+      log(`well-known: ${agent.domain} → ${agent.seller.slice(0, 30)}… (+${agent.listingAnchors.length} anchor(s), ` +
+        `+${agent.bundleBindings.length} bundle binding(s), index hash ✓)`);
     }
   }
   const allRegs = [...regs, ...discovered.values()];

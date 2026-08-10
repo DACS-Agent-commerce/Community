@@ -17,7 +17,11 @@
  */
 import { programBindingKey } from "./store.js";
 import { agreementRail } from "./agreementMetadata.js";
-import type { RegisteredDeal } from "./types.js";
+import {
+  boundedBundleBindings,
+  verifyBundleBinding,
+} from "./bundleBinding.js";
+import type { BundleBinding, RegisteredDeal } from "./types.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -36,6 +40,10 @@ export interface ScannedArtifacts {
   revocations: Map<string, string[]>;
   /** Candidate locators discarded by the per-listing resource bound. */
   revocationCandidatesTruncated: number;
+  /** jobId → BB-4-verified BundleBindings discovered in this scan window. */
+  bundleBindings: Map<string, BundleBinding[]>;
+  /** jobId + role keys whose deterministic total-work cap was exhausted. */
+  bundleBindingOverflow: Set<string>;
   txsScanned: number;
   /** Highest tx id observed — the next pass's cursor. */
   highestTxId: number;
@@ -399,6 +407,8 @@ export async function scanChain(
   const programs = new Map<string, string>();
   const revocations = new Map<string, string[]>();
   let revocationCandidatesTruncated = 0;
+  const bundleBindings = new Map<string, BundleBinding[]>();
+  const bundleBindingOverflow = new Set<string>();
   const observations: ScannedArtifacts["observations"] = [];
   const failures: ScannedArtifacts["failures"] = [];
   const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
@@ -416,9 +426,19 @@ export async function scanChain(
     programs.set(programBindingKey(read.owner, name), address);
     const data = read.data as Record<string, unknown> | undefined;
     const currentListing = data?.dacsVersion === "1" && typeof data.listingId === "string" && typeof data.listingVersion === "number";
-    const currentBundle = data?.bundleVersion === "1" && typeof data.jobId === "string" && Array.isArray(data.parties);
+    const currentBundle = (data?.bundleVersion === "1" || data?.faultBundleVersion === "1") &&
+      typeof data.jobId === "string" && Array.isArray(data.parties);
     let artifactKind = "other";
-    if (isListingRevocationCandidate(data)) {
+    const verifiedBundleBinding = data?.bindingVersion === "1"
+      ? await verifyBundleBinding(data)
+      : null;
+    if (verifiedBundleBinding) {
+      artifactKind = "bundle-binding";
+      const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
+      const bounded = boundedBundleBindings([...prior, verifiedBundleBinding]);
+      bundleBindings.set(verifiedBundleBinding.jobId, bounded.bindings);
+      for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
+    } else if (isListingRevocationCandidate(data)) {
       artifactKind = "listing-revocation";
       const listingHash = String(data!.listingContentHash).toLowerCase();
       revocationCandidatesTruncated += addRevocationCandidate(
@@ -488,5 +508,6 @@ export async function scanChain(
   }
 
   return { listings, deals, programs, revocations, revocationCandidatesTruncated,
+    bundleBindings, bundleBindingOverflow,
     txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
 }

@@ -14,6 +14,8 @@
  */
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
+import { verifyBundleBinding } from "./bundleBinding.js";
+import type { BundleBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
 
@@ -24,11 +26,14 @@ export interface WellKnownAgent {
   listingAnchors: string[];
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
+  /** BB-4-verified records from the optional DACS-1 bundle-binding index. */
+  bundleBindings: BundleBinding[];
 }
 
 interface DacsBlock {
   dacsVersion?: string;
   listings?: { indexUrl?: string; indexHash?: string };
+  bundleBindings?: { indexUrl?: string; indexHash?: string };
 }
 interface ListingIndex {
   indexVersion?: string;
@@ -116,7 +121,23 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   }
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
-  return { domain, seller, displayName, listingAnchors, contentHashes };
+  const bundleBindings: BundleBinding[] = [];
+  if (dacs.bundleBindings?.indexUrl) {
+    const bindingIndex = await fetchJson(dacs.bundleBindings.indexUrl);
+    if (!bindingIndex) return { domain, error: `bundle-binding index unreachable (${dacs.bundleBindings.indexUrl})` };
+    const expectedBindingHash = (dacs.bundleBindings.indexHash ?? "").replace(/^sha256-/, "").toLowerCase();
+    const actualBindingHash = sha256Hex(bindingIndex.raw);
+    if (!expectedBindingHash || actualBindingHash !== expectedBindingHash) {
+      return { domain, error: `bundle-binding indexHash mismatch (expected ${expectedBindingHash.slice(0, 12)}…, got ${actualBindingHash.slice(0, 12)}…)` };
+    }
+    const carried = (bindingIndex.body as { bindings?: unknown })?.bindings;
+    if (!Array.isArray(carried) || carried.length > 256) {
+      return { domain, error: "bundle-binding index must contain at most 256 records" };
+    }
+    const verified = await Promise.all(carried.map(verifyBundleBinding));
+    for (const binding of verified) if (binding) bundleBindings.push(binding);
+  }
+  return { domain, seller, displayName, listingAnchors, contentHashes, bundleBindings };
 }
 
 export async function crawlDomains(domains: string[]): Promise<{
