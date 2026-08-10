@@ -82,11 +82,34 @@ export type ProcurementEvent = {
   anchorRef?: string;
 };
 
+export type ProcurementPreview = {
+  kind: "dacs-procurement-delivery-preview";
+  status: "delivery-verified-finalising-dacs5" | "report-verified-finalising-dacs5";
+  jobId: string;
+  delivery: {
+    verified: true;
+    report: Record<string, unknown>;
+  };
+  anchors: {
+    listing?: string;
+    agreement?: string;
+    commitment?: string;
+    paymentEvidence?: string;
+    delivery?: string;
+    deliveryEvidence?: string;
+  };
+};
+
 export type ProcurementJob = {
   id: string;
   status: "running" | "complete" | "failed";
   phase: string;
   events: ProcurementEvent[];
+  /**
+   * A verified delivery that is safe to inspect while DACS-5 continues.
+   * This is deliberately nonterminal and must never be treated as acceptance.
+   */
+  preview?: ProcurementPreview;
   result?: unknown;
   error?: string;
   /**
@@ -443,6 +466,52 @@ export function procurementProfileCard(profile: ProcurementProfile, rail: Paymen
   };
 }
 
+const PREVIEW_ANCHORS = [
+  "listing",
+  "agreement",
+  "commitment",
+  "paymentEvidence",
+  "delivery",
+  "deliveryEvidence",
+] as const;
+
+function parseProcurementPreview(value: unknown): ProcurementPreview {
+  const preview = requiredRecord(value, "procurement job.preview");
+  if (preview.kind !== "dacs-procurement-delivery-preview") {
+    throw new ButlerContractError("procurement job.preview.kind", '"dacs-procurement-delivery-preview"');
+  }
+  if (preview.status !== "delivery-verified-finalising-dacs5" && preview.status !== "report-verified-finalising-dacs5") {
+    throw new ButlerContractError(
+      "procurement job.preview.status",
+      '"delivery-verified-finalising-dacs5" or "report-verified-finalising-dacs5"',
+    );
+  }
+  const delivery = requiredRecord(preview.delivery, "procurement job.preview.delivery");
+  if (requiredBoolean(delivery.verified, "procurement job.preview.delivery.verified") !== true) {
+    throw new ButlerContractError("procurement job.preview.delivery.verified", "true");
+  }
+  const report = requiredRecord(delivery.report, "procurement job.preview.delivery.report");
+  if (Object.keys(report).length === 0) {
+    throw new ButlerContractError("procurement job.preview.delivery.report", "a non-empty verified report object");
+  }
+  const rawAnchors = requiredRecord(preview.anchors, "procurement job.preview.anchors");
+  const anchors: ProcurementPreview["anchors"] = {};
+  for (const key of PREVIEW_ANCHORS) {
+    const anchor = optionalString(rawAnchors[key], `procurement job.preview.anchors.${key}`);
+    if (anchor !== undefined) anchors[key] = anchor;
+  }
+  if (!anchors.delivery || !anchors.paymentEvidence) {
+    throw new ButlerContractError("procurement job.preview.anchors", "delivery and paymentEvidence references");
+  }
+  return {
+    kind: preview.kind,
+    status: preview.status,
+    jobId: requiredString(preview.jobId, "procurement job.preview.jobId"),
+    delivery: { verified: true, report },
+    anchors,
+  };
+}
+
 export function parseProcurementJob(value: unknown): ProcurementJob {
   const job = requiredRecord(value, "procurement job");
   if (job.status !== "running" && job.status !== "complete" && job.status !== "failed") {
@@ -461,6 +530,12 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     };
   });
   if (job.status === "complete") requiredRecord(job.result, "procurement job.result");
+  // A terminal producer may omit the nonterminal preview or serialize it as
+  // JSON null. Both mean "no preview" and neither manufactures a result.
+  const preview = job.preview === undefined || job.preview === null ? undefined : parseProcurementPreview(job.preview);
+  if (job.status === "complete" && preview) {
+    throw new ButlerContractError("procurement job.preview", "no preview after terminal completion");
+  }
   if (job.failedBeforePayment !== undefined && typeof job.failedBeforePayment !== "boolean") {
     throw new ButlerContractError("procurement job.failedBeforePayment", "a boolean");
   }
@@ -492,6 +567,7 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     status: job.status,
     phase: requiredString(job.phase, "procurement job.phase"),
     events,
+    preview,
     result: job.result,
     error: optionalString(job.error, "procurement job.error"),
     failedBeforePayment: job.failedBeforePayment,

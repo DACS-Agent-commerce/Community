@@ -136,6 +136,7 @@ export const completedJob = {
   id: "job-e2e-1",
   status: "complete",
   phase: "complete",
+  preview: null,
   events: [
     { phase: "discovering", label: "Signed listing verified", at, txRef: "mock-listing-tx" },
     { phase: "selecting", label: "Counterparty vet anchored", at, txRef: "mock-vet-tx" },
@@ -144,6 +145,51 @@ export const completedJob = {
     { phase: "complete", label: "Reconciled DACS-5 bundle anchored", at, txRef: "mock-bundle-tx" },
   ],
   result: acceptedResult,
+};
+
+export const securityPreviewJob = {
+  id: completedJob.id,
+  status: "running",
+  phase: "verifying",
+  events: [
+    ...completedJob.events.slice(0, 4),
+    { phase: "verifying", label: "Seller delivery and payment evidence verified", at, txRef: "mock-delivery-tx" },
+  ],
+  preview: {
+    kind: "dacs-procurement-delivery-preview",
+    status: "report-verified-finalising-dacs5",
+    jobId: "web-auditor-e2e-1",
+    delivery: {
+      verified: true,
+      report: {
+        version: 1,
+        target: "(posted content)",
+        findings: [{
+          id: "SEC-1",
+          severity: "high",
+          title: "Unsafe dynamic execution",
+          detail: "A dynamic code path requires review.",
+          file: "app.js",
+          line: 4,
+        }],
+      },
+    },
+    anchors: {
+      listing: "mock-listing-anchor",
+      agreement: "mock-agreement-anchor",
+      commitment: "mock-commitment-anchor",
+      paymentEvidence: "mock-payment-evidence-anchor",
+      delivery: "mock-delivery-anchor",
+      deliveryEvidence: "mock-delivery-evidence-anchor",
+    },
+  },
+};
+
+export const failedSecurityPreviewJob = {
+  ...securityPreviewJob,
+  status: "failed",
+  phase: "verifying",
+  error: "Buyer DACS-5 bundle anchoring failed after payment evidence was recorded.",
 };
 
 const x402PaymentTx = `0x${"ab".repeat(32)}`;

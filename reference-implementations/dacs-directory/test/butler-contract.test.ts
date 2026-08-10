@@ -181,6 +181,109 @@ test("accepts running and completed procurement envelopes", () => {
   assert.equal(complete.result, acceptedReport);
 });
 
+test("accepts gateway-shaped verified delivery previews without treating them as terminal results", () => {
+  const previewJob = {
+    id: "job-preview-1",
+    status: "running",
+    phase: "delivering",
+    events: [{ phase: "delivering", label: "Seller delivery verified", at: "2026-07-31T06:39:22.000Z" }],
+    preview: {
+      kind: "dacs-procurement-delivery-preview",
+      status: "delivery-verified-finalising-dacs5",
+      jobId: "web-oracle-1",
+      delivery: {
+        verified: true,
+        report: {
+          kind: "oracle-attested-value",
+          preset: "crypto-price",
+          value: 1_903.44,
+          url: "https://api.example.test/price",
+        },
+      },
+      anchors: {
+        listing: "stor-listing",
+        agreement: "stor-agreement",
+        commitment: "stor-commitment",
+        paymentEvidence: "stor-payment-evidence",
+        delivery: "stor-delivery",
+        deliveryEvidence: "stor-delivery-evidence",
+      },
+    },
+  } as const;
+
+  const parsed = parseProcurementJob(previewJob);
+  assert.equal(parsed.result, undefined, "a preview must remain nonterminal");
+  assert.equal(parsed.preview?.delivery.verified, true);
+  assert.equal(parsed.preview?.delivery.report.value, 1_903.44);
+  assert.equal(parsed.preview?.anchors.paymentEvidence, "stor-payment-evidence");
+
+  const security = parseProcurementJob({
+    ...previewJob,
+    phase: "verifying",
+    preview: {
+      ...previewJob.preview,
+      status: "report-verified-finalising-dacs5",
+      jobId: "web-auditor-1",
+      delivery: {
+        verified: true,
+        report: {
+          version: 1,
+          target: "(posted content)",
+          findings: [{ id: "A1", severity: "high", title: "Unsafe dynamic execution" }],
+        },
+      },
+    },
+  });
+  assert.equal(security.preview?.status, "report-verified-finalising-dacs5");
+  assert.equal(Array.isArray(security.preview?.delivery.report.findings), true);
+});
+
+test("delivery previews fail closed on contract drift", () => {
+  const preview = {
+    kind: "dacs-procurement-delivery-preview",
+    status: "delivery-verified-finalising-dacs5",
+    jobId: "web-oracle-1",
+    delivery: { verified: true, report: { kind: "oracle-attested-value", value: 42 } },
+    anchors: { paymentEvidence: "stor-payment", delivery: "stor-delivery" },
+  };
+  const running = {
+    id: "job-preview-1",
+    status: "running",
+    phase: "delivering",
+    events: [],
+    preview,
+  };
+
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    preview: { ...preview, delivery: { ...preview.delivery, verified: false } },
+  }), ButlerContractError);
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    preview: { ...preview, delivery: { ...preview.delivery, report: {} } },
+  }), ButlerContractError);
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    preview: { ...preview, anchors: { delivery: "stor-delivery" } },
+  }), ButlerContractError);
+  assert.throws(() => parseProcurementJob({
+    ...running,
+    status: "complete",
+    phase: "complete",
+    result: acceptedReport,
+  }), ButlerContractError);
+
+  const completed = parseProcurementJob({
+    id: "job-preview-1",
+    status: "complete",
+    phase: "complete",
+    events: [],
+    preview: null,
+    result: acceptedReport,
+  });
+  assert.equal(completed.preview, undefined);
+});
+
 test("procurement queue metadata fails closed on malformed state or position", () => {
   const running = { id: "job-1", status: "running", phase: "queued", events: [] };
   assert.throws(() => parseProcurementJob({
