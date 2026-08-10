@@ -5,6 +5,7 @@ import {
   chooseProcurementExample,
   completedJob,
   expectAcceptedEvidence,
+  failedSecurityPreviewJob,
   installMockGateway,
   securityPreviewJob,
   x402CompletedJob,
@@ -247,5 +248,25 @@ test.describe("/try procurement browser safety", () => {
     releaseFinalPoll();
     await expectAcceptedEvidence(page);
     await expect(page.getByRole("heading", { name: "Verified security report is ready" })).toHaveCount(0);
+  });
+
+  test("9. preserves a verified delivery when DACS-5 finalisation fails without claiming acceptance", async ({ context, page }) => {
+    await installMockGateway(context, {
+      onProcurementPost: (route) => fulfillJson(route, securityPreviewJob),
+      onProcurementGet: (route) => fulfillJson(route, failedSecurityPreviewJob),
+    });
+    await chooseProcurementExample(page);
+
+    await page.getByRole("button", { name: /Run the full deal/ }).click();
+
+    await expect(page.getByRole("heading", { name: "Verified security report is ready" })).toBeVisible();
+    await expect(page.getByText("DACS-5 needs recovery", { exact: true })).toBeVisible();
+    await expect(page.getByText("Finalisation stopped safely", { exact: true })).toBeVisible();
+    await expect(page.getByText(failedSecurityPreviewJob.error, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Unsafe dynamic execution", { exact: true })).toBeVisible();
+    await expect(page.getByText("Not settled-and-accepted yet", { exact: true })).toBeVisible();
+    await expect(page.getByText("Settled & accepted", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Security Auditor result" })).toHaveCount(0);
+    await expect(page.getByText(/Retrying reuses the same idempotency key/)).toHaveCount(0);
   });
 });

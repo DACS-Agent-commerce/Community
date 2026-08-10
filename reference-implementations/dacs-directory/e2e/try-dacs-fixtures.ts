@@ -137,12 +137,6 @@ export const completedJob = {
   status: "complete",
   phase: "complete",
   preview: null,
-  finalisation: {
-    status: "complete",
-    startedAt: at,
-    updatedAt: at,
-    attempts: 1,
-  },
   events: [
     { phase: "discovering", label: "Signed listing verified", at, txRef: "mock-listing-tx" },
     { phase: "selecting", label: "Counterparty vet anchored", at, txRef: "mock-vet-tx" },
@@ -189,12 +183,13 @@ export const securityPreviewJob = {
       deliveryEvidence: "mock-delivery-evidence-anchor",
     },
   },
-  finalisation: {
-    status: "running",
-    startedAt: at,
-    updatedAt: at,
-    attempts: 1,
-  },
+};
+
+export const failedSecurityPreviewJob = {
+  ...securityPreviewJob,
+  status: "failed",
+  phase: "verifying",
+  error: "Buyer DACS-5 bundle anchoring failed after payment evidence was recorded.",
 };
 
 const x402PaymentTx = `0x${"ab".repeat(32)}`;

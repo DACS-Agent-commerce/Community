@@ -100,14 +100,6 @@ export type ProcurementPreview = {
   };
 };
 
-export type ProcurementFinalisation = {
-  status: "running" | "complete" | "failed";
-  startedAt: string;
-  updatedAt: string;
-  attempts: number;
-  lastError?: string;
-};
-
 export type ProcurementJob = {
   id: string;
   status: "running" | "complete" | "failed";
@@ -118,8 +110,6 @@ export type ProcurementJob = {
    * This is deliberately nonterminal and must never be treated as acceptance.
    */
   preview?: ProcurementPreview;
-  /** Persisted two-sided DACS-5 finalisation state. */
-  finalisation?: ProcurementFinalisation;
   result?: unknown;
   error?: string;
   /**
@@ -522,24 +512,6 @@ function parseProcurementPreview(value: unknown): ProcurementPreview {
   };
 }
 
-function parseProcurementFinalisation(value: unknown): ProcurementFinalisation {
-  const finalisation = requiredRecord(value, "procurement job.finalisation");
-  if (finalisation.status !== "running" && finalisation.status !== "complete" && finalisation.status !== "failed") {
-    throw new ButlerContractError("procurement job.finalisation.status", '"running", "complete", or "failed"');
-  }
-  const attempts = requiredNumber(finalisation.attempts, "procurement job.finalisation.attempts");
-  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 3) {
-    throw new ButlerContractError("procurement job.finalisation.attempts", "an integer from 1 to 3");
-  }
-  return {
-    status: finalisation.status,
-    startedAt: requiredString(finalisation.startedAt, "procurement job.finalisation.startedAt"),
-    updatedAt: requiredString(finalisation.updatedAt, "procurement job.finalisation.updatedAt"),
-    attempts,
-    lastError: optionalString(finalisation.lastError, "procurement job.finalisation.lastError"),
-  };
-}
-
 export function parseProcurementJob(value: unknown): ProcurementJob {
   const job = requiredRecord(value, "procurement job");
   if (job.status !== "running" && job.status !== "complete" && job.status !== "failed") {
@@ -558,24 +530,11 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     };
   });
   if (job.status === "complete") requiredRecord(job.result, "procurement job.result");
-  // The gateway clears its persisted nonterminal preview to JSON null when
-  // DACS-5 completes; older jobs omit the field. Both mean "no preview".
+  // A terminal producer may omit the nonterminal preview or serialize it as
+  // JSON null. Both mean "no preview" and neither manufactures a result.
   const preview = job.preview === undefined || job.preview === null ? undefined : parseProcurementPreview(job.preview);
-  const finalisation = job.finalisation === undefined ? undefined : parseProcurementFinalisation(job.finalisation);
-  if (preview && !finalisation) {
-    throw new ButlerContractError("procurement job.finalisation", "state for the nonterminal delivery preview");
-  }
-  if (finalisation?.status === "running" && !preview) {
-    throw new ButlerContractError("procurement job.preview", "verified delivery while DACS-5 finalisation is running");
-  }
   if (job.status === "complete" && preview) {
     throw new ButlerContractError("procurement job.preview", "no preview after terminal completion");
-  }
-  if (job.status === "complete" && finalisation && finalisation.status !== "complete") {
-    throw new ButlerContractError("procurement job.finalisation.status", '"complete" for a completed job');
-  }
-  if (job.status === "running" && finalisation && finalisation.status !== "running") {
-    throw new ButlerContractError("procurement job.finalisation.status", '"running" for a running job');
   }
   if (job.failedBeforePayment !== undefined && typeof job.failedBeforePayment !== "boolean") {
     throw new ButlerContractError("procurement job.failedBeforePayment", "a boolean");
@@ -609,7 +568,6 @@ export function parseProcurementJob(value: unknown): ProcurementJob {
     phase: requiredString(job.phase, "procurement job.phase"),
     events,
     preview,
-    finalisation,
     result: job.result,
     error: optionalString(job.error, "procurement job.error"),
     failedBeforePayment: job.failedBeforePayment,

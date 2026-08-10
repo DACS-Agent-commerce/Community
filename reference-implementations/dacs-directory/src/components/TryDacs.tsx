@@ -19,7 +19,6 @@ import {
   type OutputReceipt,
   type PaymentRail,
   type ProcurementEvent,
-  type ProcurementFinalisation,
   type ProcurementJob,
   type ProcurementPreview,
   type ProcurementProfile,
@@ -258,11 +257,13 @@ function ProcurementReport({ value, events, profile, rail }: { value: unknown; e
 
 function ProcurementPreviewReport({
   preview,
-  finalisation,
+  jobStatus,
+  error,
   profile,
 }: {
   preview: ProcurementPreview;
-  finalisation: ProcurementFinalisation;
+  jobStatus: ProcurementJob["status"];
+  error?: string;
   profile: ProcurementProfile;
 }) {
   const report = preview.delivery.report;
@@ -273,20 +274,23 @@ function ProcurementPreviewReport({
     value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean",
   ).slice(0, 8);
   const anchorEntries = Object.entries(preview.anchors).filter((entry): entry is [string, string] => typeof entry[1] === "string");
-  const finalising = finalisation.status === "running";
+  const finalising = jobStatus === "running";
+  const finalisationDetail = finalising
+    ? "The job remains running until the mandatory buyer and seller bundles verify and reconcile."
+    : error ?? "The verified delivery remains inspectable, but DACS-5 did not reach terminal acceptance.";
   const heading = preview.status === "report-verified-finalising-dacs5"
     ? "Verified security report is ready"
     : `Verified ${profile.agentName} delivery is ready`;
 
   return (
-    <div className={`proc-preview ${finalisation.status}`} role="status" aria-live="polite">
+    <div className={`proc-preview ${finalising ? "running" : "failed"}`} role="status" aria-live="polite">
       <div className="proc-preview-head">
         <div><span>VERIFIED DELIVERY · NONTERMINAL</span><h2>{heading}</h2></div>
         <span className={`badge ${finalising ? "pending" : "err"}`}>{finalising ? "DACS-5 finalising" : "DACS-5 needs recovery"}</span>
       </div>
       <div className="proc-preview-state">
         <div><strong>Result available now</strong><small>The seller-signed delivery and confirmed payment evidence have been verified.</small></div>
-        <div><strong>{finalising ? "Two bundle copies anchoring" : "Finalisation stopped safely"}</strong><small>{finalising ? `Attempt ${finalisation.attempts} · the job remains running until both sides reconcile.` : finalisation.lastError ?? "The verified delivery remains inspectable while the gateway recovers DACS-5."}</small></div>
+        <div><strong>{finalising ? "Two bundle copies anchoring" : "Finalisation stopped safely"}</strong><small>{finalisationDetail}</small></div>
       </div>
       {profile.id === "oracle-auto-accept" ? (
         <div className="oracle-delivery preview-delivery">
@@ -491,7 +495,6 @@ export default function TryDacs() {
   const isProcurementSel = selectedProfileId !== null;
   const procEvents = procurementJob?.events ?? [];
   const procurementPreview = procurementJob?.preview;
-  const procurementFinalisation = procurementJob?.finalisation;
   const procurementWaiting = phase === "running" && procurementJob?.queue?.status === "waiting";
   // Fail-closed staging: a terminal "failed" (or unknown-phase) event attaches
   // to the stage the run had actually reached and never advances progress.
@@ -513,11 +516,11 @@ export default function TryDacs() {
         chain,
       };
     }
-    if (stageIdx === 4 && procurementPreview && procurementFinalisation?.status === "running") {
+    if (stageIdx === 4 && procurementPreview && procurementJob?.status === "running") {
       return {
         state: "active",
         summary: "Verified delivery ready; two DACS-5 copies are finalising",
-        detail: `Attempt ${procurementFinalisation.attempts} · completion remains pending until both bundles reconcile`,
+        detail: "Completion remains pending until both bundles reconcile",
         chain,
       };
     }
@@ -833,7 +836,12 @@ export default function TryDacs() {
       await waitWithSignal(Math.min(2_000, Math.max(0, deadline - Date.now())), controller.signal);
       const { response: poll, body: pollBody } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(current.id)}`, { signal: controller.signal }, deadline);
       if (!poll.ok) throw new Error(message(pollBody));
-      current = parseProcurementJob(pollBody); setProcurementJob(current);
+      current = parseProcurementJob(pollBody);
+      // Keep the synchronous ref aligned with the rendered state. The outer
+      // catch uses it before React effects run to distinguish a terminal
+      // gateway failure from a transient watcher error.
+      procurementJobRef.current = current;
+      setProcurementJob(current);
     }
     if (current.status === "failed") {
       // Only the gateway's explicit failedBeforePayment=true proves no money
@@ -1199,9 +1207,14 @@ export default function TryDacs() {
         </aside>
       </section>
 
-      {procurementPreview && procurementFinalisation && selectedProfile && result === undefined && (
+      {procurementPreview && selectedProfile && result === undefined && (
         <section className="try-result preview-proc-result">
-          <ProcurementPreviewReport preview={procurementPreview} finalisation={procurementFinalisation} profile={selectedProfile} />
+          <ProcurementPreviewReport
+            preview={procurementPreview}
+            jobStatus={procurementJob.status}
+            error={procurementJob.error}
+            profile={selectedProfile}
+          />
         </section>
       )}
 
