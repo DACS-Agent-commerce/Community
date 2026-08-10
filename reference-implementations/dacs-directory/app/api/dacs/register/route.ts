@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
   // Verify at ingress as well as at use so invalid carrier data never enters
   // persistent registration state.
   if (body.bundleBindings) {
-    const verified = await Promise.all(body.bundleBindings.map(verifyBundleBinding));
+    const verified = await Promise.all(body.bundleBindings.map((binding) => verifyBundleBinding(binding)));
     if (verified.some((binding) => binding === null)) {
       return NextResponse.json({ error: "one or more bundleBindings fail DACS-5 BB-4" }, { status: 400 });
     }

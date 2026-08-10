@@ -23,6 +23,7 @@ async function binding(options: {
   native?: string;
   hash?: string;
   logical?: string;
+  signerClaim?: string;
 } = {}): Promise<BundleBinding> {
   const jobId = options.jobId ?? "job-binding-1";
   const role = options.role ?? "buyer";
@@ -34,14 +35,27 @@ async function binding(options: {
     logicalAddress: options.logical ?? logicalBundleAddress(jobId, role),
     nativeAddress: options.native ?? native(1),
     bundleContentHash: options.hash ?? "a".repeat(64),
-    signer: dids[signer],
+    signer: options.signerClaim ?? dids[signer],
   };
   const value = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`, "utf8"),
     privateKeyFromSeed(seeds[signer]),
   )).toString("base64url");
-  return { ...scope, signature: { algorithm: "ed25519", signer: dids[signer], value } };
+  return {
+    ...scope,
+    signature: { algorithm: "ed25519", signer: options.signerClaim ?? dids[signer], value },
+  };
 }
+
+test("BB-4 accepts scheme-case normalization but rejects suffix-shaped aliases", async () => {
+  const key = dids[0].slice(-64);
+  assert.ok(await verifyBundleBinding(await binding({ signerClaim: `DID:demos:agent:${key}` })));
+  assert.equal(await verifyBundleBinding(await binding({ signerClaim: `domain:${key}` })), null);
+  assert.equal(await verifyBundleBinding(await binding({ signerClaim: `demos:0x${key}` })), null);
+  assert.equal(await verifyBundleBinding(await binding({
+    signerClaim: `did:demos:agent:${key.toUpperCase()}`,
+  })), null);
+});
 
 test("BB-4 verifies the signed scope and derives the normative logical address", async () => {
   const candidate = await binding();

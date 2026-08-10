@@ -1,3 +1,5 @@
+import { canonicalSigningIdentity } from "./primaryClaimKey.js";
+
 const ROLES = new Set(["buyer", "seller", "orchestrator"] as const);
 const OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other",
@@ -11,7 +13,7 @@ interface BundleLike {
   parties?: unknown;
 }
 
-/** Collapse the accepted Demos claim spellings to one key identity. */
+/** Explicit compatibility identity used only by the legacy SDK reader. */
 export function demosSigningIdentity(claim: string): string {
   const key = claim.match(/^(?:did:demos:agent:|0x)?([0-9a-f]{64})$/i)?.[1];
   return key ? key.toLowerCase() : claim;
@@ -25,6 +27,7 @@ export function bundleSignerPolicy(
   bundle: BundleLike,
   validSigners: Iterable<string>,
   allPresentedSignaturesValid: boolean,
+  options: { legacyDemosAliases?: boolean } = {},
 ): boolean {
   if (!allPresentedSignaturesValid || !Array.isArray(bundle.parties)) return false;
   if (typeof bundle.outcome !== "string" || !OUTCOMES.has(bundle.outcome)) return false;
@@ -40,18 +43,19 @@ export function bundleSignerPolicy(
     byRole.set(role as BundleRole, claim);
   }
   if (!byRole.has("buyer") || !byRole.has("seller")) return false;
-  if (demosSigningIdentity(byRole.get("buyer")!) === demosSigningIdentity(byRole.get("seller")!)) return false;
+  const identity = options.legacyDemosAliases ? demosSigningIdentity : canonicalSigningIdentity;
+  if (identity(byRole.get("buyer")!) === identity(byRole.get("seller")!)) return false;
 
   const anchoredByRole = bundle.anchoredByRole;
   if (typeof anchoredByRole !== "string" || !ROLES.has(anchoredByRole as BundleRole)) return false;
   const anchorClaim = byRole.get(anchoredByRole as BundleRole);
   if (!anchorClaim) return false;
 
-  const partyClaims = new Set([...byRole.values()].map(demosSigningIdentity));
-  const valid = new Set([...validSigners].map(demosSigningIdentity));
+  const partyClaims = new Set([...byRole.values()].map(identity));
+  const valid = new Set([...validSigners].map(identity));
   if (valid.size === 0 || [...valid].some((claim) => !partyClaims.has(claim))) return false;
 
   const allRequired = valid.size === partyClaims.size && [...partyClaims].every((claim) => valid.has(claim));
   const abort = bundle.outcome === "aborted-by-self" || bundle.outcome === "aborted-by-other";
-  return abort ? (valid.size === 1 && valid.has(demosSigningIdentity(anchorClaim))) || allRequired : allRequired;
+  return abort ? (valid.size === 1 && valid.has(identity(anchorClaim))) || allRequired : allRequired;
 }

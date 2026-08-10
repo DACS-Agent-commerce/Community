@@ -982,5 +982,13 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
   const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
   const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null);
   assert.equal(tier, "institutional");
+  const mixedScheme = structuredClone(result);
+  (mixedScheme.signature as Obj).signer = `DID:demos:agent:${dids[0].slice(-64)}`;
+  maps.set(locator(9), mixedScheme);
+  assert.equal(
+    await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null),
+    "institutional",
+    "trusted signer comparison uses its resolved canonical identity",
+  );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
 });

@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
+import {
+  resolvePrimaryClaimKey,
+  resolveDemosPrimaryClaimKey,
+  sameResolvedPrimaryClaim,
+  verifyResolvedPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 import type { BundleBinding } from "./types.js";
 
 const BINDING_DOMAIN = "dacs-bundle-binding:v1:";
@@ -43,7 +49,10 @@ function strictSignatureBytes(value: unknown): Uint8Array | null {
  * BB-4 plus structural ingress. Unknown top-level members remain in the
  * signed scope so a newer-minor field can never be silently stripped.
  */
-export async function verifyBundleBinding(value: unknown): Promise<BundleBinding | null> {
+export async function verifyBundleBinding(
+  value: unknown,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<BundleBinding | null> {
   const raw = record(value);
   const signature = record(raw?.signature);
   if (
@@ -59,27 +68,21 @@ export async function verifyBundleBinding(value: unknown): Promise<BundleBinding
     typeof signature.signer !== "string" || typeof signature.value !== "string"
   ) return null;
 
-  const signer = canonicalDemosAgentClaim(raw.signer);
-  const signatureSigner = canonicalDemosAgentClaim(signature.signer);
-  if (!signer || !signatureSigner || signer !== signatureSigner) return null;
-  const keyHex = signer.slice(-64);
+  const signer = await resolvePrimaryClaimKey(raw.signer, signature.algorithm, resolveKey);
+  const signatureSigner = await resolvePrimaryClaimKey(signature.signer, signature.algorithm, resolveKey);
+  if (!signer || !signatureSigner || !sameResolvedPrimaryClaim(signer, signatureSigner)) return null;
   const sig = strictSignatureBytes(signature.value);
   if (!sig) return null;
 
   const scope = { ...raw };
   delete scope.signature;
   const hash = contentHash(scope);
-  let ok = false;
-  try {
-    ok = await ed25519Verify(
-      Buffer.from(BINDING_DOMAIN + hash, "utf8"),
-      sig,
-      publicKeyFromRaw(Uint8Array.from(Buffer.from(keyHex, "hex"))),
-    );
-  } catch {
-    return null;
-  }
-  return ok ? raw as BundleBinding : null;
+  const verified = verifyResolvedPrimaryClaimSignature(
+    Buffer.from(BINDING_DOMAIN + hash, "utf8"),
+    sig,
+    signer,
+  );
+  return verified ? raw as BundleBinding : null;
 }
 
 const bindingOrder = (left: BundleBinding, right: BundleBinding): number =>

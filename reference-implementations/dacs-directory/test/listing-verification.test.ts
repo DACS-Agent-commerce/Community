@@ -14,15 +14,18 @@ function signMessage(message: string): string {
   return Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("base64url");
 }
 
-function signedCurrentListing(extra: Record<string, unknown> = {}): Record<string, unknown> {
+function signedCurrentListing(
+  extra: Record<string, unknown> = {},
+  signingClaim = claim,
+): Record<string, unknown> {
   const identity: Record<string, unknown> = {
-    presentedBy: claim,
-    claims: [{ ref: claim, kind: "signing-key" }],
+    presentedBy: signingClaim,
+    claims: [{ ref: signingClaim, kind: "signing-key" }],
   };
   identity.presentation = {
     kind: "per-claim",
     signatures: [{
-      ref: claim,
+      ref: signingClaim,
       signature: signMessage(`dacs-bundle-presentation:v1:${contentHash(identity)}`),
     }],
   };
@@ -60,11 +63,29 @@ function signedCurrentListing(extra: Record<string, unknown> = {}): Record<strin
     ...scope,
     signature: {
       algorithm: "ed25519",
-      signer: claim,
+      signer: signingClaim,
       value: signMessage(`dacs-listing:v1:${contentHash(scope)}`),
     },
   };
 }
+
+test("verifyListing canonicalizes mixed-case DID scheme spelling on read", async () => {
+  const mixedCaseClaim = `DID:demos:agent:${publicKeyHex}`;
+  const verified = await verifyListing(signedCurrentListing({}, mixedCaseClaim));
+
+  assert.equal(verified?.signer, claim);
+  assert.equal(verified?.sellerClaim, claim);
+});
+
+test("verifyListing rejects suffix-shaped aliases even when their signatures are valid", async () => {
+  for (const rejected of [
+    `domain:${publicKeyHex}`,
+    `demos:0x${publicKeyHex}`,
+    `did:demos:agent:${publicKeyHex.toUpperCase()}`,
+  ]) {
+    assert.equal(await verifyListing(signedCurrentListing({}, rejected)), null, rejected);
+  }
+});
 
 test("verifyListing preserves inert unknown top-level fields in the signed scope", async () => {
   const listing = signedCurrentListing({

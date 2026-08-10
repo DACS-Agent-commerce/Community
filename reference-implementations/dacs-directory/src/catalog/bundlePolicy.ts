@@ -1,10 +1,15 @@
 import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
 import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
+import {
+  resolvePrimaryClaimKey,
+  resolveDemosPrimaryClaimKey,
+  verifyPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 import type { DealRecord, RegisteredDeal } from "./types.js";
 
 // This is the legacy SDK compatibility path. Current-profile agreement artifacts,
@@ -28,16 +33,6 @@ function decode(value: string): Uint8Array | null {
   }
 }
 
-function keyFor(claim: string): ReturnType<typeof publicKeyFromRaw> | null {
-  const hex = claim.match(/([0-9a-fA-F]{64})$/)?.[1];
-  if (!hex) return null;
-  try {
-    return publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex")));
-  } catch {
-    return null;
-  }
-}
-
 export function hasRequiredBundleSignatures(result: BundleVerification, rawBundle: unknown): boolean {
   const bundle = result.bundle;
   if (!bundle || !rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) return false;
@@ -54,7 +49,8 @@ export function hasRequiredBundleSignatures(result: BundleVerification, rawBundl
   }
   const valid = new Set(result.signatures.filter((s) => s.verdict === "valid").map((s) => s.party));
   return bundleSignerPolicy(bundle, valid, result.signatures.length > 0 &&
-    result.signatures.every((signature) => signature.verdict === "valid"));
+    result.signatures.every((signature) => signature.verdict === "valid"),
+    { legacyDemosAliases: true });
 }
 
 /** Return the role registered for this exact copy address, if the directory knows it. */
@@ -175,8 +171,9 @@ function expectedArtifacts(verification: BundleVerification): ExpectedArtifact[]
 export async function verifyReferencedArtifactSignature(
   artifact: ResolvedArtifact,
   partyClaims: Set<string> = new Set(),
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
-  if (artifact.kind === "dacs-1-listing") return (await verifyListing(artifact.raw)) !== null;
+  if (artifact.kind === "dacs-1-listing") return (await verifyListing(artifact.raw, resolveKey)) !== null;
   const separator = SEPARATORS[artifact.kind];
   if (!separator) return false;
   const raw = artifact.raw;
@@ -197,19 +194,28 @@ export async function verifyReferencedArtifactSignature(
     const s = entry as Record<string, unknown>;
     const signer = typeof s.signer === "string" ? s.signer : typeof s.party === "string" ? s.party : null;
     if (s.algorithm !== "ed25519" || !signer || typeof s.value !== "string") return false;
-    const key = keyFor(signer);
     const signature = decode(s.value);
-    if (!key || !signature || !(await ed25519Verify(message, signature, key))) return false;
-    validSigners.add(signer);
+    if (!signature) return false;
+    const verified = await verifyPrimaryClaimSignature(
+      message, signature, signer, s.algorithm, resolveKey,
+    );
+    if (!verified) return false;
+    validSigners.add(verified.canonicalClaim);
   }
   if (artifact.kind === "dacs-3-agreement") {
     const buyer = scope.buyer;
     const seller = scope.seller;
-    return typeof buyer === "string" && typeof seller === "string" &&
-      validSigners.has(buyer) && validSigners.has(seller);
+    if (typeof buyer !== "string" || typeof seller !== "string") return false;
+    const resolved = await Promise.all([
+      resolvePrimaryClaimKey(buyer, "ed25519", resolveKey),
+      resolvePrimaryClaimKey(seller, "ed25519", resolveKey),
+    ]);
+    return resolved.every((claim) => claim && validSigners.has(claim.canonicalClaim));
   }
   if (artifact.kind === "dacs-4-evidence") {
-    return [...validSigners].some((s) => partyClaims.has(s));
+    const parties = await Promise.all([...partyClaims].map((claim) =>
+      resolvePrimaryClaimKey(claim, "ed25519", resolveKey)));
+    return parties.some((claim) => claim && validSigners.has(claim.canonicalClaim));
   }
   return true;
 }
@@ -217,6 +223,7 @@ export async function verifyReferencedArtifactSignature(
 export async function refsPassStrictPolicy(
   verification: BundleVerification,
   artifacts: ResolvedArtifact[],
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
   if (!verification.ok || verification.refs.some((r) => r.verdict !== "ok")) return false;
   const expected = expectedArtifacts(verification);
@@ -242,7 +249,7 @@ export async function refsPassStrictPolicy(
   }
   const partyClaims = new Set((verification.bundle?.parties ?? []).map((p) => p.primaryClaim));
   const checks = await Promise.all(
-    artifacts.map((a) => verifyReferencedArtifactSignature(a, partyClaims)),
+    artifacts.map((a) => verifyReferencedArtifactSignature(a, partyClaims, resolveKey)),
   );
   return checks.every(Boolean);
 }

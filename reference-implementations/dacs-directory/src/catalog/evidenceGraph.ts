@@ -1,7 +1,12 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
+import {
+  canonicalSigningIdentity,
+  resolveDemosPrimaryClaimKey,
+  verifyPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 
 export type ArtifactKind = "agreement" | "evidence" | "verify-result" | "composite" | "rating" | "listing" | "bundle" | "attestation";
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
@@ -22,12 +27,16 @@ export interface EvidenceGraph {
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
+  resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
 const rec = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const arr = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value) ? value.map(rec).filter(Boolean) as Record<string, unknown>[] : [];
+const sameSigningIdentity = (left: unknown, right: unknown): boolean =>
+  typeof left === "string" && typeof right === "string" &&
+  canonicalSigningIdentity(left) === canonicalSigningIdentity(right);
 const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
 const PHASE_OUTCOMES = new Set(["ok", "fail"]);
 const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
@@ -117,18 +126,24 @@ function decodeSignature(value: unknown): Uint8Array | null {
   if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
   try { const bytes = Buffer.from(value, "base64url"); return bytes.length === 64 ? Uint8Array.from(bytes) : null; } catch { return null; }
 }
-export function claimKey(claim: unknown): ReturnType<typeof publicKeyFromRaw> | null {
-  const hex = typeof claim === "string" ? claim.match(/([0-9a-fA-F]{64})$/)?.[1] : undefined;
-  if (!hex) return null;
-  try { return publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))); } catch { return null; }
-}
-export function verifyComponentSignature(raw: Record<string, unknown>, kind: ArtifactKind, signature: Record<string, unknown>): boolean {
+export async function verifyComponentSignature(
+  raw: Record<string, unknown>,
+  kind: ArtifactKind,
+  signature: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<boolean> {
   if (kind === "attestation") return false;
   if (signature.algorithm !== "ed25519" || typeof signature.signer !== "string") return false;
-  const key = claimKey(signature.signer); const value = decodeSignature(signature.value);
+  const value = decodeSignature(signature.value);
   const separator = separatorFor(raw, kind);
-  if (!key || !value || !separator) return false;
-  return ed25519Verify(Buffer.from(separator + artifactHash(raw, kind), "utf8"), value, key);
+  if (!value || !separator) return false;
+  return Boolean(await verifyPrimaryClaimSignature(
+    Buffer.from(separator + artifactHash(raw, kind), "utf8"),
+    value,
+    signature.signer,
+    signature.algorithm,
+    resolveKey,
+  ));
 }
 type BundleProfile = "legacy" | "fault";
 
@@ -140,14 +155,24 @@ function bundleProfile(raw: Record<string, unknown>): BundleProfile | null {
   return raw.faultBundleVersion === "1" ? "fault" : null;
 }
 
-function verifyBundleSignature(raw: Record<string, unknown>, signature: Record<string, unknown>): boolean {
+async function verifyBundleSignature(
+  raw: Record<string, unknown>,
+  signature: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<boolean> {
   const party = signature.party;
   if (signature.algorithm !== "ed25519" || typeof party !== "string") return false;
-  const key = claimKey(party); const value = decodeSignature(signature.value);
+  const value = decodeSignature(signature.value);
   const profile = bundleProfile(raw);
-  if (!key || !value || !profile) return false;
+  if (!value || !profile) return false;
   const separator = profile === "fault" ? FAULT_BUNDLE_SEPARATOR : SEPARATORS.bundle;
-  return ed25519Verify(Buffer.from(separator + artifactHash(raw, "bundle"), "utf8"), value, key);
+  return Boolean(await verifyPrimaryClaimSignature(
+    Buffer.from(separator + artifactHash(raw, "bundle"), "utf8"),
+    value,
+    party,
+    signature.algorithm,
+    resolveKey,
+  ));
 }
 
 function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string, unknown>[]): boolean {
@@ -186,21 +211,33 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
   if (kind === "rating") return raw.ratingVersion === "1" && typeof raw.jobId === "string" && typeof raw.rater === "string" && typeof raw.target === "string" && (raw.targetRole === "buyer" || raw.targetRole === "seller") && Number.isInteger(raw.value) && Number(raw.value) >= 1 && Number(raw.value) <= 5 && typeof raw.ratedAt === "number" && (typeof raw.freeText !== "string" || raw.freeText.length <= 1000);
   return true;
 }
-function signatureOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
+async function signatureOk(
+  raw: Record<string, unknown>,
+  kind: ArtifactKind,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<boolean> {
   if (kind === "agreement") {
     const signatures = arr(raw.signatures);
-    if (raw.signature !== undefined || !Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length ||
-        !signatures.every((signature) => verifyComponentSignature(raw, kind,
-          { ...signature, signer: signature.signer ?? signature.party }))) return false;
+    if (raw.signature !== undefined || !Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) return false;
+    const checks = await Promise.all(signatures.map((signature) => verifyComponentSignature(
+      raw, kind, { ...signature, signer: signature.signer ?? signature.party }, resolveKey,
+    )));
+    if (!checks.every(Boolean)) return false;
     const parties = arr(raw.parties);
-    const required = parties.filter((party) => party.role === "buyer" || party.role === "seller").map((party) => party.primaryClaim);
-    const valid = new Set(signatures.map((signature) => signature.signer ?? signature.party));
-    return required.length === 2 && required.every((claim) => valid.has(claim));
+    const required = parties.filter((party) => party.role === "buyer" || party.role === "seller")
+      .map((party) => typeof party.primaryClaim === "string" ? canonicalSigningIdentity(party.primaryClaim) : null);
+    const valid = new Set(signatures.map((signature) => signature.signer ?? signature.party)
+      .filter((claim): claim is string => typeof claim === "string")
+      .map(canonicalSigningIdentity));
+    return required.length === 2 && required.every((claim) => claim !== null && valid.has(claim));
   }
   if (raw.signatures !== undefined) return false;
   const signature = rec(raw.signature);
-  if (kind === "rating" && signature?.signer !== raw.rater) return false;
-  return Boolean(signature && verifyComponentSignature(raw, kind, signature));
+  if (kind === "rating" && (
+    typeof signature?.signer !== "string" || typeof raw.rater !== "string" ||
+    canonicalSigningIdentity(signature.signer) !== canonicalSigningIdentity(raw.rater)
+  )) return false;
+  return Boolean(signature && await verifyComponentSignature(raw, kind, signature, resolveKey));
 }
 
 async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | null> {
@@ -213,11 +250,14 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   }
   if (!isCurrentRef(ref)) return null;
   const hash = normalizedHash(ref.contentHash);
-  const raw = await deps.read(ref.anchor.locator); if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash || !signatureOk(raw, kind)) return null;
+  const raw = await deps.read(ref.anchor.locator);
+  if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash ||
+      !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return null;
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
+  const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const raw = await deps.read(bundleLocator);
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
   const phases = arr(raw?.phaseSummary);
@@ -231,10 +271,10 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   if (!Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) {
     return fail("bundle signatures contain malformed entries");
   }
-  const signatureChecks = signatures.map((signature) => ({
+  const signatureChecks = await Promise.all(signatures.map(async (signature) => ({
     party: signature.party,
-    valid: verifyBundleSignature(raw, signature),
-  }));
+    valid: await verifyBundleSignature(raw, signature, resolveKey),
+  })));
   const validParties = signatureChecks.filter((check) => check.valid && typeof check.party === "string")
     .map((check) => check.party as string);
   const signaturesVerified = bundleSignerPolicy(raw, validParties,
@@ -276,13 +316,16 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
       const resolved = await resolveRef(kind, ref, deps); if (!resolved) return { ...fail(`${kind} reference failed`), signaturesVerified };
       if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
       if (kind === "rating") {
-        const target = parties.find((party) => party.primaryClaim === resolved.raw.target);
-        if (!parties.some((party) => party.primaryClaim === resolved.raw.rater) ||
+        const target = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.target));
+        if (!parties.some((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.rater)) ||
             !target || target.role !== resolved.raw.targetRole) {
           return { ...fail("rating party binding failed"), signaturesVerified };
         }
       }
-      if (kind === "evidence" && !parties.some((party) => party.primaryClaim === rec(resolved.raw.signature)?.signer)) return { ...fail("evidence signer is not a session party"), signaturesVerified };
+      if (kind === "evidence" && !parties.some((party) =>
+        sameSigningIdentity(party.primaryClaim, rec(resolved.raw.signature)?.signer))) {
+        return { ...fail("evidence signer is not a session party"), signaturesVerified };
+      }
       artifacts.push(resolved);
     }
   }
@@ -301,7 +344,8 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
     const nested = await resolveRef(kind, value, deps); if (!nested) return false;
     if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
-    if (kind === "evidence" && !parties.some((party) => party.primaryClaim === rec(nested.raw.signature)?.signer)) return false;
+    if (kind === "evidence" && !parties.some((party) =>
+      sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
     seen.set(key, nested.contentHash); artifacts.push(nested); return true;
   };
   for (let index = 0; index < artifacts.length; index++) {
@@ -343,11 +387,14 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  if (!listed || artifactHash(listed.raw, "listing") !== listingHash || !(await verifyListing(listed.raw))) return { ...fail("listing reference failed"), signaturesVerified };
+  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
+      !(await verifyListing(listed.raw, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
-    if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) => candidate.role === role && parties.some((party) => party.role === role && party.primaryClaim === candidate.primaryClaim)))) {
+    if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) =>
+      candidate.role === role && parties.some((party) =>
+        party.role === role && sameSigningIdentity(party.primaryClaim, candidate.primaryClaim))))) {
       return { ...fail("agreement party binding failed"), signaturesVerified };
     }
     if (!agreementMatchesListing(agreement, listed.raw)) {
