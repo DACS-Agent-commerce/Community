@@ -221,6 +221,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
   present in `DACS_RECIPE_POLICIES`; missing policy fails closed.
+- **BundleBinding key resolution currently implements the directory's canonical Demos
+  agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
+  binding signed through another ClaimReference/key-resolution method is not carried or
+  used until that resolver is configured; it fails closed to `indeterminate` rather
+  than being relabelled as verified.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
