@@ -38,8 +38,26 @@ export function currentBundleCopiesDiverge(
   buyerBundle: Record<string, unknown>,
   sellerBundle: Record<string, unknown>,
 ): boolean {
-  return flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
+  const buyerType = buyerBundle.faultBundleVersion === "1" ? "fault" : buyerBundle.bundleVersion === "1" ? "legacy" : "unknown";
+  const sellerType = sellerBundle.faultBundleVersion === "1" ? "fault" : sellerBundle.bundleVersion === "1" ? "legacy" : "unknown";
+  return buyerType !== sellerType ||
+    (buyerType === "fault" && buyerBundle.faultedParty !== sellerBundle.faultedParty) ||
+    flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
     phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary);
+}
+
+function sellerRelativeOutcome(graph: EvidenceGraph, sellerClaim: string): string {
+  const outcome = String(graph.bundle.outcome ?? "");
+  if (graph.bundle.faultBundleVersion !== "1") {
+    return graph.bundle.anchoredByRole === "seller" ? outcome : (flipOutcome(outcome) ?? "");
+  }
+  if (outcome === "completed" || outcome === "failed-substrate") return outcome;
+  const sellerRole = roleOf(graph, sellerClaim);
+  const sellerFaulted = graph.bundle.faultedParty === sellerRole;
+  const abort = outcome === "aborted-by-self" || outcome === "aborted-by-other";
+  return abort
+    ? sellerFaulted ? "aborted-by-self" : "aborted-by-other"
+    : sellerFaulted ? "failed-perm" : "failed-counterparty";
 }
 
 const roleOf = (graph: EvidenceGraph | null, claim: string) => {
@@ -65,9 +83,7 @@ export function reconcileCurrentCopies(
   );
   const authoritative = sellerOk ? sellerGraph! : buyerGraph;
   const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
-  const sellerOutcome = authoritative === sellerGraph
-    ? String(authoritative.bundle.outcome ?? "")
-    : flipOutcome(String(authoritative.bundle.outcome ?? ""));
+  const sellerOutcome = sellerRelativeOutcome(authoritative, sellerClaim);
   const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
   return {
     authoritative,

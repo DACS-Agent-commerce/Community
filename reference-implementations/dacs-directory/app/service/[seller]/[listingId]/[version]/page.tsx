@@ -8,7 +8,7 @@ import { inspectServicePath } from "@/src/catalog/inspection";
 import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
-import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
+import { directoryEvidenceState } from "@/src/components/directory-evidence-state";
 
 export const dynamic = "force-dynamic";
 
@@ -45,22 +45,18 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const found = findService(sellerClaim, listingId, version);
   if (!found) notFound();
   const { seller, listing } = found;
-  const identity = tierMeta(seller.identityTier ?? "self-declared");
+  const evidence = directoryEvidenceState(listing, seller);
+  const identity = tierMeta(evidence.identityTier);
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const inspectHref = inspectServicePath(listing);
-  const engagementEndpoint = safePublicEndpoint(listing.publicEndpoint);
+  const engagementEndpoint = evidence.endpoint.url;
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
-  const listingProfileLabel = isFixtureListing
-    ? "fixture listing"
-    : listing.artifactProfile === "dacs-v0.1"
-      ? "current DACS listing"
-      : "legacy SDK listing";
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
-  const noEndpointNote = isFixtureListing
-    ? "This fixture has no live engagement endpoint. Inspect the fixture contract before coordinating off-directory."
-    : "This seller has not published a safe HTTPS engagement endpoint. Inspect the signed artifact before coordinating off-directory.";
+  const endpointDeclarationNote = isFixtureListing && evidence.endpoint.kind === "not-declared"
+    ? "This fixture declares no live engagement endpoint."
+    : `${evidence.endpoint.explanation}.`;
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -86,8 +82,9 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>
           <span className={`badge ${identity.chipClass}`}>{identity.label}</span>
-          <span className={`badge ${listing.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{listingProfileLabel}</span>
+          <span className={`badge ${evidence.listing.kind === "current" ? "ok" : ""}`}>{evidence.listing.label}</span>
           {seller.ownerRegistered && <span className="badge ok">owner-registered</span>}
+          {engagementEndpoint && <span className={`badge ${evidence.reachability.kind === "reachable" ? "ok" : ""}`}>{evidence.reachability.label}</span>}
           {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
           {isFixtureListing && <span className="badge">not chain anchored</span>}
           {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
@@ -102,7 +99,10 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <a className="btn secondary" href={inspectHref}>Inspect service</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        <p className="note">{engagementEndpoint ? "The HTTPS endpoint is advertised inside the signed listing; it is a contact route, not a cryptographic trust anchor." : noEndpointNote}</p>
+        <p className="note">
+          {endpointDeclarationNote} <strong>Reachability:</strong> {evidence.reachability.label}.
+          {engagementEndpoint && " A declared contact route is not a health check or cryptographic trust anchor."}
+        </p>
       </section>
 
       <div className="service-layout">
@@ -120,11 +120,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
 
         <aside className="card trust-card" aria-labelledby="trust-heading">
           <div className="eyebrow">trust at a glance</div>
-          <h2 id="trust-heading" className="card-section-title">Three different checks</h2>
+          <h2 id="trust-heading" className="card-section-title">Evidence boundaries</h2>
           <ul className="trust-checks">
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
             <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
-            <li><span className={seller.reputation.completed ? "check ok" : "check"}>{seller.reputation.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{seller.reputation.completed}/{seller.reputation.totalAgreements} completed bundles passed strict verification</p></div></li>
+            <li><span className="check">{engagementEndpoint ? "•" : "–"}</span><div><strong>Endpoint declaration</strong><p>{evidence.endpoint.label}; this says nothing about availability</p></div></li>
+            <li><span className={evidence.reachability.kind === "reachable" ? "check ok" : "check"}>{evidence.reachability.kind === "reachable" ? "✓" : "–"}</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>
+            <li><span className={evidence.deals.completed ? "check ok" : "check"}>{evidence.deals.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{evidence.deals.label}. {evidence.deals.explanation}.</p></div></li>
           </ul>
         </aside>
       </div>

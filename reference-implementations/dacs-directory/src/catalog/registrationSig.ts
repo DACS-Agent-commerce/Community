@@ -6,25 +6,33 @@
  * self-describing primaryClaim. Formats accepted: 0x-hex or base64url
  * signatures (wallet builds vary); message must be fresh (±10 min).
  */
-// Pure subpaths ONLY — the package barrel re-exports createAgent, whose
-// substrate import chain webpack traces into demosdk/rubic (bundler-hostile).
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { canonicalize, sha256Hex } from "@kynesyslabs/dacs/canonical";
+import {
+  resolveDemosPrimaryClaimKey,
+  verifyPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 import type { Registration } from "./types.js";
 
 export function registrationMessage(
-  reg: Pick<Registration, "primaryClaim" | "displayName" | "listingAnchors" | "deals">,
+  reg: Pick<Registration, "primaryClaim" | "displayName" | "listingAnchors" | "deals" | "bundleBindings">,
   signedAt: number,
 ): string {
   // Stable, human-inspectable signing payload (what the wallet shows).
-  return [
+  const lines = [
     "dacs-directory registration",
     `claim:${reg.primaryClaim}`,
     `name:${reg.displayName}`,
     `anchors:${sha256Hex(JSON.stringify([...reg.listingAnchors].sort()))}`,
     `deals:${sha256Hex(canonicalize(reg.deals ?? []))}`,
-    `at:${signedAt}`,
-  ].join("\n");
+  ];
+  // Preserve existing signed registrations byte-for-byte when no bindings
+  // were carried; new registrations bind the self-authenticating carrier set.
+  if (reg.bundleBindings !== undefined) {
+    lines.push(`bundle-bindings:${sha256Hex(canonicalize(reg.bundleBindings))}`);
+  }
+  lines.push(`at:${signedAt}`);
+  return lines.join("\n");
 }
 
 function sigBytes(signature: string): Uint8Array | null {
@@ -41,7 +49,7 @@ function sigBytes(signature: string): Uint8Array | null {
 
 export async function verifyOwnerSignature(
   reg: Registration,
-  opts: { ignoreFreshness?: boolean } = {},
+  opts: { ignoreFreshness?: boolean; resolvePrimaryClaimKey?: ResolvePrimaryClaimKey } = {},
 ): Promise<boolean> {
   const os = reg.ownerSignature;
   if (!os) return false;
@@ -49,13 +57,13 @@ export async function verifyOwnerSignature(
   // stored signature without it (the content binding + signature still hold).
   if (!opts.ignoreFreshness && Math.abs(Date.now() - os.signedAt) > 10 * 60_000) return false;
   if (os.message !== registrationMessage(reg, os.signedAt)) return false; // bound content
-  const keyHex = reg.primaryClaim.match(/([0-9a-fA-F]{64})$/)?.[1];
   const sig = sigBytes(os.signature);
-  if (!keyHex || !sig) return false;
-  try {
-    const key = publicKeyFromRaw(Uint8Array.from(Buffer.from(keyHex, "hex")));
-    return await ed25519Verify(Buffer.from(os.message, "utf8"), sig, key);
-  } catch {
-    return false;
-  }
+  if (!sig) return false;
+  return Boolean(await verifyPrimaryClaimSignature(
+    Buffer.from(os.message, "utf8"),
+    sig,
+    reg.primaryClaim,
+    "ed25519",
+    opts.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey,
+  ));
 }

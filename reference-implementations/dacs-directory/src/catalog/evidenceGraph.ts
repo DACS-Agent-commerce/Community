@@ -1,7 +1,12 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
-import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
+import {
+  canonicalSigningIdentity,
+  resolveDemosPrimaryClaimKey,
+  verifyPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
 
 export type ArtifactKind = "agreement" | "evidence" | "verify-result" | "composite" | "rating" | "listing" | "bundle" | "attestation";
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
@@ -22,12 +27,16 @@ export interface EvidenceGraph {
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
+  resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
 const rec = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const arr = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value) ? value.map(rec).filter(Boolean) as Record<string, unknown>[] : [];
+const sameSigningIdentity = (left: unknown, right: unknown): boolean =>
+  typeof left === "string" && typeof right === "string" &&
+  canonicalSigningIdentity(left) === canonicalSigningIdentity(right);
 const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
 const PHASE_OUTCOMES = new Set(["ok", "fail"]);
 const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
@@ -38,14 +47,65 @@ const priceTermOk = (value: unknown): boolean => {
   return Boolean(price && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
-// PAYEE-BOUND COUPLING (issue #17 F2): site (c) of 3. No `dacs-payee-bound-agreement:v1:`
-// domain yet. When payee-bound support lands, add it here AND in bundlePolicy.ts SEPARATORS,
-// alongside shapeOk's discriminator (above) and isNeutralCancellation's commit-kind
-// (reputation.ts). §8.5.1: SELECT the domain from the required discriminator — never strip-and-retry.
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
   agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", "verify-result": "dacs-verifyresult:v1:",
   composite: "dacs-composite:v1:", rating: "dacs-rating:v1:", listing: "dacs-listing:v1:", bundle: "dacs-bundle:v1:",
 };
+const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
+const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
+
+type AgreementProfile = "legacy" | "payee-bound";
+
+/** Select the agreement type before interpreting fields; never strip-and-retry. */
+function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
+  const hasLegacy = Object.prototype.hasOwnProperty.call(raw, "agreementVersion");
+  const hasPayeeBound = Object.prototype.hasOwnProperty.call(raw, "payeeBoundAgreementVersion");
+  if (hasLegacy === hasPayeeBound) return null;
+  if (hasLegacy) return raw.agreementVersion === "1" ? "legacy" : null;
+  return raw.payeeBoundAgreementVersion === "1" ? "payee-bound" : null;
+}
+
+function separatorFor(raw: Record<string, unknown>, kind: Exclude<ArtifactKind, "attestation">): string | null {
+  if (kind !== "agreement") return SEPARATORS[kind];
+  const profile = agreementProfile(raw);
+  return profile === "legacy" ? SEPARATORS.agreement
+    : profile === "payee-bound" ? PAYEE_BOUND_AGREEMENT_SEPARATOR : null;
+}
+
+function payoutBindingShapeOk(value: unknown): boolean {
+  const binding = rec(value);
+  return Boolean(binding && typeof binding.railId === "string" && binding.railId.length > 0 &&
+    Number.isSafeInteger(binding.phaseIndex) && Number(binding.phaseIndex) >= 0 &&
+    typeof binding.payeeAddress === "string" && binding.payeeAddress.length > 0);
+}
+
+/** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
+function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
+  const profile = agreementProfile(agreement);
+  const terms = rec(agreement.terms);
+  const pipeline = arr(listing.pipeline);
+  if (!profile || !terms || !Array.isArray(listing.pipeline) || pipeline.length !== listing.pipeline.length) return false;
+
+  const commitmentKinds = pipeline.map((phase) => phase.kind).filter((kind) =>
+    kind === "commit-agreement" || kind === "commit-payee-bound-agreement");
+  const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
+  if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
+
+  if (profile === "legacy") return terms.payoutBindings === undefined;
+  if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
+
+  const expected = pipeline.flatMap((phase, phaseIndex) => {
+    if (typeof phase.kind !== "string" || !phase.kind.startsWith("pay-")) return [];
+    const railId = rec(phase.parameters)?.rail;
+    return typeof railId === "string" ? [JSON.stringify([railId, phaseIndex])] : [];
+  });
+  const actual = terms.payoutBindings.map((value) => {
+    const binding = rec(value)!;
+    return JSON.stringify([binding.railId, binding.phaseIndex]);
+  });
+  return expected.length === actual.length && new Set(actual).size === actual.length &&
+    expected.every((key) => actual.includes(key));
+}
 
 export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): Record<string, unknown> {
   if (kind === "attestation") return { ...raw };
@@ -66,24 +126,66 @@ function decodeSignature(value: unknown): Uint8Array | null {
   if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
   try { const bytes = Buffer.from(value, "base64url"); return bytes.length === 64 ? Uint8Array.from(bytes) : null; } catch { return null; }
 }
-export function claimKey(claim: unknown): ReturnType<typeof publicKeyFromRaw> | null {
-  const hex = typeof claim === "string" ? claim.match(/([0-9a-fA-F]{64})$/)?.[1] : undefined;
-  if (!hex) return null;
-  try { return publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))); } catch { return null; }
-}
-export function verifyComponentSignature(raw: Record<string, unknown>, kind: ArtifactKind, signature: Record<string, unknown>): boolean {
+export async function verifyComponentSignature(
+  raw: Record<string, unknown>,
+  kind: ArtifactKind,
+  signature: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<boolean> {
   if (kind === "attestation") return false;
   if (signature.algorithm !== "ed25519" || typeof signature.signer !== "string") return false;
-  const key = claimKey(signature.signer); const value = decodeSignature(signature.value);
-  if (!key || !value) return false;
-  return ed25519Verify(Buffer.from(SEPARATORS[kind] + artifactHash(raw, kind), "utf8"), value, key);
+  const value = decodeSignature(signature.value);
+  const separator = separatorFor(raw, kind);
+  if (!value || !separator) return false;
+  return Boolean(await verifyPrimaryClaimSignature(
+    Buffer.from(separator + artifactHash(raw, kind), "utf8"),
+    value,
+    signature.signer,
+    signature.algorithm,
+    resolveKey,
+  ));
 }
-function verifyBundleSignature(raw: Record<string, unknown>, signature: Record<string, unknown>): boolean {
+type BundleProfile = "legacy" | "fault";
+
+function bundleProfile(raw: Record<string, unknown>): BundleProfile | null {
+  const legacy = Object.prototype.hasOwnProperty.call(raw, "bundleVersion");
+  const fault = Object.prototype.hasOwnProperty.call(raw, "faultBundleVersion");
+  if (legacy === fault) return null;
+  if (legacy) return raw.bundleVersion === "1" && raw.faultedParty === undefined ? "legacy" : null;
+  return raw.faultBundleVersion === "1" ? "fault" : null;
+}
+
+async function verifyBundleSignature(
+  raw: Record<string, unknown>,
+  signature: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<boolean> {
   const party = signature.party;
   if (signature.algorithm !== "ed25519" || typeof party !== "string") return false;
-  const key = claimKey(party); const value = decodeSignature(signature.value);
-  if (!key || !value) return false;
-  return ed25519Verify(Buffer.from(SEPARATORS.bundle + artifactHash(raw, "bundle"), "utf8"), value, key);
+  const value = decodeSignature(signature.value);
+  const profile = bundleProfile(raw);
+  if (!value || !profile) return false;
+  const separator = profile === "fault" ? FAULT_BUNDLE_SEPARATOR : SEPARATORS.bundle;
+  return Boolean(await verifyPrimaryClaimSignature(
+    Buffer.from(separator + artifactHash(raw, "bundle"), "utf8"),
+    value,
+    party,
+    signature.algorithm,
+    resolveKey,
+  ));
+}
+
+function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string, unknown>[]): boolean {
+  if (bundleProfile(raw) !== "fault") return true;
+  const anchored = raw.anchoredByRole;
+  const faulted = raw.faultedParty;
+  const roles = new Set(parties.map((party) => party.role));
+  if (raw.outcome === "completed" || raw.outcome === "failed-substrate") return faulted === "none";
+  if (raw.outcome === "failed-perm" || raw.outcome === "aborted-by-self") return faulted === anchored;
+  if (raw.outcome === "failed-counterparty" || raw.outcome === "aborted-by-other") {
+    return typeof faulted === "string" && roles.has(faulted) && faulted !== anchored;
+  }
+  return false;
 }
 
 export function isCurrentRef(value: unknown): value is CurrentRef {
@@ -91,13 +193,15 @@ export function isCurrentRef(value: unknown): value is CurrentRef {
   return Boolean(anchor && anchor.kind === "storage-program" && typeof anchor.locator === "string" && /^stor-[0-9a-f]{40}$/.test(anchor.locator) && /^[0-9a-f]{64}$/.test(normalizedHash(ref?.contentHash)));
 }
 function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
-  // PAYEE-BOUND COUPLING (issue #17 F2): site (a) of 3. Today this accepts only
-  // `agreementVersion === "1"`, so a payee-bound agreement ref (#236) fails shape →
-  // bundle never refsVerified → excluded (fail-closed, CORE §11.1.2). When payee-bound
-  // support lands, this discriminator, isNeutralCancellation's commit-kind (reputation.ts
-  // ~L35), and the SEPARATORS domain (below ~L41 + bundlePolicy.ts ~L10) MUST move together
-  // — accept exactly-one of agreementVersion / payeeBoundAgreementVersion (§8.5.1), never both.
-  if (kind === "agreement") return raw.agreementVersion === "1" && typeof raw.jobId === "string" && rec(raw.listingRef) !== null && arr(raw.parties).length >= 2 && priceTermOk(rec(raw.terms)?.price);
+  if (kind === "agreement") {
+    const profile = agreementProfile(raw);
+    const terms = rec(raw.terms);
+    return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
+      (profile === "legacy"
+        ? terms.payoutBindings === undefined
+        : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
+  }
   if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
   if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
   if (kind === "composite") {
@@ -107,21 +211,33 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
   if (kind === "rating") return raw.ratingVersion === "1" && typeof raw.jobId === "string" && typeof raw.rater === "string" && typeof raw.target === "string" && (raw.targetRole === "buyer" || raw.targetRole === "seller") && Number.isInteger(raw.value) && Number(raw.value) >= 1 && Number(raw.value) <= 5 && typeof raw.ratedAt === "number" && (typeof raw.freeText !== "string" || raw.freeText.length <= 1000);
   return true;
 }
-function signatureOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
+async function signatureOk(
+  raw: Record<string, unknown>,
+  kind: ArtifactKind,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<boolean> {
   if (kind === "agreement") {
     const signatures = arr(raw.signatures);
-    if (raw.signature !== undefined || !Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length ||
-        !signatures.every((signature) => verifyComponentSignature(raw, kind,
-          { ...signature, signer: signature.signer ?? signature.party }))) return false;
+    if (raw.signature !== undefined || !Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) return false;
+    const checks = await Promise.all(signatures.map((signature) => verifyComponentSignature(
+      raw, kind, { ...signature, signer: signature.signer ?? signature.party }, resolveKey,
+    )));
+    if (!checks.every(Boolean)) return false;
     const parties = arr(raw.parties);
-    const required = parties.filter((party) => party.role === "buyer" || party.role === "seller").map((party) => party.primaryClaim);
-    const valid = new Set(signatures.map((signature) => signature.signer ?? signature.party));
-    return required.length === 2 && required.every((claim) => valid.has(claim));
+    const required = parties.filter((party) => party.role === "buyer" || party.role === "seller")
+      .map((party) => typeof party.primaryClaim === "string" ? canonicalSigningIdentity(party.primaryClaim) : null);
+    const valid = new Set(signatures.map((signature) => signature.signer ?? signature.party)
+      .filter((claim): claim is string => typeof claim === "string")
+      .map(canonicalSigningIdentity));
+    return required.length === 2 && required.every((claim) => claim !== null && valid.has(claim));
   }
   if (raw.signatures !== undefined) return false;
   const signature = rec(raw.signature);
-  if (kind === "rating" && signature?.signer !== raw.rater) return false;
-  return Boolean(signature && verifyComponentSignature(raw, kind, signature));
+  if (kind === "rating" && (
+    typeof signature?.signer !== "string" || typeof raw.rater !== "string" ||
+    canonicalSigningIdentity(signature.signer) !== canonicalSigningIdentity(raw.rater)
+  )) return false;
+  return Boolean(signature && await verifyComponentSignature(raw, kind, signature, resolveKey));
 }
 
 async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | null> {
@@ -134,27 +250,31 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   }
   if (!isCurrentRef(ref)) return null;
   const hash = normalizedHash(ref.contentHash);
-  const raw = await deps.read(ref.anchor.locator); if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash || !signatureOk(raw, kind)) return null;
+  const raw = await deps.read(ref.anchor.locator);
+  if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash ||
+      !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return null;
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
+  const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const raw = await deps.read(bundleLocator);
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
-  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || raw.bundleVersion !== "1" || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
       parties.some((party) => !["buyer", "seller", "orchestrator"].includes(String(party.role)) || typeof party.primaryClaim !== "string" || !/^[0-9a-f]{64}$/.test(normalizedHash(party.bundleHash)))) return fail("invalid or duplicate bundle parties");
+  if (!faultAttributionOk(raw, parties)) return fail("invalid fault attribution");
   if (!Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) {
     return fail("bundle signatures contain malformed entries");
   }
-  const signatureChecks = signatures.map((signature) => ({
+  const signatureChecks = await Promise.all(signatures.map(async (signature) => ({
     party: signature.party,
-    valid: verifyBundleSignature(raw, signature),
-  }));
+    valid: await verifyBundleSignature(raw, signature, resolveKey),
+  })));
   const validParties = signatureChecks.filter((check) => check.valid && typeof check.party === "string")
     .map((check) => check.party as string);
   const signaturesVerified = bundleSignerPolicy(raw, validParties,
@@ -196,13 +316,16 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
       const resolved = await resolveRef(kind, ref, deps); if (!resolved) return { ...fail(`${kind} reference failed`), signaturesVerified };
       if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
       if (kind === "rating") {
-        const target = parties.find((party) => party.primaryClaim === resolved.raw.target);
-        if (!parties.some((party) => party.primaryClaim === resolved.raw.rater) ||
+        const target = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.target));
+        if (!parties.some((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.rater)) ||
             !target || target.role !== resolved.raw.targetRole) {
           return { ...fail("rating party binding failed"), signaturesVerified };
         }
       }
-      if (kind === "evidence" && !parties.some((party) => party.primaryClaim === rec(resolved.raw.signature)?.signer)) return { ...fail("evidence signer is not a session party"), signaturesVerified };
+      if (kind === "evidence" && !parties.some((party) =>
+        sameSigningIdentity(party.primaryClaim, rec(resolved.raw.signature)?.signer))) {
+        return { ...fail("evidence signer is not a session party"), signaturesVerified };
+      }
       artifacts.push(resolved);
     }
   }
@@ -221,7 +344,8 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
     const nested = await resolveRef(kind, value, deps); if (!nested) return false;
     if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
-    if (kind === "evidence" && !parties.some((party) => party.primaryClaim === rec(nested.raw.signature)?.signer)) return false;
+    if (kind === "evidence" && !parties.some((party) =>
+      sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
     seen.set(key, nested.contentHash); artifacts.push(nested); return true;
   };
   for (let index = 0; index < artifacts.length; index++) {
@@ -263,12 +387,18 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  if (!listed || artifactHash(listed.raw, "listing") !== listingHash || !(await verifyListing(listed.raw))) return { ...fail("listing reference failed"), signaturesVerified };
+  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
+      !(await verifyListing(listed.raw, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
-    if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) => candidate.role === role && parties.some((party) => party.role === role && party.primaryClaim === candidate.primaryClaim)))) {
+    if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) =>
+      candidate.role === role && parties.some((party) =>
+        party.role === role && sameSigningIdentity(party.primaryClaim, candidate.primaryClaim))))) {
       return { ...fail("agreement party binding failed"), signaturesVerified };
+    }
+    if (!agreementMatchesListing(agreement, listed.raw)) {
+      return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });

@@ -38,6 +38,7 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.humanUrl, origin);
   assert.equal(manifest.agentCard, `${origin}/.well-known/agent.json`);
   assert.equal(manifest.catalog, `${origin}/api/dacs/listings`);
+  assert.equal(manifest.bundleBindings, `${origin}/api/dacs/bundles/{jobId}`);
   assert.equal(manifest.inspectService, `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
   assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
@@ -76,6 +77,7 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(document.openapi, "3.1.0");
   assert.ok(document.paths["/api/dacs/listings"]);
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
+  assert.ok(document.paths["/api/dacs/bundles/{jobId}"]);
   assert.ok(document.paths["/api/dacs/inspect-service/{listingId}/{version}"]);
   const inspectSeller = document.paths["/api/dacs/inspect-service/{listingId}/{version}"].get.parameters
     .find((parameter) => parameter.name === "seller");
