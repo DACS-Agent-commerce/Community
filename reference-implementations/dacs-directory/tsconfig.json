@@ -23,6 +23,9 @@
       "@/*": [
         "./*"
       ],
+      "@kynesyslabs/dacs": [
+        "./src/sdkVerification"
+      ],
       "@kynesyslabs/dacs/*": [
         "./vendor/dacs-sdk/dist/*/index"
       ]

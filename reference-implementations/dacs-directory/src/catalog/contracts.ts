@@ -190,7 +190,7 @@ export const catalogStatusSchema = {
           type: "object",
           required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
           properties: {
-            scope: { const: "listing-registration-binding" },
+            scope: { const: "listing-admission" },
             total: { type: "integer", minimum: 0 },
             byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
             query: {

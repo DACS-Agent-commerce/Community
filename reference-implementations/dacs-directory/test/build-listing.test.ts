@@ -96,6 +96,14 @@ test("publisher builds a verifiable metered listing with the AP2 rail/phase bind
       minTotal: { amount: "1", currency: "USD" },
     });
     assert.deepEqual(built.listing.acceptedRails, [{ railId: "ap2:stripe-paymentintents" }]);
+    assert.deepEqual(
+      (built.listing.offering as Record<string, unknown>).deliverable,
+      {
+        kind: "attested-payload",
+        payloadFormat: "application/json",
+        verificationMethod: { kind: "self-signed" },
+      },
+    );
     assert.deepEqual(built.listing.pipeline, [
       { kind: "negotiate-fixed-price" },
       { kind: "commit-agreement" },

@@ -11,15 +11,11 @@ import { useState } from "react";
 // Side-effect: patches the browser Buffer polyfill with base64url support
 // (the SDK decodes signature bytes with Buffer.from(x, "base64url")).
 import "@/src/shims/buffer";
-// Import ONLY pure modules: the package barrel re-exports createAgent, whose
-// lazy `import("../substrate")` gets statically traced by Next's bundler and
-// drags demosdk (node-only) into the client bundle. (SDK finding: a pure
-// "./verify" subpath export would fix this properly — see dacs-sdk#14.)
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import {
   verifyBundleCore,
   type BundleVerification,
-} from "@/vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+} from "@kynesyslabs/dacs";
 import {
   bundleMatchesRegisteredAnchor,
   hasRequiredBundleSignatures,
@@ -27,17 +23,17 @@ import {
   refsPassStrictPolicy,
   type ResolvedArtifact,
 } from "@/src/catalog/bundlePolicy";
+import { legacySessionAnchorName } from "@/src/catalog/legacySessionAnchorName";
 
 const keyFromDid = (did: string): Uint8Array | null => {
   const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
   return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
 };
 
-// Mirrors the SDK's sessionAnchorName (not exported publicly — dacs-sdk#14).
 const anchorName: Record<string, (jobId: string) => string> = {
-  "dacs-3-agreement": (j) => `dacs3:agreement:${j}`,
-  "dacs-4-evidence": (j) => `dacs4:evidence:${j}`,
-  "dacs-2-verifyresult": (j) => `dacs2:verifyrecord:${j}`,
+  "dacs-3-agreement": legacySessionAnchorName.agreement,
+  "dacs-4-evidence": legacySessionAnchorName.evidence,
+  "dacs-2-verifyresult": legacySessionAnchorName.vet,
 };
 
 async function fetchArtifact(params: string): Promise<Record<string, unknown> | null> {

@@ -6,7 +6,8 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
-the pinned SDK's legacy artifacts through program-name and content-shape detection. Registration adds a display
+the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
+listings must pass the pinned SDK's normative `isListing()` gate before admission. Registration adds a display
 name and (when owner-signed) the "owner-registered" badge — it is never a gate.
 
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
@@ -175,6 +176,13 @@ and response failures retain bounded retries. `STORAGE_NOT_FOUND` is operational
 diagnostic evidence only: under the current Demos mapping it is never authoritative
 DACS-5 absence evidence and cannot satisfy BB-8.
 
+The same status response exposes `listingRejectionDiagnostics` with scope
+`listing-admission`. It reports stable public-safe classes for normative shape,
+verification-method, signature, identity-presentation, owner/seller binding and
+declared-hash failures. For example, string-valued deliverable verification methods
+are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them to a
+registered structured verification-method variant.
+
 ## Discovery — three channels
 
 1. **Registration** (`/register` UI or `POST /api/dacs/register`): bounded pointer sets,
@@ -211,8 +219,11 @@ The Next app and the indexer speak to the node over **plain HTTP** (storage read
 unauthenticated GETs; `gcr_routine` uses hand-rolled timestamp-bound auth headers signed
 with the SDK's pure ed25519). demosdk is NOT a runtime dependency — its dependency tree
 (rubic bridge → pancakeswap/cetus/…) has unresolvable optionals in consumer installs and
-is bundler-hostile. The SDK's pure barrel does all cryptography, on both server and
-client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
+is bundler-hostile. SDK verification names resolve through one compatibility seam because
+the current top-level SDK barrel statically re-exports those optional rail modules; replace
+that seam when the SDK publishes a browser-safe verification subpath. The same verification
+code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow `node:util`
+shim over JSON-owned values, and base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
@@ -247,8 +258,9 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 `exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile reading,
 §6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. Current artifacts
-use directory-native, current-contract evidence-graph validation; the pinned SDK verifier
-is retained only for labelled legacy artifacts. DACS-2 tier derivation fails closed on
+pass the pinned SDK's normative Listing and component-signature APIs; current-contract
+evidence graphs use directory-native validation, while the SDK bundle verifier is retained
+for labelled legacy artifacts. DACS-2 tier derivation fails closed on
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.

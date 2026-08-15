@@ -1,6 +1,8 @@
 import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
-import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
-import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import {
+  isLegacyMvpAttestationBundle,
+} from "@kynesyslabs/dacs/artifacts";
+import type { BundleVerification } from "@kynesyslabs/dacs";
 
 import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
@@ -84,11 +86,11 @@ export function bundleMatchesRegisteredAnchor(
  * they must never be allowed to reassign somebody else's bundle/reputation.
  */
 export function bundleMatchesRegisteredDeal(
-  bundle: AttestationBundle | undefined,
+  bundle: BundleVerification["bundle"],
   deal: RegisteredDeal,
   catalogSeller: string,
 ): boolean {
-  if (!bundle || bundle.jobId !== deal.jobId) return false;
+  if (!isLegacyMvpAttestationBundle(bundle) || bundle.jobId !== deal.jobId) return false;
   const buyers = bundle.parties.filter((p) => p.role === "buyer");
   const sellers = bundle.parties.filter((p) => p.role === "seller");
   return buyers.length === 1 && sellers.length === 1 &&
@@ -129,7 +131,8 @@ function expectedArtifacts(verification: BundleVerification): ExpectedArtifact[]
   // The pinned compatibility SDK does not resolve or report amendments/ratings.
   // A nonempty set must fail closed here instead of receiving a partial "strict"
   // verdict. The current-profile evidence graph resolves ratingRefs separately.
-  if (!bundle || bundle.agreementRef.kind !== "dacs-3-agreement" ||
+  if (!isLegacyMvpAttestationBundle(bundle) ||
+      !bundle.agreementRef || bundle.agreementRef.kind !== "dacs-3-agreement" ||
       bundle.settlementEvidence.some((ref) => ref.kind !== "dacs-4-evidence") ||
       bundle.vetRecords.some((ref) => ref.kind !== "dacs-2-verifyresult") ||
       [extended?.amendments, extended?.ratingRefs].some((refs) => refs !== undefined &&
@@ -285,7 +288,7 @@ export function verifiedListingTerms(
 }
 
 export function bundleCategory(
-  bundle: AttestationBundle | undefined,
+  bundle: { listingRef: { listingId: string } } | undefined,
   categoriesByListing: Map<string, string>,
 ): string | undefined {
   return bundle ? categoriesByListing.get(String(bundle.listingRef.listingId)) : undefined;

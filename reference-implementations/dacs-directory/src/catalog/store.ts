@@ -386,7 +386,15 @@ export function pruneFailureHistory(now = Date.now(), batch = 500): number {
 export const failureHistorySize = (): number =>
   (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
-export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
+export type ListingRejectionCode =
+  | "SELLER_CLAIM_BINDING"
+  | "OWNER_CLAIM_BINDING"
+  | "NORMATIVE_LISTING_INVALID"
+  | "VERIFICATION_METHOD_INVALID"
+  | "LISTING_SIGNATURE_INVALID"
+  | "IDENTITY_PRESENTATION_INVALID"
+  | "LEGACY_LISTING_INVALID"
+  | "DECLARED_CONTENT_HASH_MISMATCH";
 
 export function recordListingRejection(
   locator: string,
@@ -484,7 +492,7 @@ export interface IndexerDiagnostics {
     items: PublicDeadLetterDiagnostic[];
   };
   listingRejectionDiagnostics: {
-    scope: "listing-registration-binding";
+    scope: "listing-admission";
     total: number;
     byCode: Record<string, number>;
     query: { locator: string | null; limit: number };
@@ -511,6 +519,12 @@ interface ListingRejectionRow {
 const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
   SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
   OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
+  NORMATIVE_LISTING_INVALID: "The current listing does not satisfy the pinned SDK's normative Listing validator.",
+  VERIFICATION_METHOD_INVALID: "The listing deliverable verification method is missing or is not a registered structured variant.",
+  LISTING_SIGNATURE_INVALID: "The listing signature is malformed, unsupported, unresolved, or cryptographically invalid.",
+  IDENTITY_PRESENTATION_INVALID: "The listing seller identity presentation could not be authenticated.",
+  LEGACY_LISTING_INVALID: "The artifact does not satisfy the SDK's explicit legacy Listing read profile.",
+  DECLARED_CONTENT_HASH_MISMATCH: "The discovery channel's declared listing content hash does not match the verified artifact.",
 };
 
 const publicFailure = (code: string): { code: string; message: string } =>
@@ -595,7 +609,7 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
     },
     listingRejectionDiagnostics: {
-      scope: "listing-registration-binding",
+      scope: "listing-admission",
       total: listingRejectionTotal,
       byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
       query: { locator: locator ?? null, limit },

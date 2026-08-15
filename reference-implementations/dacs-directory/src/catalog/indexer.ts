@@ -18,14 +18,11 @@
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
-// verifyBundleCore has no pure subpath export (dacs-sdk#14) — vendor path.
-import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-// The SDK doesn't export sessionAnchorName from its public barrel
-// (dacs-sdk#14) — reach into the vendored build.
-import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
+import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
+import { verifyBundleCore } from "@kynesyslabs/dacs";
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
-import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import { findValidListingRevocation, ownerClaim, verifyListingResult } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -48,6 +45,7 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import { legacySessionAnchorName } from "./legacySessionAnchorName.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
@@ -121,7 +119,7 @@ export async function indexRegistration(
     const explorerFor = (chainType: string, address: string): string | undefined =>
       chainType === "evm" ? `https://etherscan.io/address/${address}` :
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
-    cci = record.claims.map((c) => c.kind === "web2"
+    cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
           proofUrl: proofFor(c.platform, c.handle), linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
@@ -139,8 +137,12 @@ export async function indexRegistration(
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
-    const verified = await verifyListing(anchored.data);
-    if (!verified) continue;
+    const verification = await verifyListingResult(anchored.data);
+    if (!verification.ok) {
+      recordListingRejection(anchor, reg.primaryClaim, verification.code);
+      continue;
+    }
+    const verified = verification.value;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
@@ -151,9 +153,12 @@ export async function indexRegistration(
       recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
       continue;
     }
-    clearListingRejection(anchor, reg.primaryClaim);
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    if (declaredHash && declaredHash !== verified.contentHash) continue;
+    if (declaredHash && declaredHash !== verified.contentHash) {
+      recordListingRejection(anchor, reg.primaryClaim, "DECLARED_CONTENT_HASH_MISMATCH");
+      continue;
+    }
+    clearListingRejection(anchor, reg.primaryClaim);
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
     if (!listingId) continue;
@@ -369,9 +374,9 @@ export async function indexRegistration(
           return raw;
         },
         resolveRef: async (kind, jobId) => {
-          const name = kind === "dacs-3-agreement" ? sessionAnchorName.agreement(jobId)
-            : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
-              : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
+          const name = kind === "dacs-3-agreement" ? legacySessionAnchorName.agreement(jobId)
+            : kind === "dacs-4-evidence" ? legacySessionAnchorName.evidence(jobId)
+              : kind === "dacs-2-verifyresult" ? legacySessionAnchorName.vet(jobId) : null;
           if (!name) return null;
           const address = findProgramAddress(deal.owners.buyer, name) ?? deriveAnchorAddress(deal.owners.buyer, name);
           const raw = await readAnchor(address);
@@ -382,7 +387,9 @@ export async function indexRegistration(
           (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
       }).catch(() => null);
-      const bundle = verification?.bundle;
+      const bundle = verification && isLegacyMvpAttestationBundle(verification.bundle)
+        ? verification.bundle
+        : undefined;
       const signaturesOk = verification ? hasRequiredBundleSignatures(
         verification,
         rawBundle,

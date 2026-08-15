@@ -40,7 +40,11 @@ const scope = {
     description: "A deterministic verified service.",
     category: "services.other",
     tags: [],
-    deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+    deliverable: {
+      kind: "attested-payload",
+      payloadFormat: "application/json",
+      verificationMethod: { kind: "self-signed" },
+    },
   },
   buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
   pipeline: [
