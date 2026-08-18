@@ -6,7 +6,11 @@ import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/cat
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
+import {
+  indexRegistration,
+  listingBindingRejection,
+  listingIsCurrentlyEffective,
+} from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { logicalBundleAddress } from "../src/catalog/bundleBinding.js";
@@ -214,6 +218,15 @@ test("listing binding compares canonical §6.3.1 forms, not lowercased strings",
   );
   // A registration stored in a legacy non-canonical form never binds.
   assert.equal(listingBindingRejection(dids[1], owner, `0x${hexTail}`), "SELLER_CLAIM_BINDING");
+});
+
+test("listing discovery enforces both edges of the signed validity window", () => {
+  const now = 1_000;
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now + 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now - 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({}, now), true, "explicit legacy Listings have no validity field");
 });
 
 function dealRecord(

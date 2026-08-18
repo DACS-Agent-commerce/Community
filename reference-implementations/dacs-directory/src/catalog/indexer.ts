@@ -88,6 +88,20 @@ export function listingBindingRejection(
   return null;
 }
 
+/** DACS-1 reader step 3: only currently effective Listings are discoverable. */
+export function listingIsCurrentlyEffective(
+  scope: Record<string, unknown>,
+  now: number,
+): boolean {
+  const validity = scope.validity && typeof scope.validity === "object" && !Array.isArray(scope.validity)
+    ? scope.validity as { notBefore?: unknown; notAfter?: unknown }
+    : undefined;
+  if (!validity) return true; // Explicit legacy profile has no validity window.
+  if (typeof validity.notBefore === "number" && now < validity.notBefore) return false;
+  if (typeof validity.notAfter === "number" && now > validity.notAfter) return false;
+  return true;
+}
+
 /**
  * Index one registration into a verified SellerRecord.
  *
@@ -166,13 +180,12 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    const validity = scope.validity as { notAfter?: unknown } | undefined;
-    if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
+    if (!listingIsCurrentlyEffective(scope, now)) continue;
     const storedCandidates = revocations[verified.contentHash];
     const revocationAddresses = Array.isArray(storedCandidates)
       ? storedCandidates
       : storedCandidates ? [storedCandidates] : [];
-    const revocationBinding = await findValidListingRevocation(
+    const revocation = await findValidListingRevocation(
       revocationAddresses,
       verified,
       version,
@@ -210,8 +223,8 @@ export async function indexRegistration(
         ? scope.buyerRequirement as Record<string, unknown> : undefined,
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
-      status: revocationBinding ? "revoked" : "active",
-      ...(revocationBinding ? { revocationBinding } : {}),
+      status: revocation ? "revoked" : "active",
+      ...(revocation ? { revocation } : {}),
       catalogObservedAt: now,
     });
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });

@@ -4,8 +4,14 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, Registration, ScanState } from "./types.js";
+import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { deriveSellerReputation } from "./reputation.js";
+import {
+  LISTING_REJECTION_MESSAGES,
+  type ListingRejectionCode,
+} from "./listingAdmission.js";
+
+export type { ListingRejectionCode } from "./listingAdmission.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -169,6 +175,30 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
     }),
   });
   setJson("sr2-anchor-schema-version", 2);
+})();
+
+// Early Directory builds exposed the internal name `revocationBinding` in
+// ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
+// every public surface and restart path now emits the normative wire field.
+if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
+  type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => {
+        const legacy = listing as LegacyListingSummary;
+        const { revocationBinding, ...current } = legacy;
+        const revocation = current.revocation ?? revocationBinding;
+        return {
+          ...current,
+          ...(current.status === "revoked" && revocation ? { revocation } : {}),
+        };
+      }),
+    })),
+  });
+  setJson("listing-summary-revocation-schema-version", 1);
 })();
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -386,16 +416,6 @@ export function pruneFailureHistory(now = Date.now(), batch = 500): number {
 export const failureHistorySize = (): number =>
   (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
-export type ListingRejectionCode =
-  | "SELLER_CLAIM_BINDING"
-  | "OWNER_CLAIM_BINDING"
-  | "NORMATIVE_LISTING_INVALID"
-  | "VERIFICATION_METHOD_INVALID"
-  | "LISTING_SIGNATURE_INVALID"
-  | "IDENTITY_PRESENTATION_INVALID"
-  | "LEGACY_LISTING_INVALID"
-  | "DECLARED_CONTENT_HASH_MISMATCH";
-
 export function recordListingRejection(
   locator: string,
   registrationClaim: string,
@@ -515,17 +535,6 @@ interface ListingRejectionRow {
   first_seen_at: number;
   last_seen_at: number;
 }
-
-const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
-  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
-  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
-  NORMATIVE_LISTING_INVALID: "The current listing does not satisfy the pinned SDK's normative Listing validator.",
-  VERIFICATION_METHOD_INVALID: "The listing deliverable verification method is missing or is not a registered structured variant.",
-  LISTING_SIGNATURE_INVALID: "The listing signature is malformed, unsupported, unresolved, or cryptographically invalid.",
-  IDENTITY_PRESENTATION_INVALID: "The listing seller identity presentation could not be authenticated.",
-  LEGACY_LISTING_INVALID: "The artifact does not satisfy the SDK's explicit legacy Listing read profile.",
-  DECLARED_CONTENT_HASH_MISMATCH: "The discovery channel's declared listing content hash does not match the verified artifact.",
-};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]

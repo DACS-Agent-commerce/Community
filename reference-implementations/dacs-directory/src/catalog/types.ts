@@ -118,7 +118,7 @@ export interface ListingSummary {
   terms?: Record<string, unknown>;
   status: "active" | "revoked";
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
-  revocationBinding?: RevocationBinding;
+  revocation?: RevocationBinding;
   catalogObservedAt: number;
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;

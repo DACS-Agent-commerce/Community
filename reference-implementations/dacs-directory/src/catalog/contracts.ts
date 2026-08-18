@@ -1,4 +1,5 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
@@ -49,7 +50,7 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationBinding: {
+    revocation: {
       type: "object",
       required: [
         "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
@@ -84,8 +85,8 @@ export const listingSummarySchema = {
   },
   allOf: [{
     if: { properties: { status: { const: "revoked" } }, required: ["status"] },
-    then: { required: ["revocationBinding"] },
-    else: { not: { required: ["revocationBinding"] } },
+    then: { required: ["revocation"] },
+    else: { not: { required: ["revocation"] } },
   }],
 } as const;
 
@@ -112,8 +113,8 @@ export const listingRejectionDiagnosticSchema = {
   required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
-    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    code: { enum: LISTING_REJECTION_CODES },
+    message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
     occurrences: { type: "integer", minimum: 1 },
     firstSeenAt: { type: "integer", minimum: 0 },
     lastSeenAt: { type: "integer", minimum: 0 },
