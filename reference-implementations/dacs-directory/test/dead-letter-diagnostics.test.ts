@@ -111,8 +111,14 @@ test("storage cause diagnostics are actionable without claiming DACS absence", (
 test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
   const target = locator("7");
   const claim = `did:demos:agent:${"7".repeat(64)}`;
-  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
-  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING", {
+    listingId: "seller-service",
+    listingVersion: 3,
+  });
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING", {
+    listingId: "seller-service",
+    listingVersion: 3,
+  });
 
   const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target });
   assert.equal(diagnostics.listingRejectionDiagnostics.scope, "listing-admission");
@@ -121,6 +127,8 @@ test("listing binding rejections are persistent, public-safe, filterable, and re
   assert.equal(diagnostics.listingRejectionDiagnostics.byCode.OWNER_CLAIM_BINDING, 1);
   assert.deepEqual(diagnostics.listingRejectionDiagnostics.items[0], {
     locator: target,
+    listingId: "seller-service",
+    listingVersion: 3,
     code: "OWNER_CLAIM_BINDING",
     message: "The listing anchor owner does not match the registration claim.",
     occurrences: 2,

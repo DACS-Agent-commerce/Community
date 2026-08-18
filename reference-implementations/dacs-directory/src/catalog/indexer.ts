@@ -23,6 +23,8 @@ import { verifyBundleCore } from "@kynesyslabs/dacs";
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import { findValidListingRevocation, ownerClaim, verifyListingResult } from "./listingVerification.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import { listingDiagnosticCoordinates } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -153,7 +155,12 @@ export async function indexRegistration(
     if (!anchored) continue;
     const verification = await verifyListingResult(anchored.data);
     if (!verification.ok) {
-      recordListingRejection(anchor, reg.primaryClaim, verification.code);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        verification.code,
+        listingDiagnosticCoordinates(anchored.data),
+      );
       continue;
     }
     const verified = verification.value;
@@ -164,12 +171,22 @@ export async function indexRegistration(
       reg.primaryClaim,
     );
     if (bindingRejection) {
-      recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        bindingRejection,
+        listingDiagnosticCoordinates(verified.scope),
+      );
       continue;
     }
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
     if (declaredHash && declaredHash !== verified.contentHash) {
-      recordListingRejection(anchor, reg.primaryClaim, "DECLARED_CONTENT_HASH_MISMATCH");
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        "DECLARED_CONTENT_HASH_MISMATCH",
+        listingDiagnosticCoordinates(verified.scope),
+      );
       continue;
     }
     clearListingRejection(anchor, reg.primaryClaim);
@@ -226,6 +243,7 @@ export async function indexRegistration(
       status: revocation ? "revoked" : "active",
       ...(revocation ? { revocation } : {}),
       catalogObservedAt: now,
+      transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
   }

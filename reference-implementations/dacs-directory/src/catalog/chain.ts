@@ -38,6 +38,11 @@ export interface AnchorRecord {
   data: Record<string, unknown>;
   owner?: string;
   programName?: string;
+  storageAddress?: string;
+  metadata?: Record<string, unknown>;
+  createdByTx?: string;
+  lastModifiedByTx?: string;
+  interactionTxs?: string[];
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
@@ -53,9 +58,23 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
       data?: Record<string, unknown>;
       owner?: string;
       programName?: string;
+      storageAddress?: string;
+      metadata?: Record<string, unknown>;
+      createdByTx?: string;
+      lastModifiedByTx?: string;
+      interactionTxs?: string[];
     };
     return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data)
-      ? { data: json.data, owner: json.owner, programName: json.programName }
+      ? {
+          data: json.data,
+          owner: json.owner,
+          programName: json.programName,
+          storageAddress: json.storageAddress,
+          metadata: json.metadata,
+          createdByTx: json.createdByTx,
+          lastModifiedByTx: json.lastModifiedByTx,
+          interactionTxs: json.interactionTxs,
+        }
       : null;
   } catch {
     return null;
@@ -158,12 +177,26 @@ export async function resolveOwnedAnchorByName(
         data?: Record<string, unknown>;
         owner?: string;
         programName?: string;
+        storageAddress?: string;
+        metadata?: Record<string, unknown>;
+        createdByTx?: string;
+        lastModifiedByTx?: string;
+        interactionTxs?: string[];
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
         body.programName === programName
       ) {
-        record = { data: body.data, owner: body.owner, programName: body.programName };
+        record = {
+          data: body.data,
+          owner: body.owner,
+          programName: body.programName,
+          storageAddress: body.storageAddress,
+          metadata: body.metadata,
+          createdByTx: body.createdByTx,
+          lastModifiedByTx: body.lastModifiedByTx,
+          interactionTxs: body.interactionTxs,
+        };
       }
     } catch { /* classified below */ }
     if (!record) {

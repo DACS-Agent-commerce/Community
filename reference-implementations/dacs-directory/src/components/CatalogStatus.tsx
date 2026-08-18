@@ -11,6 +11,18 @@ interface Status {
   syncedToTx: number;
   chainLatestTx: number | null;
   txsBehind: number | null;
+  indexer?: {
+    listingRejectionDiagnostics?: {
+      total: number;
+      items: Array<{
+        locator: string;
+        listingId?: string;
+        listingVersion?: number;
+        code: string;
+        message: string;
+      }>;
+    };
+  };
 }
 
 function ago(ts: number): string {
@@ -49,17 +61,35 @@ export default function CatalogStatus() {
         ? "in sync with chain"
         : `${behind.toLocaleString()} tx${behind === 1 ? "" : "s"} behind chain`;
 
+  const rejected = status.indexer?.listingRejectionDiagnostics;
   return (
-    <span
-      className={`sync-chip ${cls}`}
-      role="status"
-      aria-live="polite"
-      title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
-        status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
-      } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
-    >
-      <span className="sync-dot" />
-      {label} · indexed {ago(status.generatedAt)}
-    </span>
+    <div className="catalog-status">
+      <span
+        className={`sync-chip ${cls}`}
+        role="status"
+        aria-live="polite"
+        title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
+          status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
+        } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
+      >
+        <span className="sync-dot" />
+        {label} · indexed {ago(status.generatedAt)}
+      </span>
+      {rejected && rejected.total > 0 && (
+        <details className="listing-rejection-notice">
+          <summary>{rejected.total.toLocaleString()} listing candidate{rejected.total === 1 ? "" : "s"} need seller attention</summary>
+          <p>These candidates are excluded from discovery. Republish a corrected version with the current SDK, then let the Directory reindex it.</p>
+          <ul>
+            {rejected.items.map((item) => (
+              <li key={`${item.locator}:${item.code}`}>
+                <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
+                <span>{item.message}</span>
+                <code>{item.code}</code>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }

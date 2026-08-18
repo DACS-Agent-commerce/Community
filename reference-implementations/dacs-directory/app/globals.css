@@ -248,6 +248,7 @@ pre.artifact {
 
 /* ── Catalog-freshness chip (home, top right) ─────────────────────────────── */
 .h1-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.catalog-status { display: grid; justify-items: end; gap: 8px; max-width: min(100%, 720px); }
 .sync-chip {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 0.75rem; font-weight: 600; color: var(--text-secondary);
@@ -260,6 +261,16 @@ pre.artifact {
 .sync-chip.warn .sync-dot { background: #d97706; }
 .sync-chip.warn { color: var(--text-primary); }
 .sync-chip.err .sync-dot { background: var(--red-strong); }
+.listing-rejection-notice {
+  width: min(100%, 720px); padding: 10px 12px; border: 1px solid var(--amber-border, #f3c67a);
+  border-radius: var(--radius-card); background: var(--amber-soft, #fff8e8); color: var(--text-primary);
+  font-size: .78rem;
+}
+.listing-rejection-notice summary { cursor: pointer; font-weight: 700; }
+.listing-rejection-notice p { margin: 8px 0; color: var(--text-secondary); }
+.listing-rejection-notice ul { display: grid; gap: 8px; margin: 8px 0 0; padding-left: 18px; }
+.listing-rejection-notice li span { display: block; color: var(--text-secondary); margin: 2px 0; }
+.listing-rejection-notice code { font-size: .68rem; }
 .sync-dot.pulse { animation: sync-pulse 1.1s ease-in-out infinite; }
 @keyframes sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .sync-refresh {

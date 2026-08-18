@@ -8,7 +8,7 @@ export const listingSummarySchema = {
   $id: "/schemas/listing-summary.schema.json",
   title: "DACS Directory ListingSummary",
   type: "object",
-  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt"],
+  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt", "transactionReadiness"],
   properties: {
     listingId: { type: "string", minLength: 1 },
     version: { type: "integer", minimum: 1 },
@@ -71,6 +71,16 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
+    transactionReadiness: {
+      type: "object",
+      required: ["disposition", "reason"],
+      additionalProperties: false,
+      properties: {
+        disposition: { const: "unassessed" },
+        reason: { type: "string", minLength: 1 },
+      },
+      description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
+    },
     reputationHint: { type: "object" },
     inspection: {
       type: "object",
@@ -113,6 +123,8 @@ export const listingRejectionDiagnosticSchema = {
   required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
+    listingId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" },
+    listingVersion: { type: "integer", minimum: 1 },
     code: { enum: LISTING_REJECTION_CODES },
     message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
     occurrences: { type: "integer", minimum: 1 },

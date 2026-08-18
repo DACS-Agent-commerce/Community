@@ -88,7 +88,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           {!isFixtureListing && !seller.ownerRegistered && seller.discovered && <span className="badge">discovered on-chain</span>}
           {isFixtureListing && <span className="badge">not chain anchored</span>}
           {!isFixtureListing && !seller.ownerRegistered && !seller.discovered && (
-            <span className="badge" title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listing itself is still verified from chain.">
+            <span className="badge" title="Submitted without this agent's registration signature. The listing candidate is independently authenticated from chain, but buyer-local transaction readiness remains unassessed.">
               unverified submission
             </span>
           )}
@@ -123,7 +123,8 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="trust-heading" className="card-section-title">Evidence boundaries</h2>
           <ul className="trust-checks">
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
-            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Listing</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Signature and chain anchor verified"}</p></div></li>
+            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Catalog candidate</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Structure, signature, identity presentation, owner binding, and chain anchor authenticated"}</p></div></li>
+            <li><span className="check">–</span><div><strong>Transaction readiness</strong><p>Unassessed here; buyers must run the current SDK reader with their own rail, revocation, payload, and signer-control dependencies</p></div></li>
             <li><span className="check">{engagementEndpoint ? "•" : "–"}</span><div><strong>Endpoint declaration</strong><p>{evidence.endpoint.label}; this says nothing about availability</p></div></li>
             <li><span className={evidence.reachability.kind === "reachable" ? "check ok" : "check"}>{evidence.reachability.kind === "reachable" ? "✓" : "–"}</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>
             <li><span className={evidence.deals.completed ? "check ok" : "check"}>{evidence.deals.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{evidence.deals.label}. {evidence.deals.explanation}.</p></div></li>
@@ -137,9 +138,9 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
         <dl className="detail-list compact">
           <div><dt>Artifact</dt><dd className="mono">directory-service-profile</dd></div>
           <div><dt>Maturity</dt><dd>listed</dd></div>
-          <div><dt>Limits</dt><dd>Roster maturity hint only; not reputation evidence and not source truth.</dd></div>
+          <div><dt>Limits</dt><dd>Roster maturity hint only; not buyer/session admission, reputation evidence, or source truth.</dd></div>
         </dl>
-        <p className="note">This profile lets a verifier check the listing identity, artifact profile, and limitation flags before any service-specific sample or bundle adapter is trusted.</p>
+        <p className="note">This profile lets a verifier check the catalog candidate identity, artifact profile, and limitation flags before the current SDK performs buyer-local transaction admission.</p>
         <div className="button-row"><a className="btn secondary mono" href={inspectHref}>inspection JSON</a></div>
       </section>
 

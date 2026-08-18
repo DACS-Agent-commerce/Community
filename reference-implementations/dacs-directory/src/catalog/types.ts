@@ -122,9 +122,20 @@ export interface ListingSummary {
   catalogObservedAt: number;
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
+  /**
+   * Catalog admission is not buyer/session admission. A buyer must dereference
+   * the signed artifact and run the current SDK reader with its own policy and
+   * runtime dependencies before transacting.
+   */
+  transactionReadiness?: DirectoryTransactionReadiness;
   reputationHint?: ReputationHint;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
+}
+
+export interface DirectoryTransactionReadiness {
+  disposition: "unassessed";
+  reason: string;
 }
 
 export interface ReachabilityHint {

@@ -1,6 +1,6 @@
 /**
  * POST /api/dacs/prepare-registration — issue a fresh, content-bound owner
- * signing message for an already verified listing pointer.
+ * signing message for an already finalized and authenticated listing pointer.
  *
  * The browser can safely resume registration after a reload or an expired
  * signature without rebuilding or rebroadcasting the on-chain listing.

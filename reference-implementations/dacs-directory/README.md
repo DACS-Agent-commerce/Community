@@ -7,7 +7,9 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
 the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
-listings must pass the pinned SDK's normative `isListing()` gate before admission. Registration adds a display
+listings must pass the pinned SDK's normative `isListing()` gate before catalog admission. They are exposed as
+authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
+rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display
 name and (when owner-signed) the "owner-registered" badge — it is never a gate.
 
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
@@ -21,7 +23,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Surface | Spec | How |
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
-| Seller publication | DACS-1 §6.3.4 | `/register` builds and wallet-signs a current Listing, creates its StorageProgram with the live next-nonce/empty-salt mapping from SDK #70, persists non-secret recovery coordinates before broadcast, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
+| Seller publication | DACS-1 §6.3.4 | `/register` uses the SDK rail resolver over release-authenticated PA-1 definitions, refuses attested-payload methods whose seller-runtime production capability it cannot prove, shows the exact server-built unsigned Listing before signature, creates its StorageProgram with the current SDK name/next-nonce/empty-salt mapping, persists non-secret recovery coordinates before broadcast, obtains a portable BFT-finalized `AnchorReceipt`, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
 | Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
@@ -176,12 +178,31 @@ and response failures retain bounded retries. `STORAGE_NOT_FOUND` is operational
 diagnostic evidence only: under the current Demos mapping it is never authoritative
 DACS-5 absence evidence and cannot satisfy BB-8.
 
-The same status response exposes `listingRejectionDiagnostics` with scope
+The same status response and the catalog UI expose `listingRejectionDiagnostics` with scope
 `listing-admission`. It reports stable public-safe classes for normative shape,
 verification-method, signature, identity-presentation, owner/seller binding and
-declared-hash failures. For example, string-valued deliverable verification methods
+declared-hash failures, including bounded listing ID/version coordinates when they can
+be safely recovered and explicit republishing guidance. For example, string-valued deliverable verification methods
 are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them to a
 registered structured verification-method variant.
+
+Before replacing malformed live Listings, run the read-only deployment acceptance check
+against the deployed Directory, Demos RPC, and gateway. The replacement manifest must map
+all three known old listing IDs to their new anchors/versions, the independent verifier's
+supported payload-method kinds, and the corresponding executable gateway profile IDs:
+
+```bash
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.example \
+NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.example \
+DACS_LISTING_UPGRADE_REPLACEMENTS='[...]' \
+npm run check:listing-upgrade
+```
+
+It proves the actual old anchor bytes fail with `VERIFICATION_METHOD_INVALID`, their public
+diagnostics carry the affected listing coordinates, each replacement passes the complete
+SDK reader, the reindexed catalog exposes the exact replacement pin with transaction
+readiness still unassessed, and `/try` can resolve an executable gateway profile. It never
+writes, reindexes, purchases, or invokes an agent.
 
 ## Discovery — three channels
 
@@ -235,10 +256,16 @@ shim over JSON-owned values, and base64url-patched Buffer).
   `DACS_ADMIN_TOKEN` as a Bearer token. Run indexing from cron/CI, not public UI.
 - **Wallet publication uses three signatures**: the embedded IdentityBundle presentation,
   the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
-  Before any StorageProgram broadcast, the browser persists the public signed artifact,
-  exact native/write coordinates and unsigned registration. A reload re-verifies that
-  same anchor and refreshes only the catalog-pointer signature; it never creates another
-  listing version or re-sends a chain transaction automatically.
+  The identity signature is used to build the exact unsigned Listing shown on screen; no
+  broadcastable transaction is returned until the wallet signs those exact bytes. Before
+  any StorageProgram broadcast, the browser persists the public signed artifact, exact
+  native/write coordinates and unsigned registration. After broadcast, registration waits
+  for canonical transaction inclusion, a BFT-confirmed block, portable finalized
+  `AnchorReceipt`, and independent native readback. A reload re-verifies that same anchor
+  and refreshes only the catalog-pointer signature; it never creates another listing version
+  or re-sends a chain transaction automatically. The browser publisher intentionally omits
+  attested-payload delivery: publish that shape through the seller runtime's current SDK so
+  DPA-1 can prove the exact producer capability.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
@@ -256,9 +283,10 @@ shim over JSON-owned values, and base64url-patched Buffer).
 
 ## DACS surface / conformance declaration
 
-`exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile reading,
+`exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile catalog reading,
 §6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. Current artifacts
-pass the pinned SDK's normative Listing and component-signature APIs; current-contract
+pass the pinned SDK's normative shape and component-signature APIs and are explicitly
+labelled transaction-readiness-unassessed until a buyer runs the complete SDK reader; current-contract
 evidence graphs use directory-native validation, while the SDK bundle verifier is retained
 for labelled legacy artifacts. DACS-2 tier derivation fails closed on
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
