@@ -36,9 +36,11 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
+import { GATEWAY_DEMO_RECOVERY_MESSAGE, gatewayDemoRecoveryOnly } from "./gateway-demo-recovery.js";
 import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispatchDecision, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
+const GATEWAY_DEMO_RECOVERY_ONLY = gatewayDemoRecoveryOnly();
 const PROCUREMENT_RUN_KEY = "dacs-try:procurement-run";
 const PROFILE_AGENT: Record<string, { name: string; label: string }> = {
   "oracle-auto-accept": { name: "oracle-desk", label: "Oracle Desk" },
@@ -672,6 +674,10 @@ export default function TryDacs() {
   }
 
   async function runAgent() {
+    if (GATEWAY_DEMO_RECOVERY_ONLY) {
+      setError(GATEWAY_DEMO_RECOVERY_MESSAGE);
+      return;
+    }
     if (!plan) return;
     let parsed: Record<string, unknown>;
     try { parsed = parseAgentInput(inputValue); }
@@ -1058,6 +1064,15 @@ export default function TryDacs() {
         <p>Choose a real procurement route and how to pay: native DEM on Demos, or USDC through x402 on Base Sepolia. The Butler verifies the complete deal and exposes every receipt as it happens.</p>
       </section>
 
+      {GATEWAY_DEMO_RECOVERY_ONLY && (
+        <section className="resume-banner" data-testid="gateway-demo-recovery-only" role="status">
+          <div>
+            <strong>New purchases are paused during the demo move</strong>
+            <p>{GATEWAY_DEMO_RECOVERY_MESSAGE}</p>
+          </div>
+        </section>
+      )}
+
       {/* Suppress the banner only when THIS tab is already tracking the
           record's job. A record with no jobId (the reload-raced-the-POST
           case) must always surface — that is the exact state it protects. */}
@@ -1091,7 +1106,7 @@ export default function TryDacs() {
               <div className="picker-grid">{agents.map((agent) => {
                 const profile = profiles.find((candidate) => procurementProfileCard(candidate).name === agent.name);
                 const liveRails = profile?.paymentRails.filter((rail) => profile.railReadiness[rail]?.executable).map(paymentRailLabel).join(" · ");
-                return <button key={agent.name} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{profile ? procurementModeLabel(profile.mode) : agent.summary}</small><em>{profile ? `${liveRails} · ${profile.timing.healthyMinSec}–${profile.timing.healthyMaxSec}s` : "live"}</em></div><i>→</i></button>;
+                return <button key={agent.name} disabled={GATEWAY_DEMO_RECOVERY_ONLY} onClick={() => selectAgent(agent)}><span>{agent.label.slice(0, 1)}</span><div><strong>{agent.label}</strong><small>{profile ? procurementModeLabel(profile.mode) : agent.summary}</small><em>{GATEWAY_DEMO_RECOVERY_ONLY ? "new runs paused" : profile ? `${liveRails} · ${profile.timing.healthyMinSec}–${profile.timing.healthyMaxSec}s` : "live"}</em></div><i>→</i></button>;
               })}</div>
             </div>
           ) : phase === "error" && plan ? (
@@ -1099,7 +1114,7 @@ export default function TryDacs() {
               {isProcurementSel && procurementJob?.status === "failed" && procurementJob.failedBeforePayment === true ? (
                 <>
                   <div><strong>Procurement failed before any payment</strong><small>The gateway confirms no money moved (its reason is shown above). Retrying starts a fresh purchase attempt with a new idempotency key.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry the purchase <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="ghost-btn" onClick={() => { setPhase("ready"); setProcurementJob(null); setError(""); }}>Edit details</button><button className="btn try-primary" disabled={GATEWAY_DEMO_RECOVERY_ONLY} onClick={runAgent}>{GATEWAY_DEMO_RECOVERY_ONLY ? "New purchases paused" : "Retry the purchase"} <span>→</span></button></div>
                 </>
               ) : isProcurementSel && procurementJob?.status === "failed" ? (
                 <>
@@ -1114,18 +1129,18 @@ export default function TryDacs() {
               ) : isProcurementSel ? (
                 <>
                   <div><strong>Procurement stopped safely</strong><small>Retrying reuses this run’s idempotency key, so the gateway resumes the existing job rather than starting a second paid purchase.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="btn try-primary" onClick={runAgent}>Retry this run <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); setError(""); setProcurementJob(null); }}>Choose another procurement</button><button className="btn try-primary" disabled={GATEWAY_DEMO_RECOVERY_ONLY} onClick={runAgent}>{GATEWAY_DEMO_RECOVERY_ONLY ? "Use Check & resume" : "Retry this run"} <span>→</span></button></div>
                 </>
               ) : (
                 <>
                   <div><strong>{plan.butler.label} stopped safely</strong><small>Your entered job details are still available.</small></div>
-                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); }}>Choose another agent</button><button className="ghost-btn" onClick={() => setPhase("ready")}>Edit details</button><button className="btn try-primary" onClick={runAgent}>Retry this agent <span>→</span></button></div>
+                  <div className="job-actions"><button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setError(""); }}>Choose another agent</button><button className="ghost-btn" onClick={() => setPhase("ready")}>Edit details</button><button className="btn try-primary" disabled={GATEWAY_DEMO_RECOVERY_ONLY} onClick={runAgent}>{GATEWAY_DEMO_RECOVERY_ONLY ? "New runs paused" : "Retry this agent"} <span>→</span></button></div>
                 </>
               )}
             </div>
           ) : plan && phase === "ready" && selected ? (
             <div className="job-box">
-              <div className="job-head"><div><span>{selectedProfile ? procurementModeLabel(selectedProfile.mode) : "Job details"}</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid ? "ok" : "err"}`}>{inputIsValid ? `ready · ${paymentRailLabel(selectedPaymentRail)}` : "fields need attention"}</span></div>
+              <div className="job-head"><div><span>{selectedProfile ? procurementModeLabel(selectedProfile.mode) : "Job details"}</span><small>{plan.inputNote}</small></div><span className={`badge ${inputIsValid && !GATEWAY_DEMO_RECOVERY_ONLY ? "ok" : "err"}`}>{GATEWAY_DEMO_RECOVERY_ONLY ? "recovery only" : inputIsValid ? `ready · ${paymentRailLabel(selectedPaymentRail)}` : "fields need attention"}</span></div>
               {selectedProfile && <div className="rail-picker" role="group" aria-label="Payment rail">
                 <div className="rail-picker-head"><strong>Choose payment rail</strong><span>This changes the real asset and settlement network.</span></div>
                 <div className="rail-options">{selectedProfile.paymentRails.map((rail) => {
@@ -1148,7 +1163,7 @@ export default function TryDacs() {
               <div className="job-actions">
                 <button className="ghost-btn" onClick={() => { setPhase("idle"); setPlan(null); setSelectedProfileId(null); }}>Start over</button>
                 <button className="ghost-btn" onClick={loadExample}>Load example</button>
-                <button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid}>Run the full deal <span>→</span></button>
+                <button className="btn try-primary" onClick={runAgent} disabled={!inputIsValid || GATEWAY_DEMO_RECOVERY_ONLY}>{GATEWAY_DEMO_RECOVERY_ONLY ? "New purchases paused" : "Run the full deal"} <span>→</span></button>
               </div>
             </div>
           ) : phase === "running" && isProcurementSel ? (
@@ -1222,7 +1237,7 @@ export default function TryDacs() {
 
       <section className="try-agents"><div className="try-section-head"><div><span>THREE WAYS TO PROCURE</span><h2>Production agents, DEM or x402, full DACS</h2></div><p>Each route uses the gateway’s rail-specific live schema and runs Identify → Vet → Negotiate → Settle → Verify. Sealed tender stays hidden until its DACS-3 role model is released.</p></div><div className="try-agent-grid">{profiles.map((profile, index) => {
         const agent = procurementProfileCard(profile, defaultPaymentRail(profile));
-        return <button key={profile.id} onClick={() => selectAgent(agent)}><span>0{index + 1} · {procurementModeLabel(profile.mode)}</span><strong>{profile.agentName}</strong><p>{profile.summary}</p><i>Run this procurement →</i></button>;
+        return <button key={profile.id} disabled={GATEWAY_DEMO_RECOVERY_ONLY} onClick={() => selectAgent(agent)}><span>0{index + 1} · {procurementModeLabel(profile.mode)}</span><strong>{profile.agentName}</strong><p>{profile.summary}</p><i>{GATEWAY_DEMO_RECOVERY_ONLY ? "New runs paused" : "Run this procurement →"}</i></button>;
       })}</div></section>
     </div>
   );

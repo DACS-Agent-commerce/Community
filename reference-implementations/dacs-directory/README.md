@@ -125,6 +125,7 @@ vendor directory.
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 | `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
+| `NEXT_PUBLIC_GATEWAY_DEMO_RECOVERY_ONLY` | Temporary drain only | Set to exact `1` only after the gateway-owned demo is live. The old `/try` page blocks every fresh run but preserves origin-scoped `Check & resume` recovery. Remove the flag by deploying the gateway-demo removal after the drain window. |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
