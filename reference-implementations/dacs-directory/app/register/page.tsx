@@ -20,7 +20,6 @@ import {
 
 const WALLET_URL = "https://chromewebstore.google.com/detail/demos-wallet/nefongcpmdahjaijjkihgieiamoahcoo";
 const DELIVERY_OPTIONS = [
-  { id: "deliver-attested-payload", label: "Verified result", hint: "A result such as data, analysis, or code with an authenticity attestation." },
   { id: "deliver-storage-program", label: "On-chain result", hint: "The deliverable is stored on-chain or bound to an external payload by hash." },
   { id: "deliver-entitlement", label: "Access or entitlement", hint: "A time-bound API, subscription, quota, or access grant." },
 ];
@@ -36,13 +35,50 @@ type BuiltListing = {
   contentHash: string;
   logicalAddress: string;
   programName: string;
-  anchorAddress: string;
+  anchorAddress?: string;
   exists: boolean;
+  publicationReady?: boolean;
   tx: Record<string, unknown> | null;
-  registration: Record<string, unknown> & {
+  registration?: Record<string, unknown> & {
     ownerSignature?: { message?: string; signedAt?: number };
   };
 };
+
+type PreparedListing = {
+  input: Record<string, unknown>;
+  identityPresentedAt: number;
+  identitySignature: string;
+  publication: BuiltListing;
+};
+
+const objectValue = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+
+function transactionRef(value: unknown): string | null {
+  const normalize = (candidate: unknown): string | null => {
+    if (typeof candidate !== "string") return null;
+    const hex = candidate.replace(/^0x/i, "");
+    return /^[0-9a-fA-F]{64}$/.test(hex) ? hex.toLowerCase() : null;
+  };
+  const direct = normalize(value);
+  if (direct) return direct;
+  const envelope = objectValue(value);
+  const data = objectValue(envelope?.data);
+  for (const candidate of [
+    envelope?.hash,
+    envelope?.txHash,
+    envelope?.transactionHash,
+    data?.hash,
+    data?.txHash,
+    data?.transactionHash,
+  ]) {
+    const parsed = normalize(candidate);
+    if (parsed) return parsed;
+  }
+  return null;
+}
 
 export default function Register() {
   const wallet = useDemosWallet();
@@ -68,6 +104,7 @@ export default function Register() {
   const [status, setStatus] = useState<string | null>(null);
   const [profileUrl, setProfileUrl] = useState<string | null>(null);
   const [pendingPublication, setPendingPublication] = useState<PendingListingPublication | null>(null);
+  const [preparedListing, setPreparedListing] = useState<PreparedListing | null>(null);
   const [recoveryLoaded, setRecoveryLoaded] = useState(false);
   const operationInFlight = useRef(false);
 
@@ -126,7 +163,7 @@ export default function Register() {
   const confirmAnchoredListing = async (
     pending: PendingListingPublication,
     onStep?: (step: PublishStep) => void,
-  ): Promise<void> => {
+  ): Promise<Record<string, unknown>> => {
     onStep?.("confirming");
     setPublishStep("confirming");
     setStatus("Waiting for the exact signed listing to become readable and independently verifiable…");
@@ -144,10 +181,13 @@ export default function Register() {
           sellerClaim: pending.claim,
           listingId: pending.listingId,
           listingVersion: pending.listingVersion,
+          transactionRef: pending.transactionRef,
         }),
       });
       const body = await response.json();
-      if (response.ok && body.confirmed === true) return;
+      if (response.ok && body.confirmed === true && objectValue(body.anchorReceipt)) {
+        return body.anchorReceipt as Record<string, unknown>;
+      }
       if (response.status !== 202) {
         throw new Error(body.error ?? "The anchored listing failed independent verification.");
       }
@@ -166,7 +206,7 @@ export default function Register() {
     }
     onStep?.("registering");
     setPublishStep("registering");
-    setStatus("One final wallet signature connects this verified listing to the directory.");
+    setStatus("One final wallet signature connects this finalized, authenticated catalog candidate to the directory.");
     const prepared = await fetch("/api/dacs/prepare-registration", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -199,7 +239,7 @@ export default function Register() {
     clearPendingListingPublication(window.localStorage);
     setPendingPublication(null);
     setPublishStep("complete");
-    setStatus("Your signed listing is anchored, independently verified, and queued for the next index pass.");
+    setStatus("Your signed listing has a finalized anchor, is authenticated as a catalog candidate, and is queued for the next index pass. Buyers still run their own SDK transaction-readiness checks.");
     setProfileUrl(`/seller/${encodeURIComponent(pending.claim)}`);
     setScreen("done");
   };
@@ -208,8 +248,8 @@ export default function Register() {
     pending: PendingListingPublication,
     onStep?: (step: PublishStep) => void,
   ): Promise<void> => {
-    await confirmAnchoredListing(pending, onStep);
-    const confirmed = { ...pending, stage: "registering" as const };
+    const anchorReceipt = await confirmAnchoredListing(pending, onStep);
+    const confirmed = { ...pending, anchorReceipt, stage: "registering" as const };
     if (!savePending(confirmed)) {
       throw new Error("The listing verified, but this browser cannot preserve its recovery record; directory registration was not attempted.");
     }
@@ -235,10 +275,9 @@ export default function Register() {
     }
   };
 
-  const publish = async () => {
+  const prepareExactListing = async () => {
     if (!claim || !validDescription || pendingPublication || operationInFlight.current) return;
     operationInFlight.current = true;
-    setScreen("publish");
     setStatus(null); setFailedAt(null);
     let activeStep: PublishStep = "building";
     try {
@@ -261,7 +300,7 @@ export default function Register() {
       if (!identityBuild.ok) throw new Error(identityDraft.error);
 
       activeStep = "signing"; setPublishStep("signing");
-      setStatus("First, bind the seller identity to this listing.");
+      setStatus("Approve the seller identity presentation. The exact Listing preview is built after this signature.");
       const identitySignature = await wallet.sign(identityDraft.identityMessage);
       if (!identitySignature) throw new Error(wallet.error ?? "The identity presentation signature was declined.");
       const build = await fetch("/api/dacs/build-listing", {
@@ -276,26 +315,66 @@ export default function Register() {
       const built = await build.json();
       if (!build.ok) throw new Error(built.error);
       const publication = built as BuiltListing;
-      const { ownerSignature: _ownerSignature, ...unsignedRegistration } = publication.registration;
-      let signedListing = publication.listing;
-      let transaction = publication.tx;
+      if (!publication.exists && (!publication.message || publication.publicationReady !== false)) {
+        throw new Error("The listing builder did not return a safe unsigned preview.");
+      }
+      setPreparedListing({
+        input: listingInput,
+        identityPresentedAt: Number(identityDraft.identityPresentedAt),
+        identitySignature,
+        publication,
+      });
+      setPublishStep("idle");
+      setStatus(publication.exists
+        ? "An existing immutable version was recovered. Review its exact signed artifact before registration."
+        : "Exact unsigned artifact ready. Review every field below before requesting the Listing signature.");
+    } catch (error) {
+      setFailedAt(activeStep);
+      setPublishStep("failed");
+      setStatus((error as Error).message);
+    } finally {
+      operationInFlight.current = false;
+    }
+  };
+
+  const publish = async () => {
+    if (!claim || !preparedListing || pendingPublication || operationInFlight.current) return;
+    operationInFlight.current = true;
+    setScreen("publish");
+    setStatus(null); setFailedAt(null);
+    let activeStep: PublishStep = "signing";
+    try {
+      let publication = preparedListing.publication;
       if (!publication.exists) {
-        if (!publication.message || !transaction) throw new Error("The listing builder returned an incomplete create transaction.");
-        setStatus("Now approve the complete structured listing.");
+        if (!publication.message) throw new Error("The exact Listing signing message is missing.");
+        setPublishStep("signing");
+        setStatus("Approve the exact unsigned Listing shown on the review screen.");
         const signature = await wallet.sign(publication.message);
         if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
-        signedListing = {
-          ...publication.listing,
-          signature: { algorithm: "ed25519", signer: claim, value: signature.replace(/^(0x)+/i, "") },
-        };
-        transaction = structuredClone(transaction);
-        const content = transaction.content as Record<string, unknown> | undefined;
-        const data = content?.data;
-        if (!Array.isArray(data) || !data[1] || typeof data[1] !== "object" || Array.isArray(data[1])) {
-          throw new Error("The listing builder returned an invalid StorageProgram transaction.");
-        }
-        (data[1] as Record<string, unknown>).data = signedListing;
+        const finalBuild = await fetch("/api/dacs/build-listing", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...preparedListing.input,
+            identityPresentedAt: preparedListing.identityPresentedAt,
+            identitySignature: preparedListing.identitySignature,
+            listingSignature: signature,
+          }),
+        });
+        const finalBody = await finalBuild.json();
+        if (!finalBuild.ok) throw new Error(finalBody.error);
+        publication = finalBody as BuiltListing;
+        if (
+          publication.contentHash !== preparedListing.publication.contentHash ||
+          !publication.publicationReady
+        ) throw new Error("The final publication no longer matches the exact reviewed Listing.");
       }
+      if (!publication.anchorAddress || !publication.registration) {
+        throw new Error("The finalized listing builder returned incomplete recovery coordinates.");
+      }
+      const { ownerSignature: _ownerSignature, ...unsignedRegistration } = publication.registration;
+      const signedListing = publication.listing;
+      const transaction = publication.tx;
       const listingVersion = Number(signedListing.listingVersion);
       if (!Number.isSafeInteger(listingVersion) || listingVersion < 1) {
         throw new Error("The listing builder returned an invalid listing version.");
@@ -319,13 +398,22 @@ export default function Register() {
       }
 
       if (!publication.exists) {
+        if (!transaction) throw new Error("The finalized listing builder returned no anchor transaction.");
         activeStep = "anchoring"; setPublishStep("anchoring");
         setStatus("Approve the on-chain anchor transaction. Its recovery coordinates are already saved in this browser.");
         const sent = await wallet.send(transaction);
         if (!sent) throw new Error(wallet.error ?? "The anchor transaction was not acknowledged; check this same anchor before trying anything else.");
-        pending = { ...pending, stage: "confirming" };
+        const txRef = transactionRef(sent);
+        pending = {
+          ...pending,
+          ...(txRef ? { transactionRef: txRef } : {}),
+          stage: "confirming",
+        };
         if (!savePending(pending)) {
           throw new Error("The transaction was sent, but this browser could not update its recovery record. Do not publish again; preserve this page and check the anchor.");
+        }
+        if (!txRef) {
+          throw new Error("The wallet acknowledged the write without a transaction hash. The exact anchor is saved; use Check chain and resume so the Directory can recover its canonical transaction without rebroadcasting.");
         }
       } else {
         setStatus("Recovered the existing immutable listing version; no new chain transaction will be sent.");
@@ -417,7 +505,7 @@ export default function Register() {
           {pricingKind === "metered" && <p className="field-hint">Metered listings use deterministic fixed-price acceptance; buyer and seller co-sign the whole-unit quantity and computed total at agreement commit.</p>}
 
           <fieldset className="form-field"><legend className="form-legend">Payment rail</legend><div className="badges">{PUBLISHABLE_RAIL_OPTIONS.map((option) => <button key={option.railId} type="button" aria-pressed={rails.includes(option.railId)} className={`badge rail filter ${rails.includes(option.railId) ? "active" : ""}`} onClick={() => setRails([option.railId])}>{option.label}</button>)}</div><span className="field-hint">{selectedRail?.availability === "operator_gated" ? "AP2 is operator-gated in v0.1 and requires Stripe provider onboarding; the listing records that rail without claiming it is publicly live." : "The selected rail becomes the signed payment step and accepted rail."}</span></fieldset>
-          <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div></fieldset>
+          <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div><span className="field-hint">Attested-payload services must publish through their current SDK seller runtime, which can prove the exact production method before payment.</span></fieldset>
 
           <p id="listing-readiness" className={`form-readiness ${validDescription ? "ready" : ""}`}>
             {validDescription ? "Ready for review." : <><strong>Before review:</strong> {validationIssues.join(" · ")}.</>}
@@ -430,7 +518,7 @@ export default function Register() {
         <section className="card" aria-labelledby="review-heading">
           <div className="eyebrow">step 3</div>
           <h2 id="review-heading" className="card-section-title">Review before signing</h2>
-          <p className="agent-desc">This is the service card buyers will discover. The technical identifiers below become part of the signed artifact.</p>
+          <p className="agent-desc">This is the service card buyers will discover. Approve the identity presentation first, then inspect the exact server-built Listing before signing it.</p>
           <div className="card service-card" style={{ background: "var(--bg-subtle)" }}>
             <div className="service-card-topline"><span className="eyebrow">{category.replaceAll(".", " / ")}</span><span className="badge ok">will be signed</span></div>
             <h3>{name}</h3><p className="agent-desc">{description}</p>
@@ -439,8 +527,8 @@ export default function Register() {
             <p className="meta mono">{slug} · {claim}</p>
           </div>
           <details className="technical-disclosure">
-            <summary>Preview the machine-readable listing</summary>
-            <pre className="artifact">{JSON.stringify({
+            <summary>{preparedListing?.publication.exists ? "Exact recovered signed artifact" : preparedListing ? "Exact artifact presented for Listing signature" : "Draft projection — build the exact artifact before signing"}</summary>
+            <pre className="artifact">{JSON.stringify(preparedListing?.publication.listing ?? {
               dacsVersion: "1", listingId: slug, listingVersion: "assigned at publish",
               seller: { identity: "separately signed IdentityBundle", displayName: name.trim(), publicEndpoint: publicEndpoint || undefined },
               offering: { title: name.trim(), description: description.trim(), category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), deliverable: delivery.replace("deliver-", "") },
@@ -454,8 +542,9 @@ export default function Register() {
               ] : [],
             }, null, 2)}</pre>
           </details>
+          {status && <p className={publishStep === "failed" ? "verdict err" : "note"} role={publishStep === "failed" ? "alert" : "status"}>{status}</p>}
           <p className="wallet-approval-note"><strong>For a new listing, expect four wallet approvals:</strong> seller identity, listing signature, on-chain transaction, and directory registration. The directory never receives your private key.</p>
-          <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("describe")}>Edit details</button><button className="btn" type="button" onClick={publish}>Sign and publish</button></div>
+          <div className="button-row"><button className="btn secondary" type="button" onClick={() => { setPreparedListing(null); setStatus(null); setPublishStep("idle"); setScreen("describe"); }}>Edit details</button>{preparedListing ? <button className="btn" type="button" onClick={publish}>{preparedListing.publication.exists ? "Verify anchor and register" : "Sign exact artifact and publish"}</button> : <button className="btn" type="button" onClick={prepareExactListing}>Build exact artifact</button>}</div>
         </section>
       )}
 

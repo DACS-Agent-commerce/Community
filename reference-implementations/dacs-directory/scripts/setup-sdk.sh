@@ -2,7 +2,7 @@
 # Vendors + builds the dacs-sdk (not yet on npm) and installs the app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SDK_REV="44d8ff2a07df8c951b94619d20b957b4bb5ce140"
+SDK_REV="f68fed1c63b56a438830f13e706ea4651d675157"
 
 # Railway's GitHub integration can check out this repository, but it does not
 # pass its credentials through to nested private-repository clones. Supply a
@@ -31,10 +31,10 @@ else
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
   (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
-  (cd vendor/dacs-sdk && npm install --no-audit --no-fund && npm run build)
+  (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.

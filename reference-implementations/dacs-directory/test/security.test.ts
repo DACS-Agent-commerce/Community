@@ -23,6 +23,7 @@ import {
   crawlDomain,
   isPrivateAddress,
   normalizeSubmittedDomain,
+  projectActiveListingIndexEntries,
 } from "../src/catalog/wellknown.js";
 
 const claim = `did:demos:agent:${"a".repeat(64)}`;
@@ -188,6 +189,46 @@ test("well-known URL policy rejects unsafe schemes and address ranges", async ()
   assert.equal(isPrivateAddress("2606:4700:4700::1111"), false);
   const result = await crawlDomain("https://127.0.0.1");
   assert.equal("error" in result, true);
+});
+
+test("well-known listing indexes enforce normative revocation coherence", () => {
+  const listingId = "service-1";
+  const contentHash = "b".repeat(64);
+  const active = {
+    listingId,
+    version: 1,
+    contentHash,
+    anchor: { kind: "storage-program", locator: `stor-${"c".repeat(40)}` },
+    status: "active",
+  };
+  const revocation = {
+    sellerPrimaryClaim: claim,
+    listingId,
+    listingVersion: 1,
+    listingContentHash: contentHash,
+    logicalAddress: `dacs1-revoked:${encodeURIComponent(claim)}:${listingId}:v1`,
+    markerAnchor: { kind: "storage-program", locator: `stor-${"d".repeat(40)}` },
+    markerContentHash: "e".repeat(64),
+  };
+
+  assert.deepEqual(projectActiveListingIndexEntries([active], claim), {
+    ok: true,
+    listingAnchors: [active.anchor.locator],
+    contentHashes: { [active.anchor.locator]: contentHash },
+  });
+  assert.deepEqual(projectActiveListingIndexEntries([
+    { ...active, status: "revoked", revocation },
+  ], claim), { ok: true, listingAnchors: [], contentHashes: {} });
+
+  for (const invalid of [
+    { ...active, revocation },
+    { ...active, status: "revoked" },
+    { ...active, status: "revoked", revocation: { ...revocation, listingContentHash: "f".repeat(64) } },
+    { ...active, contentHash: contentHash.toUpperCase() },
+    null,
+  ]) {
+    assert.equal(projectActiveListingIndexEntries([invalid], claim).ok, false);
+  }
 });
 
 test("rate-limit state ignores spoofed proxy headers by default and stays bounded", () => {

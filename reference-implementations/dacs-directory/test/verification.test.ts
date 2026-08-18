@@ -35,7 +35,8 @@ import {
 } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
-import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import type { BundleVerification } from "@kynesyslabs/dacs";
+import type { LegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 
 const seed = Uint8Array.from(Buffer.alloc(32, 7));
 const did = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
@@ -55,17 +56,12 @@ const listing = {
   supportedDelivery: ["deliver-attested-payload"],
 };
 
-test("listing verification requires a valid signer-bound envelope", async () => {
+test("legacy listing reads do not invent a structured signature profile outside the SDK boundary", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
-  assert.ok(await verifyListing(signed));
-  assert.equal((await verifyListing({
-    ...listing,
-    signature: { ...signed.signature, signer: `DID:demos:agent:${did.slice(-64)}` },
-  }))?.signer, did, "scheme casing is canonicalized when comparing envelope and scope identities");
+  assert.equal(await verifyListing(signed), null);
   assert.equal(await verifyListing({ ...signed, name: "tampered" }), null);
-  assert.equal(await verifyListing({ ...listing, signature: "deadbeef" }), null);
   assert.equal(await verifyListing({ ...signed, signatures: [null] }), null);
   assert.equal(ownerClaim(`0x${did.slice(-64)}`), did);
 });
@@ -106,7 +102,11 @@ test("listing verification accepts a current structured listing and verifies its
       description: "Description",
       category: "services.test",
       tags: ["test"],
-      deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+      deliverable: {
+        kind: "attested-payload",
+        payloadFormat: "application/json",
+        verificationMethod: { kind: "self-signed" },
+      },
     },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
@@ -137,7 +137,14 @@ test("listing verification accepts a current structured listing and verifies its
   assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
-function result(outcome: string, signatures: BundleVerification["signatures"]): BundleVerification {
+type LegacyBundleVerification = Omit<BundleVerification, "bundle"> & {
+  bundle: LegacyMvpAttestationBundle;
+};
+
+function result(
+  outcome: string,
+  signatures: BundleVerification["signatures"],
+): LegacyBundleVerification {
   return {
     ok: true,
     fullyVerified: signatures.every((s) => s.verdict === "valid"),
@@ -372,10 +379,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     ...evidenceScope,
     signature: await signature("dacs-evidence:v1:", evidenceScope, did, seed),
   };
-  const signedListing = {
-    ...listing,
-    signature: await signature("dacs-listing:v1:", listing, did, seed),
-  };
+  const listingSignature = await signature("dacs-listing:v1:", listing, did, seed);
+  const signedListing = { ...listing, signature: listingSignature.value };
   const verification = result("completed", [
     { party: buyerDid, verdict: "valid" },
     { party: did, verdict: "valid" },
@@ -410,7 +415,7 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
   assert.equal(await refsPassStrictPolicy(verification, artifacts), true);
 
   const substituted = structuredClone(verification);
-  substituted.bundle!.agreementRef.kind = "dacs-2-verifyresult";
+  substituted.bundle.agreementRef!.kind = "dacs-2-verifyresult";
   substituted.refs[0].kind = "dacs-2-verifyresult";
   assert.equal(await refsPassStrictPolicy(substituted, [
     { ...artifacts[0], kind: "dacs-2-verifyresult" },
@@ -426,8 +431,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     artifacts[0], artifacts[1], artifacts[1], artifacts[2],
   ]), false);
 
-  const unsupported = structuredClone(verification) as BundleVerification & {
-    bundle: NonNullable<BundleVerification["bundle"]> & { ratingRefs: unknown[] };
+  const unsupported = structuredClone(verification) as LegacyBundleVerification & {
+    bundle: LegacyMvpAttestationBundle & { ratingRefs: unknown[] };
   };
   unsupported.bundle.ratingRefs = [{ kind: "dacs-5-rating", id: "rating-j", contentHash: "f".repeat(64) }];
   assert.equal(await refsPassStrictPolicy(unsupported, artifacts), false);
@@ -545,7 +550,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   ).toString("hex");
   const verified = await verifyListing({
     ...listing,
-    signature: { algorithm: "ed25519", signer: did, value: listingSignature },
+    signature: listingSignature,
   });
   assert.ok(verified);
   if (!verified) return;
@@ -695,7 +700,7 @@ test("listing verification is open-world: an unknown additive top-level field is
       identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySignature }] } },
       displayName: "Service agent", publicEndpoint: "https://agent.example/a2a",
     },
-    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
       { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },

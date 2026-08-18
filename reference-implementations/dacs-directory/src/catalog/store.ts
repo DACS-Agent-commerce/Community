@@ -4,8 +4,16 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, Registration, ScanState } from "./types.js";
+import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { deriveSellerReputation } from "./reputation.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import {
+  LISTING_REJECTION_MESSAGES,
+  type ListingDiagnosticCoordinates,
+  type ListingRejectionCode,
+} from "./listingAdmission.js";
+
+export type { ListingRejectionCode } from "./listingAdmission.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -114,6 +122,8 @@ db.exec(`
     locator TEXT NOT NULL,
     registration_claim TEXT NOT NULL,
     reason_code TEXT NOT NULL,
+    listing_id TEXT,
+    listing_version INTEGER,
     occurrences INTEGER NOT NULL DEFAULT 1,
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
@@ -122,6 +132,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS listing_rejections_recent_idx
     ON listing_rejections(last_seen_at DESC, locator);
 `);
+
+// BEGIN IMMEDIATE serializes the read-then-DDL upgrade across app/indexer
+// processes. A deferred transaction can let both readers observe the old
+// schema and then fail one upgrader immediately with SQLITE_BUSY.
+db.transaction(() => {
+  const listingRejectionColumns = new Set(
+    (db.prepare("PRAGMA table_info(listing_rejections)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!listingRejectionColumns.has("listing_id")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_id TEXT");
+  }
+  if (!listingRejectionColumns.has("listing_version")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
+  }
+}).immediate();
 
 const readLegacy = <T>(path: string, fallback: T): T =>
   existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as T : fallback;
@@ -136,7 +161,9 @@ const setJson = db.transaction((key: string, value: unknown) => {
     .run(key, JSON.stringify(value), Date.now());
 });
 
-// One-time, atomic migration. Legacy files remain as rollback snapshots.
+// One-time, atomic migrations. Legacy files remain as rollback snapshots.
+// Every read-then-write migration starts IMMEDIATE so concurrent fresh
+// processes queue before observing state instead of racing a DEFERRED upgrade.
 if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db.transaction(() => {
   setJson("catalog", readLegacy<Catalog>(LEGACY.catalog, { catalogVersion: "1", generatedAt: 0, sellers: [] }));
   setJson("registrations", readLegacy<Registration[]>(LEGACY.registrations, []));
@@ -144,7 +171,7 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("domains", readLegacy<string[]>(LEGACY.domains, []));
   setJson("fixtures", readLegacy<FixtureSeed[]>(LEGACY.fixtures, []));
   setJson("schema-version", 1);
-})();
+}).immediate();
 
 // Every persisted anchor time written before this migration came from the
 // transaction's producer-controlled timestamp. Remove both the artifact rows
@@ -169,7 +196,49 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
     }),
   });
   setJson("sr2-anchor-schema-version", 2);
-})();
+}).immediate();
+
+// Early Directory builds exposed the internal name `revocationBinding` in
+// ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
+// every public surface and restart path now emits the normative wire field.
+if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
+  type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => {
+        const legacy = listing as LegacyListingSummary;
+        const { revocationBinding, ...current } = legacy;
+        const revocation = current.revocation ?? revocationBinding;
+        return {
+          ...current,
+          ...(current.status === "revoked" && revocation ? { revocation } : {}),
+        };
+      }),
+    })),
+  });
+  setJson("listing-summary-revocation-schema-version", 1);
+}).immediate();
+
+// Catalog authentication is deliberately narrower than the current SDK's
+// buyer-local LR-1..LR-3 decision. Persist that distinction on every existing
+// summary so old catalogs cannot imply transaction readiness after upgrade.
+if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction(() => {
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => ({
+        ...listing,
+        transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
+      })),
+    })),
+  });
+  setJson("listing-summary-readiness-schema-version", 1);
+}).immediate();
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -386,22 +455,31 @@ export function pruneFailureHistory(now = Date.now(), batch = 500): number {
 export const failureHistorySize = (): number =>
   (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
-export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
-
 export function recordListingRejection(
   locator: string,
   registrationClaim: string,
   code: ListingRejectionCode,
+  coordinates?: ListingDiagnosticCoordinates,
 ): void {
   const now = Date.now();
   db.prepare(`INSERT INTO listing_rejections(
-      locator,registration_claim,reason_code,occurrences,first_seen_at,last_seen_at
-    ) VALUES (?,?,?,1,?,?)
+      locator,registration_claim,reason_code,listing_id,listing_version,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,?,?,1,?,?)
     ON CONFLICT(locator,registration_claim) DO UPDATE SET
       reason_code=excluded.reason_code,
+      listing_id=COALESCE(excluded.listing_id,listing_rejections.listing_id),
+      listing_version=COALESCE(excluded.listing_version,listing_rejections.listing_version),
       occurrences=listing_rejections.occurrences+1,
       last_seen_at=excluded.last_seen_at`)
-    .run(locator, registrationClaim.toLowerCase(), code, now, now);
+    .run(
+      locator,
+      registrationClaim.toLowerCase(),
+      code,
+      coordinates?.listingId ?? null,
+      coordinates?.listingVersion ?? null,
+      now,
+      now,
+    );
 }
 
 export function clearListingRejection(locator: string, registrationClaim: string): void {
@@ -444,6 +522,8 @@ export interface PublicDeadLetterDiagnostic {
 
 export interface PublicListingRejectionDiagnostic {
   locator: string;
+  listingId?: string;
+  listingVersion?: number;
   code: ListingRejectionCode;
   message: string;
   occurrences: number;
@@ -484,7 +564,7 @@ export interface IndexerDiagnostics {
     items: PublicDeadLetterDiagnostic[];
   };
   listingRejectionDiagnostics: {
-    scope: "listing-registration-binding";
+    scope: "listing-admission";
     total: number;
     byCode: Record<string, number>;
     query: { locator: string | null; limit: number };
@@ -502,16 +582,13 @@ interface DeadLetterRow {
 
 interface ListingRejectionRow {
   locator: string;
+  listing_id: string | null;
+  listing_version: number | null;
   reason_code: ListingRejectionCode;
   occurrences: number;
   first_seen_at: number;
   last_seen_at: number;
 }
-
-const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
-  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
-  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
-};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]
@@ -571,7 +648,7 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
   ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
   const listingWhere = locator ? " WHERE locator = ?" : "";
-  const listingStatement = db.prepare(`SELECT locator,reason_code,occurrences,first_seen_at,last_seen_at
+  const listingStatement = db.prepare(`SELECT locator,reason_code,listing_id,listing_version,occurrences,first_seen_at,last_seen_at
     FROM listing_rejections${listingWhere}
     ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
   const listingRows = (locator
@@ -580,6 +657,8 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
   const listingHasMore = listingRows.length > limit;
   const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
     locator: row.locator,
+    ...(row.listing_id ? { listingId: row.listing_id } : {}),
+    ...(row.listing_version !== null ? { listingVersion: row.listing_version } : {}),
     code: row.reason_code,
     message: LISTING_REJECTION_MESSAGES[row.reason_code],
     occurrences: row.occurrences,
@@ -595,7 +674,7 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
     },
     listingRejectionDiagnostics: {
-      scope: "listing-registration-binding",
+      scope: "listing-admission",
       total: listingRejectionTotal,
       byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
       query: { locator: locator ?? null, limit },

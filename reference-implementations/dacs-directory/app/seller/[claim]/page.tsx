@@ -51,7 +51,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         )}{" "}
         {!seller.ownerRegistered && !seller.discovered && !hasFixtureListings && (
           <span className="badge" style={{ verticalAlign: "middle" }}
-                title="Submitted to the directory without a signature from this agent's key. The display name is not owner-attested; the listings below are still verified from chain.">
+                title="Submitted without this agent's registration signature. Listing candidates below are authenticated from chain; buyer-local transaction readiness remains unassessed.">
             unverified submission
           </span>
         )}{" "}

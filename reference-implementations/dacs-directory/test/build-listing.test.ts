@@ -25,7 +25,7 @@ const base = {
   name: "Metered AP2 service",
   description: "A metered service settled through an operator-gated AP2 provider.",
   rails: ["ap2:stripe-paymentintents"],
-  delivery: ["deliver-attested-payload"],
+  delivery: ["deliver-storage-program"],
   pricing: {
     kind: "metered",
     amount: "0.02",
@@ -44,7 +44,7 @@ const request = (body: Record<string, unknown>) => new NextRequest(
   },
 );
 
-test("publisher builds a verifiable metered listing with the AP2 rail/phase binding", async () => {
+test("publisher uses PA-1 rail resolution and signs the exact staged Listing before creating a transaction", async () => {
   const identityResponse = await POST(request(base));
   assert.equal(identityResponse.status, 200);
   const identity = await identityResponse.json() as {
@@ -79,47 +79,78 @@ test("publisher builds a verifiable metered listing with the AP2 rail/phase bind
       identitySignature,
     }));
     assert.equal(response.status, 200);
-    const built = await response.json() as {
+    const preview = await response.json() as {
       listing: Record<string, unknown>;
       message: string;
       contentHash: string;
       logicalAddress: string;
       programName: string;
-      anchorAddress: string;
       exists: boolean;
-      tx: { content: { nonce: number; data: [string, Record<string, unknown>] } };
+      publicationReady: boolean;
+      railResolution: { disposition: string; authorityBasis: string };
+      payloadCapability: { disposition: string };
+      tx: null;
     };
-    assert.deepEqual(built.listing.pricing, {
+    assert.equal(preview.publicationReady, false);
+    assert.equal(preview.tx, null, "an unsigned preview must not contain a broadcastable transaction");
+    assert.equal(preview.railResolution.disposition, "verified");
+    assert.equal(preview.railResolution.authorityBasis, "pa1-in-code");
+    assert.equal(preview.payloadCapability.disposition, "not-applicable");
+    assert.deepEqual(preview.listing.pricing, {
       kind: "metered",
       unitPrice: { amount: "0.02", currency: "USD" },
       unit: "API call",
       minTotal: { amount: "1", currency: "USD" },
     });
-    assert.deepEqual(built.listing.acceptedRails, [{ railId: "ap2:stripe-paymentintents" }]);
-    assert.deepEqual(built.listing.pipeline, [
+    assert.deepEqual(preview.listing.acceptedRails, [{ railId: "ap2:stripe-paymentintents" }]);
+    assert.deepEqual(
+      (preview.listing.offering as Record<string, unknown>).deliverable,
+      { kind: "storage-program", accessModel: "public" },
+    );
+    assert.deepEqual(preview.listing.pipeline, [
       { kind: "negotiate-fixed-price" },
       { kind: "commit-agreement" },
       { kind: "pay-ap2", parameters: { rail: "ap2:stripe-paymentintents" } },
-      { kind: "deliver-attested-payload" },
+      { kind: "deliver-storage-program" },
     ]);
+
+    const listingSignature = Buffer.from(
+      ed25519Sign(Buffer.from(preview.message, "utf8"), privateKey),
+    ).toString("hex");
+    const finalResponse = await POST(request({
+      ...base,
+      identityPresentedAt: identity.identityPresentedAt,
+      identitySignature,
+      listingSignature,
+    }));
+    assert.equal(finalResponse.status, 200);
+    const built = await finalResponse.json() as {
+      listing: Record<string, unknown>;
+      contentHash: string;
+      logicalAddress: string;
+      programName: string;
+      anchorAddress: string;
+      exists: boolean;
+      publicationReady: boolean;
+      tx: { content: { nonce: number; data: [string, Record<string, unknown>] } };
+    };
+    assert.equal(built.publicationReady, true);
+    assert.equal(built.contentHash, preview.contentHash);
     assert.equal(built.exists, false);
     assert.equal(built.logicalAddress, `dacs1:did%3Ademos%3Aagent%3A${keyHex}:metered-ap2:v1`);
     assert.ok(!built.programName.includes(":"), "the producer-held Demos name must be colon-free");
+    assert.equal(built.programName, built.logicalAddress.replaceAll(":", "%3A"));
     assert.equal(built.tx.content.nonce, 1);
     assert.equal(built.tx.content.data[1].salt, "", "SDK #70 uses the live empty-salt convention");
+    assert.deepEqual(built.tx.content.data[1].data, built.listing);
+    assert.equal((built.tx.content.data[1].metadata as Record<string, unknown>).contentHash, built.contentHash);
     assert.equal(
       built.anchorAddress,
       deriveStorageAddress(`0x${keyHex}`, built.programName, 1, LIVE_STORAGE_SALT),
     );
     assert.equal(built.contentHash.length, 64);
 
-    const listingSignature = Buffer.from(
-      ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
-    assert.ok(await verifyListing({
-      ...built.listing,
-      signature: { algorithm: "ed25519", signer: claim, value: listingSignature },
-    }));
+    assert.ok(await verifyListing(built.listing));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -144,7 +175,12 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     return new Response(null, { status: 404 });
   };
   try {
-    const builtResponse = await POST(request(finalInput));
+    const previewResponse = await POST(request(finalInput));
+    const preview = await previewResponse.json() as { message: string };
+    const listingSignature = Buffer.from(
+      ed25519Sign(Buffer.from(preview.message, "utf8"), privateKey),
+    ).toString("hex");
+    const builtResponse = await POST(request({ ...finalInput, listingSignature }));
     assert.equal(builtResponse.status, 200);
     const built = await builtResponse.json() as {
       listing: Record<string, unknown>;
@@ -153,13 +189,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
       programName: string;
       anchorAddress: string;
     };
-    const listingSignature = Buffer.from(
-      ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
-    const signedListing = {
-      ...built.listing,
-      signature: { algorithm: "ed25519", signer: claim, value: listingSignature },
-    };
+    const signedListing = built.listing;
 
     globalThis.fetch = async (input, init) => {
       if (init?.method === "POST") {
@@ -207,6 +237,22 @@ test("publisher rejects a metered listing without its deterministic unit", async
   }));
   assert.equal(response.status, 400);
   assert.match(String((await response.json()).error), /metered pricing needs a unit/);
+});
+
+test("browser publisher refuses attested payloads without seller-runtime production capability", async () => {
+  const identityResponse = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identitySignature = Buffer.from(
+    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
+  ).toString("hex");
+  const response = await POST(request({
+    ...base,
+    delivery: ["deliver-attested-payload"],
+    identityPresentedAt: identity.identityPresentedAt,
+    identitySignature,
+  }));
+  assert.equal(response.status, 409);
+  assert.match(String((await response.json()).error), /cannot prove.*production capability/i);
 });
 
 test("publisher refuses a new write when existing-publication lookup is indeterminate", async () => {

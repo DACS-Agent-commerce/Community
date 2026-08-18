@@ -1,8 +1,14 @@
 import type {
   DirectoryInspectionAffordance,
   DirectoryServiceMaturity,
+  DirectoryTransactionReadiness,
   ListingSummary,
 } from "./types.js";
+
+export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
+  disposition: "unassessed",
+  reason: "The Directory authenticated this catalog candidate but did not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. Run the current SDK Listing reader before starting a session.",
+});
 
 export type DirectoryServiceProfile = {
   profileKind: "directory-service-profile";
@@ -22,6 +28,7 @@ export type DirectoryServiceProfile = {
     noLivePaymentClaim: true;
     reason: string;
   };
+  transactionReadiness: DirectoryTransactionReadiness;
   service: {
     title: string;
     category: string;
@@ -88,6 +95,7 @@ export function directoryInspectionAffordance(listing: ListingSummary): Director
 export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T): T {
   return {
     ...listing,
+    transactionReadiness: listing.transactionReadiness ?? DIRECTORY_TRANSACTION_READINESS,
     inspection: directoryInspectionAffordance(listing),
   };
 }
@@ -109,8 +117,9 @@ export function buildDirectoryServiceProfile(origin: string, listing: ListingSum
       maturity: "listed",
       noReputationClaim: true,
       noLivePaymentClaim: true,
-      reason: "Directory observed a listing contract; sample receipts, strict bundle history, and live payment evidence require separate verifier adapters.",
+      reason: "Directory authenticated a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
     },
+    transactionReadiness: listing.transactionReadiness ?? DIRECTORY_TRANSACTION_READINESS,
     service: {
       title: listing.offering.title,
       category: listing.offering.category,
