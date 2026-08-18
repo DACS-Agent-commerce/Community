@@ -133,15 +133,20 @@ db.exec(`
     ON listing_rejections(last_seen_at DESC, locator);
 `);
 
-const listingRejectionColumns = new Set(
-  (db.prepare("PRAGMA table_info(listing_rejections)").all() as Array<{ name: string }>).map((column) => column.name),
-);
-if (!listingRejectionColumns.has("listing_id")) {
-  db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_id TEXT");
-}
-if (!listingRejectionColumns.has("listing_version")) {
-  db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
-}
+// BEGIN IMMEDIATE serializes the read-then-DDL upgrade across app/indexer
+// processes. A deferred transaction can let both readers observe the old
+// schema and then fail one upgrader immediately with SQLITE_BUSY.
+db.transaction(() => {
+  const listingRejectionColumns = new Set(
+    (db.prepare("PRAGMA table_info(listing_rejections)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!listingRejectionColumns.has("listing_id")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_id TEXT");
+  }
+  if (!listingRejectionColumns.has("listing_version")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
+  }
+}).immediate();
 
 const readLegacy = <T>(path: string, fallback: T): T =>
   existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as T : fallback;
@@ -156,7 +161,9 @@ const setJson = db.transaction((key: string, value: unknown) => {
     .run(key, JSON.stringify(value), Date.now());
 });
 
-// One-time, atomic migration. Legacy files remain as rollback snapshots.
+// One-time, atomic migrations. Legacy files remain as rollback snapshots.
+// Every read-then-write migration starts IMMEDIATE so concurrent fresh
+// processes queue before observing state instead of racing a DEFERRED upgrade.
 if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db.transaction(() => {
   setJson("catalog", readLegacy<Catalog>(LEGACY.catalog, { catalogVersion: "1", generatedAt: 0, sellers: [] }));
   setJson("registrations", readLegacy<Registration[]>(LEGACY.registrations, []));
@@ -164,7 +171,7 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("domains", readLegacy<string[]>(LEGACY.domains, []));
   setJson("fixtures", readLegacy<FixtureSeed[]>(LEGACY.fixtures, []));
   setJson("schema-version", 1);
-})();
+}).immediate();
 
 // Every persisted anchor time written before this migration came from the
 // transaction's producer-controlled timestamp. Remove both the artifact rows
@@ -189,7 +196,7 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
     }),
   });
   setJson("sr2-anchor-schema-version", 2);
-})();
+}).immediate();
 
 // Early Directory builds exposed the internal name `revocationBinding` in
 // ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
@@ -213,7 +220,7 @@ if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(
     })),
   });
   setJson("listing-summary-revocation-schema-version", 1);
-})();
+}).immediate();
 
 // Catalog authentication is deliberately narrower than the current SDK's
 // buyer-local LR-1..LR-3 decision. Persist that distinction on every existing
@@ -231,7 +238,7 @@ if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction((
     })),
   });
   setJson("listing-summary-readiness-schema-version", 1);
-})();
+}).immediate();
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
