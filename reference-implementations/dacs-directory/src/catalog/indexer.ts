@@ -18,10 +18,14 @@
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
-// verifyBundleCore has no pure subpath export (dacs-sdk#14) — vendor path.
+// verifyBundleCore is exported from the SDK's agent barrel, but that barrel
+// also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
+// dependency chain (rubic-sdk → cetus-sui-clmm-sdk → a broken @mysten/bcs
+// import) and breaks the production webpack build. Reach into the leaf
+// module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 // The SDK doesn't export sessionAnchorName from its public barrel
-// (dacs-sdk#14) — reach into the vendored build.
+// (dacs-sdk#178, follow-up to #14) — reach into the vendored build.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
