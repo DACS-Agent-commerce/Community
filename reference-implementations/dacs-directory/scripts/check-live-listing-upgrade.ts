@@ -4,8 +4,7 @@
  *
  * Required:
  *   NEXT_PUBLIC_DIRECTORY_URL=https://...
- *   NEXT_PUBLIC_BUTLER_ORIGIN=https://...
- *   DACS_LISTING_UPGRADE_REPLACEMENTS='[{"listingId":"...","replacementLocator":"stor-...","replacementVersion":4,"gatewayProfileId":"...","supportedPayloadMethods":["self-signed"]}, ...]'
+ *   DACS_LISTING_UPGRADE_REPLACEMENTS='[{"listingId":"...","replacementLocator":"stor-...","replacementVersion":4,"supportedPayloadMethods":["self-signed"]}, ...]'
  */
 import invalidLiveListings from "../test/fixtures/live-invalid-verification-methods.json";
 import { canonicalize } from "@kynesyslabs/dacs/canonical";
@@ -17,7 +16,6 @@ type Replacement = {
   listingId: string;
   replacementLocator: string;
   replacementVersion: number;
-  gatewayProfileId: string;
   supportedPayloadMethods: string[];
 };
 
@@ -40,13 +38,14 @@ function replacements(): Replacement[] {
   if (!Array.isArray(parsed) || parsed.length !== invalidLiveListings.length) {
     throw new Error(`replacement manifest must contain exactly ${invalidLiveListings.length} entries`);
   }
+  const allowedKeys = new Set(["listingId", "replacementLocator", "replacementVersion", "supportedPayloadMethods"]);
   for (const item of parsed) {
     if (
       !item || typeof item !== "object" || Array.isArray(item) ||
+      Object.keys(item).some((key) => !allowedKeys.has(key)) ||
       typeof item.listingId !== "string" ||
       typeof item.replacementLocator !== "string" || !/^stor-[0-9a-f]{40}$/.test(item.replacementLocator) ||
       !Number.isSafeInteger(item.replacementVersion) || Number(item.replacementVersion) < 1 ||
-      typeof item.gatewayProfileId !== "string" || !item.gatewayProfileId ||
       !Array.isArray(item.supportedPayloadMethods) || !item.supportedPayloadMethods.every((kind: unknown) => typeof kind === "string")
     ) throw new Error("replacement manifest contains an invalid entry");
   }
@@ -85,12 +84,7 @@ const same = (left: unknown, right: unknown): boolean => {
 
 async function main() {
   const directory = httpsOrigin("NEXT_PUBLIC_DIRECTORY_URL");
-  const gateway = httpsOrigin("NEXT_PUBLIC_BUTLER_ORIGIN");
   const manifest = replacements();
-  const gatewayCatalog = await json(`${gateway}/demo/butler/agents`);
-  const gatewayProfiles = Array.isArray(gatewayCatalog.procurementProfiles)
-    ? gatewayCatalog.procurementProfiles
-    : [];
 
   for (const old of invalidLiveListings) {
     const raw = await anchor(old.locator);
@@ -166,17 +160,9 @@ async function main() {
       throw new Error(`${replacement.listingId} complete SDK reader returned ${validation.disposition} (${validation.reason})`);
     }
 
-    const gatewayProfile = gatewayProfiles.find((profile) => profile && typeof profile === "object" && !Array.isArray(profile) &&
-      profile.id === replacement.gatewayProfileId) as Record<string, unknown> | undefined;
-    if (!gatewayProfile || gatewayProfile.executable !== true) {
-      throw new Error(`${replacement.listingId} gateway profile ${replacement.gatewayProfileId} is not executable`);
-    }
     process.stdout.write(`ok ${old.listingId}@${old.listingVersion} rejected -> v${replacement.replacementVersion} SDK-verified and discoverable\n`);
   }
-
-  const tryPage = await fetch(`${directory}/try`, { signal: AbortSignal.timeout(15_000) });
-  if (!tryPage.ok) throw new Error(`/try returned HTTP ${tryPage.status}`);
-  process.stdout.write("ok /try resolves and every replacement maps to an executable gateway profile\n");
+  process.stdout.write("ok every replacement is independently SDK-verified and discoverable\n");
 }
 
 main().catch((error) => {

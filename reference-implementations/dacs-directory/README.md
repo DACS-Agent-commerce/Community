@@ -187,13 +187,12 @@ are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them 
 registered structured verification-method variant.
 
 Before replacing malformed live Listings, run the read-only deployment acceptance check
-against the deployed Directory, Demos RPC, and gateway. The replacement manifest must map
-all three known old listing IDs to their new anchors/versions, the independent verifier's
-supported payload-method kinds, and the corresponding executable gateway profile IDs:
+against the deployed Directory and Demos RPC. The replacement manifest must map all three
+known old listing IDs to their new anchors/versions and the independent verifier's supported
+payload-method kinds:
 
 ```bash
 NEXT_PUBLIC_DIRECTORY_URL=https://directory.example \
-NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.example \
 DACS_LISTING_UPGRADE_REPLACEMENTS='[...]' \
 npm run check:listing-upgrade
 ```
@@ -201,8 +200,9 @@ npm run check:listing-upgrade
 It proves the actual old anchor bytes fail with `VERIFICATION_METHOD_INVALID`, their public
 diagnostics carry the affected listing coordinates, each replacement passes the complete
 SDK reader, the reindexed catalog exposes the exact replacement pin with transaction
-readiness still unassessed, and `/try` can resolve an executable gateway profile. It never
-writes, reindexes, purchases, or invokes an agent.
+readiness still unassessed. It never contacts a gateway and never writes, reindexes,
+purchases, or invokes an agent. Gateway demo deployment and smoke testing are owned by the
+private gateway release and are not Directory/indexer acceptance criteria.
 
 ## Discovery — three channels
 
