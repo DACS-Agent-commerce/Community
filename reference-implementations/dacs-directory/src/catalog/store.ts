@@ -15,12 +15,16 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Catalog, Registration, ScanState } from "./types.js";
+import type { Catalog, IndexerRuntimeState, Registration, ScanState } from "./types.js";
 
 const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const CATALOG_PATH = join(DATA_DIR, "catalog.json");
 const REGISTRATIONS_PATH = join(DATA_DIR, "registrations.json");
 const SCAN_STATE_PATH = join(DATA_DIR, "scan-state.json");
+const DOMAINS_PATH = join(DATA_DIR, "domains.json");
+const INDEXER_STATUS_PATH = join(DATA_DIR, "indexer-status.json");
+
+export const directoryDataPath = (): string => DATA_DIR;
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -85,7 +89,9 @@ export function saveRegistrations(regs: Registration[]): void {
  *  the sliding tx window must never make the catalog forget history; the
  *  chain remains the proof, this is just the memory of where to look). */
 export function loadScanState(): ScanState {
-  if (!existsSync(SCAN_STATE_PATH)) return { lastSeenTxId: 0, listings: {}, deals: {} };
+  if (!existsSync(SCAN_STATE_PATH)) {
+    return { lastSeenTxId: 0, listings: {}, deals: {}, anchors: {} };
+  }
   return JSON.parse(readFileSync(SCAN_STATE_PATH, "utf8")) as ScanState;
 }
 
@@ -106,7 +112,30 @@ export function saveScanState(state: ScanState): void {
   atomicJsonWrite(SCAN_STATE_PATH, state);
 }
 
-const DOMAINS_PATH = join(DATA_DIR, "domains.json");
+/** Most recent local discovery-input edit (registrations or well-known domains). */
+export function catalogInputsModifiedAt(): number {
+  return [REGISTRATIONS_PATH, DOMAINS_PATH].reduce((latest, path) => {
+    try {
+      return Math.max(latest, statSync(path).mtimeMs);
+    } catch {
+      return latest;
+    }
+  }, 0);
+}
+
+export function loadIndexerRuntimeState(): IndexerRuntimeState | null {
+  if (!existsSync(INDEXER_STATUS_PATH)) return null;
+  try {
+    return JSON.parse(readFileSync(INDEXER_STATUS_PATH, "utf8")) as IndexerRuntimeState;
+  } catch {
+    return null;
+  }
+}
+
+export function saveIndexerRuntimeState(state: IndexerRuntimeState): void {
+  atomicJsonWrite(INDEXER_STATUS_PATH, state);
+}
+
 /** Domains to crawl for §6.3.5 well-known surfaces. */
 export function loadDomains(): string[] {
   if (!existsSync(DOMAINS_PATH)) return [];

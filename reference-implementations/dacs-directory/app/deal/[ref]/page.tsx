@@ -46,15 +46,22 @@ export default async function Deal({
   const txRefs = txRefsOf(raw);
   return (
     <>
-      <p className="meta"><Link href="/">← all agents</Link></p>
-      <h1 className="h1">Deal bundle</h1>
-      <div className="meta"><CopyText value={bundleRef} head={30} tail={8} /></div>
+      <p className="breadcrumb"><Link href="/">← Back to services</Link></p>
+      <div className="page-hero compact-hero receipt-hero">
+        <p className="eyebrow">Independent proof</p>
+        <h1>Job receipt</h1>
+        <p className="hero-sub">Check that the provider, payment, and delivered result belong to the same job.</p>
+        <details className="technical-details inline-details">
+          <summary>Receipt ID</summary>
+          <div className="meta"><CopyText value={bundleRef} head={30} tail={8} /></div>
+        </details>
+      </div>
       {txRefs.length > 0 && (
         <div className="badges" style={{ marginTop: 10 }}>
           {txRefs.map((t) => (
             <a key={t.txHash} className="badge rail linked" target="_blank" rel="noreferrer"
                href={t.rail === "demos" ? `${EXPLORER}/tx/${t.txHash}` : `https://sepolia.basescan.org/tx/${t.txHash}`}>
-              settlement tx · {t.rail} ↗
+              View payment · {t.rail} ↗
             </a>
           ))}
         </div>
@@ -84,17 +91,15 @@ export default async function Deal({
             )}
           </div>
           <p className="note">
-            The seller signed this delivery attestation (DACS-X) over the GitHub state at
-            delivery time — state hash <span className="mono">{att.ghStateHash?.slice(0, 16)}…</span>.
-            The attestation rides beside the bundle until the SDK can reference it in-bundle.
+            The provider signed a snapshot of the GitHub review at delivery time.
           </p>
         </div>
       )}
 
-      <div className="section">
-        <h2>Anchored artifact (chain state)</h2>
-        <pre className="artifact">{raw ? JSON.stringify(raw, null, 2) : "not found on chain"}</pre>
-      </div>
+      <details className="technical-details raw-record section">
+        <summary>View raw technical record</summary>
+        <pre className="artifact">{raw ? JSON.stringify(raw, null, 2) : "Record not found"}</pre>
+      </details>
     </>
   );
 }

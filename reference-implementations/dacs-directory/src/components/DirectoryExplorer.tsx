@@ -3,22 +3,18 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
-import type { SellerRecord } from "@/src/catalog/types";
-import { CciChip } from "./Badge";
-import { railLabel, negotiationLabel, IDENTITY_TIERS, tierMeta } from "./labels";
+import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
+import { deliveryLabel, railLabel, negotiationLabel, IDENTITY_TIERS, tierMeta } from "./labels";
 
-const sellerRails = (s: SellerRecord) => [
-  ...new Set(
-    s.listings.flatMap(
-      (l) => l.offering.rails ?? l.offering.tags.filter((t) => t.startsWith("pay-")),
-    ),
-  ),
-];
-const sellerTier = (s: SellerRecord) => s.identityTier ?? (s.cci.length > 0 ? "verified" : "self-declared");
-const sellerCategories = (s: SellerRecord) => s.listings.map((l) => l.offering.category);
+const listingRails = (listing: ListingSummary) =>
+  listing.offering.rails ?? listing.offering.tags.filter((tag) => tag.startsWith("pay-"));
+const sellerTier = (s: SellerRecord) => s.identityTier ?? "self-declared";
 /** §10.5.4 category prefix matching: scope matches cat or cat starts with scope + "." */
 const categoryMatches = (cat: string, scope: string) =>
   cat === scope || cat.startsWith(scope + ".");
+
+const cleanDescription = (value: string) =>
+  value.replace(/\s*\[[a-z0-9_-]+:[^\]]+\]\s*$/i, "").trim();
 
 export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[] }) {
   const [q, setQ] = useState("");
@@ -26,68 +22,114 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
   const [tier, setTier] = useState<string | null>(null);
   const [category, setCategory] = useState<string | null>(null);
   const [goodRecord, setGoodRecord] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
 
   const availableSellers = useMemo(
     () => activeCatalogSellers(sellers),
     [sellers],
   );
-  const rails = useMemo(() => [...new Set(availableSellers.flatMap(sellerRails))].sort(), [availableSellers]);
-  // Top-level category segments, data-driven (no fixed taxonomy in the spec).
-  const categories = useMemo(
-    () => [...new Set(availableSellers.flatMap(sellerCategories).map((c) => c.split(".")[0]))].sort(),
+  const availableListings = useMemo(
+    () => availableSellers.flatMap((seller) =>
+      seller.listings.map((listing) => ({ seller, listing })),
+    ),
     [availableSellers],
+  );
+  const rails = useMemo(
+    () => [...new Set(availableListings.flatMap(({ listing }) => listingRails(listing)))].sort(),
+    [availableListings],
+  );
+  const categories = useMemo(
+    () => [...new Set(availableListings.map(({ listing }) => listing.offering.category))].sort(),
+    [availableListings],
   );
   const tierCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const s of availableSellers) counts[sellerTier(s)] = (counts[sellerTier(s)] ?? 0) + 1;
+    for (const { seller } of availableListings) {
+      counts[sellerTier(seller)] = (counts[sellerTier(seller)] ?? 0) + 1;
+    }
     return counts;
-  }, [availableSellers]);
+  }, [availableListings]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return availableSellers.filter((s) => {
-      if (rail && !sellerRails(s).includes(rail)) return false;
-      if (tier && sellerTier(s) !== tier) return false;
-      if (category && !sellerCategories(s).some((c) => categoryMatches(c, category))) return false;
-      if (goodRecord && !(s.reputation.completionRate !== null && s.reputation.completionRate >= 0.9)) return false;
+    return availableListings.filter(({ seller, listing }) => {
+      if (rail && !listingRails(listing).includes(rail)) return false;
+      if (tier && sellerTier(seller) !== tier) return false;
+      if (category && !categoryMatches(listing.offering.category, category)) return false;
+      if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
       if (!needle) return true;
       const hay = [
-        s.displayName, s.primaryClaim,
-        ...s.cci.map((b) => `${b.platform}:${b.handle}`),
-        ...s.listings.flatMap((l) => [
-          l.offering.title,
-          l.offering.description ?? "",
-          l.offering.category,
-          ...l.offering.tags,
-          ...(l.offering.rails ?? []),
-          ...(l.offering.delivery ?? []),
-        ]),
+        seller.displayName, seller.primaryClaim,
+        ...seller.cci.map((b) => `${b.platform}:${b.handle}`),
+        listing.offering.title,
+        listing.offering.description ?? "",
+        listing.offering.category,
+        ...listing.offering.tags,
+        ...(listing.offering.rails ?? []),
+        ...(listing.offering.delivery ?? []),
       ].join(" ").toLowerCase();
       return hay.includes(needle);
     });
-  }, [availableSellers, q, rail, tier, category, goodRecord]);
+  }, [availableListings, q, rail, tier, category, goodRecord]);
+
+  const activeFilters = [rail, tier, category, goodRecord ? "record" : null].filter(Boolean).length;
+  const clearFilters = () => {
+    setRail(null);
+    setTier(null);
+    setCategory(null);
+    setGoodRecord(false);
+    setQ("");
+  };
+  const humanCategory = (value: string) => {
+    const last = value.split(".").at(-1) ?? value;
+    return last.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  };
+  const serviceGlyph = (value?: string) => {
+    const category = value?.toLowerCase() ?? "";
+    if (category.includes("research") || category.includes("search")) return "⌕";
+    if (category.includes("code") || category.includes("develop")) return "</>";
+    if (category.includes("design") || category.includes("creative")) return "◇";
+    if (category.includes("data") || category.includes("analysis")) return "⌁";
+    if (category.includes("write") || category.includes("content")) return "✎";
+    return "✦";
+  };
 
   return (
     <>
-      <div className="toolbar">
-        <input
-          className="search"
-          placeholder="Search services, agents, identities…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        <span className="meta" style={{ marginLeft: "auto" }}>
-          {filtered.length} of {availableSellers.length} agent{availableSellers.length === 1 ? "" : "s"}
+      <div className="explorer-controls">
+        <label className="search-wrap">
+          <span className="sr-only">Search services</span>
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
+          <input
+            className="search"
+            placeholder="Try “code review” or “research”…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+        </label>
+        <button className={`filter-toggle ${showFilters ? "open" : ""}`} onClick={() => setShowFilters(!showFilters)}
+          aria-expanded={showFilters} aria-controls="directory-filters">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18"><path d="M4 7h16M7 12h10m-7 5h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
+          Filters
+          {activeFilters > 0 && <span>{activeFilters}</span>}
+        </button>
+        <span className="result-count">
+          {filtered.length} service{filtered.length === 1 ? "" : "s"}
         </span>
       </div>
 
-      <div className="facets">
+      <div id="directory-filters" className={`facets ${showFilters ? "visible" : ""}`}>
+        <div className="filter-panel-head">
+          <strong>Refine your search</strong>
+          {activeFilters > 0 && <button onClick={clearFilters}>Clear all</button>}
+        </div>
         <div className="facet-row">
-          <span className="facet-label">identity</span>
+          <span className="facet-label">Trust level</span>
           {IDENTITY_TIERS.map((t) => {
             const n = tierCounts[t.id] ?? 0;
             return (
               <button key={t.id} title={t.hint} disabled={n === 0}
+                aria-pressed={tier === t.id}
                 className={`badge ${t.chipClass} filter ${tier === t.id ? "active" : ""}`}
                 onClick={() => setTier(tier === t.id ? null : t.id)}>
                 {t.label} <span className="facet-count">{n}</span>
@@ -97,98 +139,109 @@ export default function DirectoryExplorer({ sellers }: { sellers: SellerRecord[]
         </div>
         {categories.length > 0 && (
           <div className="facet-row">
-            <span className="facet-label">category</span>
+            <span className="facet-label">Service type</span>
             {categories.map((c) => (
               <button key={c} className={`badge filter ${category === c ? "active" : ""}`}
-                title={`Matches listings whose category is "${c}" or starts with "${c}." (§10.5.4 prefix rule)`}
+                aria-pressed={category === c}
+                title={`Show ${humanCategory(c)} services`}
                 onClick={() => setCategory(category === c ? null : c)}>
-                {c}
+                {humanCategory(c)}
               </button>
             ))}
           </div>
         )}
         <div className="facet-row">
-          <span className="facet-label">pays in</span>
+          <span className="facet-label">Payment</span>
           {rails.map((r) => (
             <button key={r} className={`badge rail filter ${rail === r ? "active" : ""}`}
+              aria-pressed={rail === r}
               onClick={() => setRail(rail === r ? null : r)} title={r}>
               {railLabel(r)}
             </button>
           ))}
         </div>
         <div className="facet-row">
-          <span className="facet-label">track record</span>
+          <span className="facet-label">Experience</span>
           <button className={`badge ${goodRecord ? "ok" : ""} filter ${goodRecord ? "active" : ""}`}
-            title="Only agents with ≥90% completion across chain-verified deals (advisory reputationHint, §6.3.6 minCompletionRate — the verify pages are authoritative)"
+            aria-pressed={goodRecord}
+            title="Only show providers who completed at least 90% of recorded jobs"
             onClick={() => setGoodRecord(!goodRecord)}>
-            90%+ completion
+            Proven track record
           </button>
         </div>
       </div>
 
-      {filtered.length === 0 && (
-        <div className="card"><h3>No matches</h3><p className="meta">Try a different search, or clear the filters.</p></div>
+      {availableListings.length === 0 && (
+        <div className="empty-state">
+          <div className="empty-icon" aria-hidden="true">✦</div>
+          <p className="eyebrow">The directory is growing</p>
+          <h3>New services are on the way.</h3>
+          <p>There aren&apos;t any live listings in this catalog yet. If you run an agent, you can be one of the first providers here.</p>
+          <div className="empty-actions">
+            <Link href="/register" className="btn">List a service</Link>
+            <Link href="/how-it-works" className="btn secondary">See how trust works</Link>
+          </div>
+        </div>
+      )}
+      {availableSellers.length > 0 && filtered.length === 0 && (
+        <div className="empty-state compact">
+          <div className="empty-icon" aria-hidden="true">⌕</div>
+          <h3>No services match that search.</h3>
+          <p>Try a broader phrase or remove a filter.</p>
+          <button className="btn secondary" onClick={clearFilters}>Clear search and filters</button>
+        </div>
       )}
       <div className="grid">
-        {filtered.map((s) => {
-          const lead = s.listings[0];
-          const href = `/seller/${encodeURIComponent(s.primaryClaim)}`;
-          const web2 = s.cci.filter((b) => b.kind === "web2");
-          const t = tierMeta(sellerTier(s));
-          const negotiation = [
-            ...new Set(s.listings.flatMap((l) => l.offering.negotiation ?? [])),
-          ];
+        {filtered.map(({ seller, listing }) => {
+          const href = `/seller/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(listing.listingId)}`;
+          const t = tierMeta(sellerTier(seller));
+          const negotiation = listing.offering.negotiation ?? [];
+          const price = listing.pricing.priceHint
+            ? `${listing.pricing.priceHint}${listing.pricing.currency ? ` ${listing.pricing.currency}` : ""}`
+            : null;
+          const pricingCopy = price
+            ? `From ${price}`
+            : negotiation.some((mode) => mode.includes("fixed-price"))
+              ? "Agree price upfront"
+              : "Request a quote";
+          const delivery = listing.offering.delivery?.[0];
           return (
-            // A <div>, not a link: the proof chips inside are links themselves
-            // and <a> cannot nest. The title carries the navigation.
-            <div key={s.primaryClaim} className="card agent-card">
-              <h3><Link href={href} className="card-title-link">{lead?.offering.title ?? s.displayName}</Link></h3>
-              <div className="byline">
-                by <strong>{s.displayName}</strong>
-                <span className={`byline-src ${s.ownerRegistered ? "ok" : ""}`}>
-                  {s.ownerRegistered
-                    ? "owner-registered"
-                    : s.discovered
-                      ? "found on-chain"
-                      : "unverified submission"}
-                </span>
+            <article key={`${seller.primaryClaim}:${listing.listingId}:${listing.version}`} className="card agent-card listing-market-card">
+              <div className="service-card-top">
+                <span className="listing-category">{humanCategory(listing.offering.category)}</span>
+                <span className="availability"><i /> Available</span>
               </div>
-              {lead?.offering.description && (
-                <p className="agent-desc clamp2">{lead.offering.description}</p>
+              <div className="service-title-row">
+                <span className="service-icon" aria-hidden="true">{serviceGlyph(listing.offering.category)}</span>
+                <h3><Link href={href} className="card-title-link">{listing.offering.title}</Link></h3>
+              </div>
+              {listing.offering.description && (
+                <p className="agent-desc clamp2">{cleanDescription(listing.offering.description)}</p>
               )}
-              <div className="card-meta">
-                <span className="meta-label">identity</span>
-                <span className="meta-chips">
-                  <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
-                  {web2.map((b) => <CciChip key={b.ref} badge={b} />)}
-                </span>
-
-                <span className="meta-label">pays in</span>
-                <span className="meta-chips">
-                  {sellerRails(s).map((r) => (
-                    <span key={r} className="badge rail" title={r}>{railLabel(r)}</span>
-                  ))}
-                </span>
-
-                <span className="meta-label">negotiation</span>
-                <span className="meta-chips">
-                  {negotiation.length > 0
-                    ? negotiation.map((n) => (
-                        <span key={n} className="badge" title={n}>{negotiationLabel(n)}</span>
-                      ))
-                    : <span className="meta-empty">not stated</span>}
-                </span>
-
-                <span className="meta-label">track record</span>
-                <span className="meta-chips">
-                  <span className={`badge ${s.reputation.completed > 0 ? "ok" : ""}`}>
-                    {s.reputation.completed}/{s.reputation.totalAgreements} deals
-                    {s.reputation.completionRate !== null && ` · ${Math.round(s.reputation.completionRate * 100)}%`}
-                  </span>
+              <div className="listing-price-row">
+                <div><span>Commercial terms</span><strong>{pricingCopy}</strong></div>
+                <span className="pricing-mode">
+                  {negotiation[0] ? negotiationLabel(negotiation[0]) : "Terms on request"}
                 </span>
               </div>
-              <Link href={href} className="card-cta">view agent →</Link>
-            </div>
+              <div className="listing-facts">
+                <div><span>You receive</span><strong>{delivery ? deliveryLabel(delivery) : "Defined with provider"}</strong></div>
+                <div><span>Settle with</span><strong>{listingRails(listing).map(railLabel).join(" or ") || "Agreed rail"}</strong></div>
+              </div>
+              <div className="listing-provider">
+                <span className="provider-avatar" aria-hidden="true">{seller.displayName.slice(0, 1).toUpperCase()}</span>
+                <div><span>Offered by</span><strong>{seller.displayName}</strong></div>
+                <span className={`badge ${t.chipClass}`} title={t.hint}>{t.label}</span>
+              </div>
+              <div className="listing-card-actions">
+                <span className="provider-record">
+                  {seller.reputation.totalAgreements === 0
+                    ? "New provider"
+                    : `${seller.reputation.completed}/${seller.reputation.totalAgreements} completed`}
+                </span>
+                <Link href={href} className="card-cta">Explore service <span aria-hidden="true">→</span></Link>
+              </div>
+            </article>
           );
         })}
       </div>

@@ -10,6 +10,7 @@ import {
   rateLimit,
   rateLimitClientKey,
   rateLimitStateSize,
+  readJsonBody,
   resetRateLimitState,
 } from "../src/catalog/security.js";
 import { programBindingKey } from "../src/catalog/store.js";
@@ -33,12 +34,13 @@ test("registration parser rejects type-confusion and oversized collections", () 
 
 test("registration parser accepts and normalizes a bounded registration", () => {
   const result = parseRegistration({
-    primaryClaim: claim,
+    primaryClaim: `0x${"A".repeat(64)}`,
     displayName: " Agent ",
     listingAnchors: [`stor-${"b".repeat(40)}`, `stor-${"b".repeat(40)}`],
   });
   assert.equal(result.ok, true);
   if (result.ok) {
+    assert.equal(result.value.primaryClaim, claim);
     assert.equal(result.value.displayName, "Agent");
     assert.equal(result.value.listingAnchors.length, 1);
   }
@@ -116,7 +118,7 @@ test("well-known URL policy rejects unsafe schemes and address ranges", async ()
   assert.equal("error" in result, true);
 });
 
-test("rate-limit state ignores spoofed proxy headers by default and stays bounded", () => {
+test("rate-limit state ignores spoofed proxy headers and uses a bounded shared brake", () => {
   const prior = process.env.DACS_TRUST_PROXY;
   try {
     delete process.env.DACS_TRUST_PROXY;
@@ -125,7 +127,7 @@ test("rate-limit state ignores spoofed proxy headers by default and stays bounde
     });
     assert.equal(rateLimitClientKey(spoofed), null);
     assert.equal(rateLimit(spoofed, "untrusted", 1), null);
-    assert.equal(rateLimitStateSize(), 0);
+    assert.equal(rateLimitStateSize(), 1);
 
     process.env.DACS_TRUST_PROXY = "1";
     assert.equal(rateLimitClientKey(spoofed), "169.254.169.254");
@@ -149,4 +151,14 @@ test("rate-limit state ignores spoofed proxy headers by default and stays bounde
     if (prior === undefined) delete process.env.DACS_TRUST_PROXY;
     else process.env.DACS_TRUST_PROXY = prior;
   }
+});
+
+test("JSON body limit checks actual bytes without relying on Content-Length", async () => {
+  const req = new NextRequest("https://directory.test/api", {
+    method: "POST",
+    body: JSON.stringify({ value: "x".repeat(100) }),
+  });
+  const result = await readJsonBody(req, 32);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.response.status, 413);
 });

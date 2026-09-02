@@ -32,6 +32,10 @@ export async function GET(req: NextRequest) {
     found: !!anchored,
     valid,
     ownedByClaim: valid,
-    title: verified?.listing.name ?? null,
+    title: verified
+      ? verified.profile === "current"
+        ? verified.listing.offering.title
+        : verified.listing.name
+      : null,
   });
 }

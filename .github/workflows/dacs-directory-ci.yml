@@ -1,0 +1,68 @@
+name: dacs-directory CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "reference-implementations/dacs-directory/**"
+      - ".github/workflows/dacs-directory-ci.yml"
+  pull_request:
+    paths:
+      - "reference-implementations/dacs-directory/**"
+      - ".github/workflows/dacs-directory-ci.yml"
+
+concurrency:
+  group: dacs-directory-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: parity · test · build · browser
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reference-implementations/dacs-directory
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: reference-implementations/dacs-directory/package-lock.json
+
+      - name: Vendor and build the pinned SDK
+        env:
+          DACS_SDK_GITHUB_TOKEN: ${{ secrets.DACS_SDK_GITHUB_TOKEN }}
+        run: npm run setup
+
+      - name: Enforce reviewed SDK parity
+        run: npm run parity
+
+      - name: Unit and adversarial tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Production build
+        run: npm run build
+
+      - name: Install CI browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Production browser smoke tests
+        run: npm run test:e2e
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dacs-directory-playwright-report
+          path: |
+            reference-implementations/dacs-directory/playwright-report
+            reference-implementations/dacs-directory/test-results
+          if-no-files-found: ignore

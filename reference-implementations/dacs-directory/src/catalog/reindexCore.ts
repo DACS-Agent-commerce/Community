@@ -5,7 +5,8 @@
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { scanChain } from "./scan";
+import { projectDiscoveredAnchors, scanChain } from "./scan";
+import { DACS_SDK_REVISION } from "./sdkProfile";
 import { crawlDomains } from "./wellknown";
 import {
   loadCatalog,
@@ -42,11 +43,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   //    the proof; this state is just the memory of where to look). First run
   //    backfills the full history.
   const state = loadScanState();
-  const needsBindingBackfill = state.schemaVersion !== 3;
+  const needsBindingBackfill = state.schemaVersion !== 4 || state.sdkRevision !== DACS_SDK_REVISION;
   const maxTxs = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const scan = await scanChain(null, {
     maxTxs,
     sinceTxId: needsBindingBackfill ? 0 : state.lastSeenTxId,
+    retryAnchors: Object.values(state.anchors ?? {}).filter(
+      (anchor) => anchor.readStatus === "indeterminate",
+    ),
   });
   if (!scan.complete) {
     throw new Error(
@@ -54,21 +58,16 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       "increase the limit so the catalog cannot skip history",
     );
   }
-  for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
-  for (const [jobId, deal] of scan.deals) state.deals[jobId] = deal;
-  state.programs ??= {};
-  for (const [key, address] of scan.programs) state.programs[key] = address;
-  if (needsBindingBackfill) state.revocations = {};
-  state.revocations ??= {};
-  for (const [hash, addresses] of scan.revocations) {
-    const priorCandidates = state.revocations[hash];
-    const prior = Array.isArray(priorCandidates)
-      ? priorCandidates
-      : priorCandidates ? [priorCandidates] : [];
-    state.revocations[hash] = [...new Set([...addresses, ...prior])];
-  }
+  state.anchors ??= {};
+  for (const [address, anchor] of scan.anchors) state.anchors[address] = anchor;
+  const projected = projectDiscoveredAnchors(Object.values(state.anchors));
+  state.listings = Object.fromEntries(projected.listings);
+  state.deals = Object.fromEntries(projected.deals);
+  state.programs = Object.fromEntries(projected.programs);
+  state.revocations = Object.fromEntries(projected.revocations);
   state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
-  state.schemaVersion = 3;
+  state.schemaVersion = 4;
+  state.sdkRevision = DACS_SDK_REVISION;
   saveScanState(state);
   log(
     `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +

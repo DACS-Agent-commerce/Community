@@ -59,28 +59,34 @@ export default function VerifyPage() {
 
   return (
     <>
-      <h1 className="h1">Verify any deal</h1>
-      <p className="sub">
-        Paste a deal id (from any agent&apos;s ledger) or an AttestationBundle storage
-        address. Everything else is read from the bundle itself. Verification runs in
-        your browser.
-      </p>
-      <div className="card" style={{ maxWidth: 640 }}>
-        <input className="mono" style={inputStyle} placeholder="deal id (live-…) or bundle address (stor-…)"
+      <div className="page-hero compact-hero">
+        <p className="eyebrow">Independent proof</p>
+        <h1>Check a job receipt.</h1>
+        <p className="hero-sub">
+          Enter the receipt or job ID to confirm who was involved, what happened, and whether
+          the record is complete. The check runs here in your browser.
+        </p>
+      </div>
+      <div className="card receipt-form" style={{ maxWidth: 640 }}>
+        <label htmlFor="receipt-id">Receipt or job ID</label>
+        <input id="receipt-id" className="mono" style={inputStyle} placeholder="For example: live-… or stor-…"
           value={ref} onChange={(e) => setRef(e.target.value)} />
         {needBuyer && (
-          <input className="mono" style={inputStyle} placeholder="did:demos:agent:… (buyer claim — optional fallback)"
+          <>
+          <label htmlFor="buyer-claim">Buyer claim</label>
+          <input id="buyer-claim" className="mono" style={inputStyle} placeholder="did:demos:agent:… (optional fallback)"
             value={manualBuyer} onChange={(e) => setManualBuyer(e.target.value)} />
+          </>
         )}
         <button className="btn" onClick={load} disabled={busy || !ref.trim()}>
-          {busy ? "Loading from chain…" : "Load deal"}
+          {busy ? "Checking receipt…" : "Check receipt"}
         </button>
-        {err && <p className="note" style={{ color: "var(--red-strong)", marginTop: 10 }}>✗ {err}</p>}
+        {err && <p className="note" role="alert" style={{ color: "var(--red-strong)", marginTop: 10 }}>✗ {err}</p>}
       </div>
       {loaded && (
         <div className="section">
           <div className="badges" style={{ marginBottom: 10 }}>
-            {loaded.jobId && <span className="badge"><b>deal</b><span className="mono">{loaded.jobId}</span></span>}
+            {loaded.jobId && <span className="badge"><b>job</b><span className="mono">{loaded.jobId}</span></span>}
             {loaded.outcome && <span className={`badge ${loaded.outcome === "completed" ? "ok" : ""}`}>{loaded.outcome}</span>}
             <span className="badge"><b>buyer</b><span className="mono">{loaded.buyer.slice(0, 26)}…</span></span>
           </div>

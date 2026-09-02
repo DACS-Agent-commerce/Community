@@ -60,15 +60,19 @@ export interface ListingSummary {
   };
   pricing: { priceHint?: string; currency?: string };
   status: "active" | "revoked";
+  /** Required by the SDK catalog contract for a revoked summary. */
+  revocation?: RevocationBinding;
   catalogObservedAt: number;
   reputationHint?: ReputationHint;
+  /** Makes compatibility explicit; legacy artifacts never masquerade as current. */
+  validationProfile?: "current" | "legacy-mvp";
 }
 
 /** §6.3.6 ReputationHint — advisory; derived, never authoritative. */
 export interface ReputationHint {
   categoryScope: string;
   completionRate: number | null;
-  averageSellerRating?: number | null;
+  averageSellerRating: number | null;
   bundleCount: number;
   windowStart: number;
   windowEnd: number;
@@ -104,6 +108,7 @@ export interface DealRecord extends RegisteredDeal {
   finalisedAt?: number;
   verifiedAt: number;
   category?: string;
+  consistency?: "absent" | "indeterminate" | "oneSided" | "unified" | "divergent";
 }
 
 export interface SellerRecord {
@@ -135,11 +140,32 @@ export interface Catalog {
   sellers: SellerRecord[];
 }
 
+/** Durable heartbeat written by the standalone live-indexer process. */
+export interface IndexerRuntimeState {
+  running: boolean;
+  pid: number;
+  pollIntervalMs: number;
+  startedAt: number;
+  heartbeatAt: number;
+  indexing: boolean;
+  lastStartedAt?: number;
+  lastCompletedAt?: number;
+  lastError?: string;
+  lastObservedChainTx?: number | null;
+  lastResult?: {
+    sellers: number;
+    newTxs: number;
+    cursor: number;
+  };
+}
+
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  schemaVersion?: 3;
+  schemaVersion?: 4;
+  /** Exact SDK source revision used for the last projection pass. */
+  sdkRevision?: string;
   lastSeenTxId: number;
-  /** owner + programName → observed native address (nonce-safe binding). */
+  /** owner + logicalAddress → observed native address (nonce-safe binding). */
   programs?: Record<string, string>;
   /** listing content hash → every observed revocation marker candidate. */
   revocations?: Record<string, string[] | string>;
@@ -147,4 +173,25 @@ export interface ScanState {
   listings: Record<string, string>;
   /** jobId → discovered deal */
   deals: Record<string, RegisteredDeal>;
+  /** Append-only raw discovery journal. Projections can be rebuilt after SDK upgrades. */
+  anchors?: Record<string, RawAnchorObservation>;
 }
+
+export interface RawAnchorObservation {
+  nativeAddress: string;
+  logicalAddress: string;
+  owner: string;
+  kind: AnchorKind;
+  txId?: number;
+  txHash?: string;
+  blockNumber?: number;
+  observedAt: number;
+  readStatus: "read" | "indeterminate";
+  readFailureReason?: string;
+  contentHash?: string;
+  data?: Record<string, unknown>;
+  /** Explicitly isolated compatibility path for pre-logical-metadata writes. */
+  compatibility?: "current" | "legacy-mvp";
+}
+import type { RevocationBinding } from "@kynesyslabs/dacs/artifacts";
+import type { AnchorKind } from "@kynesyslabs/dacs/discovery";

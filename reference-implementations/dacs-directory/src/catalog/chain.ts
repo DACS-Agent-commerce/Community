@@ -52,3 +52,33 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
 export async function readAnchor(address: string): Promise<Record<string, unknown> | null> {
   return (await readAnchorRecord(address))?.data ?? null;
 }
+
+/** Latest confirmed global transaction id, or null while the node is unavailable. */
+export async function latestConfirmedTransactionId(): Promise<number | null> {
+  try {
+    const res = await fetch(RPC + "/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: AbortSignal.timeout(10_000),
+      cache: "no-store",
+      body: JSON.stringify({
+        method: "nodeCall",
+        params: [{
+          type: "nodeCall",
+          message: "getTransactions",
+          sender: null,
+          receiver: null,
+          timestamp: null,
+          data: { start: "latest", limit: 1 },
+          extra: "",
+        }],
+      }),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: number; response?: Array<{ id?: number }> };
+    const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
+    return typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? id : null;
+  } catch {
+    return null;
+  }
+}

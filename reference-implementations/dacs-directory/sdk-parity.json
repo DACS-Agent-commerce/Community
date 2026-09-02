@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "sdkRevision": "50a8c0489c04572f96015176e5f357f000cf230b",
+  "reviewedAt": "2026-09-01",
+  "status": "snapshot-parity",
+  "sourceFingerprints": {
+    "src/artifacts/types.ts": "dd00401a2cf365f93c7647cbb601f91c3f6071157c1c01110537e39c1a1e524a",
+    "src/artifacts/validators.ts": "6a568fda9e43181cf4c80b144612dab6f78da605093a75998b9df4541d0a6757",
+    "src/agent/listingValidation.ts": "8c0d37b188d0fb2009d7bd7708509f7c065e7c8ccd1dd6d64298cd2ee1cd63d5",
+    "src/agent/publishListingCore.ts": "5766f7492258956916d61f85cff9caf81509945d0f6f4fa19f50ecefa2cdb3ba",
+    "src/agent/verifyBundleCore.ts": "9067d589d1298e4bcc1184058eed9b188d13fee7416da43d3a4d838790275de5",
+    "src/discovery/catalog.ts": "0210a7fae3349ec8d4ae2136640bf4510532e5e172d0c126a56b1dd82a2b1e9b",
+    "src/canonical/addressing.ts": "2b8831ca1bcb4b8c3b50bdb47b95d41e0bbedcded64bd4bb41570ea67fa88649"
+  },
+  "coveredSurfaces": [
+    "logical anchor discovery and replay",
+    "normative Listing validation and publication",
+    "PA-1 rail authority allowlist",
+    "DPA-1 payload capability allowlist",
+    "catalog query contract",
+    "bundle and referenced-artifact resolution"
+  ],
+  "deferredFailClosed": [
+    "authenticated settlement phase-orchestrator authority",
+    "strict composite verification without session expectations",
+    "raw GCR/CCI identity provenance",
+    "unmerged RFQ, rating, and reputation extensions"
+  ]
+}

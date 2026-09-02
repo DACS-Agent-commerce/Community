@@ -5,13 +5,15 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { crawlDomain, normalizeSubmittedDomain } from "@/src/catalog/wellknown";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
+import { rateLimit, readJsonBody } from "@/src/catalog/security";
 import { loadDomains, saveDomains, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "register-domain", 3, 60 * 60_000) ?? rejectOversizeRequest(req, 4096);
+  const blocked = rateLimit(req, "register-domain", 3, 60 * 60_000);
   if (blocked) return blocked;
-  const body = (await req.json().catch(() => null)) as { domain?: string } | null;
+  const parsed = await readJsonBody<{ domain?: string }>(req, 4096);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.value;
   const submitted = body?.domain?.trim();
   if (!submitted || submitted.length > 253) {
     return NextResponse.json({ error: "need { domain }" }, { status: 400 });

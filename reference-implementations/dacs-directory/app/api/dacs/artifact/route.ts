@@ -8,10 +8,13 @@
  * claim that those exact bytes occupy the requested native address.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { deriveAnchorAddress, readAnchor } from "@/src/catalog/chain";
-import { findProgramAddress } from "@/src/catalog/store";
+import { deriveAnchorAddress, readAnchorRecord } from "@/src/catalog/chain";
+import { canonicalProgramOwner, findProgramAddress } from "@/src/catalog/store";
+import { rateLimit } from "@/src/catalog/security";
 
 export async function GET(req: NextRequest) {
+  const blocked = rateLimit(req, "artifact", 120, 60_000);
+  if (blocked) return blocked;
   const q = req.nextUrl.searchParams;
   let ref = q.get("ref");
   const owner = q.get("owner");
@@ -20,6 +23,9 @@ export async function GET(req: NextRequest) {
     ref = findProgramAddress(owner, name) ?? deriveAnchorAddress(owner, name);
   }
   if (!ref) return NextResponse.json({ error: "need ?ref= or ?owner=&name=" }, { status: 400 });
-  const value = await readAnchor(ref);
-  return NextResponse.json({ ref, value });
+  const record = await readAnchorRecord(ref);
+  if (record && owner && canonicalProgramOwner(record.owner ?? "") !== canonicalProgramOwner(owner)) {
+    return NextResponse.json({ error: "artifact owner does not match the requested party", ref, value: null }, { status: 409 });
+  }
+  return NextResponse.json({ ref, value: record?.data ?? null });
 }

@@ -18,10 +18,12 @@ export async function GET(
   if (!verified || verified.contentHash !== hit.contentHash) {
     return NextResponse.json({ error: "listing anchor failed verification" }, { status: 502 });
   }
-  const actualId = typeof verified.scope.listingId === "string"
-    ? verified.scope.listingId
+  const actualId = verified.profile === "current"
+    ? verified.listing.listingId
     : verified.listing.serviceId;
-  const actualVersion = verified.scope.listingVersion ?? verified.scope.version ?? 1;
+  const actualVersion = verified.profile === "current"
+    ? verified.listing.listingVersion
+    : verified.listing.listingVersion ?? 1;
   if (actualId !== listingId || String(actualVersion) !== version) {
     return NextResponse.json({ error: "listing anchor does not match requested id/version" }, { status: 502 });
   }

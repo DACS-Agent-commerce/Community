@@ -146,7 +146,7 @@ test("strict ref policy rejects unsigned referenced artifacts", async () => {
   }]), false);
 });
 
-test("evidence ref must be signed by a bundle party", async () => {
+test("legacy ref policy cannot authorize settlement evidence without phase authority", async () => {
   const evidenceScope = { evidenceVersion: "1", jobId: "j" };
   const message = Buffer.from(`dacs-evidence:v1:${contentHash(evidenceScope)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
@@ -165,10 +165,11 @@ test("evidence ref must be signed by a bundle party", async () => {
     return v;
   };
 
-  // Signer is a party to the bundle → accepted.
+  // Even a bundle party cannot stand in for the authenticated phase
+  // orchestrator required by the current SDK.
   assert.equal(
     await refsPassStrictPolicy(withParty(did), [{ kind: "dacs-4-evidence", raw: evidence }]),
-    true,
+    false,
   );
   // Valid signature, but the signer is a stranger to the deal → rejected.
   assert.equal(

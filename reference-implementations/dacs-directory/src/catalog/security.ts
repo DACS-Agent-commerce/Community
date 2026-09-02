@@ -41,12 +41,12 @@ export function rateLimit(
   limit: number,
   windowMs = 60_000,
 ): NextResponse | null {
-  const client = rateLimitClientKey(req);
-  // Without an explicitly trusted proxy there is no trustworthy client IP in
-  // the Web Request API. A shared fallback bucket would let one caller deny
-  // service to everyone, so direct deployments rely on the documented edge
-  // limiter plus the hard registry/input caps instead.
-  if (!client) return null;
+  // A trusted proxy provides fair per-client buckets. Direct deployments use
+  // a larger shared brake: less precise, but public expensive endpoints are
+  // never left completely unlimited.
+  const resolvedClient = rateLimitClientKey(req);
+  const client = resolvedClient ?? "shared-direct";
+  const effectiveLimit = resolvedClient ? limit : Math.max(limit * 10, 20);
   const key = `${scope}:${client}`;
   const now = Date.now();
   const prior = buckets.get(key);
@@ -57,7 +57,7 @@ export function rateLimit(
     : prior;
   bucket.count += 1;
   buckets.set(key, bucket);
-  if (bucket.count <= limit) return null;
+  if (bucket.count <= effectiveLimit) return null;
   return NextResponse.json(
     { error: "rate limit exceeded" },
     {
@@ -93,13 +93,44 @@ export function requireAdmin(req: NextRequest): NextResponse | null {
     : NextResponse.json({ error: "unauthorized" }, { status: 401 });
 }
 
-export function rejectOversizeRequest(
+export type JsonBodyResult<T> =
+  | { ok: true; value: T | null }
+  | { ok: false; response: NextResponse };
+
+/** Read and bound the actual body bytes; Content-Length is only an early hint. */
+export async function readJsonBody<T>(
   req: NextRequest,
   maxBytes = 64 * 1024,
-): NextResponse | null {
-  const raw = req.headers.get("content-length");
-  if (raw && Number(raw) > maxBytes) {
-    return NextResponse.json({ error: "request body too large" }, { status: 413 });
+): Promise<JsonBodyResult<T>> {
+  const declared = req.headers.get("content-length");
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "request body too large" }, { status: 413 }),
+    };
   }
-  return null;
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await req.arrayBuffer();
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "could not read request body" }, { status: 400 }),
+    };
+  }
+  if (bytes.byteLength > maxBytes) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "request body too large" }, { status: 413 }),
+    };
+  }
+  try {
+    const text = new TextDecoder().decode(bytes);
+    return { ok: true, value: text.length > 0 ? JSON.parse(text) as T : null };
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "request body must be valid JSON" }, { status: 400 }),
+    };
+  }
 }

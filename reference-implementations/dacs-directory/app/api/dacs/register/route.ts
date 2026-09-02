@@ -1,14 +1,19 @@
 /**
  * POST /api/dacs/register — submit a registration. The payload is a POINTER
  * set (primary claim + anchor addresses), not trusted content: everything is
- * verified from chain at index time. MVP: appends to the registration file;
- * the next reindex pass picks it up.
+ * verified from chain at index time. Appends to the registration file; the
+ * live indexer observes that durable input change and picks it up immediately.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { verifyOwnerSignature } from "@/src/catalog/registrationSig";
 import { parseRegistration } from "@/src/catalog/registration";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
-import { loadRegistrations, saveRegistrations, withDataLock } from "@/src/catalog/store";
+import { rateLimit, readJsonBody } from "@/src/catalog/security";
+import {
+  canonicalProgramOwner,
+  loadRegistrations,
+  saveRegistrations,
+  withDataLock,
+} from "@/src/catalog/store";
 
 // Hard caps bound the reindex cost: every stored registration is re-read and
 // re-verified from chain each pass (up to 32 anchors + 200 deals apiece), so
@@ -20,9 +25,11 @@ const MAX_REGISTRATIONS = 2000;
 const MAX_UNSIGNED_CANDIDATES = 200;
 
 export async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "register", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
+  const blocked = rateLimit(req, "register", 10, 10 * 60_000);
   if (blocked) return blocked;
-  const parsed = parseRegistration(await req.json().catch(() => null));
+  const rawBody = await readJsonBody<unknown>(req);
+  if (!rawBody.ok) return rawBody.response;
+  const parsed = parseRegistration(rawBody.value);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const body = parsed.value;
 
@@ -41,7 +48,8 @@ export async function POST(req: NextRequest) {
 
   return withDataLock("registrations", () => {
     const regs = loadRegistrations();
-    const idx = regs.findIndex((r) => r.primaryClaim === body.primaryClaim);
+    const idx = regs.findIndex((registration) =>
+      canonicalProgramOwner(registration.primaryClaim) === canonicalProgramOwner(body.primaryClaim));
     const prior = idx >= 0 ? regs[idx] : undefined;
     // Once a claim has any registration, replacements must be owner-signed.
     // Third-party submissions may create candidates but cannot seize an entry.
@@ -70,7 +78,7 @@ export async function POST(req: NextRequest) {
       ok: true,
       ownerVerified,
       queued: true,
-      note: "indexed at next pass" + (ownerVerified ? " (owner-registered)" : " (third-party submission)"),
+      note: "queued for live indexing" + (ownerVerified ? " (owner-registered)" : " (third-party submission)"),
     });
   });
 }

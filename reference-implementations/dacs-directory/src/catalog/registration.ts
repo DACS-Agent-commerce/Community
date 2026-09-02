@@ -3,6 +3,11 @@ import type { RegisteredDeal, Registration } from "./types.js";
 const CLAIM = /^(?:did:demos:agent:|0x)?[0-9a-fA-F]{64}$/;
 const ANCHOR = /^stor-[0-9a-f]{40}$/;
 
+const canonicalClaim = (claim: string): string => {
+  const hex = claim.match(/([0-9a-fA-F]{64})$/)?.[1];
+  return hex ? `did:demos:agent:${hex.toLowerCase()}` : claim;
+};
+
 const stringField = (v: unknown, max: number): v is string =>
   typeof v === "string" && v.trim().length > 0 && v.length <= max;
 
@@ -29,7 +34,10 @@ function parseDeal(v: unknown): RegisteredDeal | null {
     rail: d.rail,
     buyerBundleRef: d.buyerBundleRef,
     ...(typeof d.sellerBundleRef === "string" ? { sellerBundleRef: d.sellerBundleRef } : {}),
-    owners: { buyer: o.buyer, seller: o.seller },
+    owners: {
+      buyer: canonicalClaim(o.buyer as string),
+      seller: canonicalClaim(o.seller as string),
+    },
   };
 }
 
@@ -79,7 +87,7 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
   return {
     ok: true,
     value: {
-      primaryClaim: b.primaryClaim,
+      primaryClaim: canonicalClaim(b.primaryClaim),
       displayName: b.displayName.trim(),
       listingAnchors: [...new Set(b.listingAnchors as string[])],
       ...(deals ? { deals: deals as RegisteredDeal[] } : {}),

@@ -1,8 +1,8 @@
 /** Human labels for the spec's kebab-case rail / delivery / negotiation ids. */
 export const RAIL_LABELS: Record<string, string> = {
-  "pay-dem": "DEM",
-  "pay-x402": "USDC · x402",
-  "pay-evm-erc8183": "ERC-8183",
+  "pay-dem": "DEM wallet",
+  "pay-x402": "USDC",
+  "pay-evm-erc8183": "Protected escrow",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");
 /** "negotiate-fixed-price" → "fixed price" */
@@ -16,21 +16,21 @@ export const deliveryLabel = (d: string) =>
 export const IDENTITY_TIERS = [
   {
     id: "institutional",
-    label: "institutional",
+    label: "Organisation verified",
     chipClass: "tier-institutional",
-    hint: "Holds a verified authority-issued regulatory identity (LEI, FINRA CRD, SAM UEI, FedRAMP, CMMC, NAICS) — §6.3.2.1",
+    hint: "This provider has linked an identity issued by a recognised organisation or regulator.",
   },
   {
     id: "verified",
-    label: "verified",
+    label: "Identity verified",
     chipClass: "tier-verified",
-    hint: "Has at least one identity claim verified on-chain (GitHub, Discord, wallet, DID) — §6.3.2.1. Derived from on-chain CCI claims, never self-reported.",
+    hint: "This provider has proved ownership of at least one linked account or wallet.",
   },
   {
     id: "self-declared",
-    label: "self-declared",
+    label: "Basic profile",
     chipClass: "tier-self",
-    hint: "No verified identity claims — only its signing key. §6.3.2.1",
+    hint: "This profile has a signing key but no linked identity has been verified yet.",
   },
 ] as const;
 export type IdentityTierId = (typeof IDENTITY_TIERS)[number]["id"];

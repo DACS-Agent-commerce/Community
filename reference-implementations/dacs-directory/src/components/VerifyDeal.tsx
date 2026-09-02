@@ -16,18 +16,15 @@ import "@/src/shims/buffer";
 // drags demosdk (node-only) into the client bundle. (SDK finding: a pure
 // "./verify" subpath export would fix this properly — see dacs-sdk#14.)
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
+import { listingAddress } from "@kynesyslabs/dacs/canonical";
 import {
   verifyBundleCore,
   type BundleVerification,
 } from "@/vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-import {
-  hasRequiredBundleSignatures,
-  refsPassStrictPolicy,
-  type ResolvedArtifact,
-} from "@/src/catalog/bundlePolicy";
 
 const keyFromDid = (did: string): Uint8Array | null => {
-  const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
+  const hex = /^did:demos:agent:([0-9a-f]{64})$/.exec(did)?.[1] ??
+    /^key:([0-9a-f]{64})$/.exec(did)?.[1];
   return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
 };
 
@@ -85,21 +82,34 @@ export default function VerifyDeal({
 
   const run = async () => {
     setState("running");
-    const resolvedArtifacts: ResolvedArtifact[] = [];
     const verification = await verifyBundleCore(bundleRef, {
       readArtifact: async (r) => {
-        const raw = await fetchArtifact(`ref=${encodeURIComponent(r)}`);
-        if (raw && r !== bundleRef) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
-        return raw;
+        return fetchArtifact(`ref=${encodeURIComponent(r)}`);
       },
+      resolveAttestationRef: async (ref, _jobId, parties) => {
+        const owner = parties.find((party) => party.role === "orchestrator")?.primaryClaim ??
+          parties.find((party) => party.role === "buyer")?.primaryClaim;
+        if (!owner) return null;
+        return fetchArtifact(
+          `ref=${encodeURIComponent(ref.anchor.locator)}&owner=${encodeURIComponent(owner)}`,
+        );
+      },
+      resolveListingRef: async (pin, parties) => {
+        const seller = parties.find((party) => party.role === "seller")?.primaryClaim;
+        if (!seller) return null;
+        const logical = listingAddress(seller, pin.listingId, pin.version);
+        return fetchArtifact(
+          `owner=${encodeURIComponent(seller)}&name=${encodeURIComponent(logical)}`,
+        );
+      },
+      // Explicit legacy-MVP compatibility only; normative refs use the two
+      // resolvers above and never fall back to name guessing.
       resolveRef: async (kind, jobId) => {
         const name = anchorName[kind]?.(jobId);
         if (!name) return null;
-        const raw = await fetchArtifact(
+        return fetchArtifact(
           `owner=${encodeURIComponent(buyerOwner)}&name=${encodeURIComponent(name)}`,
         );
-        if (raw) resolvedArtifacts.push({ kind, raw });
-        return raw;
       },
       resolvePublicKey: async (did) => keyFromDid(did),
       verify: async (b, s, p) => ed25519Verify(b, s, publicKeyFromRaw(p)),
@@ -107,20 +117,12 @@ export default function VerifyDeal({
     const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
     const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
     const expectedPartiesMatch = buyer === buyerOwner && (!expectedSeller || seller === expectedSeller);
-    const signaturesOk = hasRequiredBundleSignatures(verification);
-    const refsOk = signaturesOk
-      ? await refsPassStrictPolicy(verification, resolvedArtifacts)
-      : false;
     const strict: BundleVerification = {
       ...verification,
-      ok: verification.ok && expectedPartiesMatch && signaturesOk && refsOk,
+      ok: verification.ok && expectedPartiesMatch,
       reason: !expectedPartiesMatch
         ? "bundle parties do not match the expected buyer/seller"
-        : !signaturesOk
-          ? "required buyer/seller signatures are missing or invalid"
-          : !refsOk
-            ? "one or more referenced artifact signatures are missing or invalid"
-            : verification.reason,
+        : verification.reason,
     };
     setResult(strict);
     setState("done");

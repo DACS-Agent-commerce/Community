@@ -3,6 +3,7 @@ import { Plus_Jakarta_Sans, Source_Code_Pro } from "next/font/google";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import ThemeToggle from "@/src/components/ThemeToggle";
+import { DACS_MARKET_MEDIA_TYPE } from "@/src/catalog/agentManifest";
 
 const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
@@ -17,9 +18,9 @@ const sourceCodePro = Source_Code_Pro({
 
 export const metadata = {
   icons: { icon: "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🗂️</text></svg>" },
-  title: "DACS Directory",
+  title: "DACS — The open market protocol for autonomous agents",
   description:
-    "Community catalog of DACS agents — verifiable listings, on-chain CCI identity, reputation you can re-derive in your browser.",
+    "Publish capabilities, discover services, negotiate agreements, settle across chains and build portable commercial reputation.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -27,6 +28,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     // suppressHydrationWarning: the no-flicker script sets data-theme before
     // React hydrates — an intentional server/client attribute diff.
     <html lang="en" className={`${jakarta.variable} ${sourceCodePro.variable}`} suppressHydrationWarning>
+      <head>
+        <link
+          rel="alternate"
+          type={DACS_MARKET_MEDIA_TYPE}
+          href="/.well-known/dacs.json"
+          title="DACS agent market entry"
+        />
+        <meta name="dacs-version" content="1" />
+      </head>
       <body>
         {/* No-flicker theme init (site default is light; persisted choice wins). */}
         <script
@@ -37,16 +47,14 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <nav className="nav">
           <div className="nav-inner">
             <Link href="/" className="nav-logo">
-              dacs<b>directory</b>
+              <span className="logo-mark" aria-hidden="true">✦</span>
+              <span>dacs<b>directory</b></span>
             </Link>
             <div className="nav-links">
-              <Link href="/">agents</Link>
-              <Link href="/how-it-works">how it works</Link>
-              <Link href="/verify">verify a deal</Link>
-              <Link href="/register">register</Link>
-              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">
-                standard ↗
-              </a>
+              <Link href="/">Explore market</Link>
+              <Link href="/how-it-works">How it works</Link>
+              <Link href="/verify">Verify outcome</Link>
+              <Link href="/register" className="nav-cta">Publish a service</Link>
               <ThemeToggle />
             </div>
           </div>
@@ -54,12 +62,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <main>{children}</main>
         <footer className="footer">
           <div className="footer-inner">
-            <span className="meta">DACS Directory — a community app; non-normative, everything re-verifiable.</span>
+            <div className="footer-brand">
+              <span className="logo-mark" aria-hidden="true">✦</span>
+              <div><strong>DACS</strong><span>The open market protocol for autonomous agents.</span></div>
+            </div>
             <div className="nav-links" style={{ marginLeft: "auto" }}>
-              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">standard</a>
-              <a href="https://github.com/DACS-Agent-commerce/Community" target="_blank" rel="noreferrer">community</a>
-              <a href="https://github.com/DACS-Agent-commerce/dacs-sdk" target="_blank" rel="noreferrer">sdk</a>
-              <a href="https://explorer.demos.sh" target="_blank" rel="noreferrer">explorer</a>
+              <Link href="/how-it-works">How it works</Link>
+              <a href="/.well-known/dacs.json">Agent access ↗</a>
+              <a href="https://github.com/DACS-Agent-commerce/Community" target="_blank" rel="noreferrer">Community ↗</a>
+              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">For developers ↗</a>
             </div>
           </div>
         </footer>

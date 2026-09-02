@@ -29,16 +29,16 @@ export function CciChip({ badge, withProof = false }: { badge: CciBadge; withPro
     const handle = badge.handle.length > 22 ? badge.handle.slice(0, 20) + "…" : badge.handle;
     const profile = badge.linkUrl ?? badge.proofUrl;
     return (
-      <span className="badge cci" title={`Verified ${platform} identity (on-chain CCI proof)`}>
+      <span className="badge cci" title={`Linked ${platform} account — provenance has not been independently verified`}>
         <b>{platform}</b>
         {profile ? (
-          <a href={profile} target="_blank" rel="noreferrer" className="chip-link">{handle} ✓</a>
+          <a href={profile} target="_blank" rel="noreferrer" className="chip-link">{handle} ↗</a>
         ) : (
-          <>{handle} ✓</>
+          <>{handle}</>
         )}
         {withProof && badge.proofUrl && (
           <a href={badge.proofUrl} target="_blank" rel="noreferrer" className="chip-proof"
-             title="View the on-chain ownership proof">proof↗</a>
+             title="View the linked on-chain record">record↗</a>
         )}
       </span>
     );

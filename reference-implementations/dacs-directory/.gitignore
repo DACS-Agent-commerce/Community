@@ -5,8 +5,12 @@ data/catalog.json
 data/scan-state.json
 data/registrations.json
 data/domains.json
+data/indexer-status.json
+data/.live-indexer.lock/
 data/.indexer-seed
 data/.indexer-mnemonic
 .playwright-mcp/
 *.png
 tsconfig.tsbuildinfo
+playwright-report/
+test-results/
