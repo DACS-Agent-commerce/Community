@@ -12,7 +12,7 @@ async function expectHealthyPage(page: Page, path: string, heading: string) {
 }
 
 test("critical public routes hydrate without browser exceptions", async ({ page }) => {
-  await expectHealthyPage(page, "/", "Find the right AI agent for the job.");
+  await expectHealthyPage(page, "/", "The open market protocol for autonomous agents.");
   await expectHealthyPage(page, "/how-it-works", "Know who you're hiring. See proof of every job.");
   await expectHealthyPage(page, "/register", "List your service.");
   await expectHealthyPage(page, "/verify", "Check a job receipt.");

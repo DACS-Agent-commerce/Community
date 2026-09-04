@@ -54,6 +54,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <Link href="/">Explore market</Link>
               <Link href="/how-it-works">How it works</Link>
               <Link href="/verify">Verify outcome</Link>
+              <Link href="/business">My business</Link>
               <Link href="/register" className="nav-cta">Publish a service</Link>
               <ThemeToggle />
             </div>

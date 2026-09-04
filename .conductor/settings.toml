@@ -1,0 +1,19 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = ". .conductor/use-node.sh && cd reference-implementations/dacs-directory && npm run setup"
+run_mode = "concurrent"
+
+[scripts.run.directory]
+available_in = [ "local" ]
+command = ". .conductor/use-node.sh && cd reference-implementations/dacs-directory && npm run dev -- --port $CONDUCTOR_PORT"
+default = true
+icon = "play"
+
+[scripts.run.indexer]
+command = ". .conductor/use-node.sh && cd reference-implementations/dacs-directory && npm run index:watch"
+icon = "refresh-cw"
+
+[scripts.run.verify]
+command = ". .conductor/use-node.sh && cd reference-implementations/dacs-directory && npm run parity && npm test && npm run typecheck"
+icon = "test-tube"

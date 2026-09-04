@@ -28,12 +28,20 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 
 ## Run it
 
+Use Node.js 22.12 or newer. The repository's `.nvmrc` selects Node 22, and shared
+Conductor actions load it automatically when nvm is installed.
+
 ```bash
 npm run setup    # one-time: vendors + builds dacs-sdk (not yet on npm), installs the app
 npm run index    # verify registrations against chain state → data/catalog.json
 npm run index:watch # continuously index confirmed chain activity and registration changes
-npm run dev      # http://localhost:3400
+npm run dev -- --port 3400 # http://localhost:3400
 ```
+
+In Conductor, use the shared **Directory** run action. It passes the workspace's
+allocated `CONDUCTOR_PORT`, so multiple worktrees can run without port collisions.
+The **Indexer** action runs the live indexing worker, and **Verify** runs SDK parity,
+unit tests, and typechecking.
 
 `setup` checks out the reviewed dacs-sdk revision pinned in
 `scripts/setup-sdk.sh`; no globally installed SDK is required. Tests and static checks

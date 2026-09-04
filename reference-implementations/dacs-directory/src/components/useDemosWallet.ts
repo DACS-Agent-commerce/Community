@@ -101,14 +101,15 @@ export function useDemosWallet() {
     }
   };
 
-  const sign = async (message: string): Promise<string | null> => {
-    if (!provider || !address) return null;
+  const sign = async (message: string, publicKeyOverride?: string): Promise<string | null> => {
+    const publicKey = publicKeyOverride ?? address;
+    if (!provider || !publicKey) return null;
     setError(null);
     try {
       // 2026-05 wallet API: object param with publicKey (old wallets tolerate it too).
       const res = (await provider.request({
         method: "sign",
-        params: [{ message, publicKey: address }],
+        params: [{ message, publicKey }],
       })) as Envelope | string;
       if (typeof res === "string") return res;
       if (res && res.success === false) {

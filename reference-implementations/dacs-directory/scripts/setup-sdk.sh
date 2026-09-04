@@ -27,8 +27,8 @@ if [ ! -d vendor/dacs-sdk ]; then
   git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
 fi
 (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
-(cd vendor/dacs-sdk && npm install --no-audit --no-fund && npm run build)
-npm install --no-audit --no-fund
+(cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
+npm ci --no-audit --no-fund
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.
 if [ ! -f data/registrations.json ] && [ -f data/registrations.example.json ]; then

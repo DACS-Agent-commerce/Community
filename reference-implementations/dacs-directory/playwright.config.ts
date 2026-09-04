@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const localBrowser = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+
 export default defineConfig({
   testDir: "./e2e",
   outputDir: "test-results/playwright",
@@ -12,7 +14,13 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [{
+    name: "chromium",
+    use: {
+      ...devices["Desktop Chrome"],
+      ...(localBrowser ? { launchOptions: { executablePath: localBrowser } } : {}),
+    },
+  }],
   webServer: {
     command: process.env.CI ? "npm start" : "npm run build && npm start",
     url: "http://localhost:3400/verify",

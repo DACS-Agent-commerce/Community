@@ -4,14 +4,17 @@
   "private": true,
   "description": "DACS Directory — community catalog (§6.3.6 API), agent registry UI, and in-browser deal verification for the DACS agent-commerce standard.",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "setup": "bash scripts/setup-sdk.sh",
-    "dev": "next dev --webpack -p 3400",
+    "dev": "next dev --webpack",
     "build": "next build --webpack",
-    "start": "next start -p 3400",
+    "start": "next start",
     "test": "tsx --test test/*.test.ts",
-    "test:e2e": "playwright test e2e/critical-routes.spec.ts",
-    "test:e2e:ui": "playwright test --ui e2e/critical-routes.spec.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
     "parity": "node scripts/check-sdk-parity.mjs",
     "index": "tsx src/catalog/reindex.ts",
     "index:watch": "tsx scripts/watch-indexer.ts",
