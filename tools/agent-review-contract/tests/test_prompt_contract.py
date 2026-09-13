@@ -26,9 +26,6 @@ class PromptContractTest(unittest.TestCase):
             "full assessment against the new",
             "Only while the recorded integration base remains current",
             "even if its provider review request has cleared",
-            "classify the lane as `HOLD` for the rest of this run",
-            "carry that evidence into every inventory rebuild in this run",
-            "do not reassess the unchanged revision",
             "Derive `EFFECTIVE_EFFECT` after those checks",
             "configured submit effect downgraded to effective read-only",
             "never the configured value alone",
@@ -52,6 +49,17 @@ class PromptContractTest(unittest.TestCase):
             "every entry in the enrolled-queue inventory is globally terminal",
             "`ALREADY_DISPOSITIONED` is terminal for the current review scope but remains globally nonterminal",
             "reviewer-idle state",
+            "every required external write and readback for that disposition is reconciled",
+            "required external write or readback not yet reconciled",
+            "remains directed until reconciliation completes",
+            "every required external write and readback is reconciled",
+            "`ACTIONABLE` for reconciliation only",
+            "never blindly retry an unknown write",
+            "do not rerun review oracles or duplicate a confirmed write",
+            "persist a runtime-local hold record keyed by reviewer",
+            "Carry that record across scheduled runs",
+            "while all keys remain unchanged",
+            "do not reassess it, and stay quiet",
         )
 
         for prompt in PROMPTS:
@@ -96,6 +104,7 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`AUTHORIZED_REVIEWER`: `UNSET`", text)
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_SAFE_398_UPDATES`", text)
         self.assertIn("require exact equality with `AUTHORIZED_REVIEWER`", text)
+        self.assertIn("`ALL_CURRENT_398_ENTRIES`", text)
 
     def test_dacs_comment_findings_require_repair_chain(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
@@ -116,6 +125,8 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`AUTHORIZED_REVIEWER`: `UNSET`", text)
         self.assertIn("`SUBMIT_REVIEWS`", text)
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION`", text)
+        self.assertIn("`MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`", text)
+        self.assertIn("never treat an empty derived view as global completion", text)
 
     def test_portable_self_pause_requires_runtime_authority_and_readback(self):
         text = PROMPTS[1].read_text(encoding="utf-8")

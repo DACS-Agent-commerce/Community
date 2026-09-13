@@ -48,12 +48,15 @@ Replace the configuration block at the top of [`prompts/portable-review-contract
 
 - canonical repository and integration branch;
 - coordination surface and review stages;
+- a nonempty monitoring scope used only for global completion evidence;
 - task ledger, when the project has one;
 - restricted-review venue, when the project has one;
 - project review policy and completion action; and
 - authenticated reviewer identity and authorized effect.
 
 Keep runtime mechanics in an adapter. The contract should continue to define outcomes, authority, evidence, repairs, and stopping conditions rather than a vendor's tool names.
+
+Scheduled read-only or draft execution requires durable runtime-local hold state keyed by reviewer, candidate, review scope, integration base, and effective effect. An unchanged key remains quiet across runs. Provider writes with missing or unknown coordination/readback state enter reconciliation-only handling and are never retried blindly.
 
 ## Verification status and limitations
 

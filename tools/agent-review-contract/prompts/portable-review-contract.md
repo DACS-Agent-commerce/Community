@@ -14,6 +14,7 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `REVIEW_POLICY`: `{{REVIEW_POLICY}}`
 - `PUBLIC_WRITING_POLICY`: `{{PUBLIC_WRITING_POLICY}}`
 - `COMPLETION_ACTION`: `{{REPORT_ONLY_OR_AUTHORIZED_SELF_PAUSE}}`
+- `MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`
 - `AUTHORIZED_EFFECT`: `READ_ONLY`
 - `AUTHORIZED_REVIEWER`: `UNSET`
 
@@ -48,6 +49,8 @@ Identity, authorization, connectivity, pagination, parse, or partial-read failur
 
 Use the configured `TASK_LEDGER` when it is not `none`. The coordination surface owns public handoffs rather than private implementation detail. Live provider state, the declared ledger, the owning specification, and exact pins outrank cursor or memory.
 
+Require the configured `MONITORING_SCOPE` to identify a nonempty set of coordination entries for global completion evidence. If it is empty, unset, unreadable, or ambiguous, disable the configured completion action and report only; never treat an empty derived view as global completion. Monitoring scope does not direct work on a non-directed entry.
+
 This prompt grants no authority. The configured `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER` values must record the authenticated user's direct local creation or update instruction. On every run, authenticate the current provider identity and require exact equality with the configured `AUTHORIZED_REVIEWER` before any non-read-only effect; also verify the runtime's configured permissions. Derive `EFFECTIVE_EFFECT` after those checks: use the configured `AUTHORIZED_EFFECT` only when its value, identity binding, local provenance, and required runtime permission all validate; otherwise set `EFFECTIVE_EFFECT` to read-only assessment. Use `EFFECTIVE_EFFECT`, never the configured value alone, for every action and stopping decision. Merge, release, deployment, disclosure, contributor-branch mutation, permission expansion, spend, and destructive effects require their own authority.
 
 If the runtime supports a single-run lock, acquire one unique lock for this executor and reconcile it with visible active work before mutation. Never steal a lock based on age alone. Without a reliable lock or shared reconciliation mechanism, execute one lane serially.
@@ -76,7 +79,7 @@ A change is **directed to the current reviewer** only when current authenticated
 - an active review request names the reviewer;
 - the current coordination record names the reviewer as reviewer or next actor; or
 - the latest unsuperseded handoff explicitly names the reviewer and requests a review action; or
-- the reviewer's latest disposition on the same immutable revision and scope records a named hold awaiting clearing evidence and current coordination has not explicitly withdrawn or superseded it.
+- the reviewer's latest disposition on the same immutable revision and scope records either a named hold awaiting clearing evidence or a required external write or readback not yet reconciled, and current coordination has not explicitly withdrawn or superseded it.
 
 A project-wide request to this executor may enroll all coordination entries only when that scope is explicit. Candidate drift, subscription, prior participation, authorship, mention without a requested action, or a stale/superseded handoff does not by itself direct work to the reviewer. Record the exact evidence used for the classification.
 
@@ -86,9 +89,11 @@ Classify terminal conditions before review readiness:
 
 - `DONE` when the configured terminal state is verified;
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
-- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope, the disposition's recorded integration-base revision is still current, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
+- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope, the disposition's recorded integration-base revision is still current, every required external write and readback for that disposition is reconciled, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
 
 A disposition that leaves a named hold open is not terminal and remains in the directed inventory until its clearing evidence is evaluated or current coordination explicitly withdraws or supersedes it. Integration-base drift takes priority over named-hold handling: classify the lane as `ACTIONABLE` for a full assessment against the new immutable base, rerun every oracle required by that assessment, and do not close the prior hold from hold-only evidence. Only while the recorded integration base remains current and clearing evidence is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin and base, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
+
+A provider disposition with any required coordination write or readback missing or `UNKNOWN` is not terminal and remains directed until reconciliation completes or current coordination explicitly withdraws or supersedes it. Classify it as `ACTIONABLE` for reconciliation only. Read the destination first; never blindly retry an unknown write. Perform only the missing write or readback, preserve confirmed destination event identifiers, and do not rerun review oracles or duplicate a confirmed write.
 
 Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the immutable revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
@@ -107,7 +112,7 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
 4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority, time, and runtime capacity remain.
 
-When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, classify the lane as `HOLD` for the rest of this run, record the run-local result and immutable pin as hold evidence, record the required submission authority or human submission as the next action and trigger, carry that evidence into every inventory rebuild in this run, and do not reassess the unchanged revision.
+When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, persist a runtime-local hold record keyed by reviewer, immutable candidate, scope, integration-base revision, and effective effect. Carry that record across scheduled runs and every inventory rebuild; while all keys remain unchanged, classify the lane as `HOLD`, do not reassess it, and stay quiet. Record the required submission authority or human submission as the next action and trigger. Reopen only when a key changes, clearing submission evidence arrives, or current coordination withdraws or supersedes the request.
 
 If a run limit interrupts the loop, report `RUN LIMIT REACHED`, keep the overall objective `IN PROGRESS`, and name the next executable lane. Completing one review or one batch is never evidence that the overall queue is complete.
 
@@ -121,7 +126,7 @@ Judge the complete review disposition. Never optimize for approval rate or treat
 - If the candidate is dirty against a required live integration base, use the configured non-approval disposition, record the integration condition, and require refresh plus a new immutable-candidate pass. Green candidate-local tests do not justify approval.
 - If a child candidate is stacked on an unintegrated parent, use the configured hold disposition until the parent integrates and the child is refreshed. Do not assess or approve an imagined combined state.
 - If a required generator, test, validator, or other deciding oracle did not run, use a bounded hold rather than approval or a defect verdict. Name the missing oracle and exact next command or evidence. Later evidence on the same pin closes only that named hold; it does not recast unrelated findings or checks.
-- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, and it leaves no named hold open, stop without running oracles or writing again. Report the existing disposition identifier and state.
+- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, every required external write and readback is reconciled, and it leaves no named hold open, stop without running oracles or writing again. Report the existing disposition identifier and state.
 - Keep review completion distinct from author repair, integration, required approvals, final owner decision, merge, release, deployment, and adoption.
 
 For restricted evidence, keep the public record useful at the stage, owner, disposition, and trigger level. Put findings, repair detail, restricted identifiers, revisions, and links only in the authorized venue. Public leakage or a claim that depends on inaccessible restricted context is a failed review.
@@ -132,7 +137,7 @@ Start with lean metadata, but always re-authenticate the reviewer and refresh th
 
 Otherwise discover without a static watchlist. Refresh the configured `INTEGRATION_BRANCHES`, then reconcile the coordination surface, current review requests, immutable candidate revisions, dependencies, checks, reviews, declared task state, and authorized restricted surfaces. A new explicitly addressed handoff is a dependable trigger. Candidate drift or an edited record is evidence to inspect, not automatic execution authority.
 
-Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision, scope, and recorded integration-base revision. Preserve any named uncleared hold in the directed inventory even if its provider review request has cleared. An existing disposition is terminal only when that base is still current, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift takes priority and reopens a full assessment against the new immutable base. Only when the recorded base remains current may a named hold wait without rerunning oracles and later evaluate just its clearing evidence. Record a terminal existing review and stop instead of creating a duplicate.
+Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision, scope, and recorded integration-base revision. Preserve any named uncleared hold in the directed inventory even if its provider review request has cleared. An existing disposition is terminal only when that base is still current, every required external write and readback is reconciled, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift takes priority and reopens a full assessment against the new immutable base. Only when the recorded base remains current may a named hold wait without rerunning oracles and later evaluate just its clearing evidence. Record a terminal existing review and stop instead of creating a duplicate.
 
 Admit a lane only with a current trigger, exact base and candidate revision or design digest, accepted stage envelope, unambiguous owner, disjoint scope, evidence destination, and no active foreign lease. Parallel execution additionally requires isolated workspaces and one predeclared join owner. Fall back to one serial lane when those conditions are unavailable. After reconciliation, return to the fixed-point loop rather than ending the run.
 
