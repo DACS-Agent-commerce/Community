@@ -19,7 +19,7 @@ class PromptContractTest(unittest.TestCase):
             "directed-by evidence",
             "classification | existing disposition",
             "integration-base revision | classification",
-            "recorded integration-base revision is still current",
+            "recorded review-input fingerprint equals the current fingerprint",
             "Integration-base drift takes priority over named-hold handling",
             "A disposition that leaves a named hold open is not terminal",
             "remains in the directed inventory until its clearing evidence is evaluated",
@@ -98,13 +98,24 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("`EFFECTIVE_EFFECT`", text)
                 self.assertIn("required-oracle/check evidence", text)
                 self.assertIn("required coordination/write/readback state", text)
+                self.assertIn("Every disposition records this fingerprint", text)
                 self.assertIn("rebuild and compare", text)
                 self.assertIn("input drift", text)
                 self.assertIn("withdrawal", text.lower())
-                self.assertIn("no new addressed request opens a distinct condition", text)
 
         portable = PROMPTS[1].read_text(encoding="utf-8")
         self.assertNotIn("new addressed request supplies a distinct review scope", portable)
+
+    def test_every_terminal_and_duplicate_path_uses_current_fingerprint(self):
+        expected_counts = {
+            "dacs-codex-automation.md": 2,
+            "portable-review-contract.md": 3,
+        }
+        predicate = "recorded review-input fingerprint equals the current fingerprint"
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertEqual(expected_counts[prompt.name], text.count(predicate))
 
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
@@ -195,7 +206,7 @@ class PromptContractTest(unittest.TestCase):
             self.assertIn("canonical review-input fingerprint", text)
         self.assertIn("required-oracle/check and clearing-evidence state", readme)
         self.assertIn("coordination/write/readback state", readme)
-        self.assertIn("every readable input remain unchanged", readme)
+        self.assertIn("recorded fingerprint equals the current fingerprint", readme)
         self.assertIn("underlying readable input changes", adapter)
 
     def test_read_only_allows_only_bounded_executor_state(self):
@@ -213,7 +224,7 @@ class PromptContractTest(unittest.TestCase):
             "dirty against",
             "stacked on",
             "deciding oracle did not run",
-            "same pin and scope",
+            "recorded review-input fingerprint equals",
             "review completion distinct",
             "Public leakage",
         )

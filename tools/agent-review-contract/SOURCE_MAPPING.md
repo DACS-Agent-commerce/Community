@@ -59,6 +59,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Non-submit hold cache and discovery could ignore a newly addressed condition | Add addressed request/condition state to cache invalidation and use the same distinct-condition predicate during discovery | A read-only result or earlier disposition must not suppress a newly requested assessment on the same head and scope. |
 | Enumerated cache and pre-submit fields could omit another disposition input | Canonicalize every disposition-relevant live input into one review-input fingerprint and reuse it for hold invalidation and pre-submit comparison | Any relevant evidence, authority, coordination, or admission change must invalidate stale work without another field-by-field patch. |
 | Reviewer mismatch could forbid the internal hold state required by safe read-only fallback | Permit only bounded runtime-local lock, cursor, and hold state when repository and reviewer identity remain reliable | A safe downgrade can deduplicate work without gaining any provider or project mutation authority. |
+| Submitted dispositions could bypass later review-input changes | Record the canonical fingerprint with every disposition and require exact current equality on every terminal or duplicate path | A newly failing check or other changed input must reopen an old submitted review even when candidate and base pins are stable. |
 
 ## Deliberately deferred
 
