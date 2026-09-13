@@ -109,6 +109,13 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`SUBMIT_REVIEWS`", text)
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION`", text)
 
+    def test_portable_self_pause_requires_runtime_authority_and_readback(self):
+        text = PROMPTS[1].read_text(encoding="utf-8")
+        self.assertIn("explicit current runtime authority", text)
+        self.assertIn("read the resulting state back", text)
+        self.assertIn("fall back to report-only", text)
+        self.assertIn("does not itself grant scheduler-mutation authority", text)
+
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
             "Never optimize for approval rate",
