@@ -50,6 +50,7 @@ A Codex run satisfies this adapter when it:
 - separately inventories every entry in the executor's enrolled monitoring scope for global completion without authorizing work on non-directed entries;
 - persists non-submit results across runs using the contract's reviewer, candidate, scope, integration-base, effect, governing contract/policy revision, and named clearing-evidence-state key;
 - reconciles partial or unknown external writes from live destination state without rerunning review oracles or blindly retrying writes;
+- holds reconciliation when the effective effect does not authorize the missing write, naming the required authorization or human update as its trigger;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
 - records which checks actually executed;
 - supplies the full concrete-repair chain for every requested change;

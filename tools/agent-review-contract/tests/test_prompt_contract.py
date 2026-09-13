@@ -159,6 +159,8 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION`", text)
         self.assertIn("`MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`", text)
         self.assertIn("never treat an empty derived view as global completion", text)
+        self.assertIn("When the missing write is unauthorized", text)
+        self.assertIn("required authorization or human update", text)
 
     def test_portable_self_pause_requires_runtime_authority_and_readback(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
