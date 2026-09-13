@@ -101,6 +101,11 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("owner", text)
                 self.assertIn("withdrawal", text.lower())
                 self.assertIn("no new addressed request opens a distinct condition", text)
+                self.assertIn("addressed request/condition state", text)
+                self.assertIn("newly addressed distinct condition", text)
+
+        portable = PROMPTS[1].read_text(encoding="utf-8")
+        self.assertNotIn("new addressed request supplies a distinct review scope", portable)
 
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
@@ -184,10 +189,11 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("`WITHDRAWN_OR_SUPERSEDED`", text)
                 self.assertIn("reviewer idle", text)
 
-    def test_codex_adapter_hold_key_tracks_contract_policy_revision(self):
+    def test_codex_adapter_hold_key_tracks_reopen_inputs(self):
         text = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
         self.assertIn("governing contract/policy revision", text)
-        self.assertIn("named clearing-evidence-state key", text)
+        self.assertIn("named clearing-evidence-state", text)
+        self.assertIn("addressed request/condition-state key", text)
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (

@@ -56,6 +56,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Pre-submit drift check covered only the candidate | Re-read both candidate and integration-base pins immediately before submission | A stable candidate can still have an obsolete assessment when its required integration context advances. |
 | Pre-submit pins could remain stable while coordination changed | Re-read trigger, stage, scope, owner, candidate, and integration base immediately before submission | Withdrawal or admission drift must cancel a stale write even when both SHAs are unchanged. |
 | Duplicate-stop rule omitted a newly addressed distinct condition | Require no new addressed request before reusing an existing disposition | Same-head deduplication must not suppress an explicitly reopened review condition. |
+| Non-submit hold cache and discovery could ignore a newly addressed condition | Add addressed request/condition state to cache invalidation and use the same distinct-condition predicate during discovery | A read-only result or earlier disposition must not suppress a newly requested assessment on the same head and scope. |
 
 ## Deliberately deferred
 
