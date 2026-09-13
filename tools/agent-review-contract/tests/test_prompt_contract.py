@@ -118,6 +118,13 @@ class PromptContractTest(unittest.TestCase):
             with self.subTest(prompt=prompt.name):
                 self.assertEqual(expected_counts[prompt.name], text.count(predicate))
 
+    def test_result_records_persist_and_read_back_assessment_fingerprint(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("persisted assessment-input fingerprint", text)
+                self.assertIn("readback including persisted fingerprint", text)
+
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
         self.assertIn("distinct assigned contributor accounts", text)

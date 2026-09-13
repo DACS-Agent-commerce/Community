@@ -173,4 +173,4 @@ Always report the inventory totals and directed-change matrix before the action 
 
 Report compactly:
 
-`inventory totals | directed-change matrix | run status | overall status | change/stage/revision | owner/task | review disposition | checks/evidence | external writes | blocker | next actor/action | trigger | next executor step | usage | required human action or none`
+`inventory totals | directed-change matrix | run status | overall status | change/stage/revision | owner/task | review disposition with persisted assessment-input fingerprint | checks/evidence | external writes and readback including persisted fingerprint | blocker | next actor/action | trigger | next executor step | usage | required human action or none`
