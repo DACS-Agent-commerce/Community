@@ -47,9 +47,10 @@ A Codex run satisfies this adapter when it:
 - downgrades to read-only when the authenticated provider identity does not exactly match the configured authorized reviewer;
 - binds every review to an immutable candidate revision;
 - inventories every change directed to the authenticated reviewer before selecting a lane;
+- separately inventories every entry in the executor's enrolled monitoring scope for global completion without authorizing work on non-directed entries;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
 - records which checks actually executed;
 - supplies the full concrete-repair chain for every requested change;
 - reads external writes back from the provider;
-- reports the overall objective as `IN PROGRESS` while any `HOLD` remains and applies self-pause only after `ACTIONABLE = 0` and `HOLD = 0`; and
+- reports the overall objective as `IN PROGRESS` while any `HOLD` or globally nonterminal enrolled entry remains, treats reviewer idle and `ALREADY_DISPOSITIONED` as insufficient for global completion, and applies self-pause only after `ACTIONABLE = 0`, `HOLD = 0`, and every enrolled entry is `DONE` or `WITHDRAWN_OR_SUPERSEDED`; and
 - keeps scheduler state distinct from overall review completion.

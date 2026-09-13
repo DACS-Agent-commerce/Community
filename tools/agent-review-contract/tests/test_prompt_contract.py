@@ -124,6 +124,15 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("fall back to report-only", text)
         self.assertIn("does not itself grant scheduler-mutation authority", text)
 
+    def test_docs_preserve_global_completion_boundary(self):
+        for relative in ("README.md", "adapters/codex.md"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(document=relative):
+                self.assertIn("enrolled", text)
+                self.assertIn("`DONE`", text)
+                self.assertIn("`WITHDRAWN_OR_SUPERSEDED`", text)
+                self.assertIn("reviewer idle", text)
+
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
             "Never optimize for approval rate",
