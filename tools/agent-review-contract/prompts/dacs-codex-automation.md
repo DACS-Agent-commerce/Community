@@ -73,7 +73,9 @@ Classify terminal conditions before review readiness:
 
 - `DONE` when the authorized merge is verified;
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
-- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same exact revision and scope and no new addressed request reopens a distinct condition.
+- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same exact revision and scope, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
+
+A disposition that leaves a named hold open is not terminal. While its clearing evidence is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
 
 Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the exact revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
@@ -88,6 +90,8 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
 4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority, time, and runtime capacity remain.
 
+When `AUTHORIZED_EFFECT` is `READ_ONLY` or `DRAFT_ONLY`, completing the assessment or draft cannot create a provider disposition. After producing the authorized result once, classify the lane as `HOLD` for the rest of this run, record the run-local result and exact pin as hold evidence, record the required submission authority or human submission as the next action and trigger, carry that evidence into every inventory rebuild in this run, and do not reassess the unchanged revision.
+
 If a run limit interrupts the loop, report `RUN LIMIT REACHED`, keep the overall objective `IN PROGRESS`, and name the next executable lane. Completing one review or one batch is never evidence that the overall queue is complete.
 
 ## Review quality rules from discussion #400
@@ -100,7 +104,7 @@ Judge the complete review disposition. Never optimize for approval rate or treat
 - If the candidate is dirty against live `next`, use `COMMENT`, record the integration condition, and require refresh against live `next` plus a new exact-head pass. Green candidate-local tests do not justify `APPROVE`.
 - If a child candidate is stacked on an unmerged parent, use `COMMENT` and hold the child until the parent lands and the child is refreshed. Do not assess or approve an imagined combined merge.
 - If a required generator, test, validator, or other deciding oracle did not run, use a bounded `HOLD` or `COMMENT` rather than `APPROVE` or `CHANGES_REQUESTED`. Name the missing oracle and exact next command or evidence. Later evidence on the same pin closes only that named hold; it does not recast unrelated findings or checks.
-- If the reviewer already has a disposition on the same pin and scope, stop without running oracles or writing again. Report the existing review identifier and state.
+- If the reviewer already has a disposition on the same pin and scope and it leaves no named hold open, stop without running oracles or writing again. Report the existing review identifier and state.
 - Keep review completion distinct from contributor repair, public integration, required approvals, steward decision, merge, release, deployment, and adoption.
 
 For restricted evidence, keep the public record useful at the stage, owner, disposition, and trigger level. Put findings, repair detail, restricted identifiers, revisions, and links only in the authorized venue. Public leakage or a claim that depends on inaccessible private context is a failed review.
@@ -111,7 +115,7 @@ Start with lean metadata, but always re-authenticate the reviewer and refresh th
 
 Otherwise discover without a static watchlist. Refresh official `main` and `next`, then reconcile #398, current review requests, exact heads, dependencies, checks, reviews, declared task state, and authorized restricted surfaces. A new addressed comment is the dependable handoff. A changed head or edited comment is evidence to inspect, not automatic execution authority.
 
-Before running review oracles, search the current reviewer's existing reviews and comments for the same exact revision. An existing disposition is terminal unless a new addressed request supplies a distinct review scope or new evidence that the prior disposition explicitly left open. Record the existing review and stop instead of creating a duplicate.
+Before running review oracles, search the current reviewer's existing reviews and comments for the same exact revision. An existing disposition is terminal only when it leaves no named hold open and no new addressed request supplies a distinct review scope. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record the existing review and stop instead of creating a duplicate.
 
 Admit a lane only with a current trigger, exact base and head or design digest, accepted stage envelope, unambiguous owner, disjoint scope, evidence destination, and no active foreign lease. Parallel execution additionally requires isolated workspaces and one predeclared join owner. Fall back to one serial lane when those conditions are unavailable. After reconciliation, return to the fixed-point loop rather than ending the run.
 

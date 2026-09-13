@@ -38,6 +38,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Ambiguous completion with held lanes | Overall completion requires both `ACTIONABLE = 0` and `HOLD = 0` | An unresolved hold keeps the overall objective in progress and keeps the scheduler able to observe its trigger. |
 | Readiness mixed with prior disposition | Terminal classifications run before readiness | An existing exact-revision disposition is evidence of completed review scope, not a blocker. |
 | Repair detail attached only to `CHANGES_REQUESTED` | Full repair chain for every accepted finding that asks for a change | DACS uses actionable `COMMENT` findings for some integration and evidence conditions. |
+| Open oracle hold looked like a terminal disposition | A disposition with a named uncleared hold remains `HOLD` | A comment can record a valid review result while deliberately leaving one deciding condition open. |
+| Non-submit execution could re-enter the same lane | Read-only and draft results become a per-run `HOLD` after one pass | No provider-visible disposition exists to terminate the lane when the configured effect forbids submission. |
 
 ## Deliberately deferred
 
