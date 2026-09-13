@@ -18,6 +18,7 @@ For a scheduled executor, add these runtime bindings:
 - one local project containing the authoritative checkout;
 - the schedule and notification policy;
 - a runtime-owned cursor or prior task state for lean comparisons and cross-run read-only/draft hold deduplication;
+- finite candidate, refresh-cycle, elapsed-time, and incremental-spend limits;
 - a unique executor lock when concurrent runs are possible; and
 - explicit authority for any review or coordination write the task may perform.
 

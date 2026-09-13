@@ -68,6 +68,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Candidate checks could inherit provider credentials | Run candidate-controlled commands in a credential-free, network-denied sandbox and reserve authenticated provider operations for a separate trusted step | Untrusted pull-request code must not bypass the review effect boundary through ambient credentials. |
 | Candidate instruction changes could govern their own review | Pin governing instructions and policy to the trusted integration-base revision | Candidate `AGENTS.md` or policy edits remain reviewable artifacts until integrated. |
 | One oracle could mutate the bytes seen by later checks | Run each deciding oracle from a fresh immutable exact-pin snapshot with read-only inputs and separate ephemeral outputs | Every accepted check must still prove the recorded candidate rather than a generated or malicious workspace mutation. |
+| Portable loop had no deterministic finite run bound | Add safe candidate, refresh-cycle, elapsed-time, and incremental-spend defaults and bind the loop to all four | A large or replenished queue must yield with an explicit next lane rather than run indefinitely. |
 
 ## Deliberately deferred
 

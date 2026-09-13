@@ -18,6 +18,10 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`
 - `AUTHORIZED_EFFECT`: `READ_ONLY`
 - `AUTHORIZED_REVIEWER`: `UNSET`
+- `MAX_CANDIDATES_PER_RUN`: `3`
+- `MAX_REFRESH_CYCLES`: `3`
+- `MAX_ELAPSED_MINUTES`: `45`
+- `MAX_INCREMENTAL_SPEND`: `0`
 
 Use the literal value `none` for an optional surface the project does not have. Skip the instructions that address a configured `none` surface.
 
@@ -111,7 +115,7 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 1. Select the largest safely isolated batch allowed by the runtime, or one serial lane when isolation and reconciliation are unavailable.
 2. Complete and reconcile that batch.
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
-4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority, time, and runtime capacity remain.
+4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority remains, but never exceed any configured candidate, refresh-cycle, elapsed-time, or incremental-spend limit.
 
 When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, persist a bounded runtime-local hold record keyed by the assessment-input fingerprint plus current admission and hold state. Carry it across scheduled runs and every inventory rebuild; classify `HOLD` and stay quiet only while those inputs remain unchanged. Record the required submission authority or human submission as the next action and trigger. Any assessment, admission, or hold-state change reopens only the affected evaluation; publication and readback results enter reconciliation instead of invalidating the assessment fingerprint.
 

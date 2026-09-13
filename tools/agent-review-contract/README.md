@@ -56,8 +56,9 @@ Replace the configuration block at the top of [`prompts/portable-review-contract
 - a nonempty monitoring scope used only for global completion evidence;
 - task ledger, when the project has one;
 - restricted-review venue, when the project has one;
-- project review policy and completion action; and
-- authenticated reviewer identity and authorized effect.
+- project review policy and completion action;
+- authenticated reviewer identity and authorized effect; and
+- finite per-run candidate, refresh-cycle, elapsed-time, and incremental-spend limits.
 
 Keep runtime mechanics in an adapter. The contract should continue to define outcomes, authority, evidence, repairs, and stopping conditions rather than a vendor's tool names.
 

@@ -200,6 +200,22 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`", text)
         self.assertIn("never treat an empty derived view as global completion", text)
 
+    def test_portable_executor_has_finite_run_limits(self):
+        text = PROMPTS[1].read_text(encoding="utf-8")
+        for binding in (
+            "`MAX_CANDIDATES_PER_RUN`: `3`",
+            "`MAX_REFRESH_CYCLES`: `3`",
+            "`MAX_ELAPSED_MINUTES`: `45`",
+            "`MAX_INCREMENTAL_SPEND`: `0`",
+        ):
+            self.assertIn(binding, text)
+        self.assertIn(
+            "never exceed any configured candidate, refresh-cycle, elapsed-time, or incremental-spend limit",
+            text,
+        )
+        self.assertIn("RUN LIMIT REACHED", text)
+        self.assertIn("next executable lane", text)
+
     def test_portable_terminal_state_has_an_explicit_live_evidence_binding(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
         self.assertIn(
