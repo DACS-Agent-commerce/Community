@@ -174,6 +174,10 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("`WITHDRAWN_OR_SUPERSEDED`", text)
                 self.assertIn("reviewer idle", text)
 
+    def test_codex_adapter_hold_key_tracks_contract_policy_revision(self):
+        text = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
+        self.assertIn("governing contract/policy-revision key", text)
+
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
             "Never optimize for approval rate",
