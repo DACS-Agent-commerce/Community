@@ -75,7 +75,8 @@ A change is **directed to the current reviewer** only when current authenticated
 
 - an active review request names the reviewer;
 - the current coordination record names the reviewer as reviewer or next actor; or
-- the latest unsuperseded handoff explicitly names the reviewer and requests a review action.
+- the latest unsuperseded handoff explicitly names the reviewer and requests a review action; or
+- the reviewer's latest disposition on the same immutable revision and scope records a named hold awaiting clearing evidence and current coordination has not explicitly withdrawn or superseded it.
 
 A project-wide request to this executor may enroll all coordination entries only when that scope is explicit. Candidate drift, subscription, prior participation, authorship, mention without a requested action, or a stale/superseded handoff does not by itself direct work to the reviewer. Record the exact evidence used for the classification.
 
@@ -87,7 +88,7 @@ Classify terminal conditions before review readiness:
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
 - `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope, the disposition's recorded integration-base revision is still current, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
 
-A disposition that leaves a named hold open is not terminal. Integration-base drift also makes a prior disposition non-terminal and reopens assessment against the new immutable base. While clearing evidence for a named hold is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
+A disposition that leaves a named hold open is not terminal and remains in the directed inventory until its clearing evidence is evaluated or current coordination explicitly withdraws or supersedes it. Integration-base drift takes priority over named-hold handling: classify the lane as `ACTIONABLE` for a full assessment against the new immutable base, rerun every oracle required by that assessment, and do not close the prior hold from hold-only evidence. Only while the recorded integration base remains current and clearing evidence is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin and base, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
 
 Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the immutable revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
@@ -127,7 +128,7 @@ Start with lean metadata, but always re-authenticate the reviewer and refresh th
 
 Otherwise discover without a static watchlist. Refresh the configured `INTEGRATION_BRANCHES`, then reconcile the coordination surface, current review requests, immutable candidate revisions, dependencies, checks, reviews, declared task state, and authorized restricted surfaces. A new explicitly addressed handoff is a dependable trigger. Candidate drift or an edited record is evidence to inspect, not automatic execution authority.
 
-Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision, scope, and recorded integration-base revision. An existing disposition is terminal only when that base is still current, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift reopens assessment against the new immutable base. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record a terminal existing review and stop instead of creating a duplicate.
+Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision, scope, and recorded integration-base revision. Preserve any named uncleared hold in the directed inventory even if its provider review request has cleared. An existing disposition is terminal only when that base is still current, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift takes priority and reopens a full assessment against the new immutable base. Only when the recorded base remains current may a named hold wait without rerunning oracles and later evaluate just its clearing evidence. Record a terminal existing review and stop instead of creating a duplicate.
 
 Admit a lane only with a current trigger, exact base and candidate revision or design digest, accepted stage envelope, unambiguous owner, disjoint scope, evidence destination, and no active foreign lease. Parallel execution additionally requires isolated workspaces and one predeclared join owner. Fall back to one serial lane when those conditions are unavailable. After reconciliation, return to the fixed-point loop rather than ending the run.
 

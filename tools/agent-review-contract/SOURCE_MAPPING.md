@@ -44,6 +44,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Portable placeholders repeated in operational clauses | Placeholders occur only in the configuration block; the body names configured keys | Adopters can configure one block without leaving unresolved operational tokens. |
 | Candidate-only terminal disposition | Bind prior dispositions to the recorded integration-base revision as well as candidate and scope | A stable candidate can become stale when its required integration base advances. |
 | Unbounded portable effect value | Closed portable vocabulary with read-only and unset-reviewer defaults | Runtimes need interoperable write semantics and a fail-safe default rather than an arbitrary authority string. |
+| Open hold could disappear after its provider request cleared | Retain the reviewer's named uncleared hold in the directed inventory until evidence is evaluated or coordination explicitly withdraws it | Monitoring ownership must survive the provider-side request transition that the review itself can cause. |
+| Hold-only recheck could override integration-base drift | Give base drift priority and require a full assessment against the new exact base | Evidence that closes an old hold cannot validate behavior in a changed integration context. |
 
 ## Deliberately deferred
 
