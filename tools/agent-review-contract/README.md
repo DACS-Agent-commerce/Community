@@ -34,9 +34,11 @@ The automation text is the full content of [`prompts/dacs-codex-automation.md`](
 
 A shared file cannot transfer another person's authority. The operator who creates the scheduled task supplies any non-read-only authorization from their own local session, and the configured lines record both the effect and reviewer identity for later runs. An identity mismatch downgrades the run to read-only; repository access alone does not grant write authority.
 
-The automation derives the current reviewer identity and current repository state at runtime. Private-security work is admitted only when the reviewer already has authorized access and the task explicitly includes that venue.
+The automation derives the current reviewer identity and current repository state at runtime. Private-security work is admitted only when the reviewer already has authorized access and the task explicitly includes that venue. General task results and notifications remain disclosure-safe; detailed restricted records are emitted only to a verified authorized restricted destination.
 
 This complete executor deliberately combines queue coordination with per-candidate review for contributors who choose to operate their own #398 queue. The harness-neutral contract, coordinator responsibilities, and runtime publication mechanics remain separately identifiable so they can be split into thinner adapters without making this full executor mandatory for every reviewer.
+
+An open-ended queue monitor stays active after the current entries become terminal. Self-pause additionally requires evidence that enrollment is closed to future entries or a verified reliable external wake-up mechanism.
 
 Run the prompt-contract checks from the repository root:
 

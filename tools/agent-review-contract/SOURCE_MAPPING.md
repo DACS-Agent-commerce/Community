@@ -63,6 +63,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | A disposition's own publication could invalidate its recorded fingerprint | Split stable assessment inputs from transient admission state and reconcile publication/readback outputs separately | Successful submission must not make an otherwise current disposition look stale and trigger duplicate review writes. |
 | Portable `DONE` referred to an undefined configured terminal state | Add a mandatory terminal-stage and required-live-evidence binding and derive `DONE` only from it | Adopters must not guess when global completion or self-pause is safe. |
 | Output schema omitted the assessment fingerprint required for later reuse | Persist the fingerprint in every disposition/provider record and include it in write readback | A later run needs durable live evidence for the equality check rather than an in-memory value. |
+| General task output could expose restricted review detail | Gate detailed records on a verified authorized destination and keep ordinary task/notification output disclosure-safe | Runtime notification configuration must not bypass the review venue's disclosure boundary. |
+| Current queue completion could self-pause an open-ended monitor | Require closed-enrollment evidence or a verified external wake-up before self-pause | Future queue entries must remain discoverable after today's entries become terminal. |
 
 ## Deliberately deferred
 

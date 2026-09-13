@@ -125,6 +125,15 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("persisted assessment-input fingerprint", text)
                 self.assertIn("readback including persisted fingerprint", text)
 
+    def test_general_output_fails_closed_for_restricted_detail(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("detailed", text)
+                self.assertIn("destination is verified as the authorized unrestricted or restricted venue", text)
+                self.assertIn("general task result and notification contain only disclosure-safe", text)
+                self.assertIn("no restricted identifiers, revisions, locations, evidence, repairs, digests, or links", text)
+
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
         self.assertIn("distinct assigned contributor accounts", text)
@@ -205,9 +214,18 @@ class PromptContractTest(unittest.TestCase):
     def test_portable_self_pause_requires_runtime_authority_and_readback(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
         self.assertIn("explicit current runtime authority", text)
+        self.assertIn("monitoring scope is closed to future entries", text)
+        self.assertIn("verified reliable external wake-up mechanism", text)
+        self.assertIn("remain active and quiet while polling on schedule", text)
         self.assertIn("read the resulting state back", text)
         self.assertIn("fall back to report-only", text)
         self.assertIn("does not itself grant scheduler-mutation authority", text)
+
+    def test_dacs_open_queue_cannot_self_pause_without_wake_path(self):
+        text = PROMPTS[0].read_text(encoding="utf-8")
+        self.assertIn("#398 is explicitly closed to future entries", text)
+        self.assertIn("reliable external wake-up mechanism is verified", text)
+        self.assertIn("Otherwise remain active and quiet while polling on schedule", text)
 
     def test_docs_preserve_global_completion_boundary(self):
         for relative in ("README.md", "adapters/codex.md"):
