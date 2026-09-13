@@ -69,7 +69,7 @@ At every stage:
 
 ## State reconstruction and fixed-point execution
 
-Before selecting work, build a fresh inventory of every change explicitly directed to the currently authenticated reviewer. Do not substitute a remembered watchlist, the newest notification, or the first actionable item for this inventory.
+Before selecting work, build a fresh inventory of every change explicitly directed to the currently authenticated reviewer. Separately build an enrolled-queue inventory of every current coordination entry inside the executor's explicit monitoring scope, including entries whose next action currently belongs to someone else. The enrolled-queue inventory is completion evidence only and does not authorize work on a non-directed entry. Do not substitute a remembered watchlist, the newest notification, or the first actionable item for either inventory.
 
 A change is **directed to the current reviewer** only when current authenticated state shows at least one of:
 
@@ -95,6 +95,10 @@ Only the remaining directed changes enter readiness classification. A remaining 
 Materialize this inventory before execution:
 
 `change | directed-by evidence | current stage | immutable revision | integration-base revision | classification | existing disposition | blocker | next actor/action | trigger`
+
+Also materialize the enrolled-queue completion view:
+
+`change | enrolled-by evidence | current stage | global terminal evidence or nonterminal reason | next actor/action | readdress trigger`
 
 Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Then execute this loop:
 
@@ -155,7 +159,7 @@ Apply the configured `PUBLIC_WRITING_POLICY` to public comments and reviews. Pub
 
 The review executor does not merge, release, deploy, modify contributor branches, grant permissions, or disclose restricted material as part of review. It does not create or modify another scheduler or automation.
 
-Report the overall review objective as complete only when complete authenticated discovery and required reconciliation produce a full directed-change inventory with `ACTIONABLE = 0` and `HOLD = 0`, and every directed entry is `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, or `DONE` with its evidence recorded. If `HOLD > 0`, preserve the run status supported by the executed work and report the overall objective as `IN PROGRESS` with the hold count; retain every hold's next actor and trigger. Apply the configured `COMPLETION_ACTION` only after the complete predicate is proven. If it requests self-pause, require explicit current runtime authority for this exact scheduler mutation, pause only this executor, and read the resulting state back. If identity, authority, or permission validation fails, fall back to report-only and name the required scheduler action to the owner; `EFFECTIVE_EFFECT` does not itself grant scheduler-mutation authority. A lean no-delta result, transient failure, partial read, completed lane or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
+The current run may report `NO ACTION (CURRENT REVIEWER IDLE)` when its complete directed-change inventory has `ACTIONABLE = 0` and `HOLD = 0`. That is not overall completion. If `HOLD > 0`, keep the overall objective `IN PROGRESS` and retain every hold's next actor and trigger. Report the overall review objective as complete only when complete authenticated discovery and required reconciliation additionally prove that every entry in the enrolled-queue inventory is globally terminal as `DONE` or `WITHDRAWN_OR_SUPERSEDED`. `ALREADY_DISPOSITIONED` is terminal for the current review scope but remains globally nonterminal because a later revision can be re-addressed. If any enrolled entry remains nonterminal, keep the overall objective `IN PROGRESS`, retain its next actor and readdress trigger, and do not apply the configured `COMPLETION_ACTION`. Apply that action only after this global completion predicate is proven. If it requests self-pause, require explicit current runtime authority for this exact scheduler mutation, pause only this executor, and read the resulting state back. If identity, authority, or permission validation fails, fall back to report-only and name the required scheduler action to the owner; `EFFECTIVE_EFFECT` does not itself grant scheduler-mutation authority. A reviewer-idle state, lean no-delta result, transient failure, partial read, completed review or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
 
 ## Output
 

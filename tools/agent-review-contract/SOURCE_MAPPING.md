@@ -46,6 +46,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Unbounded portable effect value | Closed portable vocabulary with read-only and unset-reviewer defaults | Runtimes need interoperable write semantics and a fail-safe default rather than an arbitrary authority string. |
 | Open hold could disappear after its provider request cleared | Retain the reviewer's named uncleared hold in the directed inventory until evidence is evaluated or coordination explicitly withdraws it | Monitoring ownership must survive the provider-side request transition that the review itself can cause. |
 | Hold-only recheck could override integration-base drift | Give base drift priority and require a full assessment against the new exact base | Evidence that closes an old hold cannot validate behavior in a changed integration context. |
+| Empty directed inventory could self-pause while authors were repairing reviewed changes | Separate the executable directed inventory from an enrolled-queue completion view and require every enrolled entry to be globally terminal before self-pause | Reviewer idle is not queue completion; later revisions still need discovery when re-addressed. |
 
 ## Deliberately deferred
 

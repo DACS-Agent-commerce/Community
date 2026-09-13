@@ -40,10 +40,18 @@ class PromptContractTest(unittest.TestCase):
             "ACTIONABLE = 0",
             "HOLD = 0",
             "If `HOLD > 0`",
-            "overall objective as `IN PROGRESS`",
-            "only after the complete predicate is proven",
+            "keep the overall objective `IN PROGRESS`",
+            "after this global completion predicate is proven",
             "terminal conditions before review readiness",
             "Only the remaining directed changes enter readiness classification",
+            "Separately build an enrolled-queue inventory",
+            "completion evidence only and does not authorize work on a non-directed entry",
+            "enrolled-queue completion view",
+            "NO ACTION (CURRENT REVIEWER IDLE)",
+            "That is not overall completion",
+            "every entry in the enrolled-queue inventory is globally terminal",
+            "`ALREADY_DISPOSITIONED` is terminal for the current review scope but remains globally nonterminal",
+            "reviewer-idle state",
         )
 
         for prompt in PROMPTS:

@@ -58,7 +58,7 @@ Keep advisory details in their authorized restricted venue. When a private fork 
 
 ## State reconstruction and fixed-point execution
 
-Before selecting work, build a fresh inventory of every change that is explicitly directed to the current reviewer. Do not substitute a remembered watchlist, the most recent notification, or the first actionable item for this inventory.
+Before selecting work, build a fresh inventory of every change that is explicitly directed to the current reviewer. Separately build an enrolled-queue inventory of every current #398 entry inside the executor's explicit monitoring scope, including entries whose next action currently belongs to someone else. The enrolled-queue inventory is completion evidence only and does not authorize work on a non-directed entry. Do not substitute a remembered watchlist, the most recent notification, or the first actionable item for either inventory.
 
 A change is **directed to the current reviewer** only when current authenticated state shows at least one of:
 
@@ -84,6 +84,10 @@ Only the remaining directed changes enter readiness classification. A remaining 
 Materialize this inventory before execution:
 
 `change | directed-by evidence | current stage | exact revision | integration-base revision | classification | existing disposition | blocker | next actor/action | trigger`
+
+Also materialize the enrolled-queue completion view:
+
+`change | enrolled-by evidence | current stage | global terminal evidence or nonterminal reason | next actor/action | readdress trigger`
 
 Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Then execute this loop:
 
@@ -144,7 +148,7 @@ Use the repository's public-writing gate for public comments and reviews. Public
 
 The executor does not merge, release, deploy, modify contributor branches, grant permissions, or disclose restricted material as part of review. It does not create or modify another automation.
 
-Report the overall review objective as complete only when complete authenticated discovery and all required reconciliation produce a full directed-change inventory with `ACTIONABLE = 0` and `HOLD = 0`, and every directed entry is `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, or `DONE` with its evidence recorded. If `HOLD > 0`, preserve the run status supported by the executed work and report the overall objective as `IN PROGRESS` with the hold count; retain every hold's next actor and trigger. Self-pause only after the complete predicate is proven: if the current scheduler is explicitly authorized to self-pause, pause only this executor and read the paused state back. Otherwise report the exact scheduler action to the owner. A lean no-delta result, transient failure, partial read, completed lane or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
+The current run may report `NO ACTION (CURRENT REVIEWER IDLE)` when its complete directed-change inventory has `ACTIONABLE = 0` and `HOLD = 0`. That is not overall completion. If `HOLD > 0`, keep the overall objective `IN PROGRESS` and retain every hold's next actor and trigger. Report the overall review objective as complete only when complete authenticated discovery and all required reconciliation additionally prove that every entry in the enrolled-queue inventory is globally terminal as `DONE` or `WITHDRAWN_OR_SUPERSEDED`. `ALREADY_DISPOSITIONED` is terminal for the current review scope but remains globally nonterminal because a later revision can be re-addressed. If any enrolled entry remains nonterminal, keep the overall objective `IN PROGRESS`, retain its next actor and readdress trigger, and do not self-pause. Self-pause only after this global completion predicate is proven: if the current scheduler is explicitly authorized to self-pause, pause only this executor and read the paused state back. Otherwise report the exact scheduler action to the owner. A reviewer-idle state, lean no-delta result, transient failure, partial read, completed review or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
 
 ## Output
 
