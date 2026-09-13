@@ -14,10 +14,12 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `REVIEW_POLICY`: `{{REVIEW_POLICY}}`
 - `PUBLIC_WRITING_POLICY`: `{{PUBLIC_WRITING_POLICY}}`
 - `COMPLETION_ACTION`: `{{REPORT_ONLY_OR_AUTHORIZED_SELF_PAUSE}}`
-- `AUTHORIZED_EFFECT`: `{{AUTHORIZED_EFFECT}}`
-- `AUTHORIZED_REVIEWER`: `{{AUTHORIZED_REVIEWER}}`
+- `AUTHORIZED_EFFECT`: `READ_ONLY`
+- `AUTHORIZED_REVIEWER`: `UNSET`
 
 Use the literal value `none` for an optional surface the project does not have. Skip the instructions that address a configured `none` surface.
+
+Allowed effect values are `READ_ONLY`, `DRAFT_ONLY`, `SUBMIT_REVIEWS`, or `SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION`. `READ_ONLY` and `UNSET` are the safe defaults. `DRAFT_ONLY` prepares review text without a provider write. `SUBMIT_REVIEWS` submits only provider reviews. `SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION` additionally permits the minimum coordination write allowed by the configured `PUBLIC_WRITING_POLICY`. Any non-read-only value requires an exact `AUTHORIZED_REVIEWER` binding from that authenticated user's direct local creation or update instruction.
 
 ## Role
 
@@ -83,15 +85,15 @@ Classify terminal conditions before review readiness:
 
 - `DONE` when the configured terminal state is verified;
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
-- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
+- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope, the disposition's recorded integration-base revision is still current, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
 
-A disposition that leaves a named hold open is not terminal. While its clearing evidence is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
+A disposition that leaves a named hold open is not terminal. Integration-base drift also makes a prior disposition non-terminal and reopens assessment against the new immutable base. While clearing evidence for a named hold is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
 
 Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the immutable revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
 Materialize this inventory before execution:
 
-`change | directed-by evidence | current stage | immutable revision | classification | existing disposition | blocker | next actor/action | trigger`
+`change | directed-by evidence | current stage | immutable revision | integration-base revision | classification | existing disposition | blocker | next actor/action | trigger`
 
 Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Then execute this loop:
 
@@ -114,7 +116,7 @@ Judge the complete review disposition. Never optimize for approval rate or treat
 - If the candidate is dirty against a required live integration base, use the configured non-approval disposition, record the integration condition, and require refresh plus a new immutable-candidate pass. Green candidate-local tests do not justify approval.
 - If a child candidate is stacked on an unintegrated parent, use the configured hold disposition until the parent integrates and the child is refreshed. Do not assess or approve an imagined combined state.
 - If a required generator, test, validator, or other deciding oracle did not run, use a bounded hold rather than approval or a defect verdict. Name the missing oracle and exact next command or evidence. Later evidence on the same pin closes only that named hold; it does not recast unrelated findings or checks.
-- If the reviewer already has a disposition on the same pin and scope and it leaves no named hold open, stop without running oracles or writing again. Report the existing disposition identifier and state.
+- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, and it leaves no named hold open, stop without running oracles or writing again. Report the existing disposition identifier and state.
 - Keep review completion distinct from author repair, integration, required approvals, final owner decision, merge, release, deployment, and adoption.
 
 For restricted evidence, keep the public record useful at the stage, owner, disposition, and trigger level. Put findings, repair detail, restricted identifiers, revisions, and links only in the authorized venue. Public leakage or a claim that depends on inaccessible restricted context is a failed review.
@@ -125,7 +127,7 @@ Start with lean metadata, but always re-authenticate the reviewer and refresh th
 
 Otherwise discover without a static watchlist. Refresh the configured `INTEGRATION_BRANCHES`, then reconcile the coordination surface, current review requests, immutable candidate revisions, dependencies, checks, reviews, declared task state, and authorized restricted surfaces. A new explicitly addressed handoff is a dependable trigger. Candidate drift or an edited record is evidence to inspect, not automatic execution authority.
 
-Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision. An existing disposition is terminal only when it leaves no named hold open and no new addressed request supplies a distinct review scope. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record the existing review and stop instead of creating a duplicate.
+Before running review oracles, search the current reviewer's existing dispositions for the same immutable revision, scope, and recorded integration-base revision. An existing disposition is terminal only when that base is still current, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift reopens assessment against the new immutable base. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record a terminal existing review and stop instead of creating a duplicate.
 
 Admit a lane only with a current trigger, exact base and candidate revision or design digest, accepted stage envelope, unambiguous owner, disjoint scope, evidence destination, and no active foreign lease. Parallel execution additionally requires isolated workspaces and one predeclared join owner. Fall back to one serial lane when those conditions are unavailable. After reconciliation, return to the fixed-point loop rather than ending the run.
 

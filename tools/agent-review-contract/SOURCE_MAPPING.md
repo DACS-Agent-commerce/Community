@@ -42,6 +42,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Non-submit execution could re-enter the same lane | Read-only and draft results become a per-run `HOLD` after one pass | No provider-visible disposition exists to terminate the lane when the configured effect forbids submission. |
 | Configured write effect could survive an identity downgrade in loop logic | Derive `EFFECTIVE_EFFECT` after identity, provenance, and permission checks | Every action and stopping decision must use the safe runtime result rather than the configured value alone. |
 | Portable placeholders repeated in operational clauses | Placeholders occur only in the configuration block; the body names configured keys | Adopters can configure one block without leaving unresolved operational tokens. |
+| Candidate-only terminal disposition | Bind prior dispositions to the recorded integration-base revision as well as candidate and scope | A stable candidate can become stale when its required integration base advances. |
+| Unbounded portable effect value | Closed portable vocabulary with read-only and unset-reviewer defaults | Runtimes need interoperable write semantics and a fail-safe default rather than an arbitrary authority string. |
 
 ## Deliberately deferred
 

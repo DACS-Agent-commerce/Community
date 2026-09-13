@@ -18,6 +18,9 @@ class PromptContractTest(unittest.TestCase):
             "readiness classification",
             "directed-by evidence",
             "classification | existing disposition",
+            "integration-base revision | classification",
+            "recorded integration-base revision is still current",
+            "Integration-base drift also makes a prior disposition non-terminal",
             "A disposition that leaves a named hold open is not terminal",
             "classify the lane as `HOLD` for the rest of this run",
             "carry that evidence into every inventory rebuild in this run",
@@ -94,6 +97,13 @@ class PromptContractTest(unittest.TestCase):
         operational_contract = text.split("## Role", maxsplit=1)[1]
         self.assertNotIn("{{", operational_contract)
         self.assertNotIn("}}", operational_contract)
+
+    def test_portable_effect_vocabulary_is_closed_and_safe_by_default(self):
+        text = PROMPTS[1].read_text(encoding="utf-8")
+        self.assertIn("`AUTHORIZED_EFFECT`: `READ_ONLY`", text)
+        self.assertIn("`AUTHORIZED_REVIEWER`: `UNSET`", text)
+        self.assertIn("`SUBMIT_REVIEWS`", text)
+        self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_COORDINATION`", text)
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (

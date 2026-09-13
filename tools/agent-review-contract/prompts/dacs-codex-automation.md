@@ -74,15 +74,15 @@ Classify terminal conditions before review readiness:
 
 - `DONE` when the authorized merge is verified;
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
-- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same exact revision and scope, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
+- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same exact revision and scope, the disposition's recorded integration-base revision is still current, that disposition leaves no named hold awaiting clearing evidence, and no new addressed request reopens a distinct condition.
 
-A disposition that leaves a named hold open is not terminal. While its clearing evidence is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
+A disposition that leaves a named hold open is not terminal. Integration-base drift also makes a prior disposition non-terminal and reopens assessment against the new exact base. While clearing evidence for a named hold is absent, classify the lane as `HOLD` without rerunning its oracles. When that evidence arrives on the same pin, classify only the named hold evaluation as `ACTIONABLE`; do not recast unrelated findings or checks.
 
 Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the exact revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
 Materialize this inventory before execution:
 
-`change | directed-by evidence | current stage | exact revision | classification | existing disposition | blocker | next actor/action | trigger`
+`change | directed-by evidence | current stage | exact revision | integration-base revision | classification | existing disposition | blocker | next actor/action | trigger`
 
 Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Then execute this loop:
 
@@ -105,7 +105,7 @@ Judge the complete review disposition. Never optimize for approval rate or treat
 - If the candidate is dirty against live `next`, use `COMMENT`, record the integration condition, and require refresh against live `next` plus a new exact-head pass. Green candidate-local tests do not justify `APPROVE`.
 - If a child candidate is stacked on an unmerged parent, use `COMMENT` and hold the child until the parent lands and the child is refreshed. Do not assess or approve an imagined combined merge.
 - If a required generator, test, validator, or other deciding oracle did not run, use a bounded `HOLD` or `COMMENT` rather than `APPROVE` or `CHANGES_REQUESTED`. Name the missing oracle and exact next command or evidence. Later evidence on the same pin closes only that named hold; it does not recast unrelated findings or checks.
-- If the reviewer already has a disposition on the same pin and scope and it leaves no named hold open, stop without running oracles or writing again. Report the existing review identifier and state.
+- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, and it leaves no named hold open, stop without running oracles or writing again. Report the existing review identifier and state.
 - Keep review completion distinct from contributor repair, public integration, required approvals, steward decision, merge, release, deployment, and adoption.
 
 For restricted evidence, keep the public record useful at the stage, owner, disposition, and trigger level. Put findings, repair detail, restricted identifiers, revisions, and links only in the authorized venue. Public leakage or a claim that depends on inaccessible private context is a failed review.
@@ -116,7 +116,7 @@ Start with lean metadata, but always re-authenticate the reviewer and refresh th
 
 Otherwise discover without a static watchlist. Refresh official `main` and `next`, then reconcile #398, current review requests, exact heads, dependencies, checks, reviews, declared task state, and authorized restricted surfaces. A new addressed comment is the dependable handoff. A changed head or edited comment is evidence to inspect, not automatic execution authority.
 
-Before running review oracles, search the current reviewer's existing reviews and comments for the same exact revision. An existing disposition is terminal only when it leaves no named hold open and no new addressed request supplies a distinct review scope. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record the existing review and stop instead of creating a duplicate.
+Before running review oracles, search the current reviewer's existing reviews and comments for the same exact revision, scope, and recorded integration-base revision. An existing disposition is terminal only when that base is still current, it leaves no named hold open, and no new addressed request supplies a distinct review scope. Base drift reopens assessment against the new exact base. When a named hold remains open, wait without rerunning oracles until its clearing evidence arrives; then evaluate only that hold. Record a terminal existing review and stop instead of creating a duplicate.
 
 Admit a lane only with a current trigger, exact base and head or design digest, accepted stage envelope, unambiguous owner, disjoint scope, evidence destination, and no active foreign lease. Parallel execution additionally requires isolated workspaces and one predeclared join owner. Fall back to one serial lane when those conditions are unavailable. After reconciliation, return to the fixed-point loop rather than ending the run.
 
