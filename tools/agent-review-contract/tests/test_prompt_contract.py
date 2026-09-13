@@ -254,6 +254,25 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("bounded runtime-local lock, cursor, and hold state", text)
                 self.assertIn("never permits an external or project mutation", text)
 
+    def test_candidate_commands_are_isolated_from_provider_credentials(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("candidate-controlled commands", text)
+                self.assertIn("isolated credential-free sandbox", text)
+                self.assertIn("provider credentials absent", text)
+                self.assertIn("network denied", text)
+                self.assertIn("filesystem writes confined", text)
+                self.assertIn("separate trusted control-plane step", text)
+
+    def test_candidate_instructions_cannot_govern_their_own_review(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("trusted integration-base revision", text)
+                self.assertIn("Candidate changes to instruction or policy files", text)
+                self.assertIn("gain no governing authority before integration", text)
+
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
             "Never optimize for approval rate",

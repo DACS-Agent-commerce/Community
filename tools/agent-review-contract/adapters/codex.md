@@ -4,10 +4,10 @@ This adapter maps the Agent Review Contract onto Codex. It changes runtime mecha
 
 ## Interactive use
 
-1. Open the target repository as a Codex project so its `AGENTS.md` instructions are in scope.
+1. Open the target repository as a Codex project, but load governing `AGENTS.md` and policy from the trusted integration-base revision. Treat candidate changes to those files as reviewable artifacts until integrated.
 2. Start a task with either the complete DACS Codex automation or a configured copy of the portable prompt.
 3. State the intended effect explicitly: read-only review, draft review body, or submission to a named review surface.
-4. Keep GitHub authentication and repository permissions in the Codex environment. The prompt carries no credential or permission grant.
+4. Keep GitHub authentication only in the trusted provider control-plane step. Run candidate-controlled checks in a separate credential-free sandbox with network denied and writes confined to its isolated candidate workspace. The prompt carries no credential or permission grant.
 
 ## Scheduled use
 
@@ -30,6 +30,7 @@ Codex project instructions belong in `AGENTS.md`; project policy outranks the re
 | Repository and policy discovery | Project checkout, shell, repository `AGENTS.md` |
 | Provider state and review submission | GitHub CLI, GitHub integration, or an installed provider tool |
 | Exact-candidate isolation | Git worktree or another isolated checkout |
+| Candidate command isolation | Credential-free sandbox, no provider credentials, network denied, writes confined to the isolated candidate workspace |
 | Focused verification | Repository-native test and validation commands |
 | Security review | Available Codex Security capability when the admitted lane requires it |
 | Parallel review lanes | Native agents only when isolated state and one reconciliation owner are available |
@@ -43,6 +44,8 @@ Capability names and availability vary by installation. A missing required capab
 A Codex run satisfies this adapter when it:
 
 - loads the intended project instructions;
+- loads governing instructions from the trusted integration-base revision and reviews candidate instruction changes only as artifacts;
+- isolates candidate-controlled commands from provider credentials and the trusted submission step;
 - verifies repository and reviewer identity before a write;
 - downgrades to read-only when the authenticated provider identity does not exactly match the configured authorized reviewer;
 - binds every review to an immutable candidate revision;
