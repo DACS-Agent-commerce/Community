@@ -112,7 +112,7 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
 4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority, time, and runtime capacity remain.
 
-When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, persist a runtime-local hold record keyed by reviewer, immutable candidate, scope, integration-base revision, and effective effect. Carry that record across scheduled runs and every inventory rebuild; while all keys remain unchanged, classify the lane as `HOLD`, do not reassess it, and stay quiet. Record the required submission authority or human submission as the next action and trigger. Reopen only when a key changes, clearing submission evidence arrives, or current coordination withdraws or supersedes the request.
+When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, persist a runtime-local hold record keyed by reviewer, immutable candidate, scope, integration-base revision, effective effect, and governing contract/policy revision. Carry that record across scheduled runs and every inventory rebuild; while all keys remain unchanged, classify the lane as `HOLD`, do not reassess it, and stay quiet. Record the required submission authority or human submission as the next action and trigger. Reopen only when a key changes, clearing submission evidence arrives, or current coordination withdraws or supersedes the request.
 
 If a run limit interrupts the loop, report `RUN LIMIT REACHED`, keep the overall objective `IN PROGRESS`, and name the next executable lane. Completing one review or one batch is never evidence that the overall queue is complete.
 
@@ -154,7 +154,7 @@ For every candidate finding, verify that the evidence supports the claimed impac
 
 Submit only the review state supported by the complete admitted evidence. Read every external write back from its live surface.
 
-Immediately before submission, re-read the candidate revision and compare it with the admitted pin. Any drift cancels the write and returns the lane to discovery.
+Immediately before submission, re-read both the candidate revision and integration-base revision and compare them with the admitted pins. Drift in either cancels the write and returns the lane to discovery.
 
 ## Constraints and stop rules
 

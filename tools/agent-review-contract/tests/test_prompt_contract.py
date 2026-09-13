@@ -56,6 +56,7 @@ class PromptContractTest(unittest.TestCase):
             "never blindly retry an unknown write",
             "do not rerun review oracles or duplicate a confirmed write",
             "persist a runtime-local hold record keyed by reviewer",
+            "governing contract/policy revision",
             "Carry that record across scheduled runs",
             "while all keys remain unchanged",
             "do not reassess it, and stay quiet",
@@ -81,6 +82,15 @@ class PromptContractTest(unittest.TestCase):
             with self.subTest(prompt=prompt.name):
                 for phrase in required:
                     self.assertIn(phrase, text)
+
+    def test_prompts_revalidate_candidate_and_base_before_submission(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("before submission", text)
+                self.assertIn("candidate", text)
+                self.assertIn("integration-base", text)
+                self.assertIn("drift", text)
 
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")

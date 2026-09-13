@@ -53,7 +53,7 @@ Materialize `change | directed-by evidence | current stage | exact revision | in
 
 Partition into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Process no more than the configured candidate limit, in batches of up to three isolated lanes or one serial lane; reconcile, refresh every admission surface, and rebuild the entire inventory until no action remains or any configured cycle, elapsed-time, or incremental-spend limit is reached. Completing one review or one batch is never evidence of overall completion. A limit reports `RUN LIMIT REACHED`, overall `IN PROGRESS`, usage, and the next lane.
 
-With `READ_ONLY` or `DRAFT_ONLY`, including a configured submit effect downgraded to effective read-only, produce the authorized result once, then persist a runtime-local hold record keyed by reviewer, candidate, scope, base, and effect. Carry that record across scheduled runs; while all keys remain unchanged classify `HOLD`, do not reassess it, and stay quiet. Reopen only for a key change, clearing submission evidence, withdrawal, or supersession.
+With `READ_ONLY` or `DRAFT_ONLY`, including a configured submit effect downgraded to effective read-only, produce the authorized result once, then persist a runtime-local hold record keyed by reviewer, candidate, scope, base, effect, and governing contract/policy revision. Carry that record across scheduled runs; while all keys remain unchanged classify `HOLD`, do not reassess it, and stay quiet. Reopen only for a key change, clearing submission evidence, withdrawal, or supersession.
 
 ## Review contract from discussion #400
 
@@ -63,7 +63,7 @@ If dirty against live `next`, use `COMMENT`, require refresh plus a new exact-he
 
 Keep review completion distinct from contributor repair, integration, approvals, steward decision, merge, release, deployment, and adoption. Public leakage or a claim dependent on inaccessible private context is a failed review; restricted findings, repair detail, IDs, revisions, and links stay in their authorized venue.
 
-For every accepted finding that requests change, including an actionable `COMMENT` or `CHANGES_REQUESTED` finding, provide exact reviewed head and location, violated requirement, supporting evidence, compatible repair approach, expected post-fix behavior, and executable acceptance checks. Submit only the evidence-supported disposition; immediately re-read the candidate pin before submission and read every external write back.
+For every accepted finding that requests change, including an actionable `COMMENT` or `CHANGES_REQUESTED` finding, provide exact reviewed head and location, violated requirement, supporting evidence, compatible repair approach, expected post-fix behavior, and executable acceptance checks. Submit only the evidence-supported disposition; immediately re-read both candidate and integration-base pins before submission, cancel on either drift, and read every external write back.
 
 ## Completion and output
 

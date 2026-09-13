@@ -51,7 +51,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Empty directed inventory could self-pause while authors were repairing reviewed changes | Separate the executable directed inventory from an enrolled-queue completion view and require every enrolled entry to be globally terminal before self-pause | Reviewer idle is not queue completion; later revisions still need discovery when re-addressed. |
 | DACS monitoring scope could be unset in a standalone copy | Fix DACS completion monitoring to all current #398 entries; require a nonempty configured scope in the portable prompt | Global completion must not pass vacuously over an undefined enrollment set. |
 | Provider review could look terminal before required coordination/readback completed | Require reconciled external effects and use a reconciliation-only actionable lane | Partial or unknown writes need live readback and bounded completion, not duplicate review or blind retry. |
-| Read-only and draft deduplication lasted only one invocation | Persist an exact reviewer/candidate/scope/base/effect hold key across scheduled runs | An unchanged candidate should not be repeatedly reassessed or notify merely because a new scheduler run began. |
+| Read-only and draft deduplication lasted only one invocation | Persist an exact reviewer/candidate/scope/base/effect/contract-policy hold key across scheduled runs | An unchanged candidate should not be repeatedly reassessed merely because a scheduler run began, while changed governing instructions must invalidate the old result. |
+| Pre-submit drift check covered only the candidate | Re-read both candidate and integration-base pins immediately before submission | A stable candidate can still have an obsolete assessment when its required integration context advances. |
 
 ## Deliberately deferred
 
