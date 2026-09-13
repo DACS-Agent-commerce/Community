@@ -19,7 +19,7 @@ class PromptContractTest(unittest.TestCase):
             "directed-by evidence",
             "classification | existing disposition",
             "integration-base revision | classification",
-            "recorded review-input fingerprint equals the current fingerprint",
+            "recorded assessment-input fingerprint equals the current assessment-input fingerprint",
             "Integration-base drift takes priority over named-hold handling",
             "A disposition that leaves a named hold open is not terminal",
             "remains in the directed inventory until its clearing evidence is evaluated",
@@ -57,11 +57,10 @@ class PromptContractTest(unittest.TestCase):
             "do not rerun review oracles or duplicate a confirmed write",
             "When the missing write is unauthorized",
             "required authorization or human update",
-            "persist a bounded runtime-local hold record keyed by the canonical review-input fingerprint",
-            "required-oracle/check evidence",
-            "named clearing evidence",
+            "persist a bounded runtime-local hold record keyed by the assessment-input fingerprint plus current admission and hold state",
+            "required-oracle/check and named clearing evidence",
             "Carry it across scheduled runs",
-            "digest and every underlying readable input remain unchanged",
+            "those inputs remain unchanged",
             "stay quiet",
         )
 
@@ -86,21 +85,23 @@ class PromptContractTest(unittest.TestCase):
                 for phrase in required:
                     self.assertIn(phrase, text)
 
-    def test_prompts_reuse_complete_fingerprint_before_submission(self):
+    def test_prompts_separate_assessment_admission_and_publication_state(self):
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
             with self.subTest(prompt=prompt.name):
-                self.assertIn("canonical review-input fingerprint", text)
+                self.assertIn("canonical assessment-input fingerprint", text)
+                self.assertIn("admission fingerprint", text)
                 self.assertIn("before submission", text)
-                self.assertIn("current trigger and addressed condition", text)
-                self.assertIn("stage, scope, owner", text)
+                self.assertIn("addressed review condition and scope", text)
                 self.assertIn("candidate and integration-base pins", text)
                 self.assertIn("`EFFECTIVE_EFFECT`", text)
-                self.assertIn("required-oracle/check evidence", text)
-                self.assertIn("required coordination/write/readback state", text)
-                self.assertIn("Every disposition records this fingerprint", text)
-                self.assertIn("rebuild and compare", text)
-                self.assertIn("input drift", text)
+                self.assertIn("required-oracle/check and named clearing evidence", text)
+                self.assertIn("Exclude trigger, stage, owner, publication, coordination-write, and readback results", text)
+                self.assertIn("current trigger, stage, and owner", text)
+                self.assertIn("Every disposition records the assessment fingerprint", text)
+                self.assertIn("rebuild and compare the admission fingerprint", text)
+                self.assertIn("assessment-input drift", text)
+                self.assertIn("reconcile", text)
                 self.assertIn("withdrawal", text.lower())
 
         portable = PROMPTS[1].read_text(encoding="utf-8")
@@ -111,7 +112,7 @@ class PromptContractTest(unittest.TestCase):
             "dacs-codex-automation.md": 2,
             "portable-review-contract.md": 3,
         }
-        predicate = "recorded review-input fingerprint equals the current fingerprint"
+        predicate = "recorded assessment-input fingerprint equals the current assessment-input fingerprint"
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
             with self.subTest(prompt=prompt.name):
@@ -203,11 +204,12 @@ class PromptContractTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         adapter = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
         for text in (readme, adapter):
-            self.assertIn("canonical review-input fingerprint", text)
+            self.assertIn("assessment-input fingerprint", text)
         self.assertIn("required-oracle/check and clearing-evidence state", readme)
-        self.assertIn("coordination/write/readback state", readme)
-        self.assertIn("recorded fingerprint equals the current fingerprint", readme)
-        self.assertIn("underlying readable input changes", adapter)
+        self.assertIn("Trigger, stage, owner, publication, coordination-write, and readback results are excluded", readme)
+        self.assertIn("admission fingerprint adds trigger, stage, and owner", readme)
+        self.assertIn("effects are reconciled separately", readme)
+        self.assertIn("reconciles publication results separately", adapter)
 
     def test_read_only_allows_only_bounded_executor_state(self):
         for prompt in PROMPTS:
@@ -224,7 +226,7 @@ class PromptContractTest(unittest.TestCase):
             "dirty against",
             "stacked on",
             "deciding oracle did not run",
-            "recorded review-input fingerprint equals",
+            "recorded assessment-input fingerprint equals",
             "review completion distinct",
             "Public leakage",
         )
