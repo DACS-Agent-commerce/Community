@@ -50,6 +50,7 @@ Replace the configuration block at the top of [`prompts/portable-review-contract
 
 - canonical repository and integration branch;
 - coordination surface and review stages;
+- terminal stage and the live evidence required to prove it;
 - a nonempty monitoring scope used only for global completion evidence;
 - task ledger, when the project has one;
 - restricted-review venue, when the project has one;

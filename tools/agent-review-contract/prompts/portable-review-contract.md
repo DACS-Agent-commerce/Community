@@ -9,6 +9,7 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `INTEGRATION_BRANCHES`: `{{INTEGRATION_BRANCHES}}`
 - `COORDINATION_SURFACE`: `{{COORDINATION_SURFACE}}`
 - `REVIEW_STAGES`: `{{REVIEW_STAGES}}`
+- `TERMINAL_STATE`: `{{TERMINAL_STAGE_AND_REQUIRED_LIVE_EVIDENCE}}`
 - `TASK_LEDGER`: `{{TASK_LEDGER_OR_NONE}}`
 - `RESTRICTED_REVIEW_SURFACE`: `{{RESTRICTED_REVIEW_SURFACE_OR_NONE}}`
 - `REVIEW_POLICY`: `{{REVIEW_POLICY}}`
@@ -87,7 +88,7 @@ For every directed change, derive the **current stage** from the newest mutually
 
 Classify terminal conditions before review readiness:
 
-- `DONE` when the configured terminal state is verified;
+- `DONE` only when the exact stage and every required live-evidence condition defined by the configured `TERMINAL_STATE` are verified;
 - `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
 - `ALREADY_DISPOSITIONED` when the recorded assessment-input fingerprint equals the current assessment-input fingerprint, every required external write and readback for that disposition is reconciled, and that disposition leaves no named hold awaiting clearing evidence.
 

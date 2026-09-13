@@ -184,6 +184,17 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`", text)
         self.assertIn("never treat an empty derived view as global completion", text)
 
+    def test_portable_terminal_state_has_an_explicit_live_evidence_binding(self):
+        text = PROMPTS[1].read_text(encoding="utf-8")
+        self.assertIn(
+            "`TERMINAL_STATE`: `{{TERMINAL_STAGE_AND_REQUIRED_LIVE_EVIDENCE}}`",
+            text,
+        )
+        self.assertIn(
+            "every required live-evidence condition defined by the configured `TERMINAL_STATE`",
+            text,
+        )
+
     def test_portable_self_pause_requires_runtime_authority_and_readback(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
         self.assertIn("explicit current runtime authority", text)
