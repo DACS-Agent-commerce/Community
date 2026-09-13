@@ -5,13 +5,13 @@ This adapter maps the Agent Review Contract onto Codex. It changes runtime mecha
 ## Interactive use
 
 1. Open the target repository as a Codex project so its `AGENTS.md` instructions are in scope.
-2. Start a task with either the DACS prompt or a configured copy of the portable prompt.
+2. Start a task with either the complete DACS Codex automation or a configured copy of the portable prompt.
 3. State the intended effect explicitly: read-only review, draft review body, or submission to a named review surface.
 4. Keep GitHub authentication and repository permissions in the Codex environment. The prompt carries no credential or permission grant.
 
 ## Scheduled use
 
-Codex scheduled tasks can run a recurring prompt against a selected local project. Create the schedule through the Codex scheduled-task interface and paste the complete selected prompt as the task instruction. Keep scheduling and notification preferences outside the prompt so changing cadence does not fork the review contract.
+Codex scheduled tasks can run a recurring prompt against a selected local project. For DACS, configure `AUTHORIZED_EFFECT` from the current user's direct local instruction, then paste the full contents of [`../prompts/dacs-codex-automation.md`](../prompts/dacs-codex-automation.md) as the task instruction. Paste no README, adapter, delivery, or notification text around it. Keep scheduling and notification preferences outside the prompt so changing cadence does not fork the review contract.
 
 For a scheduled executor, add these runtime bindings:
 
@@ -49,5 +49,6 @@ A Codex run satisfies this adapter when it:
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
 - records which checks actually executed;
 - supplies the full concrete-repair chain for every requested change;
-- reads external writes back from the provider; and
+- reads external writes back from the provider;
+- reports the overall objective as `IN PROGRESS` while any `HOLD` remains and applies self-pause only after `ACTIONABLE = 0` and `HOLD = 0`; and
 - keeps scheduler state distinct from overall review completion.

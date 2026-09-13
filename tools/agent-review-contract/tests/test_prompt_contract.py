@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPTS = (
-    ROOT / "prompts" / "dacs-review-executor.md",
+    ROOT / "prompts" / "dacs-codex-automation.md",
     ROOT / "prompts" / "portable-review-contract.md",
 )
 
@@ -15,14 +15,21 @@ class PromptContractTest(unittest.TestCase):
             "## State reconstruction and fixed-point execution",
             "directed to the current reviewer",
             "current stage",
-            "review-ready",
+            "readiness classification",
             "directed-by evidence",
+            "classification | existing disposition",
             "ACTIONABLE",
             "ALREADY_DISPOSITIONED",
             "WITHDRAWN_OR_SUPERSEDED",
             "rebuild the entire inventory",
             "Completing one review or one batch is never evidence",
             "ACTIONABLE = 0",
+            "HOLD = 0",
+            "If `HOLD > 0`",
+            "overall objective as `IN PROGRESS`",
+            "only after the complete predicate is proven",
+            "terminal conditions before review readiness",
+            "Only the remaining directed changes enter readiness classification",
         )
 
         for prompt in PROMPTS:
@@ -52,6 +59,26 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("steward's final design approval", text)
         self.assertIn("steward's final pull-request approval", text)
         self.assertNotIn("maintainer design approvals", text)
+
+    def test_dacs_artifact_is_named_as_complete_codex_automation(self):
+        dacs = ROOT / "prompts" / "dacs-codex-automation.md"
+        self.assertTrue(dacs.is_file())
+        self.assertFalse((ROOT / "prompts" / "dacs-review-executor.md").exists())
+        self.assertTrue(
+            dacs.read_text(encoding="utf-8").startswith(
+                "# DACS Codex Review Automation"
+            )
+        )
+        text = dacs.read_text(encoding="utf-8")
+        self.assertIn("`AUTHORIZED_EFFECT`: `READ_ONLY`", text)
+        self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_SAFE_398_UPDATES`", text)
+
+    def test_dacs_comment_findings_require_repair_chain(self):
+        text = PROMPTS[0].read_text(encoding="utf-8")
+        self.assertIn(
+            "including an actionable `COMMENT` or `CHANGES_REQUESTED` finding",
+            text,
+        )
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (

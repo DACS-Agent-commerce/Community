@@ -25,7 +25,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 |---|---|---|
 | Hard-coded `mj-deving` identity | Currently authenticated reviewer | Another contributor cannot inherit a person's identity or review scope. |
 | Private workspace and absolute local paths | Active authoritative checkout and runtime-local state | Local paths are private, machine-specific, and unusable by another reviewer. |
-| Personal standing authorization dated 2026-09-13 | Read-only review from a review request; draft or submission only when the current instruction names that effect | Authorization cannot be transferred through a shared prompt. |
+| Personal standing authorization dated 2026-09-13 | Safe `AUTHORIZED_EFFECT: READ_ONLY` default; another allowed value records the current user's direct local creation or update instruction | Authorization cannot be transferred through a shared prompt. |
 | Mandatory access to all visible private vulnerability reports before any action | Restricted surfaces admitted per candidate; missing access holds that lane | Public reviewers may lack private-report access. Missing restricted access must not disclose content or create a false global pass. |
 | Beads and private ISA required by name | Project-declared task ledger and owning specification when present | These are local coordination implementations rather than universal review semantics. |
 | Fixed local lock path | Runtime-provided unique lock; serial fallback | Lock paths and concurrency primitives belong to the runtime adapter. |
@@ -35,6 +35,9 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | `Marius action` output field | Required human action or none | The reusable prompt must address its actual operator. |
 | Source shorthand `two maintainer approvals` | Two distinct assigned-contributor approvals on the same revision, followed by final steward approval | The live #398 governance text uses contributor-account approvals and records the steward decision separately. |
 | Scattered source checks plus live discussion #400 guidance | One explicit review-quality section | Consolidates exact-head, missing-oracle, concrete-repair, disclosure, duplicate-review, approval-rate, unsupported-finding, dirty-base, stacked-parent, and outcome-over-tool-trace rules. |
+| Ambiguous completion with held lanes | Overall completion requires both `ACTIONABLE = 0` and `HOLD = 0` | An unresolved hold keeps the overall objective in progress and keeps the scheduler able to observe its trigger. |
+| Readiness mixed with prior disposition | Terminal classifications run before readiness | An existing exact-revision disposition is evidence of completed review scope, not a blocker. |
+| Repair detail attached only to `CHANGES_REQUESTED` | Full repair chain for every accepted finding that asks for a change | DACS uses actionable `COMMENT` findings for some integration and evidence conditions. |
 
 ## Deliberately deferred
 

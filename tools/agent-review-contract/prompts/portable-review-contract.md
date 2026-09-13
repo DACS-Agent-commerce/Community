@@ -77,11 +77,17 @@ A project-wide request to this executor may enroll all coordination entries only
 
 For every directed change, derive the **current stage** from the newest mutually consistent coordination record, review request, immutable candidate, reviews, checks, and task state. A terminal stage requires its defined live proof. Green checks or an approval never advance a change beyond the stage supported by the coordination record. A block remains an orthogonal flag rather than a stage.
 
-A directed change is **review-ready** only when the requested stage and artifact are unambiguous, the immutable revision is available, required dependencies and evidence are readable, no foreign owner holds the same action, and the reviewer has not already dispositioned the same revision and scope. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
+Classify terminal conditions before review readiness:
+
+- `DONE` when the configured terminal state is verified;
+- `WITHDRAWN_OR_SUPERSEDED` when current coordination state explicitly replaces or withdraws the requested action; and
+- `ALREADY_DISPOSITIONED` when the reviewer already dispositioned the same immutable revision and scope and no new addressed request reopens a distinct condition.
+
+Only the remaining directed changes enter readiness classification. A remaining change is `ACTIONABLE` only when the requested stage and artifact are unambiguous, the immutable revision is available, required dependencies and evidence are readable, and no foreign owner holds the same action. Otherwise classify it as `HOLD` and record the blocker, next actor, clearing action, and observable trigger.
 
 Materialize this inventory before execution:
 
-`change | directed-by evidence | current stage | immutable revision | review-ready | existing disposition | blocker | next actor/action | trigger`
+`change | directed-by evidence | current stage | immutable revision | classification | existing disposition | blocker | next actor/action | trigger`
 
 Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, and `DONE`. Then execute this loop:
 
@@ -140,7 +146,7 @@ Apply `{{PUBLIC_WRITING_POLICY}}` to public comments and reviews. Public coordin
 
 The review executor does not merge, release, deploy, modify contributor branches, grant permissions, or disclose restricted material as part of review. It does not create or modify another scheduler or automation.
 
-Report the overall review objective as complete only when complete authenticated discovery and required reconciliation produce a full directed-change inventory with `ACTIONABLE = 0`, and every directed entry is `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, or `DONE` with its evidence and trigger recorded. Apply `{{REPORT_ONLY_OR_AUTHORIZED_SELF_PAUSE}}` only after that proof. A lean no-delta result, transient failure, partial read, completed lane or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
+Report the overall review objective as complete only when complete authenticated discovery and required reconciliation produce a full directed-change inventory with `ACTIONABLE = 0` and `HOLD = 0`, and every directed entry is `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_SUPERSEDED`, or `DONE` with its evidence recorded. If `HOLD > 0`, preserve the run status supported by the executed work and report the overall objective as `IN PROGRESS` with the hold count; retain every hold's next actor and trigger. Apply `{{REPORT_ONLY_OR_AUTHORIZED_SELF_PAUSE}}` only after the complete predicate is proven. A lean no-delta result, transient failure, partial read, completed lane or batch, unresolved active lane, dependency hold, or missing human decision does not prove overall completion.
 
 ## Output
 
