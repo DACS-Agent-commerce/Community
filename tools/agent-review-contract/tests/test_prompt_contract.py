@@ -52,7 +52,6 @@ class PromptContractTest(unittest.TestCase):
             "every required external write and readback for that disposition is reconciled",
             "required external write or readback not yet reconciled",
             "remains directed until reconciliation completes",
-            "every required external write and readback is reconciled",
             "`ACTIONABLE` for reconciliation only",
             "never blindly retry an unknown write",
             "do not rerun review oracles or duplicate a confirmed write",
@@ -105,6 +104,27 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_SAFE_398_UPDATES`", text)
         self.assertIn("require exact equality with `AUTHORIZED_REVIEWER`", text)
         self.assertIn("`ALL_CURRENT_398_ENTRIES`", text)
+
+    def test_dacs_automation_stays_compact(self):
+        lines = PROMPTS[0].read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(len(lines), 50)
+        self.assertLessEqual(len(lines), 80)
+
+    def test_dacs_adapter_has_explicit_run_limits_and_result_layers(self):
+        text = PROMPTS[0].read_text(encoding="utf-8")
+        for key in (
+            "MAX_CANDIDATES_PER_RUN",
+            "MAX_REFRESH_CYCLES",
+            "MAX_ELAPSED_MINUTES",
+            "MAX_INCREMENTAL_SPEND",
+            "snapshot {",
+            "findings[] {",
+            "checks[] {",
+            "disposition {",
+            "publication {",
+            "usage {",
+        ):
+            self.assertIn(key, text)
 
     def test_dacs_comment_findings_require_repair_chain(self):
         text = PROMPTS[0].read_text(encoding="utf-8")

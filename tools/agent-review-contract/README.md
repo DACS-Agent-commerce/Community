@@ -12,7 +12,7 @@ This tool supports the contributor-review workflow around [DACS-Standard](https:
 
 ## Choose a prompt
 
-- [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md) is the complete Codex task instruction for DACS-Standard review automation. Its safe copy-paste defaults are read-only with no authorized reviewer.
+- [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md) is the complete, compact 50–80-line Codex task instruction for DACS-Standard review automation. Its safe copy-paste defaults are read-only with no authorized reviewer.
 - [`prompts/portable-review-contract.md`](./prompts/portable-review-contract.md) is the project-neutral template. Replace its configuration values, then use it in any agent environment with repository read access and an authorized review-submission path.
 - [`adapters/codex.md`](./adapters/codex.md) maps either prompt onto Codex projects, tasks, and scheduled tasks.
 - [`SOURCE_MAPPING.md`](./SOURCE_MAPPING.md) records every material change from the source DACS automation and why it was necessary for public reuse.
@@ -35,6 +35,8 @@ The automation text is the full content of [`prompts/dacs-codex-automation.md`](
 A shared file cannot transfer another person's authority. The operator who creates the scheduled task supplies any non-read-only authorization from their own local session, and the configured lines record both the effect and reviewer identity for later runs. An identity mismatch downgrades the run to read-only; repository access alone does not grant write authority.
 
 The automation derives the current reviewer identity and current repository state at runtime. Private-security work is admitted only when the reviewer already has authorized access and the task explicitly includes that venue.
+
+This complete executor deliberately combines queue coordination with per-candidate review for contributors who choose to operate their own #398 queue. The harness-neutral contract, coordinator responsibilities, and runtime publication mechanics remain separately identifiable so they can be split into thinner adapters without making this full executor mandatory for every reviewer.
 
 Run the prompt-contract checks from the repository root:
 
