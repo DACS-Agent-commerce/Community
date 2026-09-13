@@ -57,6 +57,8 @@ class PromptContractTest(unittest.TestCase):
             "do not rerun review oracles or duplicate a confirmed write",
             "persist a runtime-local hold record keyed by reviewer",
             "governing contract/policy revision",
+            "named clearing-evidence state",
+            "Arrival of any named clearing evidence",
             "Carry that record across scheduled runs",
             "while all keys remain unchanged",
             "do not reassess it, and stay quiet",
@@ -176,7 +178,8 @@ class PromptContractTest(unittest.TestCase):
 
     def test_codex_adapter_hold_key_tracks_contract_policy_revision(self):
         text = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
-        self.assertIn("governing contract/policy-revision key", text)
+        self.assertIn("governing contract/policy revision", text)
+        self.assertIn("named clearing-evidence-state key", text)
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
