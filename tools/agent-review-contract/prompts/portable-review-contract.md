@@ -126,7 +126,7 @@ Judge the complete review disposition. Never optimize for approval rate or treat
 - If the candidate is dirty against a required live integration base, use the configured non-approval disposition, record the integration condition, and require refresh plus a new immutable-candidate pass. Green candidate-local tests do not justify approval.
 - If a child candidate is stacked on an unintegrated parent, use the configured hold disposition until the parent integrates and the child is refreshed. Do not assess or approve an imagined combined state.
 - If a required generator, test, validator, or other deciding oracle did not run, use a bounded hold rather than approval or a defect verdict. Name the missing oracle and exact next command or evidence. Later evidence on the same pin closes only that named hold; it does not recast unrelated findings or checks.
-- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, every required external write and readback is reconciled, and it leaves no named hold open, stop without running oracles or writing again. Report the existing disposition identifier and state.
+- If the reviewer already has a disposition on the same pin and scope, its recorded integration-base revision is still current, every required external write and readback is reconciled, it leaves no named hold open, and no new addressed request opens a distinct condition, stop without running oracles or writing again. Report the existing disposition identifier and state.
 - Keep review completion distinct from author repair, integration, required approvals, final owner decision, merge, release, deployment, and adoption.
 
 For restricted evidence, keep the public record useful at the stage, owner, disposition, and trigger level. Put findings, repair detail, restricted identifiers, revisions, and links only in the authorized venue. Public leakage or a claim that depends on inaccessible restricted context is a failed review.
@@ -154,7 +154,7 @@ For every candidate finding, verify that the evidence supports the claimed impac
 
 Submit only the review state supported by the complete admitted evidence. Read every external write back from its live surface.
 
-Immediately before submission, re-read both the candidate revision and integration-base revision and compare them with the admitted pins. Drift in either cancels the write and returns the lane to discovery.
+Immediately before submission, re-read the current trigger, stage, scope, owner, candidate revision, and integration-base revision. Withdrawal or drift in any admission field cancels the write and returns the lane to discovery.
 
 ## Constraints and stop rules
 

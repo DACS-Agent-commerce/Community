@@ -54,6 +54,8 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Reconciliation looked actionable even when the effective effect forbade its missing coordination write | Hold the lane with required authorization or human update as its trigger | A reviewer-only effect must not loop on an execution path it cannot lawfully complete. |
 | Read-only and draft deduplication lasted only one invocation | Persist an exact reviewer/candidate/scope/base/effect/contract-policy/clearing-evidence hold key across scheduled runs | An unchanged candidate should not be repeatedly reassessed merely because a scheduler run began, while changed instructions or newly arrived named clearing evidence must invalidate the old hold. |
 | Pre-submit drift check covered only the candidate | Re-read both candidate and integration-base pins immediately before submission | A stable candidate can still have an obsolete assessment when its required integration context advances. |
+| Pre-submit pins could remain stable while coordination changed | Re-read trigger, stage, scope, owner, candidate, and integration base immediately before submission | Withdrawal or admission drift must cancel a stale write even when both SHAs are unchanged. |
+| Duplicate-stop rule omitted a newly addressed distinct condition | Require no new addressed request before reusing an existing disposition | Same-head deduplication must not suppress an explicitly reopened review condition. |
 
 ## Deliberately deferred
 

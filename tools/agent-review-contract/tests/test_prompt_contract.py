@@ -95,6 +95,12 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("candidate", text)
                 self.assertIn("integration-base", text)
                 self.assertIn("drift", text)
+                self.assertIn("current trigger", text)
+                self.assertIn("stage", text)
+                self.assertIn("scope", text)
+                self.assertIn("owner", text)
+                self.assertIn("withdrawal", text.lower())
+                self.assertIn("no new addressed request opens a distinct condition", text)
 
     def test_dacs_prompt_uses_current_approval_roles(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
