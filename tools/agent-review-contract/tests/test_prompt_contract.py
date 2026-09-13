@@ -190,10 +190,12 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("reviewer idle", text)
 
     def test_codex_adapter_hold_key_tracks_reopen_inputs(self):
-        text = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
-        self.assertIn("governing contract/policy revision", text)
-        self.assertIn("named clearing-evidence-state", text)
-        self.assertIn("addressed request/condition-state key", text)
+        for relative in ("README.md", "adapters/codex.md"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(document=relative):
+                self.assertIn("governing contract/policy revision", text)
+                self.assertRegex(text, r"named clearing-evidence[- ]state")
+                self.assertRegex(text, r"addressed request/condition[- ]state")
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (

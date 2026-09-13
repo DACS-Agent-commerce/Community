@@ -58,7 +58,7 @@ Replace the configuration block at the top of [`prompts/portable-review-contract
 
 Keep runtime mechanics in an adapter. The contract should continue to define outcomes, authority, evidence, repairs, and stopping conditions rather than a vendor's tool names.
 
-Scheduled read-only or draft execution requires durable runtime-local hold state keyed by reviewer, candidate, review scope, integration base, effective effect, governing contract/policy revision, and named clearing-evidence state. An unchanged key remains quiet across runs, but arrival of named clearing evidence takes priority and reopens only that hold evaluation. Provider writes with missing or unknown coordination/readback state enter reconciliation-only handling and are never retried blindly; an unauthorized missing write is held for the required authorization or human update rather than treated as executable.
+Scheduled read-only or draft execution requires durable runtime-local hold state keyed by reviewer, candidate, review scope, integration base, effective effect, governing contract/policy revision, named clearing-evidence state, and addressed request/condition state. An unchanged key remains quiet across runs, but arrival of named clearing evidence or a newly addressed distinct condition takes priority and reopens only the affected evaluation. Provider writes with missing or unknown coordination/readback state enter reconciliation-only handling and are never retried blindly; an unauthorized missing write is held for the required authorization or human update rather than treated as executable.
 
 ## Verification status and limitations
 
