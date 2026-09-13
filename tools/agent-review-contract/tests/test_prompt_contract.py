@@ -89,6 +89,12 @@ class PromptContractTest(unittest.TestCase):
             text,
         )
 
+    def test_portable_placeholders_are_confined_to_configuration(self):
+        text = PROMPTS[1].read_text(encoding="utf-8")
+        operational_contract = text.split("## Role", maxsplit=1)[1]
+        self.assertNotIn("{{", operational_contract)
+        self.assertNotIn("}}", operational_contract)
+
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (
             "Never optimize for approval rate",

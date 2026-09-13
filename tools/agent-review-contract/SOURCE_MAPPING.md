@@ -41,6 +41,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Open oracle hold looked like a terminal disposition | A disposition with a named uncleared hold remains `HOLD` | A comment can record a valid review result while deliberately leaving one deciding condition open. |
 | Non-submit execution could re-enter the same lane | Read-only and draft results become a per-run `HOLD` after one pass | No provider-visible disposition exists to terminate the lane when the configured effect forbids submission. |
 | Configured write effect could survive an identity downgrade in loop logic | Derive `EFFECTIVE_EFFECT` after identity, provenance, and permission checks | Every action and stopping decision must use the safe runtime result rather than the configured value alone. |
+| Portable placeholders repeated in operational clauses | Placeholders occur only in the configuration block; the body names configured keys | Adopters can configure one block without leaving unresolved operational tokens. |
 
 ## Deliberately deferred
 
