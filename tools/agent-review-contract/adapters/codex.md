@@ -58,7 +58,7 @@ A Codex run satisfies this adapter when it:
 - holds reconciliation when the effective effect does not authorize the missing write, naming the required authorization or human update as its trigger;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
 - records which checks actually executed;
-- records the canonical assessment-input fingerprint with every disposition, compares admission state immediately before submission, and reconciles publication results separately;
+- records the canonical assessment-input fingerprint, including the assessed stage, with every disposition, compares admission state immediately before submission, and reconciles publication results separately;
 - supplies the full concrete-repair chain for every requested change;
 - reads external writes back from the provider;
 - reports the overall objective as `IN PROGRESS` while any `HOLD` or globally nonterminal enrolled entry remains, treats reviewer idle and `ALREADY_DISPOSITIONED` as insufficient for global completion, and applies self-pause only after `ACTIONABLE = 0`, `HOLD = 0`, and every enrolled entry is `DONE` or `WITHDRAWN_OR_SUPERSEDED`; and
