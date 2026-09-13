@@ -67,6 +67,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Current queue completion could self-pause an open-ended monitor | Require closed-enrollment evidence or a verified external wake-up before self-pause | Future queue entries must remain discoverable after today's entries become terminal. |
 | Candidate checks could inherit provider credentials | Run candidate-controlled commands in a credential-free, network-denied sandbox and reserve authenticated provider operations for a separate trusted step | Untrusted pull-request code must not bypass the review effect boundary through ambient credentials. |
 | Candidate instruction changes could govern their own review | Pin governing instructions and policy to the trusted integration-base revision | Candidate `AGENTS.md` or policy edits remain reviewable artifacts until integrated. |
+| One oracle could mutate the bytes seen by later checks | Run each deciding oracle from a fresh immutable exact-pin snapshot with read-only inputs and separate ephemeral outputs | Every accepted check must still prove the recorded candidate rather than a generated or malicious workspace mutation. |
 
 ## Deliberately deferred
 

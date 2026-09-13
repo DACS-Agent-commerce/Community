@@ -258,11 +258,15 @@ class PromptContractTest(unittest.TestCase):
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
             with self.subTest(prompt=prompt.name):
-                self.assertIn("candidate-controlled commands", text)
+                self.assertIn("each deciding oracle", text)
+                self.assertIn("fresh immutable exact-pin snapshot", text)
                 self.assertIn("isolated credential-free sandbox", text)
+                self.assertIn("reviewed inputs are read-only", text)
                 self.assertIn("provider credentials absent", text)
                 self.assertIn("network denied", text)
-                self.assertIn("filesystem writes confined", text)
+                self.assertIn("separate ephemeral directory", text)
+                self.assertIn("Verify reviewed-input identity before and after every oracle", text)
+                self.assertIn("discard any result if inputs changed", text)
                 self.assertIn("separate trusted control-plane step", text)
 
     def test_candidate_instructions_cannot_govern_their_own_review(self):

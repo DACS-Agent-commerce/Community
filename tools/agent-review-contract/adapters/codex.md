@@ -30,7 +30,7 @@ Codex project instructions belong in `AGENTS.md`; project policy outranks the re
 | Repository and policy discovery | Project checkout, shell, repository `AGENTS.md` |
 | Provider state and review submission | GitHub CLI, GitHub integration, or an installed provider tool |
 | Exact-candidate isolation | Git worktree or another isolated checkout |
-| Candidate command isolation | Credential-free sandbox, no provider credentials, network denied, writes confined to the isolated candidate workspace |
+| Candidate command isolation | Fresh immutable exact-pin snapshot per oracle, read-only inputs, credential-free sandbox, network denied, separate ephemeral outputs |
 | Focused verification | Repository-native test and validation commands |
 | Security review | Available Codex Security capability when the admitted lane requires it |
 | Parallel review lanes | Native agents only when isolated state and one reconciliation owner are available |
@@ -46,6 +46,7 @@ A Codex run satisfies this adapter when it:
 - loads the intended project instructions;
 - loads governing instructions from the trusted integration-base revision and reviews candidate instruction changes only as artifacts;
 - isolates candidate-controlled commands from provider credentials and the trusted submission step;
+- verifies reviewed-input identity before and after each oracle and discards results from mutated inputs;
 - verifies repository and reviewer identity before a write;
 - downgrades to read-only when the authenticated provider identity does not exactly match the configured authorized reviewer;
 - binds every review to an immutable candidate revision;
