@@ -57,13 +57,12 @@ class PromptContractTest(unittest.TestCase):
             "do not rerun review oracles or duplicate a confirmed write",
             "When the missing write is unauthorized",
             "required authorization or human update",
-            "persist a runtime-local hold record keyed by reviewer",
-            "governing contract/policy revision",
-            "named clearing-evidence state",
-            "Arrival of any named clearing evidence",
-            "Carry that record across scheduled runs",
-            "while all keys remain unchanged",
-            "do not reassess it, and stay quiet",
+            "persist a bounded runtime-local hold record keyed by the canonical review-input fingerprint",
+            "required-oracle/check evidence",
+            "named clearing evidence",
+            "Carry it across scheduled runs",
+            "digest and every underlying readable input remain unchanged",
+            "stay quiet",
         )
 
         for prompt in PROMPTS:
@@ -87,22 +86,22 @@ class PromptContractTest(unittest.TestCase):
                 for phrase in required:
                     self.assertIn(phrase, text)
 
-    def test_prompts_revalidate_candidate_and_base_before_submission(self):
+    def test_prompts_reuse_complete_fingerprint_before_submission(self):
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
             with self.subTest(prompt=prompt.name):
+                self.assertIn("canonical review-input fingerprint", text)
                 self.assertIn("before submission", text)
-                self.assertIn("candidate", text)
-                self.assertIn("integration-base", text)
-                self.assertIn("drift", text)
-                self.assertIn("current trigger", text)
-                self.assertIn("stage", text)
-                self.assertIn("scope", text)
-                self.assertIn("owner", text)
+                self.assertIn("current trigger and addressed condition", text)
+                self.assertIn("stage, scope, owner", text)
+                self.assertIn("candidate and integration-base pins", text)
+                self.assertIn("`EFFECTIVE_EFFECT`", text)
+                self.assertIn("required-oracle/check evidence", text)
+                self.assertIn("required coordination/write/readback state", text)
+                self.assertIn("rebuild and compare", text)
+                self.assertIn("input drift", text)
                 self.assertIn("withdrawal", text.lower())
                 self.assertIn("no new addressed request opens a distinct condition", text)
-                self.assertIn("addressed request/condition state", text)
-                self.assertIn("newly addressed distinct condition", text)
 
         portable = PROMPTS[1].read_text(encoding="utf-8")
         self.assertNotIn("new addressed request supplies a distinct review scope", portable)
@@ -189,13 +188,22 @@ class PromptContractTest(unittest.TestCase):
                 self.assertIn("`WITHDRAWN_OR_SUPERSEDED`", text)
                 self.assertIn("reviewer idle", text)
 
-    def test_codex_adapter_hold_key_tracks_reopen_inputs(self):
-        for relative in ("README.md", "adapters/codex.md"):
-            text = (ROOT / relative).read_text(encoding="utf-8")
-            with self.subTest(document=relative):
-                self.assertIn("governing contract/policy revision", text)
-                self.assertRegex(text, r"named clearing-evidence[- ]state")
-                self.assertRegex(text, r"addressed request/condition[- ]state")
+    def test_docs_bind_holds_to_complete_fingerprint(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        adapter = (ROOT / "adapters" / "codex.md").read_text(encoding="utf-8")
+        for text in (readme, adapter):
+            self.assertIn("canonical review-input fingerprint", text)
+        self.assertIn("required-oracle/check and clearing-evidence state", readme)
+        self.assertIn("coordination/write/readback state", readme)
+        self.assertIn("every readable input remain unchanged", readme)
+        self.assertIn("underlying readable input changes", adapter)
+
+    def test_read_only_allows_only_bounded_executor_state(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                self.assertIn("bounded runtime-local lock, cursor, and hold state", text)
+                self.assertIn("never permits an external or project mutation", text)
 
     def test_prompts_preserve_discussion_400_runtime_rules(self):
         required = (

@@ -48,7 +48,7 @@ A Codex run satisfies this adapter when it:
 - binds every review to an immutable candidate revision;
 - inventories every change directed to the authenticated reviewer before selecting a lane;
 - separately inventories every entry in the executor's enrolled monitoring scope for global completion without authorizing work on non-directed entries;
-- persists non-submit results across runs using the contract's reviewer, candidate, scope, integration-base, effect, governing contract/policy revision, named clearing-evidence-state, and addressed request/condition-state key;
+- persists non-submit results across runs using the contract's canonical review-input fingerprint and invalidates the hold when any underlying readable input changes;
 - reconciles partial or unknown external writes from live destination state without rerunning review oracles or blindly retrying writes;
 - holds reconciliation when the effective effect does not authorize the missing write, naming the required authorization or human update as its trigger;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
