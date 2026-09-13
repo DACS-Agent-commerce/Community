@@ -25,7 +25,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 |---|---|---|
 | Hard-coded `mj-deving` identity | Currently authenticated reviewer | Another contributor cannot inherit a person's identity or review scope. |
 | Private workspace and absolute local paths | Active authoritative checkout and runtime-local state | Local paths are private, machine-specific, and unusable by another reviewer. |
-| Personal standing authorization dated 2026-09-13 | Safe `AUTHORIZED_EFFECT: READ_ONLY` default; another allowed value records the current user's direct local creation or update instruction | Authorization cannot be transferred through a shared prompt. |
+| Personal standing authorization dated 2026-09-13 | Safe read-only and unset-reviewer defaults; another allowed effect records the current authenticated user's direct local binding to an exact provider login | Authorization cannot be transferred through a shared prompt or silently follow changed credentials. |
 | Mandatory access to all visible private vulnerability reports before any action | Restricted surfaces admitted per candidate; missing access holds that lane | Public reviewers may lack private-report access. Missing restricted access must not disclose content or create a false global pass. |
 | Beads and private ISA required by name | Project-declared task ledger and owning specification when present | These are local coordination implementations rather than universal review semantics. |
 | Fixed local lock path | Runtime-provided unique lock; serial fallback | Lock paths and concurrency primitives belong to the runtime adapter. |
@@ -40,6 +40,7 @@ The preservation rule for this extraction is strict: retain the source Goal, Suc
 | Repair detail attached only to `CHANGES_REQUESTED` | Full repair chain for every accepted finding that asks for a change | DACS uses actionable `COMMENT` findings for some integration and evidence conditions. |
 | Open oracle hold looked like a terminal disposition | A disposition with a named uncleared hold remains `HOLD` | A comment can record a valid review result while deliberately leaving one deciding condition open. |
 | Non-submit execution could re-enter the same lane | Read-only and draft results become a per-run `HOLD` after one pass | No provider-visible disposition exists to terminate the lane when the configured effect forbids submission. |
+| Configured write effect could survive an identity downgrade in loop logic | Derive `EFFECTIVE_EFFECT` after identity, provenance, and permission checks | Every action and stopping decision must use the safe runtime result rather than the configured value alone. |
 
 ## Deliberately deferred
 

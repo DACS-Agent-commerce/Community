@@ -22,6 +22,9 @@ class PromptContractTest(unittest.TestCase):
             "classify the lane as `HOLD` for the rest of this run",
             "carry that evidence into every inventory rebuild in this run",
             "do not reassess the unchanged revision",
+            "Derive `EFFECTIVE_EFFECT` after those checks",
+            "configured submit effect downgraded to effective read-only",
+            "never the configured value alone",
             "ACTIONABLE",
             "ALREADY_DISPOSITIONED",
             "WITHDRAWN_OR_SUPERSEDED",
@@ -75,7 +78,9 @@ class PromptContractTest(unittest.TestCase):
         )
         text = dacs.read_text(encoding="utf-8")
         self.assertIn("`AUTHORIZED_EFFECT`: `READ_ONLY`", text)
+        self.assertIn("`AUTHORIZED_REVIEWER`: `UNSET`", text)
         self.assertIn("`SUBMIT_REVIEWS_AND_PUBLIC_SAFE_398_UPDATES`", text)
+        self.assertIn("require exact equality with `AUTHORIZED_REVIEWER`", text)
 
     def test_dacs_comment_findings_require_repair_chain(self):
         text = PROMPTS[0].read_text(encoding="utf-8")

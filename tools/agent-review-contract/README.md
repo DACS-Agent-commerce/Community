@@ -12,7 +12,7 @@ This tool supports the contributor-review workflow around [DACS-Standard](https:
 
 ## Choose a prompt
 
-- [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md) is the complete Codex task instruction for DACS-Standard review automation. Its safe copy-paste default is read-only.
+- [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md) is the complete Codex task instruction for DACS-Standard review automation. Its safe copy-paste defaults are read-only with no authorized reviewer.
 - [`prompts/portable-review-contract.md`](./prompts/portable-review-contract.md) is the project-neutral template. Replace its configuration values, then use it in any agent environment with repository read access and an authorized review-submission path.
 - [`adapters/codex.md`](./adapters/codex.md) maps either prompt onto Codex projects, tasks, and scheduled tasks.
 - [`SOURCE_MAPPING.md`](./SOURCE_MAPPING.md) records every material change from the source DACS automation and why it was necessary for public reuse.
@@ -25,14 +25,14 @@ The review-quality rules adopt the public guidance proposed in discussion #400: 
 
 ## Copy the DACS Codex automation
 
-The automation text is the full content of [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md). The file contains the complete review contract and one operator setting, `AUTHORIZED_EFFECT`. The README and Codex adapter are setup documentation and are not part of the scheduled task instruction.
+The automation text is the full content of [`prompts/dacs-codex-automation.md`](./prompts/dacs-codex-automation.md). The file contains the complete review contract and two operator settings, `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER`. The README and Codex adapter are setup documentation and are not part of the scheduled task instruction.
 
 1. Select a local Codex project whose canonical remote is `DACS-Agent-commerce/DACS-Standard`.
-2. Keep `AUTHORIZED_EFFECT: READ_ONLY`, or directly authorize Codex in the local creation instruction to replace it with exactly one other allowed value: `DRAFT_ONLY` or `SUBMIT_REVIEWS_AND_PUBLIC_SAFE_398_UPDATES`.
+2. Keep `AUTHORIZED_EFFECT: READ_ONLY` and `AUTHORIZED_REVIEWER: UNSET`, or directly authorize Codex in the local creation instruction to set one other allowed effect and bind `AUTHORIZED_REVIEWER` to your exact authenticated provider login.
 3. Paste the configured complete automation file into the scheduled task's instruction field.
 4. Choose the schedule, model, and notification policy in Codex. Delivery or notification steps, for example a chat or Telegram handoff, are Codex settings and never part of the pasted task instruction.
 
-A shared file cannot transfer another person's authority. The operator who creates the scheduled task supplies any non-read-only authorization from their own local session, and the configured line records that binding for later runs. Repository access alone does not grant write authority.
+A shared file cannot transfer another person's authority. The operator who creates the scheduled task supplies any non-read-only authorization from their own local session, and the configured lines record both the effect and reviewer identity for later runs. An identity mismatch downgrades the run to read-only; repository access alone does not grant write authority.
 
 The automation derives the current reviewer identity and current repository state at runtime. Private-security work is admitted only when the reviewer already has authorized access and the task explicitly includes that venue.
 
@@ -50,7 +50,8 @@ Replace the configuration block at the top of [`prompts/portable-review-contract
 - coordination surface and review stages;
 - task ledger, when the project has one;
 - restricted-review venue, when the project has one;
-- project review policy and completion action.
+- project review policy and completion action; and
+- authenticated reviewer identity and authorized effect.
 
 Keep runtime mechanics in an adapter. The contract should continue to define outcomes, authority, evidence, repairs, and stopping conditions rather than a vendor's tool names.
 

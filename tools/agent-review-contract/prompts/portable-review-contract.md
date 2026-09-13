@@ -14,6 +14,8 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `REVIEW_POLICY`: `{{REVIEW_POLICY}}`
 - `PUBLIC_WRITING_POLICY`: `{{PUBLIC_WRITING_POLICY}}`
 - `COMPLETION_ACTION`: `{{REPORT_ONLY_OR_AUTHORIZED_SELF_PAUSE}}`
+- `AUTHORIZED_EFFECT`: `{{AUTHORIZED_EFFECT}}`
+- `AUTHORIZED_REVIEWER`: `{{AUTHORIZED_REVIEWER}}`
 
 Use the literal value `none` for an optional surface the project does not have. Skip the instructions that address a configured `none` surface.
 
@@ -44,7 +46,7 @@ Identity, authorization, connectivity, pagination, parse, or partial-read failur
 
 Use `{{TASK_LEDGER_OR_NONE}}` when configured. The coordination surface owns public handoffs rather than private implementation detail. Live provider state, the declared ledger, the owning specification, and exact pins outrank cursor or memory.
 
-This prompt grants no authority. Derive authority from the current user's explicit instruction and the runtime's configured permissions. A request to review permits bounded read-only assessment and ordinary verification. Drafting or submitting a review requires a current instruction that names that effect. Merge, release, deployment, disclosure, contributor-branch mutation, permission expansion, spend, and destructive effects require their own authority.
+This prompt grants no authority. The configured `{{AUTHORIZED_EFFECT}}` and `{{AUTHORIZED_REVIEWER}}` values must record the authenticated user's direct local creation or update instruction. On every run, authenticate the current provider identity and require exact equality with `{{AUTHORIZED_REVIEWER}}` before any non-read-only effect; also verify the runtime's configured permissions. Derive `EFFECTIVE_EFFECT` after those checks: use `{{AUTHORIZED_EFFECT}}` only when its value, identity binding, local provenance, and required runtime permission all validate; otherwise set `EFFECTIVE_EFFECT` to read-only assessment. Use `EFFECTIVE_EFFECT`, never the configured value alone, for every action and stopping decision. Merge, release, deployment, disclosure, contributor-branch mutation, permission expansion, spend, and destructive effects require their own authority.
 
 If the runtime supports a single-run lock, acquire one unique lock for this executor and reconcile it with visible active work before mutation. Never steal a lock based on age alone. Without a reliable lock or shared reconciliation mechanism, execute one lane serially.
 
@@ -98,7 +100,7 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
 4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority, time, and runtime capacity remain.
 
-When the configured effect cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. After producing the authorized result once, classify the lane as `HOLD` for the rest of this run, record the run-local result and immutable pin as hold evidence, record the required submission authority or human submission as the next action and trigger, carry that evidence into every inventory rebuild in this run, and do not reassess the unchanged revision.
+When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, classify the lane as `HOLD` for the rest of this run, record the run-local result and immutable pin as hold evidence, record the required submission authority or human submission as the next action and trigger, carry that evidence into every inventory rebuild in this run, and do not reassess the unchanged revision.
 
 If a run limit interrupts the loop, report `RUN LIMIT REACHED`, keep the overall objective `IN PROGRESS`, and name the next executable lane. Completing one review or one batch is never evidence that the overall queue is complete.
 

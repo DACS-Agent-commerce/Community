@@ -11,7 +11,7 @@ This adapter maps the Agent Review Contract onto Codex. It changes runtime mecha
 
 ## Scheduled use
 
-Codex scheduled tasks can run a recurring prompt against a selected local project. For DACS, configure `AUTHORIZED_EFFECT` from the current user's direct local instruction, then paste the full contents of [`../prompts/dacs-codex-automation.md`](../prompts/dacs-codex-automation.md) as the task instruction. Paste no README, adapter, delivery, or notification text around it. Keep scheduling and notification preferences outside the prompt so changing cadence does not fork the review contract.
+Codex scheduled tasks can run a recurring prompt against a selected local project. For DACS, configure `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER` from the authenticated user's direct local instruction, then paste the full contents of [`../prompts/dacs-codex-automation.md`](../prompts/dacs-codex-automation.md) as the task instruction. Paste no README, adapter, delivery, or notification text around it. Keep scheduling and notification preferences outside the prompt so changing cadence does not fork the review contract.
 
 For a scheduled executor, add these runtime bindings:
 
@@ -44,6 +44,7 @@ A Codex run satisfies this adapter when it:
 
 - loads the intended project instructions;
 - verifies repository and reviewer identity before a write;
+- downgrades to read-only when the authenticated provider identity does not exactly match the configured authorized reviewer;
 - binds every review to an immutable candidate revision;
 - inventories every change directed to the authenticated reviewer before selecting a lane;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
