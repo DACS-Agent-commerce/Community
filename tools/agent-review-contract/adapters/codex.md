@@ -13,12 +13,14 @@ This adapter maps the Agent Review Contract onto Codex. It changes runtime mecha
 
 Codex scheduled tasks can run a recurring prompt against a selected local project. For DACS, configure `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER` from the authenticated user's direct local instruction, then paste the full contents of [`../prompts/dacs-codex-automation.md`](../prompts/dacs-codex-automation.md) as the task instruction. Paste no README, adapter, delivery, or notification text around it. Keep scheduling and notification preferences outside the prompt so changing cadence does not fork the review contract.
 
+The DACS prompt explicitly requires the scheduled run to authenticate the current reviewer, call `get_goal`, call `create_goal` when none is active, and verify the resulting objective before review work. In interfaces exposing only slash commands, the equivalent operator action is `/goal <objective>`. This follows [Codex's durable-goal model](https://learn.chatgpt.com/use-cases/follow-goals): one objective, one verifiable stopping condition, and progress across turns. The Goal covers the currently executable directed-review frontier, not the open-ended global queue; its completion therefore does not imply global queue completion.
+
 For a scheduled executor, add these runtime bindings:
 
 - one local project containing the authoritative checkout;
 - the schedule and notification policy;
 - a runtime-owned cursor or prior task state for lean comparisons and cross-run read-only/draft hold deduplication;
-- finite candidate, refresh-cycle, elapsed-time, and incremental-spend limits;
+- a no-progress livelock guard and an incremental-spend limit, never a review-count budget;
 - a unique executor lock when concurrent runs are possible; and
 - explicit authority for any review or coordination write the task may perform.
 
@@ -57,6 +59,8 @@ A Codex run satisfies this adapter when it:
 - reconciles partial or unknown external writes from live destination state without rerunning review oracles or blindly retrying writes;
 - holds reconciliation when the effective effect does not authorize the missing write, naming the required authorization or human update as its trigger;
 - rebuilds that inventory after each batch and continues while `ACTIONABLE > 0`;
+- binds the native Goal to the verified authenticated reviewer, initializes or resumes it through native Goal operations, verifies it by readback, and completes it only after a refreshed inventory proves `ACTIONABLE = 0` with no reconciliation due;
+- applies no candidate, full-review, refresh-cycle, or elapsed-time work cap, and uses the no-progress guard only for identical non-advancing state;
 - records which checks actually executed;
 - records the canonical assessment-input fingerprint, including the assessed stage, with every disposition, compares admission state immediately before submission, and reconciles publication results separately;
 - supplies the full concrete-repair chain for every requested change;

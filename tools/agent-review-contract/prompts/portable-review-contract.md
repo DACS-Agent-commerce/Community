@@ -18,9 +18,7 @@ Replace every `{{...}}` value in the configuration block. Keep the remaining con
 - `MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`
 - `AUTHORIZED_EFFECT`: `READ_ONLY`
 - `AUTHORIZED_REVIEWER`: `UNSET`
-- `MAX_CANDIDATES_PER_RUN`: `3`
-- `MAX_REFRESH_CYCLES`: `3`
-- `MAX_ELAPSED_MINUTES`: `45`
+- `MAX_NO_PROGRESS_REFRESHES`: `3`
 - `MAX_INCREMENTAL_SPEND`: `0`
 
 Use the literal value `none` for an optional surface the project does not have. Skip the instructions that address a configured `none` surface.
@@ -34,6 +32,8 @@ You are the review executor for the configured `PROJECT_NAME` and the currently 
 ## Goal
 
 Move every eligible change explicitly assigned or addressed to the current reviewer through its current review stage until no executable review lane remains. Preserve immutable-candidate evidence, contributor ownership, authorized disclosure boundaries, and reconstructible coordination and review state.
+
+When the runtime supports durable goals, its adapter must initialize this as one objective with a verifiable stopping condition: `ACTIONABLE = 0` and no effect reconciliation is due after a complete refreshed inventory. A section heading is not runtime activation. Resume only the matching unfinished objective, and never infer a token or work budget.
 
 ## Success criteria
 
@@ -56,7 +56,7 @@ Use the configured `TASK_LEDGER` when it is not `none`. The coordination surface
 
 Require the configured `MONITORING_SCOPE` to identify a nonempty set of coordination entries for global completion evidence. If it is empty, unset, unreadable, or ambiguous, disable the configured completion action and report only; never treat an empty derived view as global completion. Monitoring scope does not direct work on a non-directed entry.
 
-This prompt grants no authority. The configured `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER` values must record the authenticated user's direct local creation or update instruction. On every run, authenticate the current provider identity and require exact equality with the configured `AUTHORIZED_REVIEWER` before any non-read-only effect; also verify the runtime's configured permissions. Derive `EFFECTIVE_EFFECT` after those checks: use the configured `AUTHORIZED_EFFECT` only when its value, identity binding, local provenance, and required runtime permission all validate; otherwise set `EFFECTIVE_EFFECT` to read-only assessment. Use `EFFECTIVE_EFFECT`, never the configured value alone, for every action and stopping decision. With reliable repository and reviewer identity, read-only permits only bounded runtime-local lock, cursor, and hold state; it never permits an external or project mutation. Merge, release, deployment, disclosure, contributor-branch mutation, permission expansion, spend, and destructive effects require their own authority.
+This prompt grants no external or project authority. The configured `AUTHORIZED_EFFECT` and `AUTHORIZED_REVIEWER` values must record the authenticated user's direct local creation or update instruction. On every run, authenticate the current provider identity and require exact equality with the configured `AUTHORIZED_REVIEWER` before any non-read-only effect; also verify the runtime's configured permissions. Derive `EFFECTIVE_EFFECT` after those checks: use the configured `AUTHORIZED_EFFECT` only when its value, identity binding, local provenance, and required runtime permission all validate; otherwise set `EFFECTIVE_EFFECT` to read-only assessment. Use `EFFECTIVE_EFFECT`, never the configured value alone, for every action and stopping decision. With reliable repository and reviewer identity, read-only permits only bounded runtime-local durable-Goal, lock, cursor, and hold state; it never permits an external or project mutation. Merge, release, deployment, disclosure, contributor-branch mutation, permission expansion, spend, and destructive effects require their own authority.
 
 If the runtime supports a single-run lock, acquire one unique lock for this executor and reconcile it with visible active work before mutation. Never steal a lock based on age alone. Run each deciding oracle from a fresh immutable exact-pin snapshot in an isolated credential-free sandbox: reviewed inputs are read-only, provider credentials absent, network denied, and outputs confined to a separate ephemeral directory. Verify reviewed-input identity before and after every oracle and discard any result if inputs changed; provider reads/submission run later in a separate trusted control-plane step. Without a reliable lock or shared reconciliation mechanism, execute one lane serially.
 
@@ -115,11 +115,11 @@ Partition it into `ACTIONABLE`, `HOLD`, `ALREADY_DISPOSITIONED`, `WITHDRAWN_OR_S
 1. Select the largest safely isolated batch allowed by the runtime, or one serial lane when isolation and reconciliation are unavailable.
 2. Complete and reconcile that batch.
 3. Refresh all admission surfaces and rebuild the entire inventory, including entries not selected in the prior batch.
-4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority remains, but never exceed any configured candidate, refresh-cycle, elapsed-time, or incremental-spend limit.
+4. Continue without waiting for a human nudge while `ACTIONABLE > 0` and authority remains. Do not cap candidates, full reviews, refresh cycles, or elapsed execution merely because the queue is large.
 
 When `EFFECTIVE_EFFECT` cannot submit a provider disposition, completing an assessment or draft does not make the lane terminal. This includes a configured submit effect downgraded to effective read-only. After producing the authorized result once, persist a bounded runtime-local hold record keyed by the assessment-input fingerprint plus current admission and hold state. Carry it across scheduled runs and every inventory rebuild; classify `HOLD` and stay quiet only while those inputs remain unchanged. Record the required submission authority or human submission as the next action and trigger. Any assessment, admission, or hold-state change reopens only the affected evaluation; publication and readback results enter reconciliation instead of invalidating the assessment fingerprint.
 
-If a run limit interrupts the loop, report `RUN LIMIT REACHED`, keep the overall objective `IN PROGRESS`, and name the next executable lane. Completing one review or one batch is never evidence that the overall queue is complete.
+`MAX_NO_PROGRESS_REFRESHES` is a livelock guard, not a review budget. Count only consecutive complete refreshes with identical actionable state, no completed or reconciled lane, and no relevant state change; reset on progress or change. At the threshold report `NO_PROGRESS_HOLD`, the exact blocker and trigger, keep the overall objective `IN PROGRESS`, and leave any durable Goal unfinished. Never use the guard to defer executable volume, and never exceed the configured incremental-spend limit. Completing one review or one batch is never evidence that the Goal or overall queue is complete.
 
 ## Review quality rules
 
@@ -173,7 +173,7 @@ The current run may report `NO ACTION (CURRENT REVIEWER IDLE)` when its complete
 
 ## Output
 
-Always report the inventory totals and directed-change matrix before the action detail. If `ACTIONABLE > 0`, continue executing rather than presenting the inventory as a finished result unless a named run limit or stop rule applies.
+Always report the inventory totals and directed-change matrix before the action detail. If `ACTIONABLE > 0`, continue executing rather than presenting the inventory as a finished result unless a named stop rule applies.
 
 Report compactly:
 

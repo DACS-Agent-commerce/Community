@@ -166,9 +166,7 @@ class PromptContractTest(unittest.TestCase):
     def test_dacs_adapter_has_explicit_run_limits_and_result_layers(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
         for key in (
-            "MAX_CANDIDATES_PER_RUN",
-            "MAX_REFRESH_CYCLES",
-            "MAX_ELAPSED_MINUTES",
+            "MAX_NO_PROGRESS_REFRESHES",
             "MAX_INCREMENTAL_SPEND",
             "snapshot {",
             "findings[] {",
@@ -201,21 +199,44 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`MONITORING_SCOPE`: `{{NONEMPTY_COORDINATION_SCOPE}}`", text)
         self.assertIn("never treat an empty derived view as global completion", text)
 
-    def test_portable_executor_has_finite_run_limits(self):
+    def test_portable_executor_has_no_review_budget_and_a_livelock_guard(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
         for binding in (
-            "`MAX_CANDIDATES_PER_RUN`: `3`",
-            "`MAX_REFRESH_CYCLES`: `3`",
-            "`MAX_ELAPSED_MINUTES`: `45`",
+            "`MAX_NO_PROGRESS_REFRESHES`: `3`",
             "`MAX_INCREMENTAL_SPEND`: `0`",
         ):
             self.assertIn(binding, text)
-        self.assertIn(
-            "never exceed any configured candidate, refresh-cycle, elapsed-time, or incremental-spend limit",
-            text,
-        )
-        self.assertIn("RUN LIMIT REACHED", text)
-        self.assertIn("next executable lane", text)
+        for removed in (
+            "MAX_CANDIDATES_PER_RUN",
+            "MAX_REFRESH_CYCLES",
+            "MAX_ELAPSED_MINUTES",
+            "MAX_FULL_REVIEWS_PER_RUN",
+            "RUN LIMIT REACHED",
+        ):
+            self.assertNotIn(removed, text)
+        self.assertIn("livelock guard, not a review budget", text)
+        self.assertIn("NO_PROGRESS_HOLD", text)
+        self.assertIn("Never use the guard to defer executable volume", text)
+
+    def test_dacs_prompt_initializes_a_native_goal_without_a_work_budget(self):
+        text = PROMPTS[0].read_text(encoding="utf-8")
+        self.assertIn("call `get_goal`", text)
+        self.assertIn("call `create_goal` exactly once", text)
+        self.assertIn("<authenticated-reviewer>", text)
+        self.assertIn("Substitute the verified login", text)
+        self.assertIn("read the resulting Goal back", text)
+        self.assertIn("Missing native Goal operations are `HOLD`", text)
+        self.assertIn("A Goal heading alone is not Goal initialization", text)
+        self.assertIn("Complete the native Goal only after", text)
+        self.assertIn("leave the native Goal unfinished", text)
+        for removed in (
+            "MAX_CANDIDATES_PER_RUN",
+            "MAX_REFRESH_CYCLES",
+            "MAX_ELAPSED_MINUTES",
+            "MAX_FULL_REVIEWS_PER_RUN",
+            "RUN LIMIT REACHED",
+        ):
+            self.assertNotIn(removed, text)
 
     def test_portable_terminal_state_has_an_explicit_live_evidence_binding(self):
         text = PROMPTS[1].read_text(encoding="utf-8")
@@ -269,7 +290,9 @@ class PromptContractTest(unittest.TestCase):
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
             with self.subTest(prompt=prompt.name):
-                self.assertIn("bounded runtime-local lock, cursor, and hold state", text)
+                self.assertIn("bounded runtime-local", text)
+                self.assertIn("Goal", text)
+                self.assertIn("lock, cursor, and hold state", text)
                 self.assertIn("never permits an external or project mutation", text)
 
     def test_candidate_commands_are_isolated_from_provider_credentials(self):
