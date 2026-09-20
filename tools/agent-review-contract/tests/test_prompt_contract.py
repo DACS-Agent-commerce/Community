@@ -163,6 +163,19 @@ class PromptContractTest(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 50)
         self.assertLessEqual(len(lines), 80)
 
+    def test_runtime_preflight_is_subprocess_safe(self):
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                for requirement in (
+                    "never rely on shell activation persisting between commands",
+                    "record the absolute interpreter",
+                    "first on `PATH` for every command",
+                    "verify `sys.executable` plus required import versions",
+                    "`SETUP_FAILURE`, not a finding",
+                ):
+                    self.assertIn(requirement, text)
+
     def test_dacs_adapter_has_explicit_run_limits_and_result_layers(self):
         text = PROMPTS[0].read_text(encoding="utf-8")
         for key in (
