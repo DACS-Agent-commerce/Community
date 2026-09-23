@@ -85,6 +85,26 @@ class PromptContractTest(unittest.TestCase):
                 for phrase in required:
                     self.assertIn(phrase, text)
 
+    def test_prompts_require_one_complete_finding_set(self):
+        required = (
+            "bounded whole-candidate assessment",
+            "one consolidated finding set",
+            "Do not stop after establishing the first blocker",
+            "sweep the violated invariant across affected in-scope consumers, adapters, and vectors",
+            "`PRE_EXISTING`",
+            "`INTRODUCED_OR_EXPOSED_BY_CURRENT_REPAIR`",
+            "`UNKNOWN`",
+            "the preceding repair introduced or exposed it",
+            "treat the omission as review incompleteness",
+            "compatible repair and executable acceptance checks",
+        )
+
+        for prompt in PROMPTS:
+            text = prompt.read_text(encoding="utf-8")
+            with self.subTest(prompt=prompt.name):
+                for phrase in required:
+                    self.assertIn(phrase, text)
+
     def test_prompts_separate_assessment_admission_and_publication_state(self):
         for prompt in PROMPTS:
             text = prompt.read_text(encoding="utf-8")
