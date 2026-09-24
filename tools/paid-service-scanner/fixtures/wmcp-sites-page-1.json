@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "domain": "premium.example",
+      "name": "Premium Example",
+      "description": "Research tools.",
+      "status": "live",
+      "toolCount": 1,
+      "url": "https://wmcp.ai/sites/premium.example"
+    }
+  ]
+}

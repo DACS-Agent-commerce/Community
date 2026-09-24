@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "total": 2,
+  "offset": 0,
+  "limit": 50,
+  "tools": [
+    {
+      "host": "forms.example",
+      "url": "https://forms.example/",
+      "siteType": "live",
+      "name": "convert_document",
+      "kind": "action",
+      "impl": "imperative",
+      "description": "Convert a document. Requires a paid Pro subscription.",
+      "page": "/convert"
+    },
+    {
+      "host": "shop.example",
+      "url": "https://shop.example/",
+      "siteType": "live",
+      "name": "pay_invoice",
+      "kind": "action",
+      "impl": "imperative",
+      "description": "Pay an invoice for items in a shopper's cart.",
+      "page": "/checkout"
+    }
+  ]
+}

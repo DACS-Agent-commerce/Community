@@ -1,0 +1,37 @@
+{
+  "servers": [
+    {
+      "server": {
+        "name": "example.ai/generator",
+        "title": "Example Generator",
+        "description": "Generate media with pay-per-run access.",
+        "version": "1.0.0",
+        "remotes": [{"type": "streamable-http", "url": "https://mcp.example.ai"}]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "publishedAt": "2026-01-01T00:00:00Z",
+          "isLatest": false
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "example.shop/checkout",
+        "title": "Checkout",
+        "description": "Create invoices and let shoppers purchase goods.",
+        "version": "1.0.0",
+        "remotes": []
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "publishedAt": "2026-01-02T00:00:00Z",
+          "isLatest": true
+        }
+      }
+    }
+  ],
+  "metadata": {"nextCursor": "page-2", "count": 2}
+}

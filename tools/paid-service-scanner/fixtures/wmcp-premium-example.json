@@ -1,0 +1,16 @@
+{
+  "domain": "premium.example",
+  "name": "Premium Example",
+  "description": "Research tools.",
+  "homepageUrl": "https://premium.example/",
+  "status": "live",
+  "tools": [
+    {
+      "name": "deep_research",
+      "title": "Deep research",
+      "description": "Extended reports are available only on the premium tier.",
+      "surface": "navigator",
+      "pageUrl": "https://premium.example/research"
+    }
+  ]
+}

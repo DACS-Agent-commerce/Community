@@ -1,0 +1,15 @@
+{
+  "registryPages": [
+    "registry-page-1.json",
+    "registry-page-2.json"
+  ],
+  "webmcpPages": [
+    "webmcp-page-1.json"
+  ],
+  "wmcpSitePages": [
+    "wmcp-sites-page-1.json"
+  ],
+  "wmcpDetails": {
+    "premium.example": "wmcp-premium-example.json"
+  }
+}
