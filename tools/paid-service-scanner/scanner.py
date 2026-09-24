@@ -457,6 +457,8 @@ PRICE_PATTERNS = (
     re.compile(r"(?i)(?:[$€£]\s*\d+(?:\.\d{1,2})?|\b(?:USD|EUR|GBP)\s+\d+(?:\.\d{1,2})?)\s*(?:/|per\s+)(?:call|run|request|query|execution|use|month|year|seat|user)\b"),
     re.compile(r"(?i)\b(?:access|usage|invocation|each\s+(?:call|run|request))\s+(?:costs?|is\s+priced\s+at)\s+(?:[$€£]\s*\d+(?:\.\d{1,2})?|(?:USD|EUR|GBP)\s+\d+(?:\.\d{1,2})?)\b"),
     re.compile(r"(?i)\b(?:costs?|priced\s+at)\s+(?:[$€£]\s*\d+(?:\.\d{1,2})?|(?:USD|EUR|GBP)\s+\d+(?:\.\d{1,2})?)\s+to\s+(?:use|access|invoke|run)\b"),
+)
+PAID_MODEL_PATTERNS = (
     re.compile(r"(?i)\bpay[- ]per[- ](?:call|run|request|query|execution|use)\b"),
     re.compile(r"(?i)\bpricing\s+(?:starts?|begins?)\s+(?:at|from)\b"),
 )
@@ -493,7 +495,8 @@ def classify_payment(observation: Mapping[str, Any], observed_at: str) -> dict[s
         if not isinstance(value, str) or not value:
             continue
         for strength, evidence_kind, patterns in (
-            (3, "explicit_price", PRICE_PATTERNS),
+            (4, "explicit_price", PRICE_PATTERNS),
+            (3, "reported_paid_model", PAID_MODEL_PATTERNS),
             (2, "explicit_subscription", SUBSCRIPTION_PATTERNS),
             (1, "inferred_paid_lead", INFERRED_PATTERNS),
         ):
@@ -514,8 +517,10 @@ def classify_payment(observation: Mapping[str, Any], observed_at: str) -> dict[s
                     break
     if strongest == 0:
         return None
-    if strongest == 3:
+    if strongest == 4:
         status, confidence = "reported_explicit_price", "medium"
+    elif strongest == 3:
+        status, confidence = "reported_paid_model", "medium"
     elif strongest == 2:
         status, confidence = "reported_explicit_subscription", "medium"
     else:
@@ -578,7 +583,8 @@ def build_candidates(observations: Iterable[dict[str, Any]], observed_at: str) -
         status_rank = {
             "inferred_paid_lead": 1,
             "reported_explicit_subscription": 2,
-            "reported_explicit_price": 3,
+            "reported_paid_model": 3,
+            "reported_explicit_price": 4,
         }
         if status_rank[payment["status"]] > status_rank[current["payment"]["status"]]:
             retained_evidence = current["payment"]["evidence"]

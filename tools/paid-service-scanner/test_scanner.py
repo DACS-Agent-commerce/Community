@@ -43,6 +43,11 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(result["status"], "reported_explicit_price")
         self.assertEqual(result["verificationStatus"], "reported_unverified")
 
+    def test_pay_per_run_does_not_claim_a_price(self) -> None:
+        result = classify_payment(observation("One API, pay per run."), OBSERVED_AT)
+        self.assertEqual(result["status"], "reported_paid_model")
+        self.assertEqual(result["evidence"][0]["kind"], "reported_paid_model")
+
     def test_explicit_subscription(self) -> None:
         result = classify_payment(observation("Requires an active paid subscription."), OBSERVED_AT)
         self.assertEqual(result["status"], "reported_explicit_subscription")

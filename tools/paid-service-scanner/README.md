@@ -63,7 +63,8 @@ Candidate payment states are:
 
 | Status | Meaning | Confidence |
 |---|---|---|
-| `reported_explicit_price` | Directory text states an access price or a pay-per-call/run/request model | medium |
+| `reported_explicit_price` | Directory text states a numeric access price | medium |
+| `reported_paid_model` | Directory text states pay-per-call/run/request or pricing without an amount | medium |
 | `reported_explicit_subscription` | Directory text states that a paid subscription or plan is required | medium |
 | `inferred_paid_lead` | Directory text weakly associates access with a premium tier or upgrade | low |
 
