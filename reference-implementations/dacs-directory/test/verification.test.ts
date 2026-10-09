@@ -615,7 +615,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     `{${Object.keys(scope).sort().map((key) => `${JSON.stringify(key)}:${JSON.stringify(scope[key])}`).join(",")}}`,
     "utf8",
   ).digest("hex");
-  const signedMarker = async (revokedAt: number) => {
+  const signedMarker = async (revokedAt: unknown) => {
     const scope = {
       listingId: listing.listingId,
       listingVersion: listing.listingVersion,
@@ -634,7 +634,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("hex");
     return { ...scope, signature: { algorithm: "ed25519", signer: markerDid, value } };
   };
-  const outcome = async (revokedAt: number) => {
+  const outcome = async (revokedAt: unknown) => {
     const marker = await signedMarker(revokedAt);
     const verdict = await verifyListingRevocation(marker, verified, 1)
       .catch((error: Error) => `throws ${error.name}`);
@@ -650,13 +650,54 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     nan: await outcome(Number.NaN),
     infinity: await outcome(Number.POSITIVE_INFINITY),
     aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
+    // Canonicalizable, so only the safe-integer check rejects it.
+    numericString: await outcome("1791480684902"),
   }, {
     fraction: rejected,
     negative: rejected,
     nan: rejected,
     infinity: rejected,
     aboveMaxSafeInteger: rejected,
+    numericString: rejected,
   });
+});
+
+test("a revocation candidate with no canonical form never stops the candidate loop", async () => {
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const listingSignature = Buffer.from(
+    await ed25519Sign(listingMessage, privateKeyFromSeed(seed)),
+  ).toString("hex");
+  const verified = await verifyListing({
+    ...listing,
+    signature: { algorithm: "ed25519", signer: did, value: listingSignature },
+  });
+  assert.ok(verified);
+  if (!verified) return;
+
+  const scope = {
+    listingId: listing.listingId,
+    listingVersion: listing.listingVersion,
+    listingContentHash: verified.contentHash,
+    revokedAt: Date.now(),
+  };
+  const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
+  // Valid required fields; the extension member has no canonical (CF-1) number form.
+  const infinite = { ...valid, futureField: JSON.parse("1e400") };
+  const fractional = { ...valid, extension: { weight: 0.5 } };
+  assert.equal(isListingRevocationCandidate(infinite), true);
+  assert.equal(await verifyListingRevocation(infinite, verified, 1), false);
+  assert.equal(await verifyListingRevocation(fractional, verified, 1), false);
+
+  const records = new Map<string, Record<string, unknown>>([
+    ["infinite", infinite], ["fractional", fractional], ["valid", valid],
+  ]);
+  const read = async (ref: string) => records.get(ref) ?? null;
+  const binding = await findValidListingRevocation(["infinite", "fractional", "valid"], verified, 1, read);
+  assert.equal(binding?.markerAnchor.locator, "valid");
+  assert.equal(binding?.markerContentHash, contentHash(scope));
+  assert.equal(await hasValidListingRevocation(["infinite", "fractional"], verified, 1, read), false);
 });
 
 test("revocation candidate discovery is bounded per listing hash", () => {
@@ -744,6 +785,37 @@ test("indexer rejects a shape-valid listing with a fake signature", async () => 
       async () => { throw new Error("identity unavailable"); },
     );
     assert.equal(record.listings.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("indexer skips a listing with no canonical form and still indexes the next listing", async () => {
+  const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
+  const malformedAnchor = `stor-${"d".repeat(40)}`;
+  const validAnchor = `stor-${"e".repeat(40)}`;
+  // JSON `1e400` parses to Infinity, which has no canonical (CF-1) number form.
+  const bodies: Record<string, string> = {
+    [malformedAnchor]: JSON.stringify(signed).replace(/}$/, ',"futureField":1e400}'),
+    [validAnchor]: JSON.stringify(signed),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = bodies[String(input).split("/").pop() ?? ""];
+    return data
+      ? new Response(`{"success":true,"owner":"0x${did.slice(-64)}","programName":"dacs1:listing:test","data":${data}}`,
+        { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(null, { status: 404 });
+  };
+  try {
+    const record = await indexRegistration(
+      { primaryClaim: did, displayName: "Seller", listingAnchors: [malformedAnchor, validAnchor] },
+      undefined,
+      async () => { throw new Error("identity unavailable"); },
+    );
+    assert.deepEqual(record.listings.map((item) => item.anchor.locator), [validAnchor]);
   } finally {
     globalThis.fetch = originalFetch;
   }

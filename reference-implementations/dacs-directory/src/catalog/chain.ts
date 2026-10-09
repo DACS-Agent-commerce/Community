@@ -10,6 +10,7 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
+import { boundedJson, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -48,13 +49,13 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as {
+    const json = (await storageResponseJson(res)) as {
       success?: boolean;
       data?: Record<string, unknown>;
       owner?: string;
       programName?: string;
     };
-    return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data)
+    return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data) && boundedJson(json.data) !== null
       ? { data: json.data, owner: json.owner, programName: json.programName }
       : null;
   } catch {

@@ -15,6 +15,11 @@
  * Shape-defensive: the tx envelope is deep-walked for storage addresses
  * rather than assuming one schema (testnet payloads vary across versions).
  */
+import { boundedJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
+import { verifiedDiscoveryAgreement } from "./evidenceGraph.js";
+import { isAgreementDocument } from "@kynesyslabs/dacs/artifacts";
+import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
@@ -35,7 +40,7 @@ export interface ScannedArtifacts {
   /** jobId → discovered deal (buyer-anchored bundle + owners) */
   deals: Map<string, RegisteredDeal & { sellerFromAgreement?: string }>;
   /** owner + programName → observed native address. */
-  programs: Map<string, string>;
+  programs: Map<string, string | null>;
   /** listing content hash → bounded, deterministic revocation candidates. */
   revocations: Map<string, string[]>;
   /** Candidate locators discarded by the per-listing resource bound. */
@@ -44,6 +49,7 @@ export interface ScannedArtifacts {
   bundleBindings: Map<string, BundleBinding[]>;
   /** jobId + role keys whose deterministic total-work cap was exhausted. */
   bundleBindingOverflow: Set<string>;
+  omittedBindings: number;
   txsScanned: number;
   /** Highest tx id observed — the next pass's cursor. */
   highestTxId: number;
@@ -68,7 +74,8 @@ export type StorageReadFailureCode =
   | "STORAGE_NOT_FOUND"
   | "STORAGE_NOT_PUBLIC"
   | "STORAGE_RPC_UNAVAILABLE"
-  | "STORAGE_INVALID_RESPONSE";
+  | "STORAGE_INVALID_RESPONSE"
+  | "ARTIFACT_REJECTED";
 
 /** Safe cause classification; response bodies and upstream text are never persisted. */
 export function storageReadFailureCode(status: number, errorCode?: string): StorageReadFailureCode {
@@ -109,12 +116,20 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
       return { success: false, failureCode: statusFailure };
     }
     let body: StorageRead | null = null;
-    try { body = (await res.json()) as StorageRead; } catch { /* classified below */ }
+    try { body = (await storageResponseJson(res)) as StorageRead; } catch (error) {
+      if (error instanceof StorageResponseTooLarge) return { success: false, failureCode: "ARTIFACT_REJECTED" };
+    }
     const failure = storageReadFailureCode(res.status, body?.errorCode);
     if (failure === "STORAGE_NOT_FOUND" || failure === "STORAGE_NOT_PUBLIC") {
       return { success: false, failureCode: failure };
     }
-    if (res.ok && body?.success && body.programName && body.owner) return body;
+    // DACS programs require object data; unrelated primitive payloads remain unclassified storage.
+    if (
+      res.ok && body?.success && typeof body.programName === "string" && body.programName &&
+      body.programName.length <= MAX_STORAGE_NAME_LENGTH &&
+      typeof body.owner === "string" && body.owner && body.owner.length <= MAX_STORAGE_OWNER_LENGTH &&
+      (body.data == null || objectValue(body.data) || !/^dacs[0-9]+[:-]/.test(body.programName))
+    ) return { ...body, data: objectValue(body.data) ?? undefined };
     lastFailure = failure;
     if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));
   }
@@ -254,6 +269,35 @@ const parsedObject = (value: unknown): Record<string, unknown> | null => {
   try { return objectValue(JSON.parse(value)); } catch { return null; }
 };
 
+/**
+ * Content hash of a storage payload the indexer can keep, or null. The hash
+ * omits the signature envelope, which must still serialize for storage.
+ */
+function storableContentHash(data: Record<string, unknown>): string | null {
+  try {
+    if (boundedJson(data) === null) return null;
+    return contentHash(data);
+  } catch {
+    return null;
+  }
+}
+
+export async function validAgreementForDiscovery(data: Record<string, unknown>, jobId: string, buyer: string): Promise<boolean> {
+  try {
+    if (data.jobId !== jobId) return false;
+    if (data.agreementVersion !== undefined || data.payeeBoundAgreementVersion !== undefined) {
+      const parties = Array.isArray(data.parties) ? data.parties : [];
+      return parties.some((p) => p && p.role === "buyer" && canonicalDemosAgentClaim(p.primaryClaim) === canonicalDemosAgentClaim(buyer)) &&
+        parties.some((p) => p && p.role === "seller" && canonicalDemosAgentClaim(p.primaryClaim) !== null) &&
+        await verifiedDiscoveryAgreement(data);
+    }
+    return isAgreementDocument(data) && canonicalDemosAgentClaim(data.buyer) === canonicalDemosAgentClaim(buyer) &&
+      canonicalDemosAgentClaim(data.seller) !== null && await verifyReferencedArtifactSignature({
+        kind: "dacs-3-agreement", raw: data,
+      });
+  } catch { return false; }
+}
+
 /** Exact target/content attribution for a whole-value StorageProgram write. */
 export function storageWriteCandidate(value: unknown): StorageWriteCandidate | null {
   const tx = objectValue(value);
@@ -269,9 +313,13 @@ export function storageWriteCandidate(value: unknown): StorageWriteCandidate | n
   if (write.storageAddress !== tx.to) return null;
   const data = objectValue(write.data);
   if (!data) return null;
+  let hash: string;
+  const storableHash = storableContentHash(data);
+  if (storableHash === null) return null;
+  hash = storableHash;
   return {
     locator: tx.to,
-    contentHash: contentHash(data),
+    contentHash: hash,
     blockNumber: Number(tx.blockNumber),
     transactionHash: tx.hash.toLowerCase(),
   };
@@ -397,6 +445,7 @@ export async function scanChain(
     maxTxs?: number;
     sinceTxId?: number;
     retryLocators?: string[];
+    knownPrograms?: ReadonlyMap<string, string | null>;
     verifiedRevocations?: ReadonlyMap<string, ReadonlySet<string>>;
   } = {},
 ): Promise<ScannedArtifacts> {
@@ -452,13 +501,15 @@ export async function scanChain(
   }
 
   const listings = new Map<string, string>();
-  const programs = new Map<string, string>();
+  const programs = new Map<string, string | null>(opts.knownPrograms);
   const revocations = new Map<string, string[]>();
   let revocationCandidatesTruncated = 0;
   const bundleBindings = new Map<string, BundleBinding[]>();
   const bundleBindingOverflow = new Set<string>();
   const observations: ScannedArtifacts["observations"] = [];
   const failures: ScannedArtifacts["failures"] = [];
+  const namesByLocator = new Map<string, string>();
+  let omittedBindings = 0;
   const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
   const sellerCopies = new Map<string, Array<{ address: string; owner: string }>>(); // preserve competing candidates
   const addSellerCopy = (jobId: string, address: string, owner: string) => {
@@ -479,15 +530,29 @@ export async function scanChain(
       continue;
     }
     const name = read.programName;
-    programs.set(programBindingKey(read.owner, name), address);
+    namesByLocator.set(address, name);
     const data = read.data as Record<string, unknown> | undefined;
     const currentListing = data?.dacsVersion === "1" && typeof data.listingId === "string" && typeof data.listingVersion === "number";
     const currentBundle = (data?.bundleVersion === "1" || data?.faultBundleVersion === "1") &&
       typeof data.jobId === "string" && Array.isArray(data.parties);
+    const profile = currentListing || currentBundle ? "dacs-v0.1" : "legacy-sdk-v0.1";
+    const dataHash = data ? storableContentHash(data) : undefined;
+    if (dataHash === null) {
+      // No canonical form, so no DACS signature can cover it: unclassified storage.
+      // Only bounded rejection metadata is kept, never the payload itself.
+      observations.push({ locator: address, kind: "other", profile, owner: read.owner, observedAt: Date.now() });
+      failures.push({ locator: address, kind: "other", code: "ARTIFACT_REJECTED", message: "storage artifact has no canonical JSON form" });
+      continue;
+    }
+    // Duplicate owner/name programs are indeterminate, including across scan windows.
+    const programKey = programBindingKey(read.owner, name);
+    const knownProgram = programs.get(programKey);
+    programs.set(programKey, knownProgram === undefined || knownProgram === address ? address : null);
     let artifactKind = "other";
     const verifiedBundleBinding = data?.bindingVersion === "1"
       ? await verifyBundleBinding(data)
       : null;
+    if (data?.bindingVersion === "1" && !verifiedBundleBinding) omittedBindings++;
     if (verifiedBundleBinding) {
       artifactKind = "bundle-binding";
       const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
@@ -519,8 +584,8 @@ export async function scanChain(
       artifactKind = "bundle";
       bundleOwners.set(name.slice("dacs5:bundle:".length), { address, owner: read.owner });
     }
-    observations.push({ locator: address, kind: artifactKind, profile: currentListing || currentBundle ? "dacs-v0.1" : "legacy-sdk-v0.1", owner: read.owner,
-      contentHash: data ? contentHash(data) : undefined, observedAt: Date.now(), data });
+    observations.push({ locator: address, kind: artifactKind, profile, owner: read.owner,
+      contentHash: dataHash, observedAt: Date.now(), data });
   }
 
   const targets = new Map(observations
@@ -539,17 +604,23 @@ export async function scanChain(
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
   const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
   for (const [jobId, bundle] of bundleOwners) {
+    const bundleName = namesByLocator.get(bundle.address);
+    if (bundleName && programs.get(programBindingKey(bundle.owner, bundleName)) === null) continue;
     const agreementAddress = programs.get(programBindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
     const agreement = agreementAddress ? await readStorage(agreementAddress) : null;
-    const agreementData = agreement?.data as Record<string, unknown> | undefined;
+    const agreementData = agreement?.success && agreement.owner && agreement.programName === `dacs3:agreement:${jobId}` &&
+      programBindingKey(agreement.owner, agreement.programName) === programBindingKey(bundle.owner, agreement.programName) &&
+      agreement.data && storableContentHash(agreement.data) !== null &&
+      await validAgreementForDiscovery(agreement.data, jobId, didOf(bundle.owner)) ? agreement.data : undefined;
     const agreementParties = Array.isArray(agreementData?.parties) ? agreementData.parties as Array<Record<string, unknown>> : [];
-    const sellerFromAgreement = typeof agreementData?.seller === "string" ? agreementData.seller
-      : agreementParties.find((party) => party.role === "seller" && typeof party.primaryClaim === "string")?.primaryClaim as string | undefined;
+    const sellerFromAgreement = agreementData?.agreementVersion !== undefined || agreementData?.payeeBoundAgreementVersion !== undefined
+      ? agreementParties.find((party) => party?.role === "seller" && typeof party.primaryClaim === "string")?.primaryClaim as string | undefined
+      : typeof agreementData?.seller === "string" ? agreementData.seller : undefined;
     const candidates = sellerCopies.get(jobId) ?? [];
     const sellerCopy = sellerFromAgreement
       ? candidates.find((copy) => didOf(copy.owner) === sellerFromAgreement)
       : candidates.length === 1 ? candidates[0] : undefined;
-    const seller = sellerFromAgreement ?? (sellerCopy ? didOf(sellerCopy.owner) : undefined);
+    const seller = sellerFromAgreement;
     const rail = agreementRail(agreementData) ??
       ((agreementData?.price as { rail?: string } | undefined)?.rail) ??
       (((agreementData?.terms as Record<string, unknown> | undefined)?.price as { rail?: string } | undefined)?.rail) ?? "unknown";
@@ -564,6 +635,6 @@ export async function scanChain(
   }
 
   return { listings, deals, programs, revocations, revocationCandidatesTruncated,
-    bundleBindings, bundleBindingOverflow,
+    bundleBindings, bundleBindingOverflow, omittedBindings,
     txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
 }

@@ -14,6 +14,7 @@
  * advisory by spec; browser verification repeats cryptographic checks but does
  * not independently prove chain inclusion while RPC bytes traverse the server.
  */
+import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -37,6 +38,7 @@ import {
   loadScanState,
   recordListingRejection,
   type ListingRejectionCode,
+  throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
@@ -65,6 +67,7 @@ import type {
   BundleBinding,
   ListingSummary,
   Registration,
+  RegisteredDeal,
   SellerRecord,
 } from "./types.js";
 
@@ -101,6 +104,7 @@ export async function indexRegistration(
   prior?: SellerRecord,
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
+  onOmitted?: (kind: "bindings" | "deals", count: number) => void,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -139,7 +143,8 @@ export async function indexRegistration(
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
-    const verified = await verifyListing(anchored.data);
+    // A listing with no canonical form throws while hashing; skip it like any invalid one.
+    const verified = await verifyListing(anchored.data).catch(() => null);
     if (!verified) continue;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
@@ -219,12 +224,13 @@ export async function indexRegistration(
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
   const rawBindings = [
-    ...[...relevantJobs].flatMap((jobId) => scanState.bundleBindings?.[jobId] ?? []),
+    ...[...relevantJobs].flatMap((jobId) => ownArray(scanState.bundleBindings, jobId)),
     ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
   ];
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
-  for (const deal of reg.deals ?? []) {
+  onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
+  const indexDeal = async (deal: RegisteredDeal): Promise<void> => {
     const jobBindings = verifiedBindings.filter((binding) => binding.jobId === deal.jobId);
     const buyerInitial = await readAnchor(deal.buyerBundleRef);
     const resolveListing = async (ref: Record<string, unknown>) => {
@@ -308,7 +314,7 @@ export async function indexRegistration(
           reputationEligible: false,
           verifiedAt: now,
         });
-        continue;
+        return;
       }
       const resolvedDeal = {
         ...deal,
@@ -356,7 +362,7 @@ export async function indexRegistration(
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
         verifiedAt: now,
       });
-      continue;
+      return;
     }
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
@@ -429,7 +435,8 @@ export async function indexRegistration(
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
         ? bundle.anchoredByRole : undefined,
-      bundleContentHash: signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
+      bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
@@ -437,6 +444,16 @@ export async function indexRegistration(
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
+  };
+  for (const deal of reg.deals ?? []) {
+    // One deal's artifacts can never stop the next deal: a failure is an explicit unverified record.
+    try {
+      await indexDeal(deal);
+    } catch (error) {
+      throwIfInfrastructureError(error);
+      onOmitted?.("deals", 1);
+      dealCandidates.push({ ...deal, signatureVerified: false, refsVerified: false, reputationEligible: false, verifiedAt: now });
+    }
   }
   const deals = dedupeVerifiedDeals(dealCandidates);
 

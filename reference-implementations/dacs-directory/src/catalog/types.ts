@@ -274,7 +274,7 @@ export interface ScanState {
   /** Round-robin cursor for bounded engagement-surface probes. */
   reachabilityCursor?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
-  programs?: Record<string, string>;
+  programs?: Record<string, string | null>;
   /** listing content hash → bounded, deterministic revocation candidates. */
   revocations?: Record<string, string[] | string>;
   /** RB-4-verified marker locators that candidate pruning must preserve. */
