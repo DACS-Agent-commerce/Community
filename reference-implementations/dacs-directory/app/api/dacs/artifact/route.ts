@@ -8,8 +8,8 @@
  * claim that those exact bytes occupy the requested native address.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { deriveAnchorAddress, readAnchor } from "@/src/catalog/chain";
-import { findProgramAddress } from "@/src/catalog/store";
+import { readAnchor } from "@/src/catalog/chain";
+import { resolveProgramAddress } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -17,7 +17,10 @@ export async function GET(req: NextRequest) {
   const owner = q.get("owner");
   const name = q.get("name");
   if (!ref && owner && name) {
-    ref = findProgramAddress(owner, name) ?? deriveAnchorAddress(owner, name);
+    ref = resolveProgramAddress(owner, name);
+    if (!ref) {
+      return NextResponse.json({ error: "more than one program uses this owner and name; the artifact is indeterminate" }, { status: 409 });
+    }
   }
   if (!ref) return NextResponse.json({ error: "need ?ref= or ?owner=&name=" }, { status: 400 });
   const value = await readAnchor(ref);

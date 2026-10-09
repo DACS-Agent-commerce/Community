@@ -267,18 +267,19 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
     return { data: member ? withMember(raw, member) : JSON.stringify(raw), name, owner: ownerOf(buyer) };
   };
   const key = store.programBindingKey(ownerOf(buyer), name);
+  const dealKey = `${ownerOf(buyer)}\njob-attribution`;
 
   chain({ [bundle]: buyerBundle, [agreement]: program(seller), [unhashable]: program(outsider, "1e400") }, [bundle, agreement, unhashable]);
   let result = await scan();
   assert.equal(result.programs.get(key), agreement);
-  assert.equal(result.deals.get("job-attribution")?.owners.seller, seller);
+  assert.equal(result.deals.get(dealKey)?.owners.seller, seller);
 
   // Competing owner/name programs remain indeterminate whatever the read order.
   for (const order of [[bundle, agreement, otherAgreement], [bundle, otherAgreement, agreement]]) {
     chain({ [bundle]: buyerBundle, [agreement]: program(seller), [otherAgreement]: program(outsider) }, order);
     result = await scan();
     assert.equal(result.programs.get(key), null);
-    assert.equal(result.deals.get("job-attribution")?.owners.seller, "");
+    assert.equal(result.deals.get(dealKey)?.owners.seller, "");
   }
 
   // The deal loop rereads the agreement; unhashable data on that read is rejected too.
@@ -286,14 +287,14 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   reread = (at, count) => at === agreement && count > 1 ? withMember({ seller: outsider }, "1e400") : undefined;
   result = await scan();
   assert.equal(result.programs.get(key), agreement);
-  assert.equal(result.deals.get("job-attribution")?.sellerFromAgreement, undefined);
-  assert.equal(result.deals.get("job-attribution")?.owners.seller, "");
+  assert.equal(result.deals.get(dealKey)?.sellerFromAgreement, undefined);
+  assert.equal(result.deals.get(dealKey)?.owners.seller, "");
 
   // A canonical agreement whose parties are not objects attributes nothing and stops nothing.
   chain({ [bundle]: buyerBundle, [agreement]: { data: JSON.stringify({ parties: [null, 7] }), name, owner: ownerOf(buyer) } }, [bundle, agreement]);
   result = await scan();
   assert.equal(result.complete, true);
-  assert.equal(result.deals.get("job-attribution")?.owners.seller, "");
+  assert.equal(result.deals.get(dealKey)?.owners.seller, "");
 });
 
 test("current evidence graph fails closed on malformed bundles without hashing them again", async () => {

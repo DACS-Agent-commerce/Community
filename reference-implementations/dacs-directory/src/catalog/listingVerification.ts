@@ -248,9 +248,20 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
+/** Per-listing, per-pass bound on candidate reads and RB-4 verifications. */
+export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
+
+/** Candidates examined by one call: unreadable ones are retried later, rejected ones were read and failed RB-4. */
+export interface RevocationCandidateProgress {
+  unread: string[];
+  rejected: string[];
+}
+
 /**
- * Fully verify discovered candidates and return the RB-2 binding this catalog
- * can publish. A bogus candidate never shadows a later valid marker.
+ * Fully verify discovered candidates, in the given order and at most `limit`
+ * of them, and return the RB-2 binding this catalog can publish. A bogus
+ * candidate never shadows a later valid marker; unexamined candidates are
+ * left for a later call.
  */
 export async function findValidListingRevocation(
   candidateRefs: string[],
@@ -258,12 +269,19 @@ export async function findValidListingRevocation(
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+  progress: RevocationCandidateProgress = { unread: [], rejected: [] },
+  limit = REVOCATION_VERIFICATIONS_PER_PASS,
 ): Promise<RevocationBinding | null> {
-  for (const ref of candidateRefs) {
+  for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
     const candidate = await readCandidate(ref);
-    if (!candidate || !(await verifyListingRevocation(
-      candidate, listing, expectedVersion, resolveKey,
-    ))) continue;
+    if (!candidate) {
+      progress.unread.push(ref);
+      continue;
+    }
+    if (!(await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey))) {
+      progress.rejected.push(ref);
+      continue;
+    }
     const scope = stripSignature(candidate);
     return {
       sellerPrimaryClaim: listing.sellerClaim,

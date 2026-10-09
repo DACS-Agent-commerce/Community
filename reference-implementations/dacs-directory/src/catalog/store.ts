@@ -1,6 +1,7 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
 import { boundedJson } from "./artifactLimits.js";
-import { normalizeScanState } from "./scanState.js";
+import { canonicalProgramOwner, normalizeScanState } from "./scanState.js";
+import { deriveAnchorAddress } from "./chain.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -133,6 +134,20 @@ db.transaction(() => {
   }
 }).immediate();
 
+// Rejected content and transient read failures are counted and scheduled as separate classes.
+db.transaction(() => {
+  const columns = db.pragma("table_info(artifacts)") as Array<{ name: string }>;
+  if (!columns.some((entry) => entry.name === "rejection_count")) {
+    db.exec("ALTER TABLE artifacts ADD COLUMN rejection_count INTEGER NOT NULL DEFAULT 0");
+    // Rows written with one shared counter: a rejected row's count was its rejections.
+    db.prepare(`UPDATE artifacts SET rejection_count=MAX(retry_count,1), retry_count=0, status='retry',
+      next_retry_at=COALESCE(next_retry_at,0) WHERE error_code='ARTIFACT_REJECTED'`).run();
+    db.prepare("DELETE FROM dead_letters WHERE error_code='ARTIFACT_REJECTED'").run();
+  }
+  if (!columns.some((entry) => entry.name === "deferred_at")) db.exec("ALTER TABLE artifacts ADD COLUMN deferred_at INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS artifacts_rejected_retry_idx ON artifacts(deferred_at, next_retry_at) WHERE rejection_count > 0");
+}).immediate();
+
 export function throwIfInfrastructureError(error: unknown): void {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
   if (code.startsWith("SQLITE_") || ["EIO", "ENOSPC", "EROFS", "EACCES"].includes(code)) throw error;
@@ -242,14 +257,30 @@ export const loadFixtureSeeds = (): FixtureSeed[] => {
 export const saveFixtureSeeds = (seeds: FixtureSeed[]): void =>
   setJson("fixtures", [...new Set(seeds)].filter((seed) => FIXTURE_SEEDS.has(seed)).sort());
 
-/** Demos owners appear as both 0x addresses and did:demos:agent claims. */
-export const canonicalProgramOwner = (owner: string): string => {
-  const hex = owner.match(/([0-9a-fA-F]{64})$/)?.[1];
-  return hex ? `0x${hex.toLowerCase()}` : owner.toLowerCase();
-};
+export { canonicalProgramOwner };
 export const programBindingKey = (owner: string, name: string): string => `${canonicalProgramOwner(owner)}\n${name}`;
 export const findProgramAddress = (owner: string, name: string): string | null =>
   loadScanState().programs?.[programBindingKey(owner, name)] ?? null;
+/**
+ * Native address to read for an owner/name: the observed program, the legacy
+ * derived address when none was observed, or null when duplicate programs
+ * make the entry indeterminate. Null must never fall back to derivation.
+ */
+export function resolveProgramAddress(owner: string, name: string): string | null {
+  const programs = loadScanState().programs;
+  const key = programBindingKey(owner, name);
+  return Object.hasOwn(programs, key) ? programs[key] : deriveAnchorAddress(owner, name);
+}
+/** Recorded storage-program owner per locator, for ordering verification work. */
+export function artifactOwners(locators: readonly string[]): Map<string, string> {
+  const owners = new Map<string, string>();
+  const select = db.prepare("SELECT locator, owner FROM artifacts WHERE locator = ? AND owner IS NOT NULL");
+  for (const locator of locators) {
+    const row = select.get(locator) as { locator: string; owner: string } | undefined;
+    if (row) owners.set(row.locator, row.owner);
+  }
+  return owners;
+}
 
 export interface ArtifactObservation {
   locator: string; kind: string; profile: string; owner?: string; contentHash?: string;
@@ -272,9 +303,9 @@ const recordArtifactTransaction = db.transaction((observation: StoredArtifactObs
         WHEN artifacts.anchor_time IS NULL THEN excluded.anchor_time
         ELSE MIN(excluded.anchor_time,artifacts.anchor_time)
       END, status=excluded.status,
-      data_json=excluded.data_json, error_code=NULL, error_message=NULL,
-      retry_count=CASE WHEN excluded.content_hash IS NULL AND artifacts.error_code='ARTIFACT_REJECTED'
-        THEN artifacts.retry_count ELSE 0 END, next_retry_at=NULL`)
+      data_json=excluded.data_json, error_code=NULL, error_message=NULL, retry_count=0,
+      rejection_count=CASE WHEN excluded.content_hash IS NULL THEN artifacts.rejection_count ELSE 0 END,
+      deferred_at=CASE WHEN excluded.content_hash IS NULL THEN artifacts.deferred_at ELSE NULL END, next_retry_at=NULL`)
     .run(observation);
   // A readable observation is the recovery event for this locator. Keep the
   // active queue truthful and ensure a later transient failure starts at one.
@@ -330,15 +361,47 @@ export const recordConsensusAnchors = db.transaction((observations: ConsensusAnc
   return changed;
 });
 
+/** Retry reads per pass. Transient failures are served first. */
+export const RETRY_READS_PER_PASS = 100;
+/** At most this many of a pass's retry reads go to locators whose content was rejected. */
+export const REJECTED_RETRY_READS_PER_PASS = 20;
+/** Ceiling on scheduled rejected retries. Overflow waits in arrival order and rotates in. */
+export const MAX_ACTIVE_REJECTED_RETRIES = 1_000;
+
+const REJECTED_ACTIVE = "rejection_count > 0 AND deferred_at IS NULL AND status IN ('retry','dead-letter')";
+const countActiveRejected = db.prepare(`SELECT COUNT(*) count FROM artifacts WHERE ${REJECTED_ACTIVE} AND locator <> ?`);
+const longestWaitingRejected = db.prepare(`SELECT locator FROM artifacts WHERE rejection_count > 0 AND deferred_at IS NOT NULL
+  AND locator <> ? ORDER BY deferred_at, locator LIMIT 1`);
+const activateRejected = db.prepare("UPDATE artifacts SET deferred_at=NULL, next_retry_at=? WHERE locator=?");
+
 const recordArtifactFailureTransaction = db.transaction(
   (locator: string, kind: string, code: string, message: string, maxRetries: number) => {
-    const prior = db.prepare("SELECT retry_count,kind FROM artifacts WHERE locator = ?").get(locator) as { retry_count: number; kind: string } | undefined;
-    const attempts = (prior?.retry_count ?? 0) + 1;
+    const prior = db.prepare("SELECT retry_count,rejection_count,deferred_at,kind FROM artifacts WHERE locator = ?").get(locator) as
+      { retry_count: number; rejection_count: number; deferred_at: number | null; kind: string } | undefined;
+    const rejected = code === "ARTIFACT_REJECTED";
+    const rejections = (prior?.rejection_count ?? 0) + (rejected ? 1 : 0);
+    // Content that was read ends a transient streak; transient failures have their own count.
+    const attempts = rejected ? 0 : (prior?.retry_count ?? 0) + 1;
     const failureKind = kind === "unknown" && prior?.kind && prior.kind !== "unknown" ? prior.kind : kind;
-    const periodic = code === "ARTIFACT_REJECTED";
+    // Once its content was rejected, a locator stays periodic until a read succeeds.
+    const periodic = rejections > 0;
     const dead = !periodic && attempts >= maxRetries;
     const now = Date.now();
-    const next = dead ? null : now + Math.min(60 * 60_000, 2 ** Math.min(attempts, 10) * 5_000);
+    let next: number | null = dead ? null : now + Math.min(60 * 60_000, 2 ** Math.min(rejected ? rejections : attempts, 10) * 5_000);
+    let deferredAt = periodic ? prior?.deferred_at ?? null : null;
+    if (rejected) {
+      const wasActive = (prior?.rejection_count ?? 0) > 0 && prior?.deferred_at == null;
+      const waiting = longestWaitingRejected.get(locator) as { locator: string } | undefined;
+      if (wasActive && waiting) {
+        // Rotation: a retried locator yields its slot to the longest-waiting one.
+        deferredAt = now;
+        activateRejected.run(now, waiting.locator);
+      } else if (!wasActive) {
+        const full = (countActiveRejected.get(locator) as { count: number }).count >= MAX_ACTIVE_REJECTED_RETRIES;
+        deferredAt = full ? deferredAt ?? now : null;
+      }
+    }
+    if (deferredAt !== null) next = null;
     const storedCode = code.slice(0, 100);
     const storedMessage = message.slice(0, 1000);
     db.prepare(`INSERT INTO artifact_failure_history(locator,first_seen_at,last_seen_at,observations)
@@ -360,10 +423,12 @@ const recordArtifactFailureTransaction = db.transaction(
     }
     const history = db.prepare("SELECT first_seen_at FROM artifact_failure_history WHERE locator = ?")
       .get(locator) as { first_seen_at: number };
-    db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at)
-      VALUES (?,?,?,? ,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
-      error_message=excluded.error_message,retry_count=excluded.retry_count,next_retry_at=excluded.next_retry_at`)
-      .run(locator, failureKind, "unknown", now, dead ? "dead-letter" : "retry", storedCode, storedMessage, attempts, next);
+    db.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,retry_count,next_retry_at,
+      rejection_count,deferred_at) VALUES (?,?,?,? ,?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET status=excluded.status,
+      error_code=excluded.error_code,error_message=excluded.error_message,retry_count=excluded.retry_count,
+      next_retry_at=excluded.next_retry_at,rejection_count=excluded.rejection_count,deferred_at=excluded.deferred_at`)
+      .run(locator, failureKind, "unknown", now, dead ? "dead-letter" : "retry", storedCode, storedMessage, attempts, next,
+        rejections, deferredAt);
     if (dead) {
       db.prepare(`INSERT INTO dead_letters(locator,kind,error_code,error_message,attempts,first_seen_at,last_seen_at)
         VALUES (?,?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind,error_code=excluded.error_code,
@@ -440,8 +505,25 @@ export function clearListingRejection(locator: string, registrationClaim: string
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
 }
-export const loadRetryableArtifacts = (now = Date.now()): string[] =>
-  (db.prepare("SELECT locator FROM artifacts WHERE (status='retry' OR error_code='ARTIFACT_REJECTED') AND COALESCE(next_retry_at,0) <= ? ORDER BY COALESCE(next_retry_at,0),locator LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
+/**
+ * Due retry locators for one pass: transient failures first, then at most
+ * REJECTED_RETRY_READS_PER_PASS rejected locators. Free scheduled slots are
+ * first given to rejected locators waiting beyond the ceiling, oldest first.
+ */
+export const loadRetryableArtifacts = db.transaction((now: number = Date.now()): string[] => {
+  const active = (countActiveRejected.get("") as { count: number }).count;
+  if (active < MAX_ACTIVE_REJECTED_RETRIES) {
+    db.prepare(`UPDATE artifacts SET deferred_at=NULL, next_retry_at=? WHERE locator IN (SELECT locator FROM artifacts
+      WHERE rejection_count > 0 AND deferred_at IS NOT NULL ORDER BY deferred_at, locator LIMIT ?)`)
+      .run(now, MAX_ACTIVE_REJECTED_RETRIES - active);
+  }
+  const due = (where: string, limit: number) => (db.prepare(`SELECT locator FROM artifacts WHERE ${where}
+    AND COALESCE(next_retry_at,0) <= ? ORDER BY COALESCE(next_retry_at,0),locator LIMIT ?`)
+    .all(now, limit) as Array<{ locator: string }>).map((row) => row.locator);
+  const transient = due("status='retry' AND rejection_count = 0", RETRY_READS_PER_PASS);
+  return [...transient, ...due(REJECTED_ACTIVE,
+    Math.min(REJECTED_RETRY_READS_PER_PASS, RETRY_READS_PER_PASS - transient.length))];
+});
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
 

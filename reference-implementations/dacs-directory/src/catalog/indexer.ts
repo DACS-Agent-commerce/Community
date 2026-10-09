@@ -24,17 +24,24 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 // The SDK doesn't export sessionAnchorName from its public barrel
 // (dacs-sdk#14) — reach into the vendored build.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
-import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
+import { readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
-import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import {
+  findValidListingRevocation,
+  ownerClaim,
+  verifyListing,
+  type RevocationCandidateProgress,
+} from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
+  artifactOwners,
+  canonicalProgramOwner,
   clearListingRejection,
-  findProgramAddress,
+  resolveProgramAddress,
   loadScanState,
   recordListingRejection,
   type ListingRejectionCode,
@@ -105,6 +112,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  onRevocationCandidates?: (listingHash: string, progress: RevocationCandidateProgress) => void,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -139,7 +147,7 @@ export async function indexRegistration(
   const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown> }>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
-  const revocations = loadScanState().revocations ?? {};
+  const { revocations, verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
@@ -172,12 +180,31 @@ export async function indexRegistration(
     const revocationAddresses = Array.isArray(storedCandidates)
       ? storedCandidates
       : storedCandidates ? [storedCandidates] : [];
+    // Verification work is bounded per pass: markers already verified come first (even when
+    // an older snapshot omitted them from the queue), then candidates anchored by the
+    // listing's own owner, then the rest in arrival order.
+    const verifiedMarkers = new Set(verifiedRevocations[verified.contentHash] ?? []);
+    const queued = revocationAddresses.filter((address) => !verifiedMarkers.has(address));
+    const candidateOwners = artifactOwners(queued);
+    const listingOwner = anchored.owner ? canonicalProgramOwner(anchored.owner) : null;
+    const byListingOwner = (address: string) => {
+      const owner = candidateOwners.get(address);
+      return listingOwner !== null && owner !== undefined && canonicalProgramOwner(owner) === listingOwner;
+    };
+    const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const revocationBinding = await findValidListingRevocation(
-      revocationAddresses,
+      [
+        ...verifiedMarkers,
+        ...queued.filter((address) => byListingOwner(address)),
+        ...queued.filter((address) => !byListingOwner(address)),
+      ],
       verified,
       version,
       readAnchor,
+      undefined,
+      progress,
     );
+    onRevocationCandidates?.(verified.contentHash, progress);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -379,7 +406,8 @@ export async function indexRegistration(
             : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
               : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
           if (!name) return null;
-          const address = findProgramAddress(deal.owners.buyer, name) ?? deriveAnchorAddress(deal.owners.buyer, name);
+          const address = resolveProgramAddress(deal.owners.buyer, name);
+          if (!address) return null;
           const raw = await readAnchor(address);
           if (raw) resolvedArtifacts.push({ kind, raw });
           return raw;

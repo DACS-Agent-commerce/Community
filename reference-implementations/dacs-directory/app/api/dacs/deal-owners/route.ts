@@ -16,7 +16,10 @@ export async function GET(req: NextRequest) {
       });
     }
   }
-  const scanned = loadScanState().deals[jobId];
+  // Discovered deals are keyed by buyer and jobId; owners are reported only when one entry is attributed.
+  const entries = Object.values(loadScanState().deals).filter((deal) => deal.jobId === jobId);
+  const attributed = entries.filter((deal) => deal.owners.seller);
+  const scanned = attributed.length === 1 ? attributed[0] : attributed.length === 0 && entries.length === 1 ? entries[0] : undefined;
   if (scanned) {
     return NextResponse.json({
       owners: scanned.owners,

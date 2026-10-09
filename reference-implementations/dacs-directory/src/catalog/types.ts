@@ -285,6 +285,6 @@ export interface ScanState {
   bundleBindingOverflow?: string[];
   /** listing anchor address → owner address */
   listings: Record<string, string>;
-  /** jobId → discovered deal */
+  /** buyer owner + jobId (discoveredDealKey) → discovered deal */
   deals: Record<string, RegisteredDeal>;
 }

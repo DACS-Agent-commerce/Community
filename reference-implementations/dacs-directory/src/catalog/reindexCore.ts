@@ -5,12 +5,11 @@
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
 import { normalizeScanState, ownArray } from "./scanState.js";
-import { parseRegistration } from "./registration.js";
+import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
-  boundedRevocationCandidates,
   readChainTip,
   scanChain,
   scanConsensusAnchorBackfill,
@@ -38,7 +37,7 @@ import {
   recordConsensusAnchors,
   throwIfInfrastructureError,
 } from "./store";
-import type { Registration } from "./types";
+import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
 
 export interface ReindexSummary {
@@ -62,11 +61,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
   const regs: (Registration & { discovered?: boolean })[] = [];
   for (const raw of loadRegistrations()) {
-    const bindings = Array.isArray(raw?.bundleBindings)
-      ? (await Promise.all(raw.bundleBindings.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null)
-      : undefined;
-    if (bindings) omitted.omittedBindings += raw.bundleBindings!.length - bindings.length;
-    const parsed = parseRegistration(bindings ? { ...raw, bundleBindings: bindings } : raw);
+    // The registration and its binding count are checked before any binding is verified;
+    // admitted bindings are then verified one at a time.
+    const rawBindings: unknown = raw?.bundleBindings;
+    const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
+    let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
+    if (parsed.ok && admitted) {
+      const bindings: BundleBinding[] = [];
+      for (const binding of admitted) {
+        const verified = await verifyBundleBinding(binding);
+        if (verified) bindings.push(verified);
+      }
+      omitted.omittedBindings += admitted.length - bindings.length;
+      parsed = parseRegistration({ ...raw, bundleBindings: bindings });
+    }
     if (!parsed.ok) {
       omitted.omittedSellers++;
       const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
@@ -151,14 +159,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     if (!verified.includes(locator)) verified.push(locator);
     state.verifiedRevocations[listing.contentHash] = verified;
   }
-  const verifiedRevocations = new Map(
-    Object.entries(state.verifiedRevocations).map(([hash, addresses]) => [hash, new Set(addresses)]),
-  );
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
-      knownPrograms: new Map(Object.entries(state.programs)), verifiedRevocations });
+      knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
       throw new Error(
         scan.scanError ? `chain scan failed before reaching its cursor: ${scan.scanError}` :
@@ -167,7 +172,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     if (needsHistoryReplay) state.deals = Object.create(null);
     for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
-    for (const [jobId, deal] of scan.deals) state.deals[jobId] = deal;
+    for (const [key, deal] of scan.deals) state.deals[key] = deal;
     state.programs ??= Object.create(null);
     for (const [key, address] of scan.programs) state.programs[key] = address;
     // A later duplicate invalidates prior automatic attribution too.
@@ -182,18 +187,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     omitted.omittedBindings += scan.omittedBindings;
     if (needsHistoryReplay) state.revocations = Object.create(null);
     state.revocations ??= Object.create(null);
-    let revocationCandidatesTruncated = scan.revocationCandidatesTruncated;
+    const storedCandidates = (hash: string): string[] => {
+      const stored = state.revocations![hash];
+      return Array.isArray(stored) ? stored : stored ? [stored] : [];
+    };
+    // Every candidate stays queued, in arrival order, until it is verified or rejected.
     for (const [hash, addresses] of scan.revocations) {
-      const priorCandidates = state.revocations[hash];
-      const prior = Array.isArray(priorCandidates)
-        ? priorCandidates
-        : priorCandidates ? [priorCandidates] : [];
-      const merged = boundedRevocationCandidates(
-        [...addresses, ...prior],
-        verifiedRevocations.get(hash),
-      );
-      state.revocations[hash] = merged.candidates;
-      revocationCandidatesTruncated += merged.truncated;
+      state.revocations[hash] = [...new Set([...storedCandidates(hash), ...addresses])];
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
@@ -207,14 +207,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       ...state.bundleBindingOverflow,
       ...scan.bundleBindingOverflow,
     ])].sort();
-    // Bound legacy and inactive hashes too; a hash need not reappear in the
-    // current scan window for old persisted state to remain attacker-inflated.
-    for (const [hash, stored] of Object.entries(state.revocations)) {
-      const candidates = Array.isArray(stored) ? stored : [stored];
-      const bounded = boundedRevocationCandidates(candidates, verifiedRevocations.get(hash));
-      state.revocations[hash] = bounded.candidates;
-      revocationCandidatesTruncated += bounded.truncated;
-    }
     for (const observation of scan.observations) recordArtifact(observation);
     for (const failure of scan.failures) {
       const stable = failure.code === "STORAGE_NOT_FOUND" || failure.code === "STORAGE_NOT_PUBLIC";
@@ -278,9 +270,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
         `accumulated: ${Object.keys(state.listings).length} listing(s), ${Object.keys(state.deals).length} deal(s)`,
     );
-    if (revocationCandidatesTruncated > 0) {
-      log(`revocation candidates: truncated ${revocationCandidatesTruncated} unverified locator(s) at the per-listing bound`);
-    }
     const didOf = (addr: string) => `did:demos:agent:${addr.replace(/^0x/, "")}`;
     const known = new Set(regs.map((r) => r.primaryClaim));
 
@@ -362,6 +351,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
+    const revocationProgress = new Map<string, { unread: Set<string>; rejected: Set<string> }>();
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -369,6 +359,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
+      }, (hash, progress) => {
+        const entry = revocationProgress.get(hash) ?? { unread: new Set<string>(), rejected: new Set<string>() };
+        for (const address of progress.unread) entry.unread.add(address);
+        for (const address of progress.rejected) entry.rejected.add(address);
+        revocationProgress.set(hash, entry);
       }).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
@@ -395,18 +390,19 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       log("fixture: Counterparty Evidence Desk preserved");
     }
 
+    // A rejected candidate leaves the queue; it returns only if the chain shows it again.
+    // An unreadable one moves to the back so it cannot hold the front of the queue.
+    for (const [hash, { unread, rejected }] of revocationProgress) {
+      const candidates = storedCandidates(hash).filter((address) => !rejected.has(address) && !unread.has(address));
+      state.revocations[hash] = [...candidates, ...storedCandidates(hash).filter((address) => unread.has(address) && !rejected.has(address))];
+    }
     for (const seller of catalogSellers) for (const listing of seller.listings) {
       const locator = listing.revocationBinding?.markerAnchor.locator;
       if (!locator) continue;
       const verified = state.verifiedRevocations[listing.contentHash] ?? [];
       if (!verified.includes(locator)) verified.push(locator);
       state.verifiedRevocations[listing.contentHash] = verified;
-      const stored = state.revocations?.[listing.contentHash];
-      const candidates = Array.isArray(stored) ? stored : stored ? [stored] : [];
-      state.revocations![listing.contentHash] = boundedRevocationCandidates(
-        [locator, ...candidates],
-        new Set(verified),
-      ).candidates;
+      state.revocations[listing.contentHash] = [...new Set([locator, ...storedCandidates(listing.contentHash)])];
     }
     state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
       cursor: state.reachabilityCursor,

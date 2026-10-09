@@ -21,6 +21,7 @@ import { isAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
+import { discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
   boundedBundleBindings,
@@ -37,14 +38,12 @@ const nonNegativeInt = (value: unknown, fallback: number): number => {
 export interface ScannedArtifacts {
   /** listing anchor address → owner address */
   listings: Map<string, string>;
-  /** jobId → discovered deal (buyer-anchored bundle + owners) */
+  /** buyer owner + jobId (discoveredDealKey) → discovered deal (buyer-anchored bundle + owners) */
   deals: Map<string, RegisteredDeal & { sellerFromAgreement?: string }>;
   /** owner + programName → observed native address. */
   programs: Map<string, string | null>;
-  /** listing content hash → bounded, deterministic revocation candidates. */
+  /** listing content hash → every revocation candidate seen in this window, oldest first. */
   revocations: Map<string, string[]>;
-  /** Candidate locators discarded by the per-listing resource bound. */
-  revocationCandidatesTruncated: number;
   /** jobId → BB-4-verified BundleBindings discovered in this scan window. */
   bundleBindings: Map<string, BundleBinding[]>;
   /** jobId + role keys whose deterministic total-work cap was exhausted. */
@@ -164,40 +163,15 @@ export function collectNativeStorageAddresses(value: unknown, out: Set<string>, 
 const didOf = (address: string): string =>
   `did:demos:agent:${address.replace(/^0x/, "")}`;
 
-export function addRevocationCandidate(
-  revocations: Map<string, string[]>,
-  listingHash: string,
-  address: string,
-  verifiedAddresses: ReadonlySet<string> = new Set(),
-): number {
-  const candidates = revocations.get(listingHash) ?? [];
-  const merged = boundedRevocationCandidates([...candidates, address], verifiedAddresses);
-  revocations.set(listingHash, merged.candidates);
-  return merged.truncated;
-}
-
-export const MAX_REVOCATION_CANDIDATES_PER_LISTING = 16;
-
 /**
- * Keep discovery state deterministic and bounded while never evicting a marker
- * that already passed RB-4 verification. Verified markers are signer-controlled
- * rather than public-shape-controlled, so they form the explicit bound exception.
+ * Admit every candidate locator once. Discovery is never bounded by count: the
+ * indexer bounds verification work per pass and drops a locator only after it
+ * was read and rejected (REVOCATION_VERIFICATIONS_PER_PASS).
  */
-export function boundedRevocationCandidates(
-  addresses: Iterable<string>,
-  verifiedAddresses: ReadonlySet<string> = new Set(),
-  limit = MAX_REVOCATION_CANDIDATES_PER_LISTING,
-): { candidates: string[]; truncated: number } {
-  // Include the persisted verified set even when an older scan-state snapshot
-  // omitted that locator from its candidate array.
-  const unique = [...new Set([...verifiedAddresses, ...addresses])];
-  const verified = unique.filter((address) => verifiedAddresses.has(address));
-  const unverified = unique.filter((address) => !verifiedAddresses.has(address));
-  const candidates = [
-    ...verified,
-    ...unverified.slice(0, Math.max(0, limit - verified.length)),
-  ];
-  return { candidates, truncated: unique.length - candidates.length };
+export function addRevocationCandidate(revocations: Map<string, Set<string>>, listingHash: string, address: string): void {
+  const candidates = revocations.get(listingHash) ?? new Set<string>();
+  candidates.add(address);
+  revocations.set(listingHash, candidates);
 }
 
 /**
@@ -446,7 +420,6 @@ export async function scanChain(
     sinceTxId?: number;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
-    verifiedRevocations?: ReadonlyMap<string, ReadonlySet<string>>;
   } = {},
 ): Promise<ScannedArtifacts> {
   // Incremental: walk latest → sinceTxId (exclusive) and stop. First run
@@ -502,15 +475,14 @@ export async function scanChain(
 
   const listings = new Map<string, string>();
   const programs = new Map<string, string | null>(opts.knownPrograms);
-  const revocations = new Map<string, string[]>();
-  let revocationCandidatesTruncated = 0;
+  const revocations = new Map<string, Set<string>>();
   const bundleBindings = new Map<string, BundleBinding[]>();
   const bundleBindingOverflow = new Set<string>();
   const observations: ScannedArtifacts["observations"] = [];
   const failures: ScannedArtifacts["failures"] = [];
   const namesByLocator = new Map<string, string>();
   let omittedBindings = 0;
-  const bundleOwners = new Map<string, { address: string; owner: string }>(); // jobId → buyer bundle
+  const bundleOwners = new Map<string, { jobId: string; address: string; owner: string }>(); // owner + jobId → buyer bundle
   const sellerCopies = new Map<string, Array<{ address: string; owner: string }>>(); // preserve competing candidates
   const addSellerCopy = (jobId: string, address: string, owner: string) => {
     const copies = sellerCopies.get(jobId) ?? [];
@@ -561,13 +533,7 @@ export async function scanChain(
       for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
     } else if (isListingRevocationCandidate(data)) {
       artifactKind = "listing-revocation";
-      const listingHash = String(data!.listingContentHash).toLowerCase();
-      revocationCandidatesTruncated += addRevocationCandidate(
-        revocations,
-        listingHash,
-        address,
-        opts.verifiedRevocations?.get(listingHash),
-      );
+      addRevocationCandidate(revocations, String(data!.listingContentHash).toLowerCase(), address);
     } else if (name.startsWith("dacs1:listing:") || name.startsWith("dacs1-") || currentListing) {
       artifactKind = "listing";
       listings.set(address, read.owner);
@@ -576,13 +542,14 @@ export async function scanChain(
       const jobId = data!.jobId as string;
       const role = data!.anchoredByRole;
       if (role === "seller") addSellerCopy(jobId, address, read.owner);
-      else bundleOwners.set(jobId, { address, owner: read.owner });
+      else bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner });
     } else if (name.startsWith("dacs5:bundle:seller:")) {
       artifactKind = "bundle";
       addSellerCopy(name.slice("dacs5:bundle:seller:".length), address, read.owner);
     } else if (name.startsWith("dacs5:bundle:")) {
       artifactKind = "bundle";
-      bundleOwners.set(name.slice("dacs5:bundle:".length), { address, owner: read.owner });
+      const jobId = name.slice("dacs5:bundle:".length);
+      bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner });
     }
     observations.push({ locator: address, kind: artifactKind, profile, owner: read.owner,
       contentHash: dataHash, observedAt: Date.now(), data });
@@ -603,7 +570,7 @@ export async function scanChain(
 
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
   const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
-  for (const [jobId, bundle] of bundleOwners) {
+  for (const [dealKey, { jobId, ...bundle }] of bundleOwners) {
     const bundleName = namesByLocator.get(bundle.address);
     if (bundleName && programs.get(programBindingKey(bundle.owner, bundleName)) === null) continue;
     const agreementAddress = programs.get(programBindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
@@ -624,7 +591,7 @@ export async function scanChain(
     const rail = agreementRail(agreementData) ??
       ((agreementData?.price as { rail?: string } | undefined)?.rail) ??
       (((agreementData?.terms as Record<string, unknown> | undefined)?.price as { rail?: string } | undefined)?.rail) ?? "unknown";
-    deals.set(jobId, {
+    deals.set(dealKey, {
       jobId,
       rail,
       buyerBundleRef: bundle.address,
@@ -634,7 +601,9 @@ export async function scanChain(
     });
   }
 
-  return { listings, deals, programs, revocations, revocationCandidatesTruncated,
+  // Transactions are walked newest first; candidates queue in chain order.
+  return { listings, deals, programs,
+    revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     bundleBindings, bundleBindingOverflow, omittedBindings,
     txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
 }
