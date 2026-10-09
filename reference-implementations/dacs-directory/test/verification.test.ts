@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -27,6 +28,7 @@ import {
   ownerClaim,
   revocationLogicalAddress,
   verifyListing,
+  verifyListingRevocation,
 } from "../src/catalog/listingVerification.js";
 import {
   addRevocationCandidate,
@@ -589,6 +591,72 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   // opaque StorageProgram name and the marker remains discoverable.
   assert.equal(isListingRevocationCandidate(valid), true);
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
+});
+
+test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
+  const markerSeed = Uint8Array.from(randomBytes(32));
+  const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
+  const markerListing = { ...listing, agentId: markerDid };
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(markerListing)}`, "utf8");
+  const listingSignature = Buffer.from(
+    await ed25519Sign(listingMessage, privateKeyFromSeed(markerSeed)),
+  ).toString("hex");
+  const verified = await verifyListing({
+    ...markerListing,
+    signature: { algorithm: "ed25519", signer: markerDid, value: listingSignature },
+  });
+  assert.ok(verified);
+  if (!verified) return;
+
+  // RFC 8785 form of a flat scope. The SDK canonicalizer refuses numbers outside
+  // the safe-integer range, so those markers are signed over the form a lenient
+  // producer emits (NaN/Infinity have no JSON form; JSON.stringify writes null).
+  const lenientHash = (scope: Record<string, unknown>) => createHash("sha256").update(
+    `{${Object.keys(scope).sort().map((key) => `${JSON.stringify(key)}:${JSON.stringify(scope[key])}`).join(",")}}`,
+    "utf8",
+  ).digest("hex");
+  const signedMarker = async (revokedAt: number) => {
+    const scope = {
+      listingId: listing.listingId,
+      listingVersion: listing.listingVersion,
+      listingContentHash: verified.contentHash,
+      revokedAt,
+    };
+    let sdkHash: string | null = null;
+    try {
+      sdkHash = contentHash(scope);
+    } catch {
+      // Outside the SDK's canonical number domain.
+    }
+    if (sdkHash) assert.equal(lenientHash(scope), sdkHash);
+    const hash = sdkHash ?? lenientHash(scope);
+    const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
+    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("hex");
+    return { ...scope, signature: { algorithm: "ed25519", signer: markerDid, value } };
+  };
+  const outcome = async (revokedAt: number) => {
+    const marker = await signedMarker(revokedAt);
+    const verdict = await verifyListingRevocation(marker, verified, 1)
+      .catch((error: Error) => `throws ${error.name}`);
+    return { candidate: isListingRevocationCandidate(marker), verified: verdict };
+  };
+
+  assert.deepEqual(await outcome(Date.now()), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(0), { candidate: true, verified: true });
+  const rejected = { candidate: false, verified: false };
+  assert.deepEqual({
+    fraction: await outcome(1791480684902.5),
+    negative: await outcome(-1),
+    nan: await outcome(Number.NaN),
+    infinity: await outcome(Number.POSITIVE_INFINITY),
+    aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
+  }, {
+    fraction: rejected,
+    negative: rejected,
+    nan: rejected,
+    infinity: rejected,
+    aboveMaxSafeInteger: rejected,
+  });
 });
 
 test("revocation candidate discovery is bounded per listing hash", () => {
