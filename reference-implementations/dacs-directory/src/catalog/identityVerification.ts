@@ -83,8 +83,9 @@ export async function deriveIdentityTier(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<IdentityTier> {
   const claims = Array.isArray(identityBundle?.claims) ? identityBundle.claims.map(obj).filter(Boolean) as Obj[] : [];
+  // A claim whose chain artifacts cannot be canonicalized is unverified; the others still count.
   const verified = (await Promise.all(claims.map((claim) =>
-    verifiedClaim(claim, now, resolveRecipe, read, resolveKey)))).filter(Boolean) as Array<{ scheme: string }>;
+    verifiedClaim(claim, now, resolveRecipe, read, resolveKey).catch(() => null)))).filter(Boolean) as Array<{ scheme: string }>;
   if (verified.some((claim) => INSTITUTIONAL.has(claim.scheme))) return "institutional";
   return verified.length ? "verified" : "self-declared";
 }

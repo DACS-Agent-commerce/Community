@@ -307,7 +307,14 @@ export async function verifyListingRevocation(
   ) return false;
   const sig = decodeSignature(s.value);
   if (!sig) return false;
-  const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
+  let hash: string;
+  try {
+    hash = contentHash(scope);
+  } catch {
+    // An unknown member with no canonical form (e.g. JSON 1e400) cannot be signed.
+    return false;
+  }
+  const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, listing.signer, s.algorithm, resolveKey,
   );

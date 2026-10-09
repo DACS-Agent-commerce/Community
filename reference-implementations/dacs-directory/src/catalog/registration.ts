@@ -1,3 +1,4 @@
+import { boundedJson } from "./artifactLimits.js";
 import type { BundleBinding, RegisteredDeal, Registration } from "./types.js";
 import { isCanonicalDemosAgentClaim } from "./claimRef.js";
 
@@ -64,7 +65,7 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
     b.bundleBindings !== undefined &&
     (!Array.isArray(b.bundleBindings) || b.bundleBindings.length > 256 ||
       b.bundleBindings.some((binding) => !binding || typeof binding !== "object" || Array.isArray(binding) ||
-        Buffer.byteLength(JSON.stringify(binding), "utf8") > 16_384))
+        boundedJson(binding, 16_384) === null))
   ) {
     return { ok: false, error: "bundleBindings must contain at most 256 bounded JSON objects" };
   }

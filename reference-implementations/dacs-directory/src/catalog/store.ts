@@ -1,4 +1,6 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
+import { boundedJson } from "./artifactLimits.js";
+import { normalizeScanState } from "./scanState.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -123,6 +125,19 @@ db.exec(`
     ON listing_rejections(last_seen_at DESC, locator);
 `);
 
+// Add internal omission counters without changing the public diagnostic projection.
+db.transaction(() => {
+  const columns = db.pragma("table_info(scan_runs)") as Array<{ name: string }>;
+  for (const column of ["omitted_sellers", "omitted_bindings", "omitted_deals"]) {
+    if (!columns.some((entry) => entry.name === column)) db.exec(`ALTER TABLE scan_runs ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
+}).immediate();
+
+export function throwIfInfrastructureError(error: unknown): void {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (code.startsWith("SQLITE_") || ["EIO", "ENOSPC", "EROFS", "EACCES"].includes(code)) throw error;
+}
+
 const readLegacy = <T>(path: string, fallback: T): T =>
   existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as T : fallback;
 
@@ -204,8 +219,8 @@ export const loadCatalog = (): Catalog => getJson("catalog", { catalogVersion: "
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
-export const loadScanState = (): ScanState => getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
-export const saveScanState = (state: ScanState): void => setJson("scan-state", state);
+export const loadScanState = () => normalizeScanState(getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} }));
+export const saveScanState = (state: ScanState): void => setJson("scan-state", normalizeScanState(state));
 /**
  * Remove active cache rows that belong to a replaced chain. Registrations and
  * the append-only first-observation history survive so operator diagnostics do
@@ -249,26 +264,42 @@ const recordArtifactTransaction = db.transaction((observation: StoredArtifactObs
   db.prepare(`INSERT INTO artifacts(locator, kind, profile, owner, content_hash, observed_at, anchor_time, status, data_json)
     VALUES (@locator,@kind,@profile,@owner,@contentHash,@observedAt,@anchorTime,@status,@dataJson)
     ON CONFLICT(locator) DO UPDATE SET kind=excluded.kind, profile=excluded.profile, owner=excluded.owner,
-      content_hash=COALESCE(excluded.content_hash,artifacts.content_hash), observed_at=excluded.observed_at,
+      content_hash=excluded.content_hash, observed_at=excluded.observed_at,
       anchor_time=CASE
-        WHEN excluded.content_hash IS NOT NULL AND artifacts.content_hash IS NOT excluded.content_hash
+        WHEN artifacts.content_hash IS NOT excluded.content_hash
           THEN excluded.anchor_time
         WHEN excluded.anchor_time IS NULL THEN artifacts.anchor_time
         WHEN artifacts.anchor_time IS NULL THEN excluded.anchor_time
         ELSE MIN(excluded.anchor_time,artifacts.anchor_time)
       END, status=excluded.status,
-      data_json=COALESCE(excluded.data_json,artifacts.data_json), error_code=NULL, error_message=NULL,
-      retry_count=0, next_retry_at=NULL`)
+      data_json=excluded.data_json, error_code=NULL, error_message=NULL,
+      retry_count=CASE WHEN excluded.content_hash IS NULL AND artifacts.error_code='ARTIFACT_REJECTED'
+        THEN artifacts.retry_count ELSE 0 END, next_retry_at=NULL`)
     .run(observation);
   // A readable observation is the recovery event for this locator. Keep the
   // active queue truthful and ensure a later transient failure starts at one.
   db.prepare("DELETE FROM dead_letters WHERE locator = ?").run(observation.locator);
 });
 
+/**
+ * The newest observation replaces the row's content identity as one unit: the
+ * hash, the data it identifies and the hash-bound consensus time. Data is kept
+ * only with its hash, and data that cannot be serialized is kept with neither.
+ */
 export function recordArtifact(observation: ArtifactObservation): void {
-  recordArtifactTransaction({ ...observation, contentHash: observation.contentHash ?? null,
-    owner: observation.owner ?? null, anchorTime: observation.anchorTime ?? null,
-    status: observation.status ?? "observed", dataJson: observation.data ? JSON.stringify(observation.data) : null });
+  let contentHash = observation.contentHash ?? null;
+  let dataJson: string | null = null;
+  if (contentHash && observation.data) {
+    try {
+      dataJson = boundedJson(observation.data);
+      if (dataJson === null) contentHash = null;
+    } catch {
+      contentHash = null;
+    }
+  }
+  recordArtifactTransaction({ ...observation, contentHash,
+    owner: observation.owner ?? null, anchorTime: contentHash ? observation.anchorTime ?? null : null,
+    status: observation.status ?? "observed", dataJson });
 }
 
 export interface ConsensusAnchorObservation {
@@ -304,9 +335,10 @@ const recordArtifactFailureTransaction = db.transaction(
     const prior = db.prepare("SELECT retry_count,kind FROM artifacts WHERE locator = ?").get(locator) as { retry_count: number; kind: string } | undefined;
     const attempts = (prior?.retry_count ?? 0) + 1;
     const failureKind = kind === "unknown" && prior?.kind && prior.kind !== "unknown" ? prior.kind : kind;
-    const dead = attempts >= maxRetries;
+    const periodic = code === "ARTIFACT_REJECTED";
+    const dead = !periodic && attempts >= maxRetries;
     const now = Date.now();
-    const next = dead ? null : now + Math.min(60 * 60_000, 2 ** attempts * 5_000);
+    const next = dead ? null : now + Math.min(60 * 60_000, 2 ** Math.min(attempts, 10) * 5_000);
     const storedCode = code.slice(0, 100);
     const storedMessage = message.slice(0, 1000);
     db.prepare(`INSERT INTO artifact_failure_history(locator,first_seen_at,last_seen_at,observations)
@@ -409,17 +441,17 @@ export function clearListingRejection(locator: string, registrationClaim: string
     .run(locator, registrationClaim.toLowerCase());
 }
 export const loadRetryableArtifacts = (now = Date.now()): string[] =>
-  (db.prepare("SELECT locator FROM artifacts WHERE status='retry' AND next_retry_at <= ? ORDER BY next_retry_at LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
+  (db.prepare("SELECT locator FROM artifacts WHERE (status='retry' OR error_code='ARTIFACT_REJECTED') AND COALESCE(next_retry_at,0) <= ? ORDER BY COALESCE(next_retry_at,0),locator LIMIT 100").all(now) as Array<{ locator: string }>).map((row) => row.locator);
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
 
 export function beginScanRun(fromTx: number): number {
   return Number(db.prepare("INSERT INTO scan_runs(started_at,from_tx,status) VALUES (?,?,?)").run(Date.now(), fromTx, "running").lastInsertRowid);
 }
-export function finishScanRun(id: number, values: { toTx: number; chainTip?: number; txs: number; artifacts: number; rejected: number; error?: string }): void {
-  db.prepare(`UPDATE scan_runs SET finished_at=?,to_tx=?,chain_tip=?,txs_scanned=?,artifacts_observed=?,rejected=?,status=?,error=? WHERE id=?`)
+export function finishScanRun(id: number, values: { toTx: number; chainTip?: number; txs: number; artifacts: number; rejected: number; error?: string; omittedSellers?: number; omittedBindings?: number; omittedDeals?: number }): void {
+  db.prepare(`UPDATE scan_runs SET finished_at=?,to_tx=?,chain_tip=?,txs_scanned=?,artifacts_observed=?,rejected=?,status=?,error=?,omitted_sellers=?,omitted_bindings=?,omitted_deals=? WHERE id=?`)
     .run(Date.now(), values.toTx, values.chainTip ?? null, values.txs, values.artifacts, values.rejected,
-      values.error ? "failed" : "complete", values.error ?? null, id);
+      values.error ? "failed" : "complete", values.error ?? null, values.omittedSellers ?? 0, values.omittedBindings ?? 0, values.omittedDeals ?? 0, id);
 }
 const PUBLIC_FAILURES: Record<string, string> = {
   STORAGE_UNREADABLE: "The storage program could not be read after repeated attempts. Confirm the locator exists and is publicly readable before retrying.",
