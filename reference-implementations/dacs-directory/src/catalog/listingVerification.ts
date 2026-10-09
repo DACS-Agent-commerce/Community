@@ -295,7 +295,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    typeof scope.revokedAt !== "number"
+    !Number.isSafeInteger(scope.revokedAt) ||
+    Number(scope.revokedAt) < 0
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
