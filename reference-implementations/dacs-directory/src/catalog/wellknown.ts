@@ -12,9 +12,11 @@
  * lists anchors it doesn't own is caught by the indexer (listing.agentId
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { encodeAddressSegment, sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { isRevocationBinding } from "@kynesyslabs/dacs/artifacts";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { BundleBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
@@ -39,14 +41,70 @@ interface ListingIndex {
   indexVersion?: string;
   generatedAt?: number;
   seller?: string;
-  listings?: Array<{
-    listingId?: string;
-    version?: number;
-    contentHash?: string;
-    anchor?: { kind?: string; locator?: string };
-    summary?: { title?: string };
-    status?: "active" | "revoked";
-  }>;
+  listings?: unknown;
+}
+
+type ListingIndexEntry = {
+  listingId?: unknown;
+  version?: unknown;
+  contentHash?: unknown;
+  anchor?: { kind?: unknown; locator?: unknown };
+  status?: unknown;
+  revocation?: unknown;
+};
+
+export type ListingIndexProjection =
+  | { ok: true; listingAnchors: string[]; contentHashes: Record<string, string> }
+  | { ok: false; error: string };
+
+/** Validate RB-3 coherence and retain only active anchors for indexing. */
+export function projectActiveListingIndexEntries(
+  value: unknown,
+  seller: string,
+): ListingIndexProjection {
+  if (!Array.isArray(value) || value.length > 200) {
+    return { ok: false, error: "listings.json must contain at most 200 listings" };
+  }
+  const listingAnchors: string[] = [];
+  const contentHashes: Record<string, string> = {};
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { ok: false, error: "listings.json contains an invalid listing entry" };
+    }
+    const entry = raw as ListingIndexEntry;
+    const locator = entry.anchor?.locator;
+    if (
+      typeof entry.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(entry.listingId) ||
+      !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+      entry.anchor?.kind !== "storage-program" || typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) ||
+      typeof entry.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(entry.contentHash) ||
+      (entry.status !== "active" && entry.status !== "revoked")
+    ) return { ok: false, error: "listings.json contains an invalid listing entry" };
+
+    if (entry.status === "active") {
+      if (entry.revocation !== undefined) {
+        return { ok: false, error: "an active listing entry must not carry revocation" };
+      }
+    } else {
+      const revocation = entry.revocation;
+      const expectedLogicalAddress =
+        `dacs1-revoked:${encodeAddressSegment(seller)}:${entry.listingId}:v${entry.version}`;
+      if (
+        !isRevocationBinding(revocation) ||
+        revocation.sellerPrimaryClaim !== seller ||
+        revocation.listingId !== entry.listingId ||
+        revocation.listingVersion !== entry.version ||
+        revocation.listingContentHash !== entry.contentHash ||
+        revocation.logicalAddress !== expectedLogicalAddress
+      ) {
+        return { ok: false, error: "a revoked listing entry has no matching revocation binding" };
+      }
+      continue;
+    }
+    listingAnchors.push(locator);
+    contentHashes[locator] = entry.contentHash;
+  }
+  return { ok: true, listingAnchors, contentHashes };
 }
 
 export function normalizeSubmittedDomain(domain: string): string {
@@ -99,26 +157,13 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   if (idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
     return { domain, error: "listings.json has an invalid version or generatedAt" };
   }
-  const seller = idx.seller;
-  if (!seller || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
+  const seller = typeof idx.seller === "string" ? canonicalDemosAgentClaim(idx.seller) : null;
+  if (!seller) {
     return { domain, error: "listings.json has no canonical Demos seller claim" };
   }
-  if (!Array.isArray(idx.listings) || idx.listings.length > 200) {
-    return { domain, error: "listings.json must contain at most 200 listings" };
-  }
-
-  const listingAnchors: string[] = [];
-  const contentHashes: Record<string, string> = {};
-  for (const entry of idx.listings ?? []) {
-    const locator = entry.anchor?.locator;
-    if (
-      entry.status === "revoked" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
-      !locator || !/^stor-[0-9a-f]{40}$/.test(locator) ||
-      !entry.contentHash || !/^[0-9a-fA-F]{64}$/.test(entry.contentHash)
-    ) continue;
-    listingAnchors.push(locator);
-    contentHashes[locator] = entry.contentHash.toLowerCase();
-  }
+  const projection = projectActiveListingIndexEntries(idx.listings, seller);
+  if (!projection.ok) return { domain, error: projection.error };
+  const { listingAnchors, contentHashes } = projection;
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];

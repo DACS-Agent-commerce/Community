@@ -80,6 +80,8 @@ test("directory service profile envelope is listed-only and does not claim sourc
   assert.equal(envelope.maturity, envelope.artifact.maturityProfile.maturity);
   assert.equal(envelope.artifact.maturityProfile.noReputationClaim, true);
   assert.equal(envelope.artifact.maturityProfile.noLivePaymentClaim, true);
+  assert.equal(envelope.artifact.transactionReadiness.disposition, "unassessed");
+  assert.match(envelope.artifact.transactionReadiness.reason, /current SDK Listing reader/);
   assert.deepEqual(envelope.artifact.limitations, [
     "roster maturity hint",
     "not reputation evidence",
@@ -96,5 +98,6 @@ test("listing discovery can add the inspection affordance without changing the s
   assert.equal(withInspection.anchor.locator, listing.anchor.locator);
   assert.equal(withInspection.inspection?.artifactType, "directory-service-profile");
   assert.equal(withInspection.inspection?.href, inspectServicePath(listing));
+  assert.equal(withInspection.transactionReadiness?.disposition, "unassessed");
   assert.equal(listing.inspection, undefined);
 });

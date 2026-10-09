@@ -12,6 +12,7 @@
     "start:railway": "bash scripts/start-railway.sh",
     "check:deploy-config": "node scripts/check-butler-origin.mjs",
     "check:butler": "node scripts/check-butler-origin.mjs --probe",
+    "check:listing-upgrade": "tsx scripts/check-live-listing-upgrade.ts",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:e2e": "playwright test e2e/home.spec.ts e2e/register.spec.ts e2e/try-dacs.spec.ts e2e/try-chat.spec.ts",
     "test:e2e:live": "playwright test e2e/try-dacs.live.spec.ts",

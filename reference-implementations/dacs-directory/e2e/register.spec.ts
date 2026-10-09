@@ -26,7 +26,7 @@ test("seller publication survives registration failure and reload without rebroa
           calls.push(request);
           if (request.method === "connect") return { success: true, data: { address } };
           if (request.method === "sign") return { success: true, data: { signature: "ab".repeat(64) } };
-          if (request.method === "sendTransaction") return { success: true, data: { hash: "mock-listing-tx" } };
+          if (request.method === "sendTransaction") return { success: true, data: { hash: "cd".repeat(32) } };
           throw new Error(`unexpected wallet method ${request.method}`);
         },
       },
@@ -42,22 +42,39 @@ test("seller publication survives registration failure and reload without rebroa
   let registrationPosts = 0;
   let confirmationPosts = 0;
   await context.route("**/api/dacs/build-listing", async (route) => {
-    const input = route.request().postDataJSON() as { identitySignature?: string };
+    const input = route.request().postDataJSON() as { identitySignature?: string; listingSignature?: string };
     if (!input.identitySignature) {
       return json(route, { identityMessage: "identity-message", identityPresentedAt: 1_786_360_000_000 });
     }
-    return json(route, {
-      listing: { dacsVersion: "1", listingId: "recovery-service", listingVersion: 1 },
+    const listing = {
+      dacsVersion: "1",
+      listingId: "recovery-service",
+      listingVersion: 1,
+      offering: { deliverable: { kind: "storage-program", accessModel: "public" } },
+      ...(input.listingSignature ? { signature: { algorithm: "ed25519", signer: claim, value: input.listingSignature } } : {}),
+    };
+    if (!input.listingSignature) return json(route, {
+      listing,
       message: "listing-message",
+      contentHash,
+      logicalAddress: `dacs1:did%3Ademos%3Aagent%3A${keyHex}:recovery-service:v1`,
+      programName,
+      exists: false,
+      publicationReady: false,
+      tx: null,
+    });
+    return json(route, {
+      listing,
       contentHash,
       logicalAddress: `dacs1:did%3Ademos%3Aagent%3A${keyHex}:recovery-service:v1`,
       programName,
       anchorAddress,
       exists: false,
+      publicationReady: true,
       tx: {
         content: {
           type: "storageProgram",
-          data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", data: "__SIGNED_LISTING__", salt: "" }],
+          data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", data: listing, salt: "" }],
           nonce: 8,
         },
       },
@@ -69,7 +86,11 @@ test("seller publication survives registration failure and reload without rebroa
   });
   await context.route("**/api/dacs/confirm-listing", async (route) => {
     confirmationPosts++;
-    return json(route, { confirmed: true, state: "verified" });
+    return json(route, {
+      confirmed: true,
+      state: "finalized-and-verified",
+      anchorReceipt: { receiptVersion: "1", state: "finalized", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
+    });
   });
   await context.route("**/api/dacs/prepare-registration", (route) => json(route, {
     registration: {
@@ -94,7 +115,11 @@ test("seller publication survives registration failure and reload without rebroa
   await expect(page.getByText("Ready for review.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Review listing" }).click();
   await expect(page.getByText(/expect four wallet approvals/i)).toBeVisible();
-  await page.getByRole("button", { name: "Sign and publish" }).click();
+  await page.getByRole("button", { name: "Build exact artifact" }).click();
+  await expect(page.getByText(/Exact unsigned artifact ready/)).toBeVisible();
+  await page.getByText("Exact artifact presented for Listing signature").click();
+  await expect(page.getByText(/"accessModel": "public"/)).toBeVisible();
+  await page.getByRole("button", { name: "Sign exact artifact and publish" }).click();
 
   await expect(page.getByText("temporary registry write failure", { exact: true })).toBeVisible();
   await expect(page.locator(".progress-list li.failed")).toContainText("Register the catalog pointer");
@@ -120,7 +145,7 @@ test("seller publication survives registration failure and reload without rebroa
   await expect(page.getByText(anchorAddress, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Check chain and resume" }).click();
 
-  await expect(page.getByText(/anchored, independently verified, and queued/)).toBeVisible();
+  await expect(page.getByText(/finalized anchor.*authenticated as a catalog candidate/)).toBeVisible();
   await expect.poll(() => page.evaluate(() => (
     (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
       .filter((call) => call.method === "sendTransaction").length

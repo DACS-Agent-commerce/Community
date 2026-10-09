@@ -24,6 +24,11 @@ const nextConfig = {
         }),
       );
       config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:util$/, (resource) => {
+          resource.request = new URL("./src/shims/node-util.ts", import.meta.url).pathname;
+        }),
+      );
+      config.plugins.push(
         new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] }),
       );
     }

@@ -5,11 +5,10 @@
  * known deals. Registration becomes "confirm what we found", not data entry.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { isListing } from "@kynesyslabs/dacs/artifacts";
-import { stripSignature } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
+import { verifyListing } from "@/src/catalog/listingVerification";
 import { loadScanState } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
@@ -26,9 +25,14 @@ export async function GET(req: NextRequest) {
   for (const [address, o] of Object.entries(state.listings)) {
     if (o.toLowerCase() !== owner.toLowerCase()) continue;
     const raw = await readAnchor(address);
-    const scope = raw ? stripSignature(raw) : null;
-    if (scope && isListing(scope)) {
-      listings.push({ address, title: (scope as { name?: string }).name ?? address });
+    const verified = raw ? await verifyListing(raw) : null;
+    if (verified) {
+      listings.push({
+        address,
+        title: verified.profile === "dacs-v0.1"
+          ? verified.listing.offering.title
+          : verified.listing.name,
+      });
     }
   }
 

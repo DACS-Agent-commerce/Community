@@ -121,7 +121,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
   }
   for (const seller of prior.sellers) for (const listing of seller.listings) {
-    const locator = listing.revocationBinding?.markerAnchor.locator;
+    const locator = listing.revocation?.markerAnchor.locator;
     if (!locator) continue;
     const verified = state.verifiedRevocations[listing.contentHash] ?? [];
     if (!verified.includes(locator)) verified.push(locator);
@@ -358,7 +358,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
 
   for (const seller of catalogSellers) for (const listing of seller.listings) {
-    const locator = listing.revocationBinding?.markerAnchor.locator;
+    const locator = listing.revocation?.markerAnchor.locator;
     if (!locator) continue;
     const verified = state.verifiedRevocations[listing.contentHash] ?? [];
     if (!verified.includes(locator)) verified.push(locator);

@@ -721,7 +721,7 @@ export default function TryDacs() {
     try {
       if (isProcurementSel && selectedProfile) {
         const deadline = Date.now() + 12 * 60_000;
-        // The Directory is the discovery surface. Pass its verified listing
+        // The Directory is the discovery surface. Pass its authenticated catalog candidate
         // pointer to the Butler; the gateway independently dereferences and
         // verifies the signed DACS-1 artifact before negotiation.
         const request: Record<string, unknown> = { profileId: selectedProfile.id, ...parsed, paymentRail: selectedPaymentRail };

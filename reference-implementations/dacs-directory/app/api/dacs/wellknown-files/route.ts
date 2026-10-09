@@ -46,6 +46,7 @@ export async function GET(req: NextRequest) {
         ...(l.pricing.priceHint ? { priceHint: l.pricing.priceHint } : {}),
       },
       status: l.status,
+      ...(l.revocation ? { revocation: l.revocation } : {}),
     });
   }
 
