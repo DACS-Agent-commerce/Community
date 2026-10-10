@@ -30,11 +30,7 @@ import {
   verifyListing,
   verifyListingRevocation,
 } from "../src/catalog/listingVerification.js";
-import {
-  addRevocationCandidate,
-  isListingRevocationCandidate,
-  MAX_REVOCATION_CANDIDATES_PER_LISTING,
-} from "../src/catalog/scan.js";
+import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
@@ -581,11 +577,11 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
     "dacs1-revoked:cci-xm%3Aevm%3Amainnet%3A0x1234:offer:v3",
   );
 
-  const candidates = new Map<string, string[]>();
+  const candidates = new Map<string, Set<string>>();
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
   addRevocationCandidate(candidates, verified.contentHash, "stor-new");
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
-  assert.deepEqual(candidates.get(verified.contentHash), ["stor-old", "stor-new"]);
+  assert.deepEqual([...candidates.get(verified.contentHash) ?? []], ["stor-old", "stor-new"]);
 
   // Discovery is value-based: a conforming producer may use any colon-free,
   // opaque StorageProgram name and the marker remains discoverable.
@@ -700,41 +696,43 @@ test("a revocation candidate with no canonical form never stops the candidate lo
   assert.equal(await hasValidListingRevocation(["infinite", "fractional"], verified, 1, read), false);
 });
 
-test("revocation candidate discovery is bounded per listing hash", () => {
-  const candidates = new Map<string, string[]>();
+test("revocation candidate discovery admits every locator once", () => {
+  const candidates = new Map<string, Set<string>>();
   const listingHash = "a".repeat(64);
-  for (let index = 0; index < 20; index++) {
+  for (let index = 0; index < 40; index++) {
     addRevocationCandidate(candidates, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
   }
-  assert.equal(candidates.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
+  addRevocationCandidate(candidates, listingHash, `stor-${"0".repeat(40)}`);
+  const admitted = [...candidates.get(listingHash) ?? []];
+  assert.equal(admitted.length, 40);
+  assert.equal(admitted[0], `stor-${"0".repeat(40)}`);
 });
 
-test("candidate pruning preserves an RB-4-verified locator across restart", () => {
-  const listingHash = "b".repeat(64);
-  const verified = `stor-${"f".repeat(40)}`;
-  const beforeRestart = new Map<string, string[]>();
-  for (let index = 0; index < MAX_REVOCATION_CANDIDATES_PER_LISTING; index++) {
-    addRevocationCandidate(beforeRestart, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
-  }
-  addRevocationCandidate(beforeRestart, listingHash, verified, new Set([verified]));
-
-  const persisted = JSON.parse(JSON.stringify(Object.fromEntries(beforeRestart))) as Record<string, string[]>;
-  const afterRestart = new Map(Object.entries(persisted));
-  for (let index = 16; index < 32; index++) {
-    addRevocationCandidate(
-      afterRestart,
-      listingHash,
-      `stor-${index.toString(16).padStart(40, "0")}`,
-      new Set([verified]),
-    );
-  }
-
-  assert.equal(afterRestart.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
-  assert.equal(afterRestart.get(listingHash)?.includes(verified), true);
-
-  const staleState = new Map([[listingHash, afterRestart.get(listingHash)!.filter((address) => address !== verified)]]);
-  addRevocationCandidate(staleState, listingHash, `stor-${"e".repeat(40)}`, new Set([verified]));
-  assert.equal(staleState.get(listingHash)?.includes(verified), true);
+test("revocation verification work per call is bounded and reports what it examined", async () => {
+  const perPass = 16;
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const listingSignature = Buffer.from(await ed25519Sign(listingMessage, privateKeyFromSeed(seed))).toString("hex");
+  const verified = await verifyListing({ ...listing, signature: { algorithm: "ed25519", signer: did, value: listingSignature } });
+  assert.ok(verified);
+  if (!verified) return;
+  const scope = { listingId: listing.listingId, listingVersion: listing.listingVersion, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("hex");
+  const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value } };
+  const refs = Array.from({ length: 20 }, (_, index) => `bogus-${index}`);
+  const reads: string[] = [];
+  const read = async (ref: string) => {
+    reads.push(ref);
+    if (ref === "valid") return valid;
+    return ref === "bogus-3" ? null : { ...valid, revokedAt: 2 };
+  };
+  const progress = { unread: [] as string[], rejected: [] as string[] };
+  assert.equal(await findValidListingRevocation([...refs, "valid"], verified, 1, read, undefined, progress), null);
+  assert.equal(reads.length, perPass);
+  assert.deepEqual(progress.unread, ["bogus-3"]);
+  assert.equal(progress.rejected.length, perPass - 1);
+  const remaining = [...refs, "valid"].filter((ref) => !progress.rejected.includes(ref) && !progress.unread.includes(ref));
+  const binding = await findValidListingRevocation([...remaining, ...progress.unread], verified, 1, read);
+  assert.equal(binding?.markerAnchor.locator, "valid");
 });
 
 test("public discovery excludes revoked listings and empty sellers", () => {

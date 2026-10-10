@@ -29,6 +29,8 @@ const seeds = [21, 22].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 const [buyer, seller] = dids;
 const ownerOf = (did: string) => `0x${did.slice(-64)}`;
+/** Discovered deals are keyed by their buyer and jobId. */
+const dealKey = (jobId: string) => `${ownerOf(buyer)}\n${jobId}`;
 const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
@@ -152,12 +154,12 @@ for (const jobId of ["constructor", "__proto__", "toString", "hasOwnProperty"]) 
     chain({ [locator(1)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
       [locator(2)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify({ seller }), owner: ownerOf(buyer) } }, [locator(1), locator(2)]);
     await reindex();
-    assert.ok(Object.hasOwn(store.loadScanState().deals, jobId));
-    assert.equal(store.loadScanState().deals[jobId].owners.seller, "");
+    assert.ok(Object.hasOwn(store.loadScanState().deals, dealKey(jobId)));
+    assert.equal(store.loadScanState().deals[dealKey(jobId)].owners.seller, "");
     transactions = [];
     await reindex();
     assert.ok(store.loadCatalog().generatedAt > 5);
-    assert.ok(Object.hasOwn(store.loadScanState().deals, jobId));
+    assert.ok(Object.hasOwn(store.loadScanState().deals, dealKey(jobId)));
     assert.ok(store.loadCatalog().sellers.some((s) => s.displayName === "Later"));
   });
   test(`signed reserved binding ${jobId} survives two reindexes and SQLite reload`, async () => {
@@ -286,19 +288,19 @@ test("rejected revocation outside replay overlap is retried and consensus time r
 test("rejected retries remain periodic after exhaustion with a bounded queue", () => {
   sql("DELETE FROM artifacts RETURNING locator");
   for (let i = 0; i < 120; i++) for (let pass = 0; pass < 8; pass++) {
-    store.recordArtifact({ locator: locator(1000 + i), kind: "other", profile: "unknown", observedAt: Date.now() });
+    store.recordArtifact({ locator: locator(1000 + i), kind: "other", profile: "unknown", observedAt: Date.now(), rejected: true });
     store.recordArtifactFailure(locator(1000 + i), "other", "ARTIFACT_REJECTED", "rejected", 1);
   }
-  const retry = sql("SELECT retry_count,status,next_retry_at FROM artifacts WHERE locator='" + locator(1000) + "'")[0];
-  assert.equal(retry.retry_count, 8);
+  const retry = sql("SELECT rejection_count,status,next_retry_at FROM artifacts WHERE locator='" + locator(1000) + "'")[0];
+  assert.equal(retry.rejection_count, 8);
   assert.equal(retry.status, "retry");
   assert.ok(Number(retry.next_retry_at) > Date.now(), "periodic rejection retries have a future deadline");
   assert.ok(Number(retry.next_retry_at) <= Date.now() + 3_600_000, "backoff is capped at one hour");
   // Pre-fix ARTIFACT_REJECTED dead letters had no retry deadline.
   sql("UPDATE artifacts SET status='dead-letter', next_retry_at=NULL WHERE locator='" + locator(1000) + "' RETURNING locator");
   const queued = store.loadRetryableArtifacts(Date.now() + 4_000_000);
-  assert.equal(queued.length, 100);
-  assert.equal(new Set(queued).size, 100);
+  assert.equal(queued.length, 20, "rejected retries have their own per-pass budget");
+  assert.equal(new Set(queued).size, 20);
   assert.ok(queued.includes(locator(1000)), "old rejected dead letters are due for another read");
 });
 test("duplicate programs are indeterminate within a pass and across passes", async () => {
@@ -312,19 +314,19 @@ test("duplicate programs are indeterminate within a pass and across passes", asy
     chain({ [locator(20)]: bundle, [locator(21)]: honest, [locator(22)]: invalid }, order);
     const result = await scan();
     assert.equal(result.programs.get(key), null);
-    assert.equal(result.deals.get(jobId)?.owners.seller, "");
+    assert.equal(result.deals.get(dealKey(jobId))?.owners.seller, "");
   }
   resetIndex([later], 10);
   chain({ [locator(20)]: bundle, [locator(21)]: honest }, [locator(20), locator(21)]);
   await reindex();
-  assert.equal(store.loadScanState().deals[jobId].owners.seller, seller);
+  assert.equal(store.loadScanState().deals[dealKey(jobId)].owners.seller, seller);
   storage[locator(22)] = invalid;
   transactions = [{ id: 100, content: JSON.stringify({ memo: locator(22) }) }];
   await reindex();
   assert.equal(store.findProgramAddress(ownerOf(buyer), name), null);
-  assert.equal(store.loadScanState().deals[jobId].owners.seller, "");
+  assert.equal(store.loadScanState().deals[dealKey(jobId)].owners.seller, "");
   await reindex();
-  assert.equal(store.loadScanState().deals[jobId].owners.seller, "");
+  assert.equal(store.loadScanState().deals[dealKey(jobId)].owners.seller, "");
 });
 test("unrelated non-object storage stays unclassified while DACS-named data is rejected", async () => {
   chain({ [locator(30)]: { data: '"text"' }, [locator(31)]: { data: '[1,2]' }, [locator(32)]: { data: '[]', name: 'dacs5:bundle:bad' } }, [locator(30), locator(31), locator(32)]);

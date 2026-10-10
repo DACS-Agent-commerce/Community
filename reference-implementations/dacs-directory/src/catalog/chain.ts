@@ -122,7 +122,7 @@ export async function resolveOwnedAnchorByName(
 
   let candidates: ProgramCandidate[];
   try {
-    const body = await response.json() as { result?: unknown; response?: unknown };
+    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown };
     if (body.result !== 200 || !Array.isArray(body.response)) {
       return { status: "indeterminate", reason: "program-name lookup returned an invalid response" };
     }
@@ -154,7 +154,7 @@ export async function resolveOwnedAnchorByName(
     }
     let record: AnchorRecord | null = null;
     try {
-      const body = await read.json() as {
+      const body = await storageResponseJson(read) as {
         success?: boolean;
         data?: Record<string, unknown>;
         owner?: string;
@@ -162,7 +162,7 @@ export async function resolveOwnedAnchorByName(
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
-        body.programName === programName
+        boundedJson(body.data) !== null && body.programName === programName
       ) {
         record = { data: body.data, owner: body.owner, programName: body.programName };
       }

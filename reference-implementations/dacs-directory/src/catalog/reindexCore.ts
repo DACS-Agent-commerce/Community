@@ -4,13 +4,12 @@
  * chain state and rewrite the catalog cache. Used by the CLI (npm run index)
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
-import { normalizeScanState, ownArray } from "./scanState.js";
-import { parseRegistration } from "./registration.js";
+import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
+import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
-  boundedRevocationCandidates,
   readChainTip,
   scanChain,
   scanConsensusAnchorBackfill,
@@ -25,6 +24,7 @@ import {
   loadFixtureSeeds,
   loadRegistrations,
   loadScanState,
+  admitRevocationCandidates,
   saveCatalog,
   saveScanState,
   beginScanRun,
@@ -38,7 +38,7 @@ import {
   recordConsensusAnchors,
   throwIfInfrastructureError,
 } from "./store";
-import type { Registration } from "./types";
+import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
 
 export interface ReindexSummary {
@@ -62,11 +62,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
   const regs: (Registration & { discovered?: boolean })[] = [];
   for (const raw of loadRegistrations()) {
-    const bindings = Array.isArray(raw?.bundleBindings)
-      ? (await Promise.all(raw.bundleBindings.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null)
-      : undefined;
-    if (bindings) omitted.omittedBindings += raw.bundleBindings!.length - bindings.length;
-    const parsed = parseRegistration(bindings ? { ...raw, bundleBindings: bindings } : raw);
+    // The registration and its binding count are checked before any binding is verified;
+    // admitted bindings are then verified one at a time.
+    const rawBindings: unknown = raw?.bundleBindings;
+    const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
+    let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
+    if (parsed.ok && admitted) {
+      const bindings: BundleBinding[] = [];
+      for (const binding of admitted) {
+        const verified = await verifyBundleBinding(binding);
+        if (verified) bindings.push(verified);
+      }
+      omitted.omittedBindings += admitted.length - bindings.length;
+      parsed = parseRegistration({ ...raw, bundleBindings: bindings });
+    }
     if (!parsed.ok) {
       omitted.omittedSellers++;
       const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
@@ -97,7 +106,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      schemaVersion: 9,
+      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -117,7 +126,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
-  const needsHistoryReplay = state.schemaVersion !== 9;
+  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
+  const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
+  // Overflow is recomputed per signer from the replayed bindings.
+  if (needsHistoryReplay) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -151,23 +163,29 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     if (!verified.includes(locator)) verified.push(locator);
     state.verifiedRevocations[listing.contentHash] = verified;
   }
-  const verifiedRevocations = new Map(
-    Object.entries(state.verifiedRevocations).map(([hash, addresses]) => [hash, new Set(addresses)]),
-  );
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
-      knownPrograms: new Map(Object.entries(state.programs)), verifiedRevocations });
+      knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
       throw new Error(
         scan.scanError ? `chain scan failed before reaching its cursor: ${scan.scanError}` :
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
       );
     }
-    if (needsHistoryReplay) state.deals = Object.create(null);
+    // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
+    // entries are kept and the replay adds or refreshes each owner's entry.
+    if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
     for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
-    for (const [jobId, deal] of scan.deals) state.deals[jobId] = deal;
+    for (const [key, deal] of scan.deals) {
+      // Seller copies are matched within one scan window; keep the stored one when this window has none.
+      const stored = Object.hasOwn(state.deals, key) ? state.deals[key] : undefined;
+      if (!deal.sellerBundleRef && stored?.sellerBundleRef && stored.owners.seller === deal.owners.seller) {
+        deal.sellerBundleRef = stored.sellerBundleRef;
+      }
+      state.deals[key] = deal;
+    }
     state.programs ??= Object.create(null);
     for (const [key, address] of scan.programs) state.programs[key] = address;
     // A later duplicate invalidates prior automatic attribution too.
@@ -178,22 +196,15 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         deal.owners.seller = "";
         delete (deal as { sellerFromAgreement?: string }).sellerFromAgreement;
       }
+      // A deal without an attributed seller has no seller copy.
+      if (!deal.owners.seller) delete deal.sellerBundleRef;
     }
     omitted.omittedBindings += scan.omittedBindings;
-    if (needsHistoryReplay) state.revocations = Object.create(null);
-    state.revocations ??= Object.create(null);
-    let revocationCandidatesTruncated = scan.revocationCandidatesTruncated;
+    // Every candidate is queued once, in arrival order, with the owner and content it was read with.
+    const observed = new Map(scan.observations.map((observation) => [observation.locator, observation]));
     for (const [hash, addresses] of scan.revocations) {
-      const priorCandidates = state.revocations[hash];
-      const prior = Array.isArray(priorCandidates)
-        ? priorCandidates
-        : priorCandidates ? [priorCandidates] : [];
-      const merged = boundedRevocationCandidates(
-        [...addresses, ...prior],
-        verifiedRevocations.get(hash),
-      );
-      state.revocations[hash] = merged.candidates;
-      revocationCandidatesTruncated += merged.truncated;
+      admitRevocationCandidates(hash, addresses.map((locator) =>
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: observed.get(locator)?.contentHash })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
@@ -207,14 +218,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       ...state.bundleBindingOverflow,
       ...scan.bundleBindingOverflow,
     ])].sort();
-    // Bound legacy and inactive hashes too; a hash need not reappear in the
-    // current scan window for old persisted state to remain attacker-inflated.
-    for (const [hash, stored] of Object.entries(state.revocations)) {
-      const candidates = Array.isArray(stored) ? stored : [stored];
-      const bounded = boundedRevocationCandidates(candidates, verifiedRevocations.get(hash));
-      state.revocations[hash] = bounded.candidates;
-      revocationCandidatesTruncated += bounded.truncated;
-    }
     for (const observation of scan.observations) recordArtifact(observation);
     for (const failure of scan.failures) {
       const stable = failure.code === "STORAGE_NOT_FOUND" || failure.code === "STORAGE_NOT_PUBLIC";
@@ -271,16 +274,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
-    state.schemaVersion = 9;
+    state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
     saveScanState(state);
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
         `accumulated: ${Object.keys(state.listings).length} listing(s), ${Object.keys(state.deals).length} deal(s)`,
     );
-    if (revocationCandidatesTruncated > 0) {
-      log(`revocation candidates: truncated ${revocationCandidatesTruncated} unverified locator(s) at the per-listing bound`);
-    }
     const didOf = (addr: string) => `did:demos:agent:${addr.replace(/^0x/, "")}`;
     const known = new Set(regs.map((r) => r.primaryClaim));
 
@@ -308,7 +308,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       if (!deal.owners.seller) continue; // unattributable — skip
       const reg = sellerReg(deal.owners.seller);
       reg.deals ??= [];
-      if (!reg.deals.some((d) => d.jobId === deal.jobId)) reg.deals.push(deal);
+      const key = discoveredDealKey(deal.owners.buyer, deal.jobId);
+      if (!reg.deals.some((d) => discoveredDealKey(d.owners.buyer, d.jobId) === key)) reg.deals.push(deal);
       const bindings = ownArray(state.bundleBindings, deal.jobId);
       if (bindings.length > 0) {
         reg.bundleBindings ??= [];
@@ -401,12 +402,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const verified = state.verifiedRevocations[listing.contentHash] ?? [];
       if (!verified.includes(locator)) verified.push(locator);
       state.verifiedRevocations[listing.contentHash] = verified;
-      const stored = state.revocations?.[listing.contentHash];
-      const candidates = Array.isArray(stored) ? stored : stored ? [stored] : [];
-      state.revocations![listing.contentHash] = boundedRevocationCandidates(
-        [locator, ...candidates],
-        new Set(verified),
-      ).candidates;
     }
     state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
       cursor: state.reachabilityCursor,

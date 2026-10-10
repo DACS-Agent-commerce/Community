@@ -3,6 +3,7 @@ import type { BundleBinding, RegisteredDeal, Registration } from "./types.js";
 import { isCanonicalDemosAgentClaim } from "./claimRef.js";
 
 const ANCHOR = /^stor-[0-9a-f]{40}$/;
+export const MAX_REGISTRATION_BUNDLE_BINDINGS = 256;
 
 const stringField = (v: unknown, max: number): v is string =>
   typeof v === "string" && v.trim().length > 0 && v.length <= max;
@@ -63,7 +64,7 @@ export function parseRegistration(v: unknown): RegistrationParseResult {
   }
   if (
     b.bundleBindings !== undefined &&
-    (!Array.isArray(b.bundleBindings) || b.bundleBindings.length > 256 ||
+    (!Array.isArray(b.bundleBindings) || b.bundleBindings.length > MAX_REGISTRATION_BUNDLE_BINDINGS ||
       b.bundleBindings.some((binding) => !binding || typeof binding !== "object" || Array.isArray(binding) ||
         boundedJson(binding, 16_384) === null))
   ) {

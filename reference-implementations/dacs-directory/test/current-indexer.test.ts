@@ -9,7 +9,8 @@ import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVe
 import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
-import { logicalBundleAddress } from "../src/catalog/bundleBinding.js";
+import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
+import { loadScanState, saveScanState } from "../src/catalog/store.js";
 import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
@@ -810,6 +811,52 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.equal(record.reputation.bundleCount, 1);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("bindings signed by other parties leave a deal's binding resolution intact", async () => {
+  const fixture = await vector("crowded-binding-job", 90);
+  const deal = registeredDeal("crowded-binding-job", locator(996), locator(997));
+  const holders = [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ];
+  const others = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
+    const seed = Uint8Array.from(Buffer.alloc(32, 150 + index));
+    const claim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
+    const scope = { bindingVersion: "1" as const, jobId: deal.jobId, role: "buyer" as const, logicalAddress: logicalBundleAddress(deal.jobId, "buyer"),
+      nativeAddress: locator(400 + index), bundleContentHash: "b".repeat(64), signer: claim };
+    const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`), privateKeyFromSeed(seed))).toString("base64url");
+    return { ...scope, signature: { algorithm: "ed25519" as const, signer: claim, value } };
+  }));
+  // Discovered bindings and their overflow, as a reindex pass would persist them, plus another
+  // signer's binding whose signature does not verify.
+  const discovered = boundedBundleBindings([...others, ...holders]);
+  const forged = { ...others[0], nativeAddress: locator(399) };
+  const saved = loadScanState();
+  saveScanState({ ...saved, bundleBindings: { ...saved.bundleBindings, [deal.jobId]: [...discovered.bindings, forged] },
+    bundleBindingOverflow: [...saved.bundleBindingOverflow, ...discovered.overflowKeys] });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  let omitted = 0;
+  const index = () => indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal] },
+    undefined, async () => { throw new Error("identity unavailable"); }, undefined, (kind, count) => { if (kind === "bindings") omitted += count; });
+  try {
+    const record = await index();
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
+    assert.equal(omitted, 0, "other signers' bindings are not verified for this deal");
+    // Overflow of the role holder's own bindings still makes its side indeterminate.
+    const own = boundedBundleBindings([holders[0], await bindingFor(deal.jobId, "buyer", locator(995), fixture.buyerBundle, 0)], 1);
+    saveScanState({ ...loadScanState(), bundleBindingOverflow: own.overflowKeys });
+    assert.equal((await index()).deals[0].refsVerified, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    saveScanState(saved);
   }
 });
 
