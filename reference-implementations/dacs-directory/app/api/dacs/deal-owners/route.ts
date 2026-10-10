@@ -15,9 +15,11 @@ const sellerRef = (deal: RegisteredDeal) => deal.owners.seller ? deal.sellerBund
  * A jobId is unique only per producer, so every catalog and scanned entry for it is
  * considered. An entry counts only when each bundle ref it carries is bound to the party
  * it is reported for: that party owns the storage program, or that party's verified
- * BundleBinding for the role names the address. `bundleRef` then narrows the entries to
- * the deal holding that copy. Owners are reported only when exactly one distinct,
- * attributed deal remains.
+ * BundleBinding for the role names the address. A catalog entry also has to sit in its
+ * own seller's record and either have both copies verified against these parties, or be
+ * a scanned entry as indexed: the same parties, each ref the scanned one or resolved
+ * through that party's binding. `bundleRef` then narrows the entries to the deal holding
+ * that copy. Owners are reported only when exactly one distinct, attributed deal remains.
  */
 export async function GET(req: NextRequest) {
   const jobId = req.nextUrl.searchParams.get("jobId")?.trim();
@@ -25,18 +27,27 @@ export async function GET(req: NextRequest) {
   const bundleRef = req.nextUrl.searchParams.get("bundleRef")?.trim() || undefined;
   const state = loadScanState();
   const bindings = ownArray(state.bundleBindings, jobId);
-  const boundTo = (ref: string, claim: string, role: "buyer" | "seller") => {
+  const signedFor = (ref: string, claim: string, role: "buyer" | "seller") => {
     const holder = canonicalDemosAgentClaim(claim);
-    return holder !== null && (artifactOwner(ref) === party(claim) || bindings.some((binding) =>
-      binding.role === role && binding.nativeAddress === ref && canonicalDemosAgentClaim(binding.signer) === holder));
+    return holder !== null && bindings.some((binding) =>
+      binding.role === role && binding.nativeAddress === ref && canonicalDemosAgentClaim(binding.signer) === holder);
   };
+  const boundTo = (ref: string, claim: string, role: "buyer" | "seller") =>
+    canonicalDemosAgentClaim(claim) !== null && (artifactOwner(ref) === party(claim) || signedFor(ref, claim, role));
   const bound = (deal: RegisteredDeal) => boundTo(deal.buyerBundleRef, deal.owners.buyer, "buyer") &&
     (!sellerRef(deal) || boundTo(sellerRef(deal)!, deal.owners.seller, "seller"));
-  const catalog = loadCatalog().sellers.flatMap((seller) => seller.deals).filter((deal) => deal.jobId === jobId && bound(deal));
+  const entries = Object.values(state.deals).filter((deal) => deal.jobId === jobId);
+  const indexedFrom = (deal: RegisteredDeal) => entries.some((entry) => parties(entry) === parties(deal) &&
+    (deal.buyerBundleRef === entry.buyerBundleRef || signedFor(deal.buyerBundleRef, deal.owners.buyer, "buyer")) &&
+    (sellerRef(deal) === sellerRef(entry) || (!!sellerRef(deal) && signedFor(sellerRef(deal)!, deal.owners.seller, "seller"))));
+  const catalog = loadCatalog().sellers.flatMap((record) => record.deals.filter((deal) => deal.jobId === jobId &&
+    canonicalDemosAgentClaim(deal.owners.seller) !== null &&
+    canonicalDemosAgentClaim(deal.owners.seller) === canonicalDemosAgentClaim(record.primaryClaim) &&
+    (deal.refsVerified || indexedFrom(deal)) && bound(deal)));
   // A scanned entry already indexed into the catalog is represented by its catalog entry,
   // whose bundle refs may have been resolved through bindings, whichever ref is requested.
   const indexed = new Set(catalog.map(parties));
-  const scanned = Object.values(state.deals).filter((deal) => deal.jobId === jobId && !indexed.has(parties(deal)) && bound(deal));
+  const scanned = entries.filter((deal) => !indexed.has(parties(deal)) && bound(deal));
   const holds = (deal: RegisteredDeal) => !bundleRef || deal.buyerBundleRef === bundleRef || sellerRef(deal) === bundleRef;
   const distinct = new Map<string, RegisteredDeal>();
   for (const deal of [...catalog, ...scanned].filter(holds)) {

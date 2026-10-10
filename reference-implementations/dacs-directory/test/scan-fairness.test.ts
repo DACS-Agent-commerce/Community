@@ -25,6 +25,7 @@ const { scanChain } = await import("../src/catalog/scan.js");
 const { dedupeVerifiedDeals } = await import("../src/catalog/bundlePolicy.js");
 const artifactRoute = await import("../app/api/dacs/artifact/route.js");
 const dealOwnersRoute = await import("../app/api/dacs/deal-owners/route.js");
+const { registrationMessage } = await import("../src/catalog/registrationSig.js");
 
 type Obj = Record<string, unknown>;
 const seeds = [21, 22, 23, 24].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -394,9 +395,10 @@ test("deal-owner lookup answers only when one attributed deal holds the jobId", 
     ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at), owners: { buyer: who, seller: sellerClaim } });
   const lookup = async (query = "") =>
     await (await dealOwnersRoute.GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}${query}`))).json();
-  const catalogOf = (...records: Array<[string, ReturnType<typeof entry>[]]>) => store.saveCatalog({ catalogVersion: "1", generatedAt: 1,
+  const verified = (deal: ReturnType<typeof entry>) => ({ ...deal, refsVerified: true });
+  const catalogOf = (...records: Array<[string, Array<ReturnType<typeof entry> & { refsVerified?: boolean; sellerBundleRef?: string }>]>) => store.saveCatalog({ catalogVersion: "1", generatedAt: 1,
     sellers: records.map(([claim, deals]) => ({ primaryClaim: claim,
-      deals: deals.map((deal) => ({ ...deal, signatureVerified: false, refsVerified: false, verifiedAt: 1 })) })) as never });
+      deals: deals.map((deal) => ({ signatureVerified: false, refsVerified: false, verifiedAt: 1, ...deal })) })) as never });
   resetIndex([later], 14);
   owns(buyer, 46, 56);
   owns(outsider, 47);
@@ -409,12 +411,26 @@ test("deal-owner lookup answers only when one attributed deal holds the jobId", 
   // A lone unattributed entry is not reported as ownership.
   store.saveScanState({ ...emptyState(), deals: { b: entry(outsider, "", 47) } });
   assert.deepEqual(await lookup(), { owners: null, buyerBundleRef: null });
-  // A catalog entry stands for its own scanned entry, whose refs may differ before binding resolution.
+  // A verified catalog entry stands for its own scanned entry, whose refs may differ.
   store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46) } });
-  catalogOf([seller, [entry(buyer, seller, 56)]]);
+  catalogOf([seller, [verified(entry(buyer, seller, 56))]]);
   assert.deepEqual(await lookup(), { owners: { buyer, seller }, buyerBundleRef: locator(56), sellerBundleRef: null });
+  // An unverified one does not when its ref is neither the scanned ref nor bound by a binding.
+  const scannedDeal = { owners: { buyer, seller }, buyerBundleRef: locator(46), sellerBundleRef: null };
+  catalogOf([seller, [entry(buyer, seller, 56)]]);
+  assert.deepEqual(await lookup(), scannedDeal);
+  // Nor does a verified one with a ref its party does not hold, or one in another seller's record.
+  catalogOf([seller, [verified(entry(buyer, seller, 47))]]);
+  assert.deepEqual(await lookup(), scannedDeal);
+  catalogOf([seller, [{ ...verified(entry(buyer, seller, 46)), sellerBundleRef: locator(47) }]]);
+  assert.deepEqual(await lookup(), scannedDeal);
+  catalogOf([otherSeller, [verified(entry(buyer, seller, 56))]]);
+  assert.deepEqual(await lookup(), scannedDeal);
+  // Nor an unverified one naming the scanned buyer's ref under another seller.
+  catalogOf([otherSeller, [entry(buyer, otherSeller, 46)]]);
+  assert.deepEqual(await lookup(), scannedDeal);
   // Two catalog sellers' deals with the jobId are ambiguous unless the bundle names one.
-  catalogOf([seller, [entry(buyer, seller, 46)]], [otherSeller, [entry(otherBuyer, otherSeller, 48)]]);
+  catalogOf([seller, [entry(buyer, seller, 46)]], [otherSeller, [verified(entry(otherBuyer, otherSeller, 48))]]);
   assert.equal((await lookup()).owners, null);
   assert.deepEqual((await lookup(`&bundleRef=${locator(48)}`)).owners, { buyer: otherBuyer, seller: otherSeller });
 });
@@ -497,6 +513,48 @@ test("deal-owner lookup counts a deal only when its bundle refs are bound to its
   assert.deepEqual(await lookup(`&bundleRef=${locator(940)}`), deal);
 });
 
+test("a registration's deal counts for the lookup only when verified or when it is the scanned deal as indexed", async () => {
+  const jobId = "registered-job";
+  const real = { owners: { buyer, seller }, buyerBundleRef: locator(960), sellerBundleRef: locator(962) };
+  const declared = (buyerRef: number, sellerRef?: number, owners = { buyer, seller }) => ({ jobId, rail: "pay-dem",
+    buyerBundleRef: locator(buyerRef), ...(sellerRef ? { sellerBundleRef: locator(sellerRef) } : {}), owners });
+  const signedBy = async (reg: Registration, signer: number): Promise<Registration> => {
+    const signedAt = Date.now();
+    const message = registrationMessage(reg, signedAt);
+    const value = Buffer.from(await ed25519Sign(Buffer.from(message), privateKeyFromSeed(seeds[signer]))).toString("hex");
+    return { ...reg, ownerSignature: { message, signature: value, signedAt } };
+  };
+  const lookupsWith = async (registration: Registration) => {
+    resetIndex([registration, later], 27);
+    chain({
+      [locator(960)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+      [locator(961)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+      [locator(962)]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"any":1}', owner: ownerOf(seller) },
+    }, [locator(960), locator(961), locator(962)]);
+    transactions.unshift(memo(10));
+    await reindex();
+    const lookup = ownersLookup(jobId);
+    return [await lookup(`&bundleRef=${locator(960)}`), await lookup(`&bundleRef=${locator(962)}`), await lookup()];
+  };
+  const thirdParty = (deal: ReturnType<typeof declared>): Registration =>
+    ({ primaryClaim: otherSeller, displayName: "Third party", listingAnchors: [], deals: [deal] });
+  // Another party's registration naming the scanned deal's parties or refs, signed by that party or not.
+  for (const registration of [
+    thirdParty(declared(960)),
+    thirdParty(declared(961, 962)),
+    thirdParty(declared(960, undefined, { buyer, seller: otherSeller })),
+    await signedBy(thirdParty(declared(960, undefined, { buyer, seller: otherSeller })), 3),
+  ]) {
+    assert.deepEqual(await lookupsWith(registration), [real, real, real], JSON.stringify(registration.deals));
+  }
+  assert.equal(store.loadCatalog().sellers.find((s) => s.primaryClaim === otherSeller)?.ownerRegistered, true);
+  // An unsigned registration under the seller's own claim whose refs differ from the scanned deal's.
+  for (const deal of [declared(961, 962), declared(960)]) {
+    assert.deepEqual(await lookupsWith({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] }),
+      [real, real, real], JSON.stringify(deal));
+  }
+});
+
 test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has resolved past", async () => {
   const jobId = "resolved-ref";
   resetIndex([later], 26);
@@ -515,6 +573,12 @@ test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has
   const resolved = { owners: { buyer, seller }, buyerBundleRef: locator(951), sellerBundleRef: null };
   assert.deepEqual(await lookup(), resolved);
   assert.deepEqual(await lookup(`&bundleRef=${locator(951)}`), resolved);
+  assert.deepEqual(await lookup(`&bundleRef=${locator(950)}`), { owners: null, buyerBundleRef: null });
+  // So does a catalog entry the indexer could not verify, resolved through the same binding.
+  const catalog = store.loadCatalog();
+  catalog.sellers[0].deals[0].refsVerified = false;
+  store.saveCatalog(catalog);
+  assert.deepEqual(await lookup(), resolved);
   assert.deepEqual(await lookup(`&bundleRef=${locator(950)}`), { owners: null, buyerBundleRef: null });
   // The buyer's binding for the seller role does not bind the catalog's buyer ref.
   const sellerScope = { ...scope, role: "seller", logicalAddress: logicalBundleAddress(jobId, "seller") };
