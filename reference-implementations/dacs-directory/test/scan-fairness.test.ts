@@ -22,6 +22,7 @@ const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { deriveAnchorAddress, resolveOwnedAnchorByName } = await import("../src/catalog/chain.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { scanChain } = await import("../src/catalog/scan.js");
+const { dedupeVerifiedDeals } = await import("../src/catalog/bundlePolicy.js");
 const artifactRoute = await import("../app/api/dacs/artifact/route.js");
 const dealOwnersRoute = await import("../app/api/dacs/deal-owners/route.js");
 
@@ -66,6 +67,7 @@ let transactions: Obj[] = [];
 let reads = new Map<string, number>();
 const unavailable = new Set<string>();
 const scanOnly = new Set<string>();
+let nodeDown = false;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
   if (path.startsWith("/storage-program/")) {
@@ -79,6 +81,7 @@ globalThis.fetch = async (input, init) => {
       `"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${entry.data}}`, { headers: { "content-type": "application/json" } });
   }
   const call = JSON.parse(String(init?.body)).params?.[0];
+  if (nodeDown) return Response.json({ result: 503 });
   return Response.json({ result: 200, response: call?.message === "getTransactions" && call.data?.start === "latest" ? transactions : [] });
 };
 const memo = (id: number, at?: string): Obj => ({ id, status: "confirmed", type: "transfer", hash: id.toString(16).padStart(64, "0"),
@@ -104,12 +107,35 @@ const emptyState = (): ScanState => ({
   schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
   verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
 });
+const candidateTable = () => sql("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").length > 0;
 function resetIndex(registrations: Registration[], generatedAt: number) {
   store.saveRegistrations(registrations);
   store.saveCatalog({ catalogVersion: "1", generatedAt, sellers: [] });
   store.saveScanState(emptyState());
   sql("DELETE FROM artifacts");
   sql("DELETE FROM dead_letters");
+  if (candidateTable()) sql("DELETE FROM revocation_candidates");
+}
+/** Candidates still queued for a listing, in the order they will be examined. */
+const pending = (hash: string) => sql("SELECT locator FROM revocation_candidates WHERE listing_hash=? AND state='pending' ORDER BY seq", hash)
+  .map((row) => String(row.locator));
+/** SQLite statements executed, and rows they returned, in this process while enabled. */
+const sqlWork = { enabled: false, calls: 0, rows: 0 };
+{
+  const probe = new Database(":memory:");
+  const statement = Object.getPrototypeOf(probe.prepare("SELECT 1")) as Record<string, (...args: unknown[]) => unknown>;
+  probe.close();
+  for (const method of ["get", "all", "run", "iterate"]) {
+    const original = statement[method];
+    statement[method] = function (this: unknown, ...args: unknown[]) {
+      const result = original.apply(this, args);
+      if (sqlWork.enabled) {
+        sqlWork.calls++;
+        sqlWork.rows += Array.isArray(result) ? result.length : result === undefined ? 0 : 1;
+      }
+      return result;
+    };
+  }
 }
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
 const sellerRegistration: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)] };
@@ -165,7 +191,7 @@ test("every revocation candidate is eventually verified with bounded work per pa
   assert.equal(listingStatus(), "revoked");
   assert.ok(passes <= Math.ceil(candidates.length / 16), `revoked after ${passes} passes`);
   // Unreadable candidates are kept for a later pass rather than dropped.
-  const queued = store.loadScanState().revocations[listingHash] as string[];
+  const queued = pending(listingHash);
   for (const at of unreadable) assert.ok(queued.includes(at), `${at} stays queued`);
   // Rejected candidates are not verified again.
   reads = new Map();
@@ -173,6 +199,50 @@ test("every revocation candidate is eventually verified with bounded work per pa
   assert.equal(listingStatus(), "revoked");
   assert.equal(readsOf(older.slice(16)), 0);
   assert.ok(readsOf(candidates) <= 16);
+});
+
+test("per-pass revocation work does not grow with the number of queued candidates", async () => {
+  const work: Array<{ calls: number; rows: number; verified: number }> = [];
+  for (const count of [40, 400]) {
+    resetIndex([sellerRegistration, later], 17);
+    const queued = range(20_000, count);
+    chain({
+      [locator(1)]: { data: JSON.stringify(listing) },
+      ...Object.fromEntries(queued.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+    }, [locator(1), ...queued]);
+    await reindex();
+    transactions = [];
+    reads = new Map();
+    sqlWork.calls = sqlWork.rows = 0;
+    sqlWork.enabled = true;
+    try { await reindex(); } finally { sqlWork.enabled = false; }
+    work.push({ calls: sqlWork.calls, rows: sqlWork.rows, verified: readsOf(queued) });
+  }
+  assert.deepEqual(work[1], work[0], "the same statements and rows with ten times the queue");
+  assert.equal(work[0].verified, 16);
+  // Nothing unexamined left the queue: two passes examined 32 of the 400.
+  assert.equal(pending(listingHash).length, 400 - 32);
+});
+
+test("a rejected candidate is verified again only when its content changes", async () => {
+  resetIndex([sellerRegistration, later], 18);
+  const candidates = range(600, 3);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    ...Object.fromEntries(candidates.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+  }, [locator(1), ...candidates]);
+  await reindex();
+  assert.equal(listingStatus(), "active");
+  // Mentioned again with the same content: the scanner reads each once and none is verified again.
+  transactions = [memo(50, candidates.join(" "))];
+  reads = new Map();
+  await reindex();
+  assert.equal(readsOf(candidates), candidates.length);
+  // New content at one of them is examined.
+  storage[candidates[1]] = { data: JSON.stringify(marker), owner: ownerOf(outsider) };
+  transactions = [memo(60, candidates[1]), ...transactions];
+  await reindex();
+  assert.equal(listingStatus(), "revoked");
 });
 
 test("a verified marker missing from the candidate queue is still checked first", async () => {
@@ -238,40 +308,112 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
   });
 }
 
-test("jobId-keyed scan state loads and is rekeyed by owner without a history replay", async () => {
-  const jobId = "stored-job";
-  resetIndex([later], 8);
-  const deal = { jobId, rail: "pay-dem", buyerBundleRef: locator(45), owners: { buyer, seller }, sellerFromAgreement: seller };
-  sql("UPDATE kv_state SET value_json=? WHERE key='scan-state'", JSON.stringify({ ...emptyState(), lastSeenTxId: 30, deals: { [jobId]: deal } }));
-  const loaded = store.loadScanState();
-  assert.deepEqual(Object.keys(loaded.deals), [`${ownerOf(buyer)}\n${jobId}`]);
-  chain({}, []);
-  transactions = [memo(30)];
+test("two buyers' attributed deals with the same jobId both reach the seller's record", async () => {
+  const jobId = "two-buyers";
+  resetIndex([later], 19);
+  chain({
+    [locator(70)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+    [locator(71)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(72)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":2}', owner: ownerOf(otherBuyer) },
+    [locator(73)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 2, 1)), owner: ownerOf(otherBuyer) },
+  }, [locator(70), locator(71), locator(72), locator(73)]);
   await reindex();
-  assert.equal(lastRun().status, "complete");
-  assert.equal(lastRun().from_tx, 28, "an incremental pass, not a replay from genesis");
-  assert.deepEqual(store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals.map((d) => d.jobId), [jobId]);
-  const saved = JSON.parse(String(sql("SELECT value_json FROM kv_state WHERE key='scan-state'")[0].value_json)) as ScanState;
-  assert.deepEqual(Object.keys(saved.deals), [`${ownerOf(buyer)}\n${jobId}`]);
+  const deals = store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals ?? [];
+  assert.deepEqual(deals.map((deal) => `${deal.owners.buyer} ${deal.buyerBundleRef}`).sort(),
+    [`${buyer} ${locator(70)}`, `${otherBuyer} ${locator(72)}`].sort());
+  // Verified-deal deduplication keeps one record per buyer and jobId, and per bundle ref.
+  const verifiedDeal = (who: string, at: number) => ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at),
+    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, verifiedAt: 1 });
+  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(buyer, 74), verifiedDeal(outsider, 70)])
+    .map((deal) => deal.buyerBundleRef), [locator(70), locator(72)]);
 });
 
-test("deal-owner lookup reports the one attributed entry for a jobId and nothing when entries disagree", async () => {
+test("v9 scan state is completed by a full deal-history replay before it is marked migrated", async () => {
+  const jobId = "stored-job";
+  resetIndex([later], 8);
+  chain({
+    [locator(45)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+    [locator(46)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(47)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":2}', owner: ownerOf(otherBuyer) },
+    [locator(48)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 2, 3)), owner: ownerOf(otherBuyer) },
+  }, [locator(45), locator(46), locator(47), locator(48)]);
+  transactions.unshift(memo(30));
+  // jobId-keyed v9 state in which only one owner's entry was kept.
+  const kept = { jobId, rail: "pay-dem", buyerBundleRef: locator(47), owners: { buyer: otherBuyer, seller: otherSeller }, sellerFromAgreement: otherSeller };
+  sql("UPDATE kv_state SET value_json=? WHERE key='scan-state'", JSON.stringify({ ...emptyState(), lastSeenTxId: 30, deals: { [jobId]: kept } }));
+  const entries = () => Object.values(store.loadScanState().deals).filter((deal) => deal.jobId === jobId).map((deal) => deal.owners.buyer).sort();
+  // An interrupted replay leaves the state unmigrated, and the next pass replays again.
+  nodeDown = true;
+  try { await assert.rejects(reindex()); } finally { nodeDown = false; }
+  assert.equal(store.loadScanState().schemaVersion, 9);
+  assert.deepEqual(entries(), [otherBuyer]);
+  // An entry whose bundle cannot be read during the replay is kept, not dropped.
+  unavailable.add(locator(47));
+  await reindex();
+  unavailable.clear();
+  assert.equal(lastRun().from_tx, 0, "a replay from genesis");
+  assert.equal(store.loadScanState().schemaVersion, 10);
+  assert.deepEqual(entries(), [buyer, otherBuyer].sort());
+  assert.deepEqual(store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals.map((d) => d.buyerBundleRef), [locator(45)]);
+  // Once migrated, passes are incremental and the result is unchanged.
+  await reindex();
+  assert.equal(lastRun().from_tx, 28);
+  assert.deepEqual(entries(), [buyer, otherBuyer].sort());
+  const saved = JSON.parse(String(sql("SELECT value_json FROM kv_state WHERE key='scan-state'")[0].value_json)) as ScanState;
+  assert.deepEqual(Object.keys(saved.deals).sort(), [`${ownerOf(buyer)}\n${jobId}`, `${ownerOf(otherBuyer)}\n${jobId}`].sort());
+});
+
+test("a discovered deal keeps its seller copy when a later window has none", async () => {
+  const jobId = "kept-copy";
+  resetIndex([later], 23);
+  chain({
+    [locator(920)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+    [locator(921)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(922)]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"any":1}', owner: ownerOf(seller) },
+  }, [locator(920), locator(921), locator(922)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  const entry = () => store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`];
+  assert.equal(entry().sellerBundleRef, locator(922));
+  transactions = [memo(40, locator(920))];
+  await reindex();
+  assert.equal(entry().owners.seller, seller);
+  assert.equal(entry().sellerBundleRef, locator(922));
+});
+
+test("deal-owner lookup answers only when one attributed deal holds the jobId", async () => {
   const jobId = "lookup-job";
   const entry = (who: string, sellerClaim: string, at: number) =>
     ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at), owners: { buyer: who, seller: sellerClaim } });
-  const lookup = async () => (await (await dealOwnersRoute.GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}`))).json()).owners;
+  const lookup = async (query = "") =>
+    await (await dealOwnersRoute.GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}${query}`))).json();
+  const catalogOf = (...records: Array<[string, ReturnType<typeof entry>[]]>) => store.saveCatalog({ catalogVersion: "1", generatedAt: 1,
+    sellers: records.map(([claim, deals]) => ({ primaryClaim: claim,
+      deals: deals.map((deal) => ({ ...deal, signatureVerified: false, refsVerified: false, verifiedAt: 1 })) })) as never });
   resetIndex([later], 14);
+  // Scanned entries only: an attributed entry next to another owner's unattributed one is ambiguous.
   store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46), b: entry(outsider, "", 47) } });
-  assert.deepEqual(await lookup(), { buyer, seller });
-  store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46), b: entry(otherBuyer, otherSeller, 48) } });
-  assert.equal(await lookup(), null);
+  assert.equal((await lookup()).owners, null);
+  store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46) } });
+  assert.deepEqual((await lookup()).owners, { buyer, seller });
+  // A lone unattributed entry is not reported as ownership.
+  store.saveScanState({ ...emptyState(), deals: { b: entry(outsider, "", 47) } });
+  assert.deepEqual(await lookup(), { owners: null, buyerBundleRef: null });
+  // A catalog entry stands for its own scanned entry, whose refs may differ before binding resolution.
+  store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46) } });
+  catalogOf([seller, [entry(buyer, seller, 56)]]);
+  assert.deepEqual(await lookup(), { owners: { buyer, seller }, buyerBundleRef: locator(56), sellerBundleRef: null });
+  // Two catalog sellers' deals with the jobId are ambiguous unless the bundle names one.
+  catalogOf([seller, [entry(buyer, seller, 46)]], [otherSeller, [entry(otherBuyer, otherSeller, 48)]]);
+  assert.equal((await lookup()).owners, null);
+  assert.deepEqual((await lookup(`&bundleRef=${locator(48)}`)).owners, { buyer: otherBuyer, seller: otherSeller });
 });
 
 test("a locator whose content was rejected stays periodic after later transient failures", () => {
   resetIndex([later], 9);
   const at = locator(500);
   for (let pass = 0; pass < 4; pass++) {
-    store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: Date.now() });
+    store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: Date.now(), rejected: true });
     store.recordArtifactFailure(at, "other", "ARTIFACT_REJECTED", "rejected", 1);
   }
   for (let attempt = 1; attempt <= 7; attempt++) {
@@ -294,12 +436,56 @@ test("a pass reads at most 100 retries with transient failures first and at most
   for (const at of rejected) store.recordArtifactFailure(at, "other", "ARTIFACT_REJECTED", "rejected", 1);
   for (const at of transient) store.recordArtifactFailure(at, "unknown", "STORAGE_RPC_UNAVAILABLE", "outage", 5);
   const due = Date.now() + 4_000_000;
-  assert.deepEqual(store.loadRetryableArtifacts(due), transient.slice(0, 100));
-  sql(`DELETE FROM artifacts WHERE locator IN (${transient.slice(0, 30).map(() => "?").join(",")})`, ...transient.slice(0, 30));
+  const full = store.loadRetryableArtifacts(due);
+  assert.deepEqual(full.slice(0, 80), transient.slice(0, 80));
+  assert.equal(full.length, 100);
+  assert.ok(full.slice(80).every((at) => rejected.includes(at)));
+  // Transient retries fill whatever the rejected share does not use.
+  sql(`DELETE FROM artifacts WHERE locator IN (${rejected.slice(0, 25).map(() => "?").join(",")})`, ...rejected.slice(0, 25));
   const mixed = store.loadRetryableArtifacts(due);
-  assert.deepEqual(mixed.slice(0, 90), transient.slice(30));
-  assert.equal(mixed.length, 100);
-  assert.ok(mixed.slice(90).every((at) => rejected.includes(at)));
+  assert.deepEqual(mixed.slice(0, 95), transient.slice(0, 95));
+  assert.deepEqual(mixed.slice(95).sort(), rejected.slice(25).sort());
+});
+
+test("rejected retries keep a reserved share while transient retries are due", () => {
+  resetIndex([later], 20);
+  const transient = range(8_000, 100), rejected = locator(8_500);
+  store.recordArtifactFailure(rejected, "other", "ARTIFACT_REJECTED", "rejected", 1);
+  for (const at of transient) store.recordArtifactFailure(at, "unknown", "STORAGE_RPC_UNAVAILABLE", "outage", 5);
+  assert.deepEqual(store.loadRetryableArtifacts(Date.now() + 4_000_000), [...transient.slice(0, 99), rejected]);
+});
+
+test("content that fails the artifact policy on a well-formed read is a rejection", async () => {
+  resetIndex([later], 21);
+  const named = locator(900), longName = locator(901);
+  chain({ [named]: { data: "[1,2]", name: "dacs5:bundle:bad" }, [longName]: { data: "{}", name: `dacs1:listing:${"x".repeat(1_100)}` } },
+    [named, longName]);
+  await reindex();
+  for (const at of [named, longName]) {
+    assert.deepEqual(sql("SELECT error_code, rejection_count, retry_count FROM artifacts WHERE locator=?", at)[0],
+      { error_code: "ARTIFACT_REJECTED", rejection_count: 1, retry_count: 0 }, at);
+  }
+  assert.equal(reads.get(named), 1, "content is not read again within the same pass");
+});
+
+test("a successful read without content ends the rejected class", async () => {
+  resetIndex([later], 22);
+  const at = locator(910);
+  chain({ [at]: { data: '{"n":1e400}' } }, [at]);
+  await reindex();
+  assert.equal(sql("SELECT rejection_count FROM artifacts WHERE locator=?", at)[0].rejection_count, 1);
+  transactions = [];
+  sql("UPDATE artifacts SET next_retry_at=0 WHERE locator=?", at);
+  await reindex();
+  assert.equal(sql("SELECT rejection_count FROM artifacts WHERE locator=?", at)[0].rejection_count, 2, "rejections accumulate");
+  storage[at] = { data: '"text"' };
+  sql("UPDATE artifacts SET next_retry_at=0 WHERE locator=?", at);
+  await reindex();
+  assert.deepEqual(sql("SELECT status, rejection_count, retry_count FROM artifacts WHERE locator=?", at)[0],
+    { status: "observed", rejection_count: 0, retry_count: 0 });
+  // A later outage follows the bounded transient policy.
+  for (let attempt = 0; attempt < 5; attempt++) store.recordArtifactFailure(at, "unknown", "STORAGE_RPC_UNAVAILABLE", "outage", 5);
+  assert.equal(sql("SELECT status FROM artifacts WHERE locator=?", at)[0].status, "dead-letter");
 });
 
 test("a transient retry is read before rejected retries and the revocation it carries is applied", async () => {
@@ -307,7 +493,7 @@ test("a transient retry is read before rejected retries and the revocation it ca
   chain({ [locator(1)]: { data: JSON.stringify(listing) }, [locator(60)]: { data: JSON.stringify(marker) } }, [locator(1), locator(60)]);
   const rejected = range(700, 150);
   for (const at of rejected) {
-    store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: Date.now() });
+    store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: Date.now(), rejected: true });
     store.recordArtifactFailure(at, "other", "ARTIFACT_REJECTED", "rejected", 1);
   }
   unavailable.add(locator(60));
@@ -333,7 +519,7 @@ test("scheduled rejected retries have a ceiling and every waiting locator is sti
     const total = 1_030;
     const rejected = range(5_000, total);
     const reject = (at: string) => {
-      store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: clock });
+      store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: clock, rejected: true });
       store.recordArtifactFailure(at, "other", "ARTIFACT_REJECTED", "rejected", 1);
     };
     for (const at of rejected) reject(at);

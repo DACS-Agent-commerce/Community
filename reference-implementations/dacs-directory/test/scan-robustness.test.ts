@@ -288,7 +288,7 @@ test("rejected revocation outside replay overlap is retried and consensus time r
 test("rejected retries remain periodic after exhaustion with a bounded queue", () => {
   sql("DELETE FROM artifacts RETURNING locator");
   for (let i = 0; i < 120; i++) for (let pass = 0; pass < 8; pass++) {
-    store.recordArtifact({ locator: locator(1000 + i), kind: "other", profile: "unknown", observedAt: Date.now() });
+    store.recordArtifact({ locator: locator(1000 + i), kind: "other", profile: "unknown", observedAt: Date.now(), rejected: true });
     store.recordArtifactFailure(locator(1000 + i), "other", "ARTIFACT_REJECTED", "rejected", 1);
   }
   const retry = sql("SELECT rejection_count,status,next_retry_at FROM artifacts WHERE locator='" + locator(1000) + "'")[0];

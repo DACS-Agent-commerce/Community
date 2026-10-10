@@ -31,6 +31,9 @@ insert.run(rejected, "other", "unknown", "retry", "ARTIFACT_REJECTED", "rejected
 insert.run(oldRejected, "listing-revocation", "unknown", "dead-letter", "ARTIFACT_REJECTED", "rejected", 5, null);
 insert.run(transient, "unknown", "unknown", "retry", "STORAGE_RPC_UNAVAILABLE", "outage", 2, 6_000);
 insert.run(exhausted, "unknown", "unknown", "dead-letter", "STORAGE_RPC_UNAVAILABLE", "outage", 5, null);
+// Enough further rejected rows to exceed the scheduled ceiling, due later than the rows above.
+const later = Array.from({ length: 1_000 }, (_, index) => locator(10_000 + index));
+for (const [index, at] of later.entries()) insert.run(at, "other", "unknown", "retry", "ARTIFACT_REJECTED", "rejected", 1, 20_000 + index);
 const deadLetter = seeded.prepare("INSERT INTO dead_letters VALUES (?,?,?,?,?,1,1)");
 deadLetter.run(oldRejected, "listing-revocation", "ARTIFACT_REJECTED", "rejected", 5);
 deadLetter.run(exhausted, "unknown", "STORAGE_RPC_UNAVAILABLE", "outage", 5);
@@ -52,5 +55,15 @@ test("existing retry rows are split into rejected and transient classes in place
     assert.deepEqual(row(exhausted), { status: "dead-letter", retry_count: 5, rejection_count: 0 });
     const deadLetters = db.prepare("SELECT locator FROM dead_letters ORDER BY locator").all();
     assert.deepEqual(deadLetters, [{ locator: exhausted }]);
+  } finally { db.close(); }
+});
+
+test("migrated rejected rows beyond the scheduled ceiling wait for a slot in due order", () => {
+  const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    const count = (where: string) => (db.prepare(`SELECT COUNT(*) count FROM artifacts WHERE rejection_count > 0 AND ${where}`).get() as { count: number }).count;
+    assert.equal(count("deferred_at IS NULL"), 1_000);
+    const waiting = db.prepare("SELECT locator, next_retry_at FROM artifacts WHERE deferred_at IS NOT NULL ORDER BY locator").all();
+    assert.deepEqual(waiting, later.slice(-2).map((locator) => ({ locator, next_retry_at: null })));
   } finally { db.close(); }
 });

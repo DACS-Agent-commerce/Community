@@ -22,11 +22,20 @@ export const canonicalProgramOwner = (owner: string): string => {
 };
 
 /**
- * A discovered deal belongs to the buyer that anchored its bundle and signed
- * its agreement (DACS-5 §10.4.2, DACS-3 CA-7), so it is keyed by that owner
- * and the jobId: another owner's program with the same jobId is a separate entry.
+ * Discovered deals are namespaced by the storage owner of the bundle program
+ * and the jobId, because jobId uniqueness is a producer obligation a consumer
+ * cannot rely on across unrelated writers. The key is an indexing namespace
+ * only: buyer attribution still comes from the validated agreement and its
+ * role evidence (DACS-5 §10.4.2, DACS-3 CA-7), never from storage ownership.
  */
 export const discoveredDealKey = (buyer: string, jobId: string): string => `${canonicalProgramOwner(buyer)}\n${jobId}`;
+
+/**
+ * v10 replays the full deal history so entries that jobId-keyed state could
+ * not hold are rebuilt under their owner key. A pass records the version only
+ * after its complete replay is saved; an interrupted replay simply runs again.
+ */
+export const SCAN_STATE_SCHEMA_VERSION = 10;
 
 /** JSON/SQLite restore prototypes: rebuild every attacker-keyed dictionary on ingress. */
 export type NormalizedScanState = ScanState & Required<Pick<ScanState, "programs" | "revocations" | "verifiedRevocations" | "bundleBindings" | "bundleBindingOverflow">>;
@@ -46,6 +55,7 @@ export function normalizeScanState(state: ScanState): NormalizedScanState {
     deals: dictionary(Object.fromEntries(Object.values(deals)
       .map((deal) => [discoveredDealKey(deal.owners.buyer, deal.jobId), deal])), () => true),
     programs: dictionary(state.programs, (v) => v === null || typeof v === "string"),
+    // Legacy carriage only: the candidate queue lives in SQLite (store.ts).
     revocations: dictionary(state.revocations, (v) => typeof v === "string" || strings(v)),
     verifiedRevocations: dictionary(state.verifiedRevocations, strings),
     bundleBindings: dictionary(state.bundleBindings, (v) => Array.isArray(v)),

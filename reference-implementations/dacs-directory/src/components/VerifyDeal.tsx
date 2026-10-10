@@ -46,13 +46,13 @@ async function fetchArtifact(params: string): Promise<Record<string, unknown> | 
   return json.value ?? null;
 }
 
-async function registeredBundleRefs(jobId: string): Promise<{
+async function registeredBundleRefs(jobId: string, bundleRef: string): Promise<{
   owners: unknown;
   buyerBundleRef: unknown;
   sellerBundleRef: unknown;
 } | null> {
   try {
-    const res = await fetch(`/api/dacs/deal-owners?jobId=${encodeURIComponent(jobId)}`);
+    const res = await fetch(`/api/dacs/deal-owners?jobId=${encodeURIComponent(jobId)}&bundleRef=${encodeURIComponent(bundleRef)}`);
     if (!res.ok) return null;
     return await res.json() as { owners: unknown; buyerBundleRef: unknown; sellerBundleRef: unknown };
   } catch {
@@ -129,7 +129,7 @@ export default function VerifyDeal({
       const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
       const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
       const registered = verification.bundle?.jobId
-        ? await registeredBundleRefs(verification.bundle.jobId) : null;
+        ? await registeredBundleRefs(verification.bundle.jobId, bundleRef) : null;
       const anchorBindingAvailable = registeredAnchorRole(
         bundleRef,
         registered?.buyerBundleRef,

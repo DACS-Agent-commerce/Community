@@ -124,6 +124,20 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS listing_rejections_recent_idx
     ON listing_rejections(last_seen_at DESC, locator);
+  CREATE TABLE IF NOT EXISTS revocation_candidates (
+    listing_hash TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    owner TEXT,
+    content_hash TEXT,
+    seq INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    PRIMARY KEY(listing_hash, locator)
+  );
+  CREATE INDEX IF NOT EXISTS revocation_candidates_seq_idx ON revocation_candidates(seq);
+  CREATE INDEX IF NOT EXISTS revocation_candidates_pending_idx
+    ON revocation_candidates(listing_hash, seq) WHERE state = 'pending';
+  CREATE INDEX IF NOT EXISTS revocation_candidates_owner_idx
+    ON revocation_candidates(listing_hash, owner, seq) WHERE state = 'pending';
 `);
 
 // Add internal omission counters without changing the public diagnostic projection.
@@ -133,6 +147,14 @@ db.transaction(() => {
     if (!columns.some((entry) => entry.name === column)) db.exec(`ALTER TABLE scan_runs ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
   }
 }).immediate();
+
+/** Retry reads per pass. Transient failures are returned first. */
+export const RETRY_READS_PER_PASS = 100;
+/** Rejected retries per pass: reserved whenever any are due, and never more than this. */
+export const REJECTED_RETRY_READS_PER_PASS = 20;
+/** Ceiling on scheduled rejected retries. Overflow waits in arrival order and rotates in. */
+export const MAX_ACTIVE_REJECTED_RETRIES = 1_000;
+const REJECTED_ACTIVE = "rejection_count > 0 AND deferred_at IS NULL AND status IN ('retry','dead-letter')";
 
 // Rejected content and transient read failures are counted and scheduled as separate classes.
 db.transaction(() => {
@@ -146,6 +168,14 @@ db.transaction(() => {
   }
   if (!columns.some((entry) => entry.name === "deferred_at")) db.exec("ALTER TABLE artifacts ADD COLUMN deferred_at INTEGER");
   db.exec("CREATE INDEX IF NOT EXISTS artifacts_rejected_retry_idx ON artifacts(deferred_at, next_retry_at) WHERE rejection_count > 0");
+  // At most MAX_ACTIVE_REJECTED_RETRIES stay scheduled, including rows migrated above:
+  // in due order, the rest wait for a slot. Idempotent, so it also runs on every start.
+  const excess = (db.prepare(`SELECT COUNT(*) count FROM artifacts WHERE ${REJECTED_ACTIVE}`).get() as { count: number }).count -
+    MAX_ACTIVE_REJECTED_RETRIES;
+  if (excess > 0) {
+    db.prepare(`UPDATE artifacts SET deferred_at=?, next_retry_at=NULL WHERE locator IN (SELECT locator FROM artifacts
+      WHERE ${REJECTED_ACTIVE} ORDER BY COALESCE(next_retry_at,0) DESC, locator DESC LIMIT ?)`).run(Date.now(), excess);
+  }
 }).immediate();
 
 export function throwIfInfrastructureError(error: unknown): void {
@@ -201,6 +231,78 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   setJson("sr2-anchor-schema-version", 2);
 })();
 
+/**
+ * Revocation candidates, per listing content hash. Each locator is admitted
+ * once and stays pending until it is read and fails RB-4; a rejected locator
+ * is admitted again only when the chain shows it with different content.
+ * `seq` is arrival order; an unreadable candidate is given a new one, so it
+ * moves behind the others and is retried later.
+ */
+export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null }
+const nextCandidateSeq = db.prepare("SELECT COALESCE(MAX(seq),0) + 1 seq FROM revocation_candidates");
+const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state)
+  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending')
+  ON CONFLICT(listing_hash,locator) DO UPDATE SET
+    owner=COALESCE(excluded.owner,revocation_candidates.owner),
+    content_hash=COALESCE(excluded.content_hash,revocation_candidates.content_hash),
+    seq=CASE WHEN revocation_candidates.state='rejected' AND excluded.content_hash IS NOT NULL
+      AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN excluded.seq ELSE revocation_candidates.seq END,
+    state=CASE WHEN revocation_candidates.state='rejected' AND excluded.content_hash IS NOT NULL
+      AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN 'pending' ELSE revocation_candidates.state END`);
+export const admitRevocationCandidates = db.transaction(
+  (listingHash: string, candidates: readonly RevocationCandidateObservation[]): void => {
+    let seq = (nextCandidateSeq.get() as { seq: number }).seq;
+    for (const candidate of candidates) {
+      upsertCandidate.run({ listingHash, locator: candidate.locator, seq: seq++,
+        owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null });
+    }
+  },
+);
+/** Candidate queues carried in scan-state JSON by earlier releases move into the table, in their stored order. */
+const ingestLegacyRevocations = (revocations: ScanState["revocations"]): void => {
+  const artifact = db.prepare("SELECT owner, content_hash FROM artifacts WHERE locator = ?");
+  for (const [listingHash, stored] of Object.entries(revocations ?? {})) {
+    const locators = Array.isArray(stored) ? stored : stored ? [stored] : [];
+    admitRevocationCandidates(listingHash, locators.map((locator) => {
+      const row = artifact.get(locator) as { owner: string | null; content_hash: string | null } | undefined;
+      return { locator, owner: row?.owner, contentHash: row?.content_hash };
+    }));
+  }
+};
+db.transaction(() => {
+  const state = getJson<ScanState | null>("scan-state", null);
+  if (!state?.revocations || Object.keys(state.revocations).length === 0) return;
+  ingestLegacyRevocations(normalizeScanState(state).revocations);
+  setJson("scan-state", { ...state, revocations: {} });
+}).immediate();
+
+const pendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
+  WHERE listing_hash = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+/**
+ * The next `limit` candidates to verify for a listing: those anchored by the
+ * listing's owner first, then the rest in arrival order. Two indexed queries
+ * of at most `limit` rows each, whatever the queue length.
+ */
+export function nextRevocationCandidates(listingHash: string, listingOwner: string | null, limit: number): string[] {
+  const rows = (statement: Database.Statement, ...params: unknown[]) =>
+    (statement.all(...params) as Array<{ locator: string }>).map((row) => row.locator);
+  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
+  return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
+}
+const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
+const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
+  WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
+/** Apply one verification batch: rejected candidates leave the queue, unreadable ones move to its back. */
+export const recordRevocationProgress = db.transaction(
+  (listingHash: string, progress: { unread: readonly string[]; rejected: readonly string[] }): void => {
+    for (const locator of progress.rejected) rejectCandidate.run(listingHash, locator);
+    let seq = (nextCandidateSeq.get() as { seq: number }).seq;
+    for (const locator of progress.unread) requeueCandidate.run(seq++, listingHash, locator);
+  },
+);
+
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Cross-process/instance lease. SQLite serializes acquisition; expired leases recover automatically. */
@@ -235,7 +337,11 @@ export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalo
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = () => normalizeScanState(getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} }));
-export const saveScanState = (state: ScanState): void => setJson("scan-state", normalizeScanState(state));
+export const saveScanState = db.transaction((state: ScanState): void => {
+  const normalized = normalizeScanState(state);
+  ingestLegacyRevocations(normalized.revocations);
+  setJson("scan-state", { ...normalized, revocations: {} });
+});
 /**
  * Remove active cache rows that belong to a replaced chain. Registrations and
  * the append-only first-observation history survive so operator diagnostics do
@@ -245,6 +351,7 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
+  db.prepare("DELETE FROM revocation_candidates").run();
 });
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
@@ -271,24 +378,16 @@ export function resolveProgramAddress(owner: string, name: string): string | nul
   const key = programBindingKey(owner, name);
   return Object.hasOwn(programs, key) ? programs[key] : deriveAnchorAddress(owner, name);
 }
-/** Recorded storage-program owner per locator, for ordering verification work. */
-export function artifactOwners(locators: readonly string[]): Map<string, string> {
-  const owners = new Map<string, string>();
-  const select = db.prepare("SELECT locator, owner FROM artifacts WHERE locator = ? AND owner IS NOT NULL");
-  for (const locator of locators) {
-    const row = select.get(locator) as { locator: string; owner: string } | undefined;
-    if (row) owners.set(row.locator, row.owner);
-  }
-  return owners;
-}
-
 export interface ArtifactObservation {
   locator: string; kind: string; profile: string; owner?: string; contentHash?: string;
   observedAt: number; anchorTime?: number; status?: string; data?: Record<string, unknown>;
+  /** Set on the observation that accompanies a rejection; any other observation is a successful read. */
+  rejected?: boolean;
 }
 
-type StoredArtifactObservation = Omit<ArtifactObservation, "owner" | "contentHash" | "anchorTime" | "status"> & {
+type StoredArtifactObservation = Omit<ArtifactObservation, "owner" | "contentHash" | "anchorTime" | "status" | "rejected"> & {
   contentHash: string | null; owner: string | null; anchorTime: number | null; status: string; dataJson: string | null;
+  rejected: number;
 };
 
 const recordArtifactTransaction = db.transaction((observation: StoredArtifactObservation) => {
@@ -304,8 +403,8 @@ const recordArtifactTransaction = db.transaction((observation: StoredArtifactObs
         ELSE MIN(excluded.anchor_time,artifacts.anchor_time)
       END, status=excluded.status,
       data_json=excluded.data_json, error_code=NULL, error_message=NULL, retry_count=0,
-      rejection_count=CASE WHEN excluded.content_hash IS NULL THEN artifacts.rejection_count ELSE 0 END,
-      deferred_at=CASE WHEN excluded.content_hash IS NULL THEN artifacts.deferred_at ELSE NULL END, next_retry_at=NULL`)
+      rejection_count=CASE WHEN @rejected THEN artifacts.rejection_count ELSE 0 END,
+      deferred_at=CASE WHEN @rejected THEN artifacts.deferred_at ELSE NULL END, next_retry_at=NULL`)
     .run(observation);
   // A readable observation is the recovery event for this locator. Keep the
   // active queue truthful and ensure a later transient failure starts at one.
@@ -328,9 +427,10 @@ export function recordArtifact(observation: ArtifactObservation): void {
       contentHash = null;
     }
   }
-  recordArtifactTransaction({ ...observation, contentHash,
+  const { rejected, ...observed } = observation;
+  recordArtifactTransaction({ ...observed, contentHash,
     owner: observation.owner ?? null, anchorTime: contentHash ? observation.anchorTime ?? null : null,
-    status: observation.status ?? "observed", dataJson });
+    status: observation.status ?? "observed", dataJson, rejected: rejected ? 1 : 0 });
 }
 
 export interface ConsensusAnchorObservation {
@@ -361,14 +461,6 @@ export const recordConsensusAnchors = db.transaction((observations: ConsensusAnc
   return changed;
 });
 
-/** Retry reads per pass. Transient failures are served first. */
-export const RETRY_READS_PER_PASS = 100;
-/** At most this many of a pass's retry reads go to locators whose content was rejected. */
-export const REJECTED_RETRY_READS_PER_PASS = 20;
-/** Ceiling on scheduled rejected retries. Overflow waits in arrival order and rotates in. */
-export const MAX_ACTIVE_REJECTED_RETRIES = 1_000;
-
-const REJECTED_ACTIVE = "rejection_count > 0 AND deferred_at IS NULL AND status IN ('retry','dead-letter')";
 const countActiveRejected = db.prepare(`SELECT COUNT(*) count FROM artifacts WHERE ${REJECTED_ACTIVE} AND locator <> ?`);
 const longestWaitingRejected = db.prepare(`SELECT locator FROM artifacts WHERE rejection_count > 0 AND deferred_at IS NOT NULL
   AND locator <> ? ORDER BY deferred_at, locator LIMIT 1`);
@@ -506,9 +598,11 @@ export function clearListingRejection(locator: string, registrationClaim: string
     .run(locator, registrationClaim.toLowerCase());
 }
 /**
- * Due retry locators for one pass: transient failures first, then at most
- * REJECTED_RETRY_READS_PER_PASS rejected locators. Free scheduled slots are
- * first given to rejected locators waiting beyond the ceiling, oldest first.
+ * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
+ * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
+ * locators; transient failures fill the rest and are returned first. Free
+ * scheduled slots are first given to rejected locators waiting beyond the
+ * ceiling, oldest first.
  */
 export const loadRetryableArtifacts = db.transaction((now: number = Date.now()): string[] => {
   const active = (countActiveRejected.get("") as { count: number }).count;
@@ -520,9 +614,8 @@ export const loadRetryableArtifacts = db.transaction((now: number = Date.now()):
   const due = (where: string, limit: number) => (db.prepare(`SELECT locator FROM artifacts WHERE ${where}
     AND COALESCE(next_retry_at,0) <= ? ORDER BY COALESCE(next_retry_at,0),locator LIMIT ?`)
     .all(now, limit) as Array<{ locator: string }>).map((row) => row.locator);
-  const transient = due("status='retry' AND rejection_count = 0", RETRY_READS_PER_PASS);
-  return [...transient, ...due(REJECTED_ACTIVE,
-    Math.min(REJECTED_RETRY_READS_PER_PASS, RETRY_READS_PER_PASS - transient.length))];
+  const rejected = due(REJECTED_ACTIVE, REJECTED_RETRY_READS_PER_PASS);
+  return [...due("status='retry' AND rejection_count = 0", RETRY_READS_PER_PASS - rejected.length), ...rejected];
 });
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;

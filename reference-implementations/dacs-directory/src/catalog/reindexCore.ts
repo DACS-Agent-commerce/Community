@@ -4,7 +4,7 @@
  * chain state and rewrite the catalog cache. Used by the CLI (npm run index)
  * and by POST /api/dacs/reindex (the UI's refresh button).
  */
-import { normalizeScanState, ownArray } from "./scanState.js";
+import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
@@ -24,6 +24,7 @@ import {
   loadFixtureSeeds,
   loadRegistrations,
   loadScanState,
+  admitRevocationCandidates,
   saveCatalog,
   saveScanState,
   beginScanRun,
@@ -105,7 +106,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      schemaVersion: 9,
+      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
       lastSeenTxId: 0,
       lastChainTip: observedChainTip,
       listings: {},
@@ -125,7 +126,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
-  const needsHistoryReplay = state.schemaVersion !== 9;
+  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
+  const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
+  // Overflow is recomputed per signer from the replayed bindings.
+  if (needsHistoryReplay) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -170,9 +174,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
       );
     }
-    if (needsHistoryReplay) state.deals = Object.create(null);
+    // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
+    // entries are kept and the replay adds or refreshes each owner's entry.
+    if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
     for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
-    for (const [key, deal] of scan.deals) state.deals[key] = deal;
+    for (const [key, deal] of scan.deals) {
+      // Seller copies are matched within one scan window; keep the stored one when this window has none.
+      const stored = Object.hasOwn(state.deals, key) ? state.deals[key] : undefined;
+      if (!deal.sellerBundleRef && stored?.sellerBundleRef && stored.owners.seller === deal.owners.seller) {
+        deal.sellerBundleRef = stored.sellerBundleRef;
+      }
+      state.deals[key] = deal;
+    }
     state.programs ??= Object.create(null);
     for (const [key, address] of scan.programs) state.programs[key] = address;
     // A later duplicate invalidates prior automatic attribution too.
@@ -185,15 +198,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     omitted.omittedBindings += scan.omittedBindings;
-    if (needsHistoryReplay) state.revocations = Object.create(null);
-    state.revocations ??= Object.create(null);
-    const storedCandidates = (hash: string): string[] => {
-      const stored = state.revocations![hash];
-      return Array.isArray(stored) ? stored : stored ? [stored] : [];
-    };
-    // Every candidate stays queued, in arrival order, until it is verified or rejected.
+    // Every candidate is queued once, in arrival order, with the owner and content it was read with.
+    const observed = new Map(scan.observations.map((observation) => [observation.locator, observation]));
     for (const [hash, addresses] of scan.revocations) {
-      state.revocations[hash] = [...new Set([...storedCandidates(hash), ...addresses])];
+      admitRevocationCandidates(hash, addresses.map((locator) =>
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: observed.get(locator)?.contentHash })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
@@ -263,7 +272,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
-    state.schemaVersion = 9;
+    state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
     saveScanState(state);
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
@@ -297,7 +306,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       if (!deal.owners.seller) continue; // unattributable — skip
       const reg = sellerReg(deal.owners.seller);
       reg.deals ??= [];
-      if (!reg.deals.some((d) => d.jobId === deal.jobId)) reg.deals.push(deal);
+      const key = discoveredDealKey(deal.owners.buyer, deal.jobId);
+      if (!reg.deals.some((d) => discoveredDealKey(d.owners.buyer, d.jobId) === key)) reg.deals.push(deal);
       const bindings = ownArray(state.bundleBindings, deal.jobId);
       if (bindings.length > 0) {
         reg.bundleBindings ??= [];
@@ -351,7 +361,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
-    const revocationProgress = new Map<string, { unread: Set<string>; rejected: Set<string> }>();
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -359,11 +368,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, (hash, progress) => {
-        const entry = revocationProgress.get(hash) ?? { unread: new Set<string>(), rejected: new Set<string>() };
-        for (const address of progress.unread) entry.unread.add(address);
-        for (const address of progress.rejected) entry.rejected.add(address);
-        revocationProgress.set(hash, entry);
       }).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
@@ -390,19 +394,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       log("fixture: Counterparty Evidence Desk preserved");
     }
 
-    // A rejected candidate leaves the queue; it returns only if the chain shows it again.
-    // An unreadable one moves to the back so it cannot hold the front of the queue.
-    for (const [hash, { unread, rejected }] of revocationProgress) {
-      const candidates = storedCandidates(hash).filter((address) => !rejected.has(address) && !unread.has(address));
-      state.revocations[hash] = [...candidates, ...storedCandidates(hash).filter((address) => unread.has(address) && !rejected.has(address))];
-    }
     for (const seller of catalogSellers) for (const listing of seller.listings) {
       const locator = listing.revocationBinding?.markerAnchor.locator;
       if (!locator) continue;
       const verified = state.verifiedRevocations[listing.contentHash] ?? [];
       if (!verified.includes(locator)) verified.push(locator);
       state.verifiedRevocations[listing.contentHash] = verified;
-      state.revocations[listing.contentHash] = [...new Set([locator, ...storedCandidates(listing.contentHash)])];
     }
     state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
       cursor: state.reachabilityCursor,

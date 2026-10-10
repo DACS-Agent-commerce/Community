@@ -55,7 +55,7 @@ export interface ScannedArtifacts {
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
   chainTip: number;
-  observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown> }>;
+  observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
 }
@@ -122,13 +122,17 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
     if (failure === "STORAGE_NOT_FOUND" || failure === "STORAGE_NOT_PUBLIC") {
       return { success: false, failureCode: failure };
     }
-    // DACS programs require object data; unrelated primitive payloads remain unclassified storage.
-    if (
-      res.ok && body?.success && typeof body.programName === "string" && body.programName &&
-      body.programName.length <= MAX_STORAGE_NAME_LENGTH &&
-      typeof body.owner === "string" && body.owner && body.owner.length <= MAX_STORAGE_OWNER_LENGTH &&
-      (body.data == null || objectValue(body.data) || !/^dacs[0-9]+[:-]/.test(body.programName))
-    ) return { ...body, data: objectValue(body.data) ?? undefined };
+    if (res.ok && body?.success && typeof body.programName === "string" && body.programName &&
+      typeof body.owner === "string" && body.owner) {
+      // A well-formed read whose content fails the artifact policy is a rejection, which depends
+      // only on the stored content. DACS programs require object data; unrelated primitive
+      // payloads remain unclassified storage.
+      if (body.programName.length > MAX_STORAGE_NAME_LENGTH || body.owner.length > MAX_STORAGE_OWNER_LENGTH ||
+        (body.data != null && !objectValue(body.data) && /^dacs[0-9]+[:-]/.test(body.programName))) {
+        return { success: false, failureCode: "ARTIFACT_REJECTED" };
+      }
+      return { ...body, data: objectValue(body.data) ?? undefined };
+    }
     lastFailure = failure;
     if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));
   }
@@ -512,7 +516,7 @@ export async function scanChain(
     if (dataHash === null) {
       // No canonical form, so no DACS signature can cover it: unclassified storage.
       // Only bounded rejection metadata is kept, never the payload itself.
-      observations.push({ locator: address, kind: "other", profile, owner: read.owner, observedAt: Date.now() });
+      observations.push({ locator: address, kind: "other", profile, owner: read.owner, observedAt: Date.now(), rejected: true });
       failures.push({ locator: address, kind: "other", code: "ARTIFACT_REJECTED", message: "storage artifact has no canonical JSON form" });
       continue;
     }

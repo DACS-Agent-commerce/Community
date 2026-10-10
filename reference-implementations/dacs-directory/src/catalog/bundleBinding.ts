@@ -34,6 +34,11 @@ export function bundleBindingRoleKey(jobId: string, role: BundleBinding["role"])
   return `${jobId}\n${role}`;
 }
 
+/** Discovery is bounded per authenticated signer, so one signer's bindings never use another's budget (BB-6). */
+export function bundleBindingOverflowKey(jobId: string, role: BundleBinding["role"], signer: string): string {
+  return `${bundleBindingRoleKey(jobId, role)}\n${canonicalDemosAgentClaim(signer) ?? signer}`;
+}
+
 function strictSignatureBytes(value: unknown): Uint8Array | null {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(value)) return null;
   try {
@@ -107,8 +112,9 @@ const bindingOrder = (left: BundleBinding, right: BundleBinding): number =>
   contentHash(left).localeCompare(contentHash(right));
 
 /**
- * Deterministic total-work ceiling. Overflow is sticky in ScanState and must
- * make that side indeterminate; truncation can never manufacture absence.
+ * Deterministic work ceiling per signer of each jobId and role. Overflow is
+ * sticky in ScanState and must make that signer's side indeterminate;
+ * truncation can never manufacture absence.
  */
 export function boundedBundleBindings(
   bindings: Iterable<BundleBinding>,
@@ -118,7 +124,7 @@ export function boundedBundleBindings(
   for (const binding of bindings) unique.set(contentHash(binding), binding);
   const byRole = new Map<string, BundleBinding[]>();
   for (const binding of unique.values()) {
-    const key = bundleBindingRoleKey(binding.jobId, binding.role);
+    const key = bundleBindingOverflowKey(binding.jobId, binding.role, binding.signer);
     const values = byRole.get(key) ?? [];
     values.push(binding);
     byRole.set(key, values);

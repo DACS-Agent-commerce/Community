@@ -151,7 +151,11 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   const [indexed] = catalog.sellers[0].listings;
   assert.equal(indexed.status, "revoked");
   assert.equal(indexed.revocationBinding?.markerAnchor.locator, validMarker);
-  assert.deepEqual(store.loadScanState().revocations?.[verifiedListing.contentHash], [validMarker]);
+  const queue = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    assert.deepEqual(queue.prepare("SELECT locator FROM revocation_candidates WHERE listing_hash = ? AND state = 'pending'")
+      .all(verifiedListing.contentHash), [{ locator: validMarker }]);
+  } finally { queue.close(); }
   assert.deepEqual(artifactRow(deepMarker), { kind: "other", content_hash: null, anchor_time: null, data_json: null, status: "retry" });
   assert.ok(store.loadRetryableArtifacts(Date.now() + 4_000_000).includes(deepMarker));
   assert.equal(artifactRow(validMarker)?.content_hash, contentHash(marker));
@@ -216,9 +220,11 @@ test("scan requires an object payload and string metadata from every storage rea
 
   assert.equal(result.complete, true);
   assert.equal(result.listings.size, 0);
-  for (const invalid of [numeric, text, list, numericOwner]) {
+  // Non-object data under a DACS name is rejected content; a non-string owner is a malformed node response.
+  for (const [invalid, code] of [[numeric, "ARTIFACT_REJECTED"], [text, "ARTIFACT_REJECTED"], [list, "ARTIFACT_REJECTED"],
+    [numericOwner, "STORAGE_INVALID_RESPONSE"]]) {
     assert.equal(result.observations.some((observation) => observation.locator === invalid), false);
-    assert.ok(result.failures.some((failure) => failure.locator === invalid && failure.code === "STORAGE_INVALID_RESPONSE"));
+    assert.ok(result.failures.some((failure) => failure.locator === invalid && failure.code === code), invalid);
   }
   assert.deepEqual(result.revocations.get(verifiedListing.contentHash), [validMarker]);
 });
