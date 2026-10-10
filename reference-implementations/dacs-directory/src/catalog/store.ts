@@ -169,12 +169,16 @@ db.transaction(() => {
   if (!columns.some((entry) => entry.name === "deferred_at")) db.exec("ALTER TABLE artifacts ADD COLUMN deferred_at INTEGER");
   db.exec("CREATE INDEX IF NOT EXISTS artifacts_rejected_retry_idx ON artifacts(deferred_at, next_retry_at) WHERE rejection_count > 0");
   // At most MAX_ACTIVE_REJECTED_RETRIES stay scheduled, including rows migrated above:
-  // in due order, the rest wait for a slot. Idempotent, so it also runs on every start.
+  // the earliest due stay, and the rest wait for a slot, returning in due order.
+  // Idempotent, so it also runs on every start.
   const excess = (db.prepare(`SELECT COUNT(*) count FROM artifacts WHERE ${REJECTED_ACTIVE}`).get() as { count: number }).count -
     MAX_ACTIVE_REJECTED_RETRIES;
   if (excess > 0) {
-    db.prepare(`UPDATE artifacts SET deferred_at=?, next_retry_at=NULL WHERE locator IN (SELECT locator FROM artifacts
-      WHERE ${REJECTED_ACTIVE} ORDER BY COALESCE(next_retry_at,0) DESC, locator DESC LIMIT ?)`).run(Date.now(), excess);
+    const deferred = (db.prepare(`SELECT locator FROM artifacts WHERE ${REJECTED_ACTIVE}
+      ORDER BY COALESCE(next_retry_at,0) DESC, locator DESC LIMIT ?`).all(excess) as Array<{ locator: string }>).reverse();
+    const defer = db.prepare("UPDATE artifacts SET deferred_at=?, next_retry_at=NULL WHERE locator=?");
+    const start = Date.now() - deferred.length;
+    for (const [index, row] of deferred.entries()) defer.run(start + index, row.locator);
   }
 }).immediate();
 
@@ -619,6 +623,11 @@ export const loadRetryableArtifacts = db.transaction((now: number = Date.now()):
 });
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
+/** Canonical storage owner recorded when the locator was last read, if any. */
+export const artifactOwner = (locator: string): string | null => {
+  const owner = (db.prepare("SELECT owner FROM artifacts WHERE locator = ?").get(locator) as { owner: string | null } | undefined)?.owner;
+  return owner ? canonicalProgramOwner(owner) : null;
+};
 
 export function beginScanRun(fromTx: number): number {
   return Number(db.prepare("INSERT INTO scan_runs(started_at,from_tx,status) VALUES (?,?,?)").run(Date.now(), fromTx, "running").lastInsertRowid);

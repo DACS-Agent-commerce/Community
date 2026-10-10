@@ -587,10 +587,10 @@ export async function scanChain(
     const sellerFromAgreement = agreementData?.agreementVersion !== undefined || agreementData?.payeeBoundAgreementVersion !== undefined
       ? agreementParties.find((party) => party?.role === "seller" && typeof party.primaryClaim === "string")?.primaryClaim as string | undefined
       : typeof agreementData?.seller === "string" ? agreementData.seller : undefined;
-    const candidates = sellerCopies.get(jobId) ?? [];
+    // A seller copy is attached only to a deal whose seller is attributed, and only when that seller owns it.
     const sellerCopy = sellerFromAgreement
-      ? candidates.find((copy) => didOf(copy.owner) === sellerFromAgreement)
-      : candidates.length === 1 ? candidates[0] : undefined;
+      ? (sellerCopies.get(jobId) ?? []).find((copy) => didOf(copy.owner) === sellerFromAgreement)
+      : undefined;
     const seller = sellerFromAgreement;
     const rail = agreementRail(agreementData) ??
       ((agreementData?.price as { rail?: string } | undefined)?.rail) ??

@@ -16,7 +16,7 @@ process.env.DACS_DIRECTORY_DATA = dataDirectory;
 process.env.DACS_SCAN_FINALITY_DEPTH = "0";
 const store = await import("../src/catalog/store.js");
 const { verifyListing } = await import("../src/catalog/listingVerification.js");
-const { logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
+const { logicalBundleAddress, verifyBundleBinding } = await import("../src/catalog/bundleBinding.js");
 const { artifactHash } = await import("../src/catalog/evidenceGraph.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { deriveAnchorAddress, resolveOwnedAnchorByName } = await import("../src/catalog/chain.js");
@@ -381,6 +381,13 @@ test("a discovered deal keeps its seller copy when a later window has none", asy
   assert.equal(entry().sellerBundleRef, locator(922));
 });
 
+/** Records each locator as read with `who` as its storage owner. */
+const owns = (who: string, ...at: number[]) => {
+  for (const n of at) store.recordArtifact({ locator: locator(n), kind: "bundle", profile: "unknown", owner: ownerOf(who), observedAt: 1 });
+};
+const ownersLookup = (jobId: string) => async (query = "") =>
+  await (await dealOwnersRoute.GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}${query}`))).json();
+
 test("deal-owner lookup answers only when one attributed deal holds the jobId", async () => {
   const jobId = "lookup-job";
   const entry = (who: string, sellerClaim: string, at: number) =>
@@ -391,6 +398,9 @@ test("deal-owner lookup answers only when one attributed deal holds the jobId", 
     sellers: records.map(([claim, deals]) => ({ primaryClaim: claim,
       deals: deals.map((deal) => ({ ...deal, signatureVerified: false, refsVerified: false, verifiedAt: 1 })) })) as never });
   resetIndex([later], 14);
+  owns(buyer, 46, 56);
+  owns(outsider, 47);
+  owns(otherBuyer, 48);
   // Scanned entries only: an attributed entry next to another owner's unattributed one is ambiguous.
   store.saveScanState({ ...emptyState(), deals: { a: entry(buyer, seller, 46), b: entry(outsider, "", 47) } });
   assert.equal((await lookup()).owners, null);
@@ -407,6 +417,112 @@ test("deal-owner lookup answers only when one attributed deal holds the jobId", 
   catalogOf([seller, [entry(buyer, seller, 46)]], [otherSeller, [entry(otherBuyer, otherSeller, 48)]]);
   assert.equal((await lookup()).owners, null);
   assert.deepEqual((await lookup(`&bundleRef=${locator(48)}`)).owners, { buyer: otherBuyer, seller: otherSeller });
+});
+
+test("a seller copy belongs only to a deal whose attributed seller owns it", async () => {
+  const jobId = "copy-owner";
+  resetIndex([later], 24);
+  chain({
+    [locator(930)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+    [locator(931)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(932)]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"any":1}', owner: ownerOf(seller) },
+  }, [locator(930), locator(931), locator(932)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  const lookup = ownersLookup(jobId);
+  const deal = { owners: { buyer, seller }, buyerBundleRef: locator(930), sellerBundleRef: locator(932) };
+  assert.deepEqual(await lookup(`&bundleRef=${locator(932)}`), deal);
+  // Another owner's name-only bundle for the jobId, in the same window as the seller copy.
+  storage[locator(933)] = { name: `dacs5:bundle:${jobId}`, data: '{"any":9}', owner: ownerOf(outsider) };
+  transactions = [memo(20, `${locator(933)} ${locator(932)}`), ...transactions];
+  const entryOf = (did: string) => store.loadScanState().deals[`${ownerOf(did)}\n${jobId}`];
+  const window = await scanChain(null, { maxTxs: 100, sinceTxId: 0 });
+  const scannedOf = (did: string) => [...window.deals.values()].find((deal) => deal.jobId === jobId && deal.owners.buyer === did);
+  assert.equal(scannedOf(outsider)?.sellerBundleRef, undefined);
+  assert.equal(scannedOf(buyer)?.sellerBundleRef, locator(932));
+  for (let pass = 1; pass <= 3; pass++) {
+    await reindex();
+    transactions = [];
+    assert.equal(entryOf(outsider).owners.seller, "");
+    assert.equal(entryOf(outsider).sellerBundleRef, undefined, `pass ${pass}`);
+    assert.deepEqual(await lookup(`&bundleRef=${locator(932)}`), deal, `pass ${pass}`);
+    assert.deepEqual(await lookup(`&bundleRef=${locator(930)}`), deal, `pass ${pass}`);
+  }
+  // State saved by an earlier release can still carry a copy on the unattributed entry:
+  // the lookup does not count it, and the next pass removes it.
+  const unfiltered = await lookup();
+  const state = store.loadScanState();
+  state.deals[`${ownerOf(outsider)}\n${jobId}`].sellerBundleRef = locator(932);
+  store.saveScanState(state);
+  assert.deepEqual(await lookup(`&bundleRef=${locator(932)}`), deal);
+  assert.deepEqual(await lookup(), unfiltered);
+  await reindex();
+  assert.equal(entryOf(outsider).sellerBundleRef, undefined);
+});
+
+test("deal-owner lookup counts a deal only when its bundle refs are bound to its parties", async () => {
+  const jobId = "declared-job";
+  const declared = (buyerRef: number, sellerRef: number, owners = { buyer, seller }) =>
+    ({ jobId, rail: "pay-dem", buyerBundleRef: locator(buyerRef), sellerBundleRef: locator(sellerRef), owners });
+  const thirdParty: Registration = { primaryClaim: otherSeller, displayName: "Third party", listingAnchors: [], deals: [declared(943, 944)] };
+  resetIndex([thirdParty, later], 25);
+  chain({
+    [locator(940)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+    [locator(941)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(942)]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"any":1}', owner: ownerOf(seller) },
+    [locator(943)]: { data: '{"any":2}', owner: ownerOf(otherSeller) },
+    [locator(944)]: { data: '{"any":3}', owner: ownerOf(otherSeller) },
+  }, [locator(940), locator(941), locator(942), locator(943), locator(944)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  const lookup = ownersLookup(jobId);
+  const deal = { owners: { buyer, seller }, buyerBundleRef: locator(940), sellerBundleRef: locator(942) };
+  const catalogRefs = () => store.loadCatalog().sellers.flatMap((s) => s.deals).filter((d) => d.jobId === jobId).map((d) => d.buyerBundleRef).sort();
+  assert.deepEqual(catalogRefs(), [locator(940), locator(943)], "the registration's deal is in the catalog");
+  // The registration's refs are owned by neither named party.
+  assert.deepEqual(await lookup(`&bundleRef=${locator(944)}`), { owners: null, buyerBundleRef: null });
+  assert.deepEqual(await lookup(`&bundleRef=${locator(940)}`), deal);
+  assert.deepEqual(await lookup(`&bundleRef=${locator(942)}`), deal);
+  assert.deepEqual(await lookup(), deal);
+  // A registration that names the buyer's bundle under other parties is not counted either.
+  store.saveRegistrations([{ ...thirdParty, deals: [declared(940, 944, { buyer: otherBuyer, seller: otherSeller })] }, later]);
+  transactions = [];
+  await reindex();
+  assert.deepEqual(await lookup(`&bundleRef=${locator(940)}`), deal);
+  // Nor one that pairs the buyer's bundle with a seller copy the seller does not own.
+  store.saveRegistrations([{ ...thirdParty, deals: [declared(940, 944)] }, later]);
+  await reindex();
+  assert.ok(catalogRefs().filter((ref) => ref === locator(940)).length === 2, "both deals are in the catalog");
+  assert.deepEqual(await lookup(`&bundleRef=${locator(944)}`), { owners: null, buyerBundleRef: null });
+  assert.deepEqual(await lookup(`&bundleRef=${locator(940)}`), deal);
+});
+
+test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has resolved past", async () => {
+  const jobId = "resolved-ref";
+  resetIndex([later], 26);
+  const scanned = { jobId, rail: "pay-dem", buyerBundleRef: locator(950), owners: { buyer, seller } };
+  owns(buyer, 950);
+  // The catalog's buyer ref comes from the buyer's verified BundleBinding.
+  const scope = { bindingVersion: "1", jobId, role: "buyer", logicalAddress: logicalBundleAddress(jobId, "buyer"),
+    nativeAddress: locator(951), bundleContentHash: "c".repeat(64), signer: buyer };
+  const binding = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
+    value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } } as BundleBinding;
+  assert.ok(await verifyBundleBinding(binding));
+  store.saveScanState({ ...emptyState(), schemaVersion: 10, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: seller,
+    deals: [{ ...scanned, buyerBundleRef: locator(951), signatureVerified: true, refsVerified: true, verifiedAt: 1 }] }] } as never);
+  const lookup = ownersLookup(jobId);
+  const resolved = { owners: { buyer, seller }, buyerBundleRef: locator(951), sellerBundleRef: null };
+  assert.deepEqual(await lookup(), resolved);
+  assert.deepEqual(await lookup(`&bundleRef=${locator(951)}`), resolved);
+  assert.deepEqual(await lookup(`&bundleRef=${locator(950)}`), { owners: null, buyerBundleRef: null });
+  // The buyer's binding for the seller role does not bind the catalog's buyer ref.
+  const sellerScope = { ...scope, role: "seller", logicalAddress: logicalBundleAddress(jobId, "seller") };
+  const sellerRole = { ...sellerScope, signature: { algorithm: "ed25519", signer: buyer,
+    value: await signature(contentHash(sellerScope), "dacs-bundle-binding:v1:", 0, "base64url") } } as BundleBinding;
+  assert.ok(await verifyBundleBinding(sellerRole));
+  store.saveScanState({ ...store.loadScanState(), bundleBindings: { [jobId]: [sellerRole] } });
+  assert.deepEqual(await lookup(`&bundleRef=${locator(951)}`), { owners: null, buyerBundleRef: null });
 });
 
 test("a locator whose content was rejected stays periodic after later transient failures", () => {

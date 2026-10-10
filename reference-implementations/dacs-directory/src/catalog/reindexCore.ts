@@ -196,6 +196,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         deal.owners.seller = "";
         delete (deal as { sellerFromAgreement?: string }).sellerFromAgreement;
       }
+      // A deal without an attributed seller has no seller copy.
+      if (!deal.owners.seller) delete deal.sellerBundleRef;
     }
     omitted.omittedBindings += scan.omittedBindings;
     // Every candidate is queued once, in arrival order, with the owner and content it was read with.

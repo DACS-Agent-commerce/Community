@@ -27,7 +27,8 @@ seeded.exec(`
 `);
 const insert = seeded.prepare(`INSERT INTO artifacts(locator,kind,profile,observed_at,status,error_code,error_message,next_retry_at,rejection_count)
   VALUES (?,'other','unknown',1,'retry','ARTIFACT_REJECTED','rejected',?,1)`);
-for (const [index, at] of rejected.entries()) insert.run(at, 1_000 + index);
+// The first 1,000 are due in locator order; the 30 beyond them are due in reverse locator order.
+for (const [index, at] of rejected.entries()) insert.run(at, index < 1_000 ? 1_000 + index : 4_029 - index);
 const observed = seeded.prepare("INSERT INTO artifacts(locator,kind,profile,owner,content_hash,observed_at) VALUES (?,'listing-revocation','dacs-v0.1',?,?,1)");
 observed.run(other, `0x${"c".repeat(64)}`, "1".repeat(64));
 observed.run(owned, listingOwner, "2".repeat(64));
@@ -53,6 +54,19 @@ test("startup defers scheduled rejected retries beyond the ceiling, latest due f
     assert.deepEqual(waiting.map((row) => row.locator), rejected.slice(store.MAX_ACTIVE_REJECTED_RETRIES));
   } finally { db.close(); }
   assert.equal(store.loadRetryableArtifacts(10_000).length, store.REJECTED_RETRY_READS_PER_PASS);
+});
+
+test("rejected retries deferred at startup return to the schedule in due order", () => {
+  // Five scheduled locators read successfully, which frees five slots.
+  for (const at of rejected.slice(0, 5)) store.recordArtifact({ locator: at, kind: "other", profile: "unknown", observedAt: 2 });
+  store.loadRetryableArtifacts(10_000);
+  const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    const returned = db.prepare(`SELECT locator FROM artifacts WHERE rejection_count > 0 AND deferred_at IS NULL
+      AND locator IN (${rejected.slice(store.MAX_ACTIVE_REJECTED_RETRIES).map(() => "?").join(",")}) ORDER BY locator`)
+      .all(...rejected.slice(store.MAX_ACTIVE_REJECTED_RETRIES)) as Array<{ locator: string }>;
+    assert.deepEqual(returned.map((row) => row.locator), rejected.slice(-5));
+  } finally { db.close(); }
 });
 
 test("startup moves a candidate queue from scan state into the candidate store in order", () => {
