@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,8 +45,13 @@ seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog
       offering: { title: "test", category: "services.test", tags: [] },
       pricing: {},
       status: "revoked",
+      transactionReadiness: { disposition: "ready" },
       revocationBinding,
       catalogObservedAt: 1,
+    }, {
+      listingId: "listing-2",
+      version: 1,
+      status: "active",
     }],
     deals: [],
     reputation: { completed: 0, bundleCount: 0, totalAgreements: 0, completionRate: null },
@@ -64,4 +70,25 @@ test("persisted revocationBinding summaries migrate to normative revocation once
   const listing = store.loadCatalog().sellers[0]?.listings[0];
   assert.deepEqual(listing?.revocation, revocationBinding);
   assert.equal("revocationBinding" in (listing ?? {}), false);
+});
+
+test("startup migrates ready and missing readiness summaries once across restarts", () => {
+  const listings = store.loadCatalog().sellers[0]?.listings;
+  assert.equal(listings?.length, 2);
+  for (const listing of listings ?? []) {
+    assert.equal(listing.transactionReadiness?.disposition, "unassessed");
+    assert.match(listing.transactionReadiness?.reason ?? "", /buyer-local/);
+  }
+  const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    const readMigration = () => db.prepare("SELECT * FROM kv_state WHERE key IN ('catalog', 'listing-summary-readiness-schema-version') ORDER BY key").all();
+    const before = readMigration();
+    assert.equal((db.prepare("SELECT value_json FROM kv_state WHERE key='listing-summary-readiness-schema-version'").get() as { value_json: string }).value_json, "1");
+    const restart = spawnSync(process.execPath, [
+      "--import", "tsx", "--input-type=module", "--eval",
+      `await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});`,
+    ], { env: { ...process.env, DACS_DIRECTORY_DATA: dataDirectory }, encoding: "utf8", timeout: 30_000 });
+    assert.equal(restart.status, 0, restart.stderr);
+    assert.deepEqual(readMigration(), before, "a restart does not rewrite the migrated catalog or version marker");
+  } finally { db.close(); }
 });
