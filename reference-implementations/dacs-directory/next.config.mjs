@@ -28,6 +28,18 @@ const nextConfig = {
           resource.request = new URL("./src/shims/node-util.ts", import.meta.url).pathname;
         }),
       );
+      // The SDK's ClaimReference parser (CORE B.1 CF-2) checks `domain:`
+      // hostnames with node:net/node:url; the shims are the WHATWG subset.
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:net$/, (resource) => {
+          resource.request = new URL("./src/shims/node-net.ts", import.meta.url).pathname;
+        }),
+      );
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:url$/, (resource) => {
+          resource.request = new URL("./src/shims/node-url.ts", import.meta.url).pathname;
+        }),
+      );
       config.plugins.push(
         new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] }),
       );

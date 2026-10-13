@@ -180,17 +180,16 @@ test("signature depth sweep bounds whole values and normalizes persisted envelop
   delete scope.signature;
   const extended = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } };
-  // The pinned SDK (dacs-sdk f68fed1) canonicalizes 64 container levels, the signature
-  // envelope included, so a member nested deeper than 62 has no canonical form there.
-  // That bound is below the Directory's own 128-level bound, which leaves 126 as the
-  // limit once the pin carries CF-5 depth 128 (dacs-sdk b819b32).
+  // CORE CF-5 admits 128 container levels (dacs-sdk b819b32, in the pin), the signature
+  // envelope included, so a member nested deeper than 126 has no canonical form. 61-64
+  // stay in the sweep: the previous pin (f68fed1) refused everything deeper than 62.
   for (const depth of [61, 62, 63, 64, 124, 125, 126, 127, 128, 129, 4096, 4098, 4100]) {
     resetIndex([later], 6);
     chain({ [locator(4)]: { data: withSignatureMember(extended, nested(depth)) } }, [locator(4)]);
     await reindex();
     assert.ok(store.loadCatalog().generatedAt > 6);
     const saved = store.loadScanState().bundleBindings?.job ?? [];
-    assert.equal(saved.length, depth <= 62 ? 1 : 0, `depth ${depth}`);
+    assert.equal(saved.length, depth <= 126 ? 1 : 0, `depth ${depth}`);
     if (saved.length) {
       assert.equal(Object.keys(saved[0].signature).length, 3);
       assert.equal(JSON.stringify(saved[0]), JSON.stringify(extended));

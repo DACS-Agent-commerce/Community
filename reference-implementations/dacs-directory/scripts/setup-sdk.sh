@@ -2,7 +2,7 @@
 # Vendors + builds the dacs-sdk (not yet on npm) and installs the app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SDK_REV="f68fed1c63b56a438830f13e706ea4651d675157"
+SDK_REV="3904d704fb540e6e1d7dd502a0be29f20569c92d"
 
 # Railway's GitHub integration can check out this repository, but it does not
 # pass its credentials through to nested private-repository clones. Supply a
