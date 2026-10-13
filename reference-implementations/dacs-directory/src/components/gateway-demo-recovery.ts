@@ -1,6 +1,9 @@
 export const GATEWAY_DEMO_RECOVERY_MESSAGE =
   "New purchases are paused while the buyer demo moves to its gateway-owned origin. Existing runs whose gateway job id this browser received can still be checked and resumed; a run without one is never re-sent and goes to manual reconciliation.";
 
+export const GATEWAY_DEMO_RECOVERY_HELP_URL =
+  "https://github.com/DACS-Agent-commerce/Community/issues/new?title=Gateway%20demo%20run%20reconciliation";
+
 /**
  * Shown when a drain-mode resume finds a record without a job id: the
  * original POST may never have reached the gateway, so re-sending it could

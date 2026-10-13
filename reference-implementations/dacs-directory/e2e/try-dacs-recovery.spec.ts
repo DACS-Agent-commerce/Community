@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import {
   PROCUREMENT_RUN_KEY,
   completedJob,
@@ -25,6 +25,41 @@ async function seedStoredRun(page: Page, value: Record<string, unknown>) {
     window.localStorage.setItem(key, JSON.stringify(value));
   }, { key: PROCUREMENT_RUN_KEY, value });
 }
+
+// Deliberately bypass the disabled DOM button to exercise the component's
+// dispatch guard. React's props are used only in this test, with no production
+// test hook; a normal click cannot invoke a disabled button's handler.
+async function invokeClickHandler(button: Locator) {
+  await button.evaluate(async (element) => {
+    const key = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+    const props = key ? (element as unknown as Record<string, { onClick?: () => unknown }>)[key] : undefined;
+    if (typeof props?.onClick !== "function") throw new Error("React click handler not found");
+    await props.onClick();
+  });
+}
+
+test("recovery-only runAgent refuses a direct invocation with a valid purchase form", async ({ context, page }) => {
+  const posts = await countProcurementPosts(context);
+  let butlerPosts = 0;
+  await context.route("**/demo/butler", async (route) => {
+    if (route.request().method() === "POST") butlerPosts += 1;
+    await route.abort("blockedbyclient");
+  });
+  await page.goto("/try");
+  const agent = page.locator(".picker-grid").getByRole("button", { name: /Security Auditor/ });
+  await expect(agent).toBeDisabled();
+  await invokeClickHandler(agent);
+  await page.getByRole("button", { name: "Load example" }).click();
+  await expect(page.locator(".field-error")).toHaveCount(0);
+  const run = page.locator(".job-box").getByRole("button", { name: /New purchases paused/ });
+  await expect(run).toBeDisabled();
+  await invokeClickHandler(run);
+
+  await expect(page.locator(".bubble.error")).toContainText("New purchases are paused");
+  expect(posts.count).toBe(0);
+  expect(butlerPosts).toBe(0);
+  expect(await page.evaluate((key) => localStorage.getItem(key), PROCUREMENT_RUN_KEY)).toBeNull();
+});
 
 test("recovery-only deployment blocks fresh starts but preserves an existing job", async ({ context, page }) => {
   const posts = await countProcurementPosts(context);
@@ -64,6 +99,9 @@ test("recovery-only deployment never re-sends a run whose job id was never recei
 
   await page.goto("/try");
   await expect(page.locator(".resume-banner[role=alert]")).toContainText("give the operator run id recovery-only-unsent-run");
+  await expect(page.getByRole("link", { name: /Ask for run reconciliation/ })).toHaveAttribute(
+    "href", "https://github.com/DACS-Agent-commerce/Community/issues/new?title=Gateway%20demo%20run%20reconciliation",
+  );
   await page.getByRole("button", { name: /Check & resume/ }).click();
 
   await expect(page.locator(".bubble.error")).toContainText("run id recovery-only-unsent-run");

@@ -36,7 +36,7 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
-import { GATEWAY_DEMO_RECOVERY_MESSAGE, gatewayDemoManualReconcileMessage, gatewayDemoRecoveryOnly } from "./gateway-demo-recovery.js";
+import { GATEWAY_DEMO_RECOVERY_HELP_URL, GATEWAY_DEMO_RECOVERY_MESSAGE, gatewayDemoManualReconcileMessage, gatewayDemoRecoveryOnly } from "./gateway-demo-recovery.js";
 import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispatchDecision, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
@@ -903,9 +903,10 @@ export default function TryDacs() {
   /**
    * Reconcile a persisted run after a reload. With a job id this only reads
    * status. Without one (the reload raced the POST response) it re-POSTs the
-   * SAME stored input under the SAME idempotency key, so the gateway returns
-   * the original job if it exists — it can never start a second purchase for
-   * this run.
+   * SAME stored input under the SAME idempotency key, except in the recovery-only
+   * drain, where resumeDispatchDecision returns manual-reconcile. Outside the
+   * drain the gateway returns the original job if it exists; an unknown key
+   * can create the first purchase for this run.
    */
   async function resumeStoredRun() {
     const stored = storedRun;
@@ -946,9 +947,11 @@ export default function TryDacs() {
         if (!response.ok) throw new Error(message(body));
         job = parseProcurementJob(body);
       } else {
-        // The reload raced the original POST response: re-POST the SAME
-        // stored input under the SAME key — inside the cross-tab lock, like
-        // every paid dispatch, and refusing without a real lock manager.
+        // The reload raced the original POST response: outside the drain,
+        // re-POST the SAME stored input under the SAME key. In the drain,
+        // resumeDispatchDecision returns manual-reconcile instead. Both
+        // decisions run inside the cross-tab lock, refusing without a real
+        // lock manager.
         // The lock only SERIALIZES: while this section was queued, another
         // tab may have dismissed this record and started a new run, so the
         // section re-validates its captured record against storage NOW and
@@ -1092,6 +1095,7 @@ export default function TryDacs() {
           <div>
             <strong>A procurement run from this browser is still on record</strong>
             <p>Started {new Date(storedRun.startedAt).toLocaleString()}{storedRun.jobId ? ` · job ${compact(storedRun.jobId, 8, 6)}` : " · the job id was never received"}. {GATEWAY_DEMO_RECOVERY_ONLY && !storedRun.jobId ? `New purchases are paused, so this run is never re-sent: Check & resume only follows a job id another tab received. Otherwise give the operator run id ${storedRun.runId}.` : "Resuming reconnects under the same idempotency key, so it can never start a second purchase."}</p>
+            {GATEWAY_DEMO_RECOVERY_ONLY && !storedRun.jobId && <p><a href={GATEWAY_DEMO_RECOVERY_HELP_URL} target="_blank" rel="noreferrer">Ask for run reconciliation ↗</a> — include the run id shown above.</p>}
           </div>
           <div className="resume-actions">
             <button className="ghost-btn" onClick={() => { if (window.confirm("Dismiss this reminder? If the run paid, its job remains preserved on the gateway — only dismiss once you no longer need this browser to track it.")) updateStoredRun(null); }}>Dismiss</button>
