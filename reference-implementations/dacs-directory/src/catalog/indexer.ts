@@ -20,7 +20,12 @@ import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
-import { verifyBundleCore } from "@kynesyslabs/dacs";
+// verifyBundleCore is exported from the SDK's agent barrel, but that barrel
+// also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
+// dependency chain (rubic-sdk → cetus-sui-clmm-sdk → a broken @mysten/bcs
+// import) and breaks the production webpack build. Reach into the leaf
+// module directly to keep this file free of the substrate client.
+import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 import { readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
