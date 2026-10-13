@@ -285,8 +285,8 @@ export interface ScanState {
   /** Round-robin cursor for bounded engagement-surface probes. */
   reachabilityCursor?: number;
   /** owner + programName → observed native address (nonce-safe binding). */
-  programs?: Record<string, string>;
-  /** listing content hash → bounded, deterministic revocation candidates. */
+  programs?: Record<string, string | null>;
+  /** Legacy: listing content hash → revocation candidates. Moved into SQLite on load or save. */
   revocations?: Record<string, string[] | string>;
   /** RB-4-verified marker locators that candidate pruning must preserve. */
   verifiedRevocations?: Record<string, string[]>;
@@ -296,6 +296,6 @@ export interface ScanState {
   bundleBindingOverflow?: string[];
   /** listing anchor address → owner address */
   listings: Record<string, string>;
-  /** jobId → discovered deal */
+  /** buyer owner + jobId (discoveredDealKey) → discovered deal */
   deals: Record<string, RegisteredDeal>;
 }
