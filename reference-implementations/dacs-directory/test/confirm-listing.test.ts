@@ -118,7 +118,15 @@ const request = (body: Record<string, unknown>) => new NextRequest(
 );
 
 /** Stub the Demos node: native readback, canonical write, and its block. */
-function stubChain(overrides: { nativeMetadata?: Record<string, unknown>; block?: Record<string, unknown> } = {}): void {
+function stubChain(overrides: {
+  nativeMetadata?: Record<string, unknown>;
+  transactionMetadata?: Record<string, unknown>;
+  block?: Record<string, unknown>;
+} = {}): void {
+  const write = transaction.content.data[1] as Record<string, unknown>;
+  const written = overrides.transactionMetadata
+    ? { ...transaction, content: { ...transaction.content, data: ["storageProgram", { ...write, metadata: overrides.transactionMetadata }] } }
+    : transaction;
   globalThis.fetch = async (_input, init) => {
     if (init?.method !== "POST") {
       return Response.json({
@@ -134,7 +142,7 @@ function stubChain(overrides: { nativeMetadata?: Record<string, unknown>; block?
     }
     const rpc = JSON.parse(String(init.body)) as { params: Array<{ message: string; data: Record<string, unknown> }> };
     const call = rpc.params[0]!;
-    if (call.message === "getTransactions") return Response.json({ result: 200, response: [transaction] });
+    if (call.message === "getTransactions") return Response.json({ result: 200, response: [written] });
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 5) {
       return Response.json({
         result: 200,
@@ -205,13 +213,20 @@ test("listing confirmation never registers before the write is BFT-final", async
 
 test("listing confirmation rejects native metadata that does not bind the signed artifact", async () => {
   const originalFetch = globalThis.fetch;
+  const unbound = { ...metadata, envelopeHash: "0".repeat(64) };
   try {
-    stubChain({ nativeMetadata: { ...metadata, envelopeHash: "0".repeat(64) } });
-    const response = await POST(request(coordinates));
-    assert.equal(response.status, 409);
-    const body = await response.json() as Record<string, unknown>;
-    assert.equal(body.state, "finality-failed");
-    assert.equal(body.anchorReceipt, undefined);
+    for (const overrides of [
+      { nativeMetadata: unbound },
+      // Native and transaction metadata agree, but neither hashes the anchored envelope.
+      { nativeMetadata: unbound, transactionMetadata: unbound },
+    ]) {
+      stubChain(overrides);
+      const response = await POST(request(coordinates));
+      assert.equal(response.status, 409, Object.keys(overrides).join("+"));
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(body.state, "finality-failed");
+      assert.equal(body.anchorReceipt, undefined);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
