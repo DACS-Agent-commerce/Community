@@ -240,6 +240,13 @@ async function signatureOk(
   return Boolean(signature && await verifyComponentSignature(raw, kind, signature, resolveKey));
 }
 
+/** Discovery uses the same agreement shape and required-party signature gates as graph resolution. */
+export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): Promise<boolean> {
+  try {
+    return shapeOk(raw, "agreement") && await signatureOk(raw, "agreement", resolveDemosPrimaryClaimKey);
+  } catch { return false; }
+}
+
 async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | null> {
   if (kind === "attestation") {
     if (!isCurrentRef(ref)) return null;
@@ -257,9 +264,23 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
-  const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const raw = await deps.read(bundleLocator);
-  const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: raw ? artifactHash(raw, "bundle") : "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
+  // A failed graph carries no content hash: a rejected bundle is never hashed again.
+  const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
+  try {
+    return await verifyCurrentEvidenceGraph(raw, deps, fail);
+  } catch {
+    // Untrusted bundle or referenced content that cannot be canonicalized or read fails closed.
+    return fail("bundle or a referenced artifact could not be processed");
+  }
+}
+
+async function verifyCurrentEvidenceGraph(
+  raw: Record<string, unknown> | null,
+  deps: EvidenceGraphDeps,
+  fail: (reason: string) => EvidenceGraph,
+): Promise<EvidenceGraph> {
+  const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
   if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");

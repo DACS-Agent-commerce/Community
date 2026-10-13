@@ -1,3 +1,4 @@
+import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
@@ -33,6 +34,11 @@ export function bundleBindingRoleKey(jobId: string, role: BundleBinding["role"])
   return `${jobId}\n${role}`;
 }
 
+/** Discovery is bounded per authenticated signer, so one signer's bindings never use another's budget (BB-6). */
+export function bundleBindingOverflowKey(jobId: string, role: BundleBinding["role"], signer: string): string {
+  return `${bundleBindingRoleKey(jobId, role)}\n${canonicalDemosAgentClaim(signer) ?? signer}`;
+}
+
 function strictSignatureBytes(value: unknown): Uint8Array | null {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(value)) return null;
   try {
@@ -45,9 +51,15 @@ function strictSignatureBytes(value: unknown): Uint8Array | null {
   }
 }
 
+/** The whole value, signature envelope included, must serialize within the bound. */
+function withinBindingLimit(raw: Record<string, unknown>): boolean {
+  return boundedJson(raw, 16_384) !== null;
+}
+
 /**
  * BB-4 plus structural ingress. Unknown top-level members remain in the
  * signed scope so a newer-minor field can never be silently stripped.
+ * Total over untrusted parsed JSON: anything that fails verification is null.
  */
 export async function verifyBundleBinding(
   value: unknown,
@@ -56,7 +68,7 @@ export async function verifyBundleBinding(
   const raw = record(value);
   const signature = record(raw?.signature);
   if (
-    !raw || Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384 ||
+    !raw || !withinBindingLimit(raw) ||
     raw.bindingVersion !== "1" || typeof raw.jobId !== "string" ||
     raw.jobId.length < 1 || raw.jobId.length > 160 ||
     typeof raw.role !== "string" || !ROLES.has(raw.role) ||
@@ -76,13 +88,21 @@ export async function verifyBundleBinding(
 
   const scope = { ...raw };
   delete scope.signature;
-  const hash = contentHash(scope);
+  let hash: string;
+  try {
+    hash = contentHash(scope);
+  } catch {
+    // No canonical form (e.g. JSON 1e400 or excessive nesting), so no signature can cover it.
+    return null;
+  }
   const verified = verifyResolvedPrimaryClaimSignature(
     Buffer.from(BINDING_DOMAIN + hash, "utf8"),
     sig,
     signer,
   );
-  return verified ? raw as BundleBinding : null;
+  return verified ? { ...raw, signature: {
+    algorithm: signature.algorithm, signer: signature.signer, value: signature.value,
+  } } as BundleBinding : null;
 }
 
 const bindingOrder = (left: BundleBinding, right: BundleBinding): number =>
@@ -92,8 +112,9 @@ const bindingOrder = (left: BundleBinding, right: BundleBinding): number =>
   contentHash(left).localeCompare(contentHash(right));
 
 /**
- * Deterministic total-work ceiling. Overflow is sticky in ScanState and must
- * make that side indeterminate; truncation can never manufacture absence.
+ * Deterministic work ceiling per signer of each jobId and role. Overflow is
+ * sticky in ScanState and must make that signer's side indeterminate;
+ * truncation can never manufacture absence.
  */
 export function boundedBundleBindings(
   bindings: Iterable<BundleBinding>,
@@ -103,7 +124,7 @@ export function boundedBundleBindings(
   for (const binding of bindings) unique.set(contentHash(binding), binding);
   const byRole = new Map<string, BundleBinding[]>();
   for (const binding of unique.values()) {
-    const key = bundleBindingRoleKey(binding.jobId, binding.role);
+    const key = bundleBindingOverflowKey(binding.jobId, binding.role, binding.signer);
     const values = byRole.get(key) ?? [];
     values.push(binding);
     byRole.set(key, values);

@@ -10,6 +10,7 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
+import { boundedJson, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -48,13 +49,13 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as {
+    const json = (await storageResponseJson(res)) as {
       success?: boolean;
       data?: Record<string, unknown>;
       owner?: string;
       programName?: string;
     };
-    return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data)
+    return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data) && boundedJson(json.data) !== null
       ? { data: json.data, owner: json.owner, programName: json.programName }
       : null;
   } catch {
@@ -121,7 +122,7 @@ export async function resolveOwnedAnchorByName(
 
   let candidates: ProgramCandidate[];
   try {
-    const body = await response.json() as { result?: unknown; response?: unknown };
+    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown };
     if (body.result !== 200 || !Array.isArray(body.response)) {
       return { status: "indeterminate", reason: "program-name lookup returned an invalid response" };
     }
@@ -153,7 +154,7 @@ export async function resolveOwnedAnchorByName(
     }
     let record: AnchorRecord | null = null;
     try {
-      const body = await read.json() as {
+      const body = await storageResponseJson(read) as {
         success?: boolean;
         data?: Record<string, unknown>;
         owner?: string;
@@ -161,7 +162,7 @@ export async function resolveOwnedAnchorByName(
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
-        body.programName === programName
+        boundedJson(body.data) !== null && body.programName === programName
       ) {
         record = { data: body.data, owner: body.owner, programName: body.programName };
       }
