@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -27,12 +28,9 @@ import {
   ownerClaim,
   revocationLogicalAddress,
   verifyListing,
+  verifyListingRevocation,
 } from "../src/catalog/listingVerification.js";
-import {
-  addRevocationCandidate,
-  isListingRevocationCandidate,
-  MAX_REVOCATION_CANDIDATES_PER_LISTING,
-} from "../src/catalog/scan.js";
+import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
@@ -579,11 +577,11 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
     "dacs1-revoked:cci-xm%3Aevm%3Amainnet%3A0x1234:offer:v3",
   );
 
-  const candidates = new Map<string, string[]>();
+  const candidates = new Map<string, Set<string>>();
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
   addRevocationCandidate(candidates, verified.contentHash, "stor-new");
   addRevocationCandidate(candidates, verified.contentHash, "stor-old");
-  assert.deepEqual(candidates.get(verified.contentHash), ["stor-old", "stor-new"]);
+  assert.deepEqual([...candidates.get(verified.contentHash) ?? []], ["stor-old", "stor-new"]);
 
   // Discovery is value-based: a conforming producer may use any colon-free,
   // opaque StorageProgram name and the marker remains discoverable.
@@ -591,41 +589,150 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
 });
 
-test("revocation candidate discovery is bounded per listing hash", () => {
-  const candidates = new Map<string, string[]>();
-  const listingHash = "a".repeat(64);
-  for (let index = 0; index < 20; index++) {
-    addRevocationCandidate(candidates, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
-  }
-  assert.equal(candidates.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
+test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
+  const markerSeed = Uint8Array.from(randomBytes(32));
+  const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
+  const markerListing = { ...listing, agentId: markerDid };
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(markerListing)}`, "utf8");
+  const listingSignature = Buffer.from(
+    await ed25519Sign(listingMessage, privateKeyFromSeed(markerSeed)),
+  ).toString("hex");
+  const verified = await verifyListing({
+    ...markerListing,
+    signature: { algorithm: "ed25519", signer: markerDid, value: listingSignature },
+  });
+  assert.ok(verified);
+  if (!verified) return;
+
+  // RFC 8785 form of a flat scope. The SDK canonicalizer refuses numbers outside
+  // the safe-integer range, so those markers are signed over the form a lenient
+  // producer emits (NaN/Infinity have no JSON form; JSON.stringify writes null).
+  const lenientHash = (scope: Record<string, unknown>) => createHash("sha256").update(
+    `{${Object.keys(scope).sort().map((key) => `${JSON.stringify(key)}:${JSON.stringify(scope[key])}`).join(",")}}`,
+    "utf8",
+  ).digest("hex");
+  const signedMarker = async (revokedAt: unknown) => {
+    const scope = {
+      listingId: listing.listingId,
+      listingVersion: listing.listingVersion,
+      listingContentHash: verified.contentHash,
+      revokedAt,
+    };
+    let sdkHash: string | null = null;
+    try {
+      sdkHash = contentHash(scope);
+    } catch {
+      // Outside the SDK's canonical number domain.
+    }
+    if (sdkHash) assert.equal(lenientHash(scope), sdkHash);
+    const hash = sdkHash ?? lenientHash(scope);
+    const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
+    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("hex");
+    return { ...scope, signature: { algorithm: "ed25519", signer: markerDid, value } };
+  };
+  const outcome = async (revokedAt: unknown) => {
+    const marker = await signedMarker(revokedAt);
+    const verdict = await verifyListingRevocation(marker, verified, 1)
+      .catch((error: Error) => `throws ${error.name}`);
+    return { candidate: isListingRevocationCandidate(marker), verified: verdict };
+  };
+
+  assert.deepEqual(await outcome(Date.now()), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(0), { candidate: true, verified: true });
+  const rejected = { candidate: false, verified: false };
+  assert.deepEqual({
+    fraction: await outcome(1791480684902.5),
+    negative: await outcome(-1),
+    nan: await outcome(Number.NaN),
+    infinity: await outcome(Number.POSITIVE_INFINITY),
+    aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
+    // Canonicalizable, so only the safe-integer check rejects it.
+    numericString: await outcome("1791480684902"),
+  }, {
+    fraction: rejected,
+    negative: rejected,
+    nan: rejected,
+    infinity: rejected,
+    aboveMaxSafeInteger: rejected,
+    numericString: rejected,
+  });
 });
 
-test("candidate pruning preserves an RB-4-verified locator across restart", () => {
-  const listingHash = "b".repeat(64);
-  const verified = `stor-${"f".repeat(40)}`;
-  const beforeRestart = new Map<string, string[]>();
-  for (let index = 0; index < MAX_REVOCATION_CANDIDATES_PER_LISTING; index++) {
-    addRevocationCandidate(beforeRestart, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
+test("a revocation candidate with no canonical form never stops the candidate loop", async () => {
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const listingSignature = Buffer.from(
+    await ed25519Sign(listingMessage, privateKeyFromSeed(seed)),
+  ).toString("hex");
+  const verified = await verifyListing({
+    ...listing,
+    signature: { algorithm: "ed25519", signer: did, value: listingSignature },
+  });
+  assert.ok(verified);
+  if (!verified) return;
+
+  const scope = {
+    listingId: listing.listingId,
+    listingVersion: listing.listingVersion,
+    listingContentHash: verified.contentHash,
+    revokedAt: Date.now(),
+  };
+  const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
+  // Valid required fields; the extension member has no canonical (CF-1) number form.
+  const infinite = { ...valid, futureField: JSON.parse("1e400") };
+  const fractional = { ...valid, extension: { weight: 0.5 } };
+  assert.equal(isListingRevocationCandidate(infinite), true);
+  assert.equal(await verifyListingRevocation(infinite, verified, 1), false);
+  assert.equal(await verifyListingRevocation(fractional, verified, 1), false);
+
+  const records = new Map<string, Record<string, unknown>>([
+    ["infinite", infinite], ["fractional", fractional], ["valid", valid],
+  ]);
+  const read = async (ref: string) => records.get(ref) ?? null;
+  const binding = await findValidListingRevocation(["infinite", "fractional", "valid"], verified, 1, read);
+  assert.equal(binding?.markerAnchor.locator, "valid");
+  assert.equal(binding?.markerContentHash, contentHash(scope));
+  assert.equal(await hasValidListingRevocation(["infinite", "fractional"], verified, 1, read), false);
+});
+
+test("revocation candidate discovery admits every locator once", () => {
+  const candidates = new Map<string, Set<string>>();
+  const listingHash = "a".repeat(64);
+  for (let index = 0; index < 40; index++) {
+    addRevocationCandidate(candidates, listingHash, `stor-${index.toString(16).padStart(40, "0")}`);
   }
-  addRevocationCandidate(beforeRestart, listingHash, verified, new Set([verified]));
+  addRevocationCandidate(candidates, listingHash, `stor-${"0".repeat(40)}`);
+  const admitted = [...candidates.get(listingHash) ?? []];
+  assert.equal(admitted.length, 40);
+  assert.equal(admitted[0], `stor-${"0".repeat(40)}`);
+});
 
-  const persisted = JSON.parse(JSON.stringify(Object.fromEntries(beforeRestart))) as Record<string, string[]>;
-  const afterRestart = new Map(Object.entries(persisted));
-  for (let index = 16; index < 32; index++) {
-    addRevocationCandidate(
-      afterRestart,
-      listingHash,
-      `stor-${index.toString(16).padStart(40, "0")}`,
-      new Set([verified]),
-    );
-  }
-
-  assert.equal(afterRestart.get(listingHash)?.length, MAX_REVOCATION_CANDIDATES_PER_LISTING);
-  assert.equal(afterRestart.get(listingHash)?.includes(verified), true);
-
-  const staleState = new Map([[listingHash, afterRestart.get(listingHash)!.filter((address) => address !== verified)]]);
-  addRevocationCandidate(staleState, listingHash, `stor-${"e".repeat(40)}`, new Set([verified]));
-  assert.equal(staleState.get(listingHash)?.includes(verified), true);
+test("revocation verification work per call is bounded and reports what it examined", async () => {
+  const perPass = 16;
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const listingSignature = Buffer.from(await ed25519Sign(listingMessage, privateKeyFromSeed(seed))).toString("hex");
+  const verified = await verifyListing({ ...listing, signature: { algorithm: "ed25519", signer: did, value: listingSignature } });
+  assert.ok(verified);
+  if (!verified) return;
+  const scope = { listingId: listing.listingId, listingVersion: listing.listingVersion, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("hex");
+  const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value } };
+  const refs = Array.from({ length: 20 }, (_, index) => `bogus-${index}`);
+  const reads: string[] = [];
+  const read = async (ref: string) => {
+    reads.push(ref);
+    if (ref === "valid") return valid;
+    return ref === "bogus-3" ? null : { ...valid, revokedAt: 2 };
+  };
+  const progress = { unread: [] as string[], rejected: [] as string[] };
+  assert.equal(await findValidListingRevocation([...refs, "valid"], verified, 1, read, undefined, progress), null);
+  assert.equal(reads.length, perPass);
+  assert.deepEqual(progress.unread, ["bogus-3"]);
+  assert.equal(progress.rejected.length, perPass - 1);
+  const remaining = [...refs, "valid"].filter((ref) => !progress.rejected.includes(ref) && !progress.unread.includes(ref));
+  const binding = await findValidListingRevocation([...remaining, ...progress.unread], verified, 1, read);
+  assert.equal(binding?.markerAnchor.locator, "valid");
 });
 
 test("public discovery excludes revoked listings and empty sellers", () => {
@@ -676,6 +783,37 @@ test("indexer rejects a shape-valid listing with a fake signature", async () => 
       async () => { throw new Error("identity unavailable"); },
     );
     assert.equal(record.listings.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("indexer skips a listing with no canonical form and still indexes the next listing", async () => {
+  const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
+  const malformedAnchor = `stor-${"d".repeat(40)}`;
+  const validAnchor = `stor-${"e".repeat(40)}`;
+  // JSON `1e400` parses to Infinity, which has no canonical (CF-1) number form.
+  const bodies: Record<string, string> = {
+    [malformedAnchor]: JSON.stringify(signed).replace(/}$/, ',"futureField":1e400}'),
+    [validAnchor]: JSON.stringify(signed),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = bodies[String(input).split("/").pop() ?? ""];
+    return data
+      ? new Response(`{"success":true,"owner":"0x${did.slice(-64)}","programName":"dacs1:listing:test","data":${data}}`,
+        { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(null, { status: 404 });
+  };
+  try {
+    const record = await indexRegistration(
+      { primaryClaim: did, displayName: "Seller", listingAnchors: [malformedAnchor, validAnchor] },
+      undefined,
+      async () => { throw new Error("identity unavailable"); },
+    );
+    assert.deepEqual(record.listings.map((item) => item.anchor.locator), [validAnchor]);
   } finally {
     globalThis.fetch = originalFetch;
   }

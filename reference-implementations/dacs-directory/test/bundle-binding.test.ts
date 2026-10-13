@@ -131,7 +131,8 @@ test("BB-6 budget and the total discovery ceiling fail closed", async () => {
 
   const bounded = boundedBundleBindings(candidates, 8);
   assert.equal(bounded.bindings.length, 8);
-  assert.deepEqual(bounded.overflowKeys, [bundleBindingRoleKey(candidates[0].jobId, "buyer")]);
+  assert.equal(bounded.overflowKeys.length, 1);
+  assert.ok(bounded.overflowKeys[0].startsWith(bundleBindingRoleKey(candidates[0].jobId, "buyer")));
   const overflow = await resolveBundleSide({
     jobId: candidates[0].jobId,
     role: "buyer",
@@ -141,6 +142,32 @@ test("BB-6 budget and the total discovery ceiling fail closed", async () => {
     inspect: async () => { throw new Error("must not fetch"); },
   });
   assert.deepEqual(overflow, { disposition: "indeterminate", reason: "bundle-binding discovery cap exhausted" });
+});
+
+test("the discovery ceiling is per signer: other signers' bindings leave the role holder's side intact", async () => {
+  const holder = await binding({ native: native(1), hash: "a".repeat(64) });
+  const others = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
+    const seed = Uint8Array.from(Buffer.alloc(32, 100 + index));
+    const claim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
+    const scope = { bindingVersion: "1" as const, jobId: holder.jobId, role: "buyer" as const, logicalAddress: holder.logicalAddress,
+      nativeAddress: native(100 + index), bundleContentHash: "b".repeat(64), signer: claim };
+    const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`, "utf8"),
+      privateKeyFromSeed(seed))).toString("base64url");
+    return { ...scope, signature: { algorithm: "ed25519" as const, signer: claim, value } };
+  }));
+  for (const other of others) assert.ok(await verifyBundleBinding(other));
+  const bounded = boundedBundleBindings([...others, holder]);
+  assert.deepEqual(bounded.overflowKeys, []);
+  assert.equal(bounded.bindings.length, 34);
+  const resolution = await resolveBundleSide({
+    jobId: holder.jobId,
+    role: "buyer",
+    expectedSigner: dids[0],
+    bindings: bounded.bindings,
+    overflow: bounded.overflowKeys.length > 0,
+    inspect: async (candidate) => ({ value: candidate, bundleContentHash: candidate.bundleContentHash, fullSignatureStanding: true }),
+  });
+  assert.equal(resolution.disposition, "present");
 });
 
 test("BB-5 poisoned content hashes are inert and cannot win selection", async () => {

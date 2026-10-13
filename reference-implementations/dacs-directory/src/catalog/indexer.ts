@@ -14,6 +14,7 @@
  * advisory by spec; browser verification repeats cryptographic checks but does
  * not independently prove chain inclusion while RPC bytes traverse the server.
  */
+import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -23,9 +24,15 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 // The SDK doesn't export sessionAnchorName from its public barrel
 // (dacs-sdk#14) — reach into the vendored build.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
-import { deriveAnchorAddress, readAnchor, readAnchorRecord } from "./chain.js";
+import { readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
-import { findValidListingRevocation, ownerClaim, verifyListing } from "./listingVerification.js";
+import {
+  findValidListingRevocation,
+  ownerClaim,
+  REVOCATION_VERIFICATIONS_PER_PASS,
+  verifyListing,
+  type RevocationCandidateProgress,
+} from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -33,17 +40,20 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
-  findProgramAddress,
+  nextRevocationCandidates,
+  resolveProgramAddress,
   loadScanState,
   recordListingRejection,
+  recordRevocationProgress,
   type ListingRejectionCode,
+  throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
-  bundleBindingRoleKey,
+  bundleBindingOverflowKey,
   resolveBundleSide,
   verifyBundleBinding,
 } from "./bundleBinding.js";
@@ -65,6 +75,7 @@ import type {
   BundleBinding,
   ListingSummary,
   Registration,
+  RegisteredDeal,
   SellerRecord,
 } from "./types.js";
 
@@ -101,6 +112,7 @@ export async function indexRegistration(
   prior?: SellerRecord,
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
+  onOmitted?: (kind: "bindings" | "deals", count: number) => void,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -135,11 +147,12 @@ export async function indexRegistration(
   const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown> }>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
-  const revocations = loadScanState().revocations ?? {};
+  const { verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
-    const verified = await verifyListing(anchored.data);
+    // A listing with no canonical form throws while hashing; skip it like any invalid one.
+    const verified = await verifyListing(anchored.data).catch(() => null);
     if (!verified) continue;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
@@ -163,16 +176,24 @@ export async function indexRegistration(
       : 1;
     const validity = scope.validity as { notAfter?: unknown } | undefined;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
-    const storedCandidates = revocations[verified.contentHash];
-    const revocationAddresses = Array.isArray(storedCandidates)
-      ? storedCandidates
-      : storedCandidates ? [storedCandidates] : [];
+    // Verification work is bounded per pass: markers already verified come first (even when
+    // an older snapshot omitted them from the queue), then the next pending candidates,
+    // those anchored by the listing's own owner first. Only one batch is ever selected.
+    const limit = REVOCATION_VERIFICATIONS_PER_PASS;
+    const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const revocationBinding = await findValidListingRevocation(
-      revocationAddresses,
+      [
+        ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
+        ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
+      ],
       verified,
       version,
       readAnchor,
+      undefined,
+      progress,
+      limit,
     );
+    recordRevocationProgress(verified.contentHash, progress);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -218,14 +239,28 @@ export async function indexRegistration(
   const scanState = loadScanState();
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
+  // Only bindings signed by a deal's own buyer or seller are verified, so other signers'
+  // bindings for the same jobId add no work here (BB-6).
+  const holders = new Set((reg.deals ?? []).flatMap((deal) => [deal.owners.buyer, deal.owners.seller]
+    .map((claim) => `${deal.jobId}\n${canonicalDemosAgentClaim(claim)}`)));
+  const signedByHolder = (binding: BundleBinding) => typeof binding?.signer === "string" &&
+    canonicalDemosAgentClaim(binding.signer) !== null && holders.has(`${binding.jobId}\n${canonicalDemosAgentClaim(binding.signer)}`);
   const rawBindings = [
-    ...[...relevantJobs].flatMap((jobId) => scanState.bundleBindings?.[jobId] ?? []),
+    ...[...relevantJobs].flatMap((jobId) => ownArray(scanState.bundleBindings, jobId)),
     ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
-  ];
+  ].filter(signedByHolder);
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
-  for (const deal of reg.deals ?? []) {
-    const jobBindings = verifiedBindings.filter((binding) => binding.jobId === deal.jobId);
+  onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
+  const indexDeal = async (deal: RegisteredDeal): Promise<void> => {
+    // Only bindings signed by this deal's role holders are discovery for it (BB-6).
+    const roleHolder = (role: string) => role === "buyer" ? deal.owners.buyer : role === "seller" ? deal.owners.seller : null;
+    const jobBindings = verifiedBindings.filter((binding) => {
+      const holder = roleHolder(binding.role);
+      return binding.jobId === deal.jobId && holder !== null &&
+        canonicalDemosAgentClaim(binding.signer) !== null &&
+        canonicalDemosAgentClaim(binding.signer) === canonicalDemosAgentClaim(holder);
+    });
     const buyerInitial = await readAnchor(deal.buyerBundleRef);
     const resolveListing = async (ref: Record<string, unknown>) => {
       const id = String(ref.listingId ?? "");
@@ -289,7 +324,7 @@ export async function indexRegistration(
         role: "buyer",
         expectedSigner: deal.owners.buyer,
         bindings: jobBindings,
-        overflow: overflowBindings.has(bundleBindingRoleKey(deal.jobId, "buyer")),
+        overflow: overflowBindings.has(bundleBindingOverflowKey(deal.jobId, "buyer", deal.owners.buyer)),
         inspect,
       });
       const sellerResolution = await resolveBundleSide({
@@ -297,7 +332,7 @@ export async function indexRegistration(
         role: "seller",
         expectedSigner: deal.owners.seller,
         bindings: jobBindings,
-        overflow: overflowBindings.has(bundleBindingRoleKey(deal.jobId, "seller")),
+        overflow: overflowBindings.has(bundleBindingOverflowKey(deal.jobId, "seller", deal.owners.seller)),
         inspect,
       });
       if (buyerResolution.disposition !== "present" || sellerResolution.disposition !== "present") {
@@ -308,7 +343,7 @@ export async function indexRegistration(
           reputationEligible: false,
           verifiedAt: now,
         });
-        continue;
+        return;
       }
       const resolvedDeal = {
         ...deal,
@@ -356,7 +391,7 @@ export async function indexRegistration(
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
         verifiedAt: now,
       });
-      continue;
+      return;
     }
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
@@ -373,7 +408,8 @@ export async function indexRegistration(
             : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
               : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
           if (!name) return null;
-          const address = findProgramAddress(deal.owners.buyer, name) ?? deriveAnchorAddress(deal.owners.buyer, name);
+          const address = resolveProgramAddress(deal.owners.buyer, name);
+          if (!address) return null;
           const raw = await readAnchor(address);
           if (raw) resolvedArtifacts.push({ kind, raw });
           return raw;
@@ -429,7 +465,8 @@ export async function indexRegistration(
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
         ? bundle.anchoredByRole : undefined,
-      bundleContentHash: signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
+      bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
@@ -437,6 +474,16 @@ export async function indexRegistration(
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
+  };
+  for (const deal of reg.deals ?? []) {
+    // One deal's artifacts can never stop the next deal: a failure is an explicit unverified record.
+    try {
+      await indexDeal(deal);
+    } catch (error) {
+      throwIfInfrastructureError(error);
+      onOmitted?.("deals", 1);
+      dealCandidates.push({ ...deal, signatureVerified: false, refsVerified: false, reputationEligible: false, verifiedAt: now });
+    }
   }
   const deals = dedupeVerifiedDeals(dealCandidates);
 
