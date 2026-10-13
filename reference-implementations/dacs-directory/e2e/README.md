@@ -2,7 +2,7 @@
 
 The Playwright suite has two layers:
 
-- `npm run test:e2e` runs seven deterministic browser regressions: six mocked `/try` payment-safety scenarios plus a `/try-chat` replay check that proves the explainer cannot dispatch a purchase. It never spends DEM or USDC and is safe for CI.
+- `npm run test:e2e` runs two deterministic passes. The first (`playwright.config.ts`, port 3400) runs the landing-page, seller-registration, mocked `/try` payment-safety and `/try-chat` replay regressions. The second (`playwright.recovery.config.ts`, port 3401) builds `/try` with `NEXT_PUBLIC_GATEWAY_DEMO_RECOVERY_ONLY=1` and runs `try-dacs-recovery.spec.ts`, which proves the drain sends no procurement POST: fresh starts are disabled, a run with a job id is read, and a run without one goes to manual reconciliation. The default config ignores that spec because it needs the flag. Neither pass spends DEM or USDC; both are safe for CI.
 - `npm run test:e2e:live` contains five serial checks against the live Butler gateway. It is skipped unless the operator explicitly authorizes a capped testnet purchase.
 
 ## Install the browser

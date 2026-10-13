@@ -142,18 +142,25 @@ export function withExclusiveProcurementLock<T>(
  *   on the stale capture could overwrite the live run's recovery handle.
  * - same run, jobId now known (another tab already re-POSTed) → READ that
  *   job; a second POST is unnecessary.
- * - same run, still no jobId → the idempotent re-POST proceeds.
+ * - same run, still no jobId → the idempotent re-POST proceeds, EXCEPT in
+ *   the recovery-only drain: the original POST may never have reached the
+ *   gateway, so the re-POST could be the first request for its key and start
+ *   (and pay for) a new job. Without a read-only lookup by key, the run is
+ *   handed to manual reconciliation instead.
  */
 export type ResumeDispatchDecision =
   | { action: "abort-stale" }
   | { action: "read"; jobId: string }
-  | { action: "post" };
+  | { action: "post" }
+  | { action: "manual-reconcile"; runId: string };
 
 export function resumeDispatchDecision(
   captured: StoredProcurementRun,
   current: StoredProcurementRun | null,
+  { recoveryOnly = false }: { recoveryOnly?: boolean } = {},
 ): ResumeDispatchDecision {
   if (!current || current.runId !== captured.runId) return { action: "abort-stale" };
   if (current.jobId) return { action: "read", jobId: current.jobId };
+  if (recoveryOnly) return { action: "manual-reconcile", runId: current.runId };
   return { action: "post" };
 }

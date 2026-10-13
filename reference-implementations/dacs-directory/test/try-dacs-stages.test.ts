@@ -194,6 +194,19 @@ test("resume decisions: stale records abort, known job ids read, only the raced 
   assert.deepEqual(resumeDispatchDecision(captured, { ...captured }), { action: "post" });
 });
 
+test("recovery-only resume decisions never post: a record without a job id goes to manual reconciliation", () => {
+  const captured: StoredProcurementRun = { runId: "run-x", goal: "g", input: { budgetDem: 5 }, startedAt: at };
+  const drain = { recoveryOnly: true };
+  // The original POST may never have reached the gateway, so re-POSTing the
+  // stored key during the drain could create (and pay for) a brand-new job.
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured }, drain), { action: "manual-reconcile", runId: "run-x" });
+  // A job id learned meanwhile (e.g. by another tab) is still read-only recovery.
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured, jobId: "job-1" }, drain), { action: "read", jobId: "job-1" });
+  assert.deepEqual(resumeDispatchDecision(captured, null, drain), { action: "abort-stale" });
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured, runId: "run-y" }, drain), { action: "abort-stale" });
+  assert.deepEqual(resumeDispatchDecision(captured, { ...captured }, { recoveryOnly: false }), { action: "post" });
+});
+
 test("a stale resume queued behind a newer run neither posts nor touches the newer record", async () => {
   const locks = fakeLockManager();
   const signal = new AbortController().signal;

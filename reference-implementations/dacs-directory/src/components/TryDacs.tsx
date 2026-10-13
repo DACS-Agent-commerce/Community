@@ -36,7 +36,7 @@ import {
   type FieldErrors,
 } from "./try-dacs-forms.js";
 import AgentInputForm from "./try-forms/AgentInputForm.js";
-import { GATEWAY_DEMO_RECOVERY_MESSAGE, gatewayDemoRecoveryOnly } from "./gateway-demo-recovery.js";
+import { GATEWAY_DEMO_RECOVERY_MESSAGE, gatewayDemoManualReconcileMessage, gatewayDemoRecoveryOnly } from "./gateway-demo-recovery.js";
 import { ProcurementLockUnavailableError, parseStoredProcurementRun, resumeDispatchDecision, stageEvents, withExclusiveProcurementLock, type LockRequestor, type StoredProcurementRun } from "./try-dacs-stages.js";
 
 const BUTLER = (process.env.NEXT_PUBLIC_BUTLER_ORIGIN ?? "http://127.0.0.1:8402").replace(/\/$/, "");
@@ -57,6 +57,14 @@ class StaleResumeRecordError extends Error {
   constructor() {
     super("This recovery record was reconciled in another tab (dismissed, resumed there, or replaced by a new run), so nothing was sent from this tab.");
     this.name = "StaleResumeRecordError";
+  }
+}
+
+/** Thrown when a recovery-only resume would have to re-POST a record with no job id. */
+class ManualReconcileRequiredError extends Error {
+  constructor(runId: string) {
+    super(gatewayDemoManualReconcileMessage(runId));
+    this.name = "ManualReconcileRequiredError";
   }
 }
 
@@ -946,8 +954,9 @@ export default function TryDacs() {
         // section re-validates its captured record against storage NOW and
         // must never act on (or overwrite) a record it no longer owns.
         job = await withExclusiveProcurementLock(browserLocks(), controller.signal, async () => {
-          const decision = resumeDispatchDecision(stored, readStoredRun());
+          const decision = resumeDispatchDecision(stored, readStoredRun(), { recoveryOnly: GATEWAY_DEMO_RECOVERY_ONLY });
           if (decision.action === "abort-stale") throw new StaleResumeRecordError();
+          if (decision.action === "manual-reconcile") throw new ManualReconcileRequiredError(decision.runId);
           if (decision.action === "read") {
             // Another tab already learned this run's job id — read it, never re-POST.
             const { response, body } = await fetchJsonBeforeDeadline(`${BUTLER}/demo/procurement/${encodeURIComponent(decision.jobId)}`, { signal: controller.signal }, deadline);
@@ -972,9 +981,11 @@ export default function TryDacs() {
       setProcurementJob(job);
       await followProcurementJob(job, controller, deadline);
     } catch (cause) {
-      if (cause instanceof StaleResumeRecordError) {
-        // The record now belongs to another run (or is gone); this tab must
-        // not keep its key or offer procurement retries against it.
+      if (cause instanceof StaleResumeRecordError || cause instanceof ManualReconcileRequiredError) {
+        // The record now belongs to another run (or is gone), or the drain
+        // forbids re-sending it; this tab must not keep its key or offer
+        // procurement retries against it. A manual-reconcile record stays
+        // stored so the banner keeps showing its run id until dismissed.
         procurementRunId.current = null;
         setPlan(null); setPhase("idle");
         setError(cause.message);
@@ -1080,7 +1091,7 @@ export default function TryDacs() {
         <section className="resume-banner" role="alert">
           <div>
             <strong>A procurement run from this browser is still on record</strong>
-            <p>Started {new Date(storedRun.startedAt).toLocaleString()}{storedRun.jobId ? ` · job ${compact(storedRun.jobId, 8, 6)}` : " · the job id was never received"}. Resuming reconnects under the same idempotency key, so it can never start a second purchase.</p>
+            <p>Started {new Date(storedRun.startedAt).toLocaleString()}{storedRun.jobId ? ` · job ${compact(storedRun.jobId, 8, 6)}` : " · the job id was never received"}. {GATEWAY_DEMO_RECOVERY_ONLY && !storedRun.jobId ? `New purchases are paused, so this run is never re-sent: Check & resume only follows a job id another tab received. Otherwise give the operator run id ${storedRun.runId}.` : "Resuming reconnects under the same idempotency key, so it can never start a second purchase."}</p>
           </div>
           <div className="resume-actions">
             <button className="ghost-btn" onClick={() => { if (window.confirm("Dismiss this reminder? If the run paid, its job remains preserved on the gateway — only dismiss once you no longer need this browser to track it.")) updateStoredRun(null); }}>Dismiss</button>

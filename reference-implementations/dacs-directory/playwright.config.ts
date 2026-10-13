@@ -5,6 +5,9 @@ const livePaidRun = process.env.RUN_LIVE_PAID_E2E === "1";
 
 export default defineConfig({
   testDir: "./e2e",
+  // Needs NEXT_PUBLIC_GATEWAY_DEMO_RECOVERY_ONLY=1 at build time; it runs
+  // only under playwright.recovery.config.ts on its own server.
+  testIgnore: /try-dacs-recovery\.spec\.ts$/,
   outputDir: livePaidRun ? "test-results/playwright-live" : "test-results/playwright",
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),

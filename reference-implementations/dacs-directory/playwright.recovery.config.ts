@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  testMatch: /try-dacs-recovery\.spec\.ts$/,
   outputDir: "test-results/playwright-recovery",
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
