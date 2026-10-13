@@ -13,7 +13,17 @@ const blocks = [...guide.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => mat
 const install = blocks.find((block) => block.includes("sdk_rev="));
 const checks = blocks.find((block) => block.includes("npm run typecheck"));
 assert.ok(install && checks, "documented install and check commands are present");
-const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+const realGit = execFileSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+const gitPathVariables = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_SHALLOW_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+function snapshot(directory) {
+  return readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).map((entry) => [
+    entry.name, entry.isDirectory() ? snapshot(join(directory, entry.name)) : readFileSync(join(directory, entry.name)),
+  ]);
+}
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "dacs-local-workflow-"));
@@ -29,11 +39,12 @@ function fixture(t) {
     DACS_DIRECTORY_DATA: join(cwd, "data"),
   };
   writeFileSync(join(bin, "git"), `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 if (args.some(a => ['clone', 'fetch', 'checkout'].includes(a))) {
-  appendFileSync(process.env.WORKFLOW_LOG, JSON.stringify({tool:'git', args})+'\\n');
+  const gitPaths = Object.fromEntries(${JSON.stringify(gitPathVariables)}.filter(key => key in process.env).map(key => [key, process.env[key]]));
+  appendFileSync(process.env.WORKFLOW_LOG, JSON.stringify({tool:'git', args, gitPaths})+'\\n');
   if (args.includes('fetch')) process.exit(0); // The pin is already available offline.
   if (args[0] === 'clone') args.splice(1, args.length-2, '--no-local', process.env.WORKFLOW_SDK_SOURCE);
 }
@@ -41,8 +52,8 @@ const run = spawnSync(process.env.WORKFLOW_REAL_GIT, args, {stdio:'inherit'});
 process.exit(run.status ?? 1);
 `, { mode: 0o755 });
   writeFileSync(join(bin, "npm"), `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 appendFileSync(process.env.WORKFLOW_LOG, JSON.stringify({tool:'npm', args, data:process.env.DACS_DIRECTORY_DATA})+'\\n');
 if (args[0] === 'test' || (args[1] === 'build' && process.env.WORKFLOW_CHECKS)) {
@@ -104,7 +115,11 @@ test("documented checks leave development data untouched and clean temporary cat
 });
 
 test("documented SDK install rejects redirected and shared checkouts before mutations", (t) => {
-  for (const kind of ["vendor-symlink", "sdk-symlink", "dangling-symlink", "git-symlink", "linked-worktree", "shared-objects", "dirty"]) {
+  for (const kind of [
+    "vendor-symlink", "sdk-symlink", "dangling-symlink", "git-symlink", "linked-worktree",
+    "objects-symlink", "objects-pack-symlink", "objects-fanout-symlink", "common-directory",
+    "shared-objects", "http-alternates", "dangling-alternates", "dirty",
+  ]) {
     const f = fixture(t);
     const source = sdkFixture(f);
     const vendor = join(f.cwd, "vendor");
@@ -127,18 +142,33 @@ test("documented SDK install rejects redirected and shared checkouts before muta
           symlinkSync(join(source, ".git"), join(sdk, ".git"));
         } else if (kind === "shared-objects") {
           writeFileSync(join(sdk, ".git/objects/info/alternates"), `${source}/.git/objects\n`);
+        } else if (kind === "objects-symlink") {
+          rmSync(join(sdk, ".git/objects"), { recursive: true });
+          symlinkSync(join(source, ".git/objects"), join(sdk, ".git/objects"));
+        } else if (kind === "objects-pack-symlink" || kind === "objects-fanout-symlink") {
+          const entry = kind === "objects-pack-symlink" ? "pack" : readdirSync(join(source, ".git/objects")).find(name => /^[0-9a-f]{2}$/.test(name));
+          assert.ok(entry, "fixture has loose objects");
+          rmSync(join(sdk, ".git/objects", entry), { recursive: true });
+          symlinkSync(join(source, ".git/objects", entry), join(sdk, ".git/objects", entry));
+        } else if (kind === "common-directory") {
+          writeFileSync(join(sdk, ".git/commondir"), `${source}/.git\n`);
+        } else if (kind === "http-alternates") {
+          writeFileSync(join(sdk, ".git/objects/info/http-alternates"), "https://example.invalid/objects\n");
+        } else if (kind === "dangling-alternates") {
+          symlinkSync(join(f.root, "missing"), join(sdk, ".git/objects/info/alternates"));
         } else writeFileSync(join(sdk, "README.md"), "local edit\n");
       }
     }
+    const before = snapshot(source);
     const run = f.run(install);
     assert.notEqual(run.status, 0, kind);
     assert.match(run.stderr, /stopped:/, kind);
     assert.deepEqual(f.commands(), [], `${kind}: no clone, fetch, checkout or npm`);
-    assert.equal(readFileSync(join(source, "README.md"), "utf8"), "isolated fixture\n");
+    assert.deepEqual(snapshot(source), before, `${kind}: external checkout and object store are unchanged`);
   }
 });
 
-test("documented SDK install accepts new and existing private clean clones", (t) => {
+test("documented SDK install accepts private clean clones and ignores Git path overrides", (t) => {
   for (const existing of [false, true]) {
     const f = fixture(t);
     const source = sdkFixture(f);
@@ -146,10 +176,21 @@ test("documented SDK install accepts new and existing private clean clones", (t)
       mkdirSync(join(f.cwd, "vendor"));
       cpSync(source, join(f.cwd, "vendor/dacs-sdk"), { recursive: true });
     }
-    const run = f.run(install);
+    Object.assign(f.env, {
+      GIT_DIR: join(source, ".git"), GIT_WORK_TREE: source, GIT_COMMON_DIR: join(source, ".git"),
+      GIT_INDEX_FILE: join(source, ".git/index"), GIT_SHALLOW_FILE: join(source, ".git/shallow"),
+      GIT_OBJECT_DIRECTORY: join(source, ".git/objects"), GIT_ALTERNATE_OBJECT_DIRECTORIES: join(source, ".git/objects"),
+    });
+    const before = snapshot(source);
+    // Path neutralization stays within the subshell, preserving the caller's Git setup.
+    const run = f.run(`${install}\nresult=$?\n[ "$GIT_OBJECT_DIRECTORY" = "$WORKFLOW_SDK_SOURCE/.git/objects" ] || exit 99\nexit "$result"`);
     assert.equal(run.status, 0, run.stderr);
     const commands = f.commands();
     assert.equal(commands.filter((command) => command.tool === "git").length, existing ? 2 : 3);
+    for (const command of commands.filter((command) => command.tool === "git")) {
+      assert.deepEqual(command.gitPaths, {}, "Git mutations use checkout-local paths");
+    }
+    assert.deepEqual(snapshot(source), before, "external Git files are unchanged");
     assert.deepEqual(commands.filter((command) => command.tool === "npm").map((command) => command.args), [
       ["ci", "--no-audit", "--no-fund"], ["run", "build"], ["ci", "--no-audit", "--no-fund"],
     ]);

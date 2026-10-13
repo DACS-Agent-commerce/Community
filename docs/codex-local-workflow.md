@@ -45,6 +45,10 @@ building whatever the SDK checkout happens to contain. It builds only after
   set -euo pipefail
   die() { echo "stopped: $*" >&2; exit 1; }
 
+  # Resolve all Git paths from the selected checkout, not the caller's shell.
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_SHALLOW_FILE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
   sdk_rev=$(sed -n 's/^SDK_REV="\([0-9a-f]\{40\}\)"$/\1/p' scripts/setup-sdk.sh)
   [ "${#sdk_rev}" -eq 40 ] || die "no 40-hex SDK_REV found in scripts/setup-sdk.sh"
 
@@ -62,8 +66,17 @@ building whatever the SDK checkout happens to contain. It builds only after
   [ "$(cd "$sdk" && pwd -P)" = "$sdk" ] || die "$sdk resolves outside this worktree"
   [ -d "$sdk/.git" ] && [ ! -L "$sdk/.git" ] \
     || die "$sdk needs a private .git directory; linked worktrees are not supported"
-  [ ! -e "$sdk/.git/objects/info/alternates" ] \
-    || die "$sdk shares an object store; use a standalone clone"
+  objects="$sdk/.git/objects"
+  [ -d "$objects" ] && [ ! -L "$objects" ] \
+    && [ "$(cd "$objects" && pwd -P)" = "$objects" ] \
+    && [ "$(git -C "$sdk" rev-parse --path-format=absolute --git-path objects)" = "$objects" ] \
+    || die "$sdk needs its own local .git/objects directory"
+  object_links=$(find "$objects" -type l -print -quit) || die "cannot inspect $objects"
+  [ -z "$object_links" ] || die "$sdk has redirected object-store entries; use a standalone clone"
+  for alternate in alternates http-alternates; do
+    [ ! -e "$objects/info/$alternate" ] && [ ! -L "$objects/info/$alternate" ] \
+      || die "$sdk shares an object store; use a standalone clone"
+  done
   [ "$(git -C "$sdk" rev-parse --show-toplevel)" = "$sdk" ] \
     || die "$sdk is not a Git checkout of its own; inspect it, do not overwrite it"
   [ -z "$(git -C "$sdk" status --porcelain)" ] \
@@ -83,6 +96,9 @@ reinstalls. If it prints `stopped: ...` or any command fails, fix that before
 continuing; do not run the checks below on a partial install. Access to the SDK
 repository may require your normal GitHub authentication; do not put a token in
 a remote URL or committed file.
+
+The existing clone's `origin` is used for fetching, but its checked-out `HEAD`
+must still match the exact SDK commit pinned by this repository.
 
 ## Run deterministic checks
 
