@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
+import { isAnchorReceipt } from "@kynesyslabs/dacs/artifacts";
 import { canonicalize, contentHash, listingAddress, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
@@ -116,9 +117,9 @@ const request = (body: Record<string, unknown>) => new NextRequest(
   { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
 );
 
-test("listing confirmation verifies coordinates, owner, identity, signature, hash, and tuple", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input, init) => {
+/** Stub the Demos node: native readback, canonical write, and its block. */
+function stubChain(overrides: { nativeMetadata?: Record<string, unknown>; block?: Record<string, unknown> } = {}): void {
+  globalThis.fetch = async (_input, init) => {
     if (init?.method !== "POST") {
       return Response.json({
         success: true,
@@ -126,7 +127,7 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
         owner,
         programName,
         storageAddress: anchorAddress,
-        metadata,
+        metadata: overrides.nativeMetadata ?? metadata,
         createdByTx: transactionHash,
         interactionTxs: [],
       });
@@ -143,6 +144,7 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
           hash: "block-5",
           content: { timestamp: 1_786_360_000, ordered_transactions: [transactionHash] },
           validation_data: { validators: ["fixture-validator"], quorum: 1 },
+          ...overrides.block,
         },
       });
     }
@@ -151,6 +153,11 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     }
     return Response.json({ result: 500, response: null });
   };
+}
+
+test("listing confirmation verifies coordinates, owner, identity, signature, hash, and tuple", async () => {
+  const originalFetch = globalThis.fetch;
+  stubChain();
   try {
     const response = await POST(request(coordinates));
     assert.equal(response.status, 200);
@@ -162,7 +169,49 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     assert.equal(body.sellerClaim, sellerClaim);
     assert.equal(body.listingId, scope.listingId);
     assert.equal(body.listingVersion, 1);
-    assert.equal((body.anchorReceipt as Record<string, unknown>).state, "finalized");
+    const receipt = body.anchorReceipt as Record<string, unknown>;
+    assert.equal(isAnchorReceipt(receipt), true);
+    assert.equal(receipt.state, "finalized");
+    assert.equal(receipt.observationDisposition, "established");
+    assert.equal(receipt.logicalAddress, logicalAddress);
+    assert.equal(receipt.nativeAddress, anchorAddress);
+    assert.equal(receipt.contentHash, listingHash);
+    assert.deepEqual(receipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("listing confirmation never registers before the write is BFT-final", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const block of [
+      { status: "pending" },
+      { content: { timestamp: 1_786_360_000, ordered_transactions: [] } },
+      { validation_data: undefined },
+    ]) {
+      stubChain({ block });
+      const response = await POST(request(coordinates));
+      assert.equal(response.status, 202, JSON.stringify(block));
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(body.confirmed, false);
+      assert.equal(body.state, "finality-pending");
+      assert.equal(body.anchorReceipt, undefined);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("listing confirmation rejects native metadata that does not bind the signed artifact", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    stubChain({ nativeMetadata: { ...metadata, envelopeHash: "0".repeat(64) } });
+    const response = await POST(request(coordinates));
+    assert.equal(response.status, 409);
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body.state, "finality-failed");
+    assert.equal(body.anchorReceipt, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

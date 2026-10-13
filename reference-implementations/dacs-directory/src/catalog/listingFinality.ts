@@ -5,7 +5,7 @@ import {
   demosWriteEvidenceToAnchorReceipt,
   type DemosWriteEvidence,
 } from "../sdkDemosWriteEvidence.js";
-import type { AnchorReceipt } from "@kynesyslabs/dacs/artifacts";
+import { isAnchorReceipt, type AnchorReceipt } from "@kynesyslabs/dacs/artifacts";
 
 import { readAnchorRecord } from "./chain.js";
 import { storageWriteCandidate } from "./scan.js";
@@ -96,6 +96,37 @@ export type FinalizedListingAnchorResult =
   | { status: "rejected"; reason: string }
   | { status: "finalized"; receipt: AnchorReceipt };
 
+export interface ExpectedListingAnchorWrite {
+  anchorAddress: string;
+  logicalAddress: string;
+  listingContentHash: string;
+  sellerClaim: string;
+  transactionRef: string;
+}
+
+/**
+ * Registration admits a Listing only on a receipt that passes the SDK's CORE
+ * §5.1 AnchorReceipt gate, records an established finalized write, and binds
+ * this exact listing write. Returns the rejection reason, or null to admit.
+ */
+export function listingAnchorReceiptRejection(
+  receipt: unknown,
+  expected: ExpectedListingAnchorWrite,
+): string | null {
+  if (!isAnchorReceipt(receipt)) return "anchor receipt is not a CORE §5.1 AnchorReceipt";
+  if (receipt.state !== "finalized" || receipt.observationDisposition !== "established") {
+    return "anchor receipt does not establish a finalized write";
+  }
+  if (
+    receipt.logicalAddress !== expected.logicalAddress ||
+    receipt.nativeAddress !== expected.anchorAddress ||
+    receipt.contentHash !== expected.listingContentHash ||
+    receipt.writer !== expected.sellerClaim ||
+    receipt.transactionRef.value !== expected.transactionRef
+  ) return "anchor receipt does not bind this listing write";
+  return null;
+}
+
 /**
  * Establish a portable finalized Demos AnchorReceipt from canonical transaction,
  * BFT-confirmed block, and exact native readback. Read visibility alone never
@@ -183,15 +214,14 @@ export async function finalizedListingAnchorReceipt(input: {
       metadata.envelopeHash !== nativeValueHash
     ) return { status: "rejected", reason: "native listing metadata does not bind the signed artifact" };
     assertDemosWriteEvidence(evidence);
-    return {
-      status: "finalized",
-      receipt: demosWriteEvidenceToAnchorReceipt({
-        logicalAddress: input.logicalAddress,
-        contentHash: input.listingContentHash,
-        writer: input.sellerClaim,
-        evidence,
-      }),
-    };
+    const receipt = demosWriteEvidenceToAnchorReceipt({
+      logicalAddress: input.logicalAddress,
+      contentHash: input.listingContentHash,
+      writer: input.sellerClaim,
+      evidence,
+    });
+    const rejection = listingAnchorReceiptRejection(receipt, { ...input, transactionRef: txRef });
+    return rejection ? { status: "rejected", reason: rejection } : { status: "finalized", receipt };
   } catch (error) {
     return {
       status: "pending",

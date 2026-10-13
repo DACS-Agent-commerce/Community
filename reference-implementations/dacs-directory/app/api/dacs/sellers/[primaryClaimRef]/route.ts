@@ -8,6 +8,7 @@ import { loadCatalog } from "@/src/catalog/store";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { canonicalDemosAgentClaim } from "@/src/catalog/claimRef";
+import { withDirectoryTransactionReadiness } from "@/src/catalog/inspection";
 
 export async function GET(
   req: NextRequest,
@@ -22,7 +23,7 @@ export async function GET(
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
   const origin = requestBaseUrl(req);
   return catalogJson(req, {
-    listings: seller.listings,
+    listings: seller.listings.map(withDirectoryTransactionReadiness),
     identity: seller.identityBundle ?? {
       profile: "legacy-sdk-v0.1",
       primaryClaim: seller.primaryClaim,

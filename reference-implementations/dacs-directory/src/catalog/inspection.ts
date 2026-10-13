@@ -92,10 +92,19 @@ export function directoryInspectionAffordance(listing: ListingSummary): Director
   };
 }
 
+/**
+ * The SDK establishes transaction readiness only through its ordered Listing
+ * reader (`isVerifiedListingAdmission`), which this Directory never runs. Every
+ * public projection carries the Directory's own disposition and never
+ * republishes a stored one.
+ */
+export function withDirectoryTransactionReadiness<T extends ListingSummary>(listing: T): T {
+  return { ...listing, transactionReadiness: DIRECTORY_TRANSACTION_READINESS };
+}
+
 export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T): T {
   return {
-    ...listing,
-    transactionReadiness: listing.transactionReadiness ?? DIRECTORY_TRANSACTION_READINESS,
+    ...withDirectoryTransactionReadiness(listing),
     inspection: directoryInspectionAffordance(listing),
   };
 }
@@ -119,7 +128,7 @@ export function buildDirectoryServiceProfile(origin: string, listing: ListingSum
       noLivePaymentClaim: true,
       reason: "Directory authenticated a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
     },
-    transactionReadiness: listing.transactionReadiness ?? DIRECTORY_TRANSACTION_READINESS,
+    transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     service: {
       title: listing.offering.title,
       category: listing.offering.category,
