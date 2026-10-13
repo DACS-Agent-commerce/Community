@@ -8,7 +8,7 @@ import {
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
-import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { canonicalDemosAgentReference } from "./claimRef.js";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
@@ -75,12 +75,13 @@ function verificationMethodFailure(raw: Record<string, unknown>): boolean {
  * DACS-1 CF-2 makes only the leading `did` scheme token case-insensitive on
  * read. The current SDK validator still requires a lowercase claim scheme, so
  * validate a scheme-canonical projection while preserving and verifying the
- * exact received bytes. Method text and key casing are never rewritten.
+ * exact received bytes. Method text, key casing and advisory parameters are
+ * never rewritten.
  */
 function listingValidationView(raw: Record<string, unknown>): Record<string, unknown> {
   const view = structuredClone(raw);
   const normalize = (value: unknown): unknown => typeof value === "string"
-    ? canonicalDemosAgentClaim(value) ?? value
+    ? canonicalDemosAgentReference(value) ?? value
     : value;
   const seller = record(view.seller);
   const identity = record(seller?.identity);
