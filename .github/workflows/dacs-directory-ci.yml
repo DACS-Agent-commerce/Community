@@ -30,8 +30,9 @@ jobs:
       # Node 20.10; the app is validated on Node 22.
       NODE_VERSION: "22"
       # Keeps canonical URLs / sitemap deterministic during the build instead
-      # of falling back to localhost (which the build warns about).
-      NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.local
+      # of falling back to localhost (which the build warns about). Uses a
+      # reserved public-looking name: check:deploy-config rejects .local hosts.
+      NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.example
     steps:
       - uses: actions/checkout@v7
 

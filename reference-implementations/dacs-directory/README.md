@@ -138,8 +138,12 @@ npm run check:deploy-config
 ```
 
 The deployment check requires one credential-free HTTPS origin with no path, query,
-or fragment, so generated canonical URLs and discovery documents cannot silently point
-at localhost or a different base path.
+or fragment, written exactly as that origin (an optional trailing `/` is allowed), on
+a public host: `localhost`, `*.localhost`, `*.local`, and loopback, unspecified,
+private, shared (CGNAT), and link-local IP literals are rejected. Generated canonical
+URLs and discovery documents therefore cannot silently point at localhost or a
+different base path. The check does not resolve DNS, so a public name that resolves
+to a private address still passes.
 
 ## Human and agent discovery
 
