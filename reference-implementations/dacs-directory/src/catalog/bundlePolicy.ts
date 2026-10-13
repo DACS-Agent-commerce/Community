@@ -98,15 +98,20 @@ export function bundleMatchesRegisteredDeal(
     sellers[0].primaryClaim === catalogSeller;
 }
 
-/** Keep at most one verified reputation record per signed job and bundle ref. */
+/**
+ * Keep at most one verified reputation record per buyer and signed job, and per
+ * bundle ref. A jobId is unique only per producer, so two buyers' deals with
+ * the same jobId are distinct records.
+ */
 export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
   const jobs = new Set<string>();
   const refs = new Set<string>();
   return deals.filter((deal) => {
     if (!deal.refsVerified) return true;
+    const job = `${demosSigningIdentity(deal.owners.buyer)}\n${deal.jobId}`;
     const ref = deal.buyerBundleRef.toLowerCase();
-    if (jobs.has(deal.jobId) || refs.has(ref)) return false;
-    jobs.add(deal.jobId);
+    if (jobs.has(job) || refs.has(ref)) return false;
+    jobs.add(job);
     refs.add(ref);
     return true;
   });

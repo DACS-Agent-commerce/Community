@@ -4,8 +4,8 @@ import type { Metadata } from "next";
 import CopyText from "@/src/components/CopyText";
 import VerifyAttestation from "@/src/components/VerifyAttestation";
 import VerifyDeal from "@/src/components/VerifyDeal";
-import { deriveAnchorAddress, readAnchor } from "@/src/catalog/chain";
-import { findProgramAddress } from "@/src/catalog/store";
+import { readAnchor } from "@/src/catalog/chain";
+import { resolveProgramAddress } from "@/src/catalog/store";
 
 const EXPLORER = "https://explorer.demos.sh";
 
@@ -45,7 +45,7 @@ export default async function Deal({
   const deliveryName = `dacsx:delivery:${jobId}`;
   const sellerClaim = seller ? decodeURIComponent(seller) : null;
   const attestationAddress = sellerClaim && jobId
-    ? findProgramAddress(sellerClaim, deliveryName) ?? deriveAnchorAddress(sellerClaim, deliveryName)
+    ? resolveProgramAddress(sellerClaim, deliveryName)
     : null;
   const attestation = attestationAddress ? await readAnchor(attestationAddress) : null;
   const att = attestation as {
