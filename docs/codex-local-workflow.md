@@ -18,12 +18,11 @@ It uses the Node version and SDK revision already pinned by the repository.
 ## Install the pinned dependencies
 
 From the Community repository root, use your normally initialized version
-manager to select an already-installed Node 22, then set paths from the current
+manager to select an already-installed Node 22 (for example `nvm use 22`) and
+confirm that `node --version` prints `v22.x`. Then set paths from the current
 worktree rather than a fixed checkout location:
 
 ```bash
-nvm use 22
-
 repo_root=$(git rev-parse --show-toplevel)
 app_dir="$repo_root/reference-implementations/dacs-directory"
 cd "$app_dir"
@@ -33,32 +32,57 @@ export NEXT_TELEMETRY_DISABLED=1
 unset RUN_LIVE_PAID_E2E LIVE_BUTLER_ORIGIN
 ```
 
-Read the exact SDK commit from the committed setup script, then create a clean
-vendor checkout in this worktree and install both dependency trees from their
-lockfiles:
+Read the exact SDK commit from the committed setup script, then create or
+reuse a clean vendor checkout in this worktree and install both dependency trees
+from their lockfiles. The block runs in a subshell with `set -euo pipefail`, so
+pasting it into an interactive shell stops at the first failure instead of
+building whatever the SDK checkout happens to contain. It builds only after
+`HEAD` is verified to be the pinned commit:
 
 ```bash
-sdk_rev=$(sed -n 's/^SDK_REV="\([0-9a-f]\{40\}\)"$/\1/p' scripts/setup-sdk.sh)
-test "${#sdk_rev}" -eq 40
+(
+  set -euo pipefail
+  die() { echo "stopped: $*" >&2; exit 1; }
 
-mkdir -p vendor
-git clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
-git -C vendor/dacs-sdk fetch --depth 1 origin "$sdk_rev"
-git -C vendor/dacs-sdk checkout --detach "$sdk_rev"
+  sdk_rev=$(sed -n 's/^SDK_REV="\([0-9a-f]\{40\}\)"$/\1/p' scripts/setup-sdk.sh)
+  [ "${#sdk_rev}" -eq 40 ] || die "no 40-hex SDK_REV found in scripts/setup-sdk.sh"
 
-(cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
-npm ci --no-audit --no-fund
+  sdk=vendor/dacs-sdk
+  if [ ! -e "$sdk" ]; then
+    mkdir -p vendor
+    git clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git "$sdk"
+  fi
+
+  # An existing path must be its own Git checkout with no local changes.
+  [ "$(git -C "$sdk" rev-parse --show-toplevel)" = "$(cd "$sdk" && pwd -P)" ] \
+    || die "$sdk is not a Git checkout of its own; inspect it, do not overwrite it"
+  [ -z "$(git -C "$sdk" status --porcelain)" ] \
+    || die "$sdk has local changes; inspect them, do not overwrite them"
+
+  git -C "$sdk" fetch --depth 1 origin "$sdk_rev"
+  git -C "$sdk" checkout --detach "$sdk_rev"
+  [ "$(git -C "$sdk" rev-parse HEAD)" = "$sdk_rev" ] || die "$sdk is not at $sdk_rev"
+
+  (cd "$sdk" && npm ci --no-audit --no-fund && npm run build)
+  npm ci --no-audit --no-fund
+)
 ```
 
-If `vendor/dacs-sdk` already exists, first confirm that it is a Git checkout,
-has no local changes, and is at the pinned commit. Preserve unexpected content
-instead of overwriting it. Access to the SDK repository may require your normal
-GitHub authentication; do not put a token in a remote URL or committed file.
+Rerunning the block on a clean checkout is safe: it re-pins the checkout and
+reinstalls. If it prints `stopped: ...` or any command fails, fix that before
+continuing; do not run the checks below on a partial install. Access to the SDK
+repository may require your normal GitHub authentication; do not put a token in
+a remote URL or committed file.
 
 ## Run deterministic checks
 
-The local equivalent of the Directory CI's static, unit, and production-build
-checks is:
+These are the same check commands as the Directory CI's typecheck, test,
+origin-validation, and production-build steps. The install differs: CI runs
+`npm run setup` (`npm install`), while this workflow uses `npm ci`. Use the same
+placeholder origins as the `env:` block of
+`.github/workflows/dacs-directory-ci.yml` (today
+`NEXT_PUBLIC_DIRECTORY_URL` and `NEXT_PUBLIC_BUTLER_ORIGIN`; drop any variable
+the workflow no longer sets):
 
 ```bash
 npm run typecheck
@@ -75,8 +99,15 @@ These commands do not require the indexer, a wallet, paid commerce, or a shared
 runtime data directory. Browser checks are separate from this deterministic
 verification set.
 
-If interactive development is needed, bind only to loopback and let the OS
-choose a currently free port:
+If interactive development is needed, first seed the worktree-local catalog the
+way `npm run setup` does. The seed is only read when the SQLite catalog is first
+created, so copy it before the first `next dev`:
+
+```bash
+[ -f data/registrations.json ] || cp data/registrations.example.json data/registrations.json
+```
+
+Then bind only to loopback and let the OS choose a currently free port:
 
 ```bash
 ./node_modules/.bin/next dev --hostname 127.0.0.1 --port 0
