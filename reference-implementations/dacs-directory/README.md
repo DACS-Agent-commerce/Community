@@ -139,11 +139,17 @@ npm run check:deploy-config
 
 The deployment check requires one credential-free HTTPS origin with no path, query,
 or fragment, written exactly as that origin (an optional trailing `/` is allowed), on
-a public host: `localhost`, `*.localhost`, `*.local`, and loopback, unspecified,
-private, shared (CGNAT), and link-local IP literals are rejected. Generated canonical
-URLs and discovery documents therefore cannot silently point at localhost or a
-different base path. The check does not resolve DNS, so a public name that resolves
-to a private address still passes.
+a public host. A host name needs at least two non-empty labels and must not be
+`localhost` or end in `.localhost`, `.local`, `.internal`, `.home.arpa`, or
+`.localdomain`. An IP literal must be globally routable: the IPv4 special-use ranges
+(loopback, unspecified, private, shared (CGNAT), link-local, documentation,
+benchmarking, and protocol-assignment), multicast, reserved, and broadcast are
+rejected, and IPv6 must be global unicast (`2000::/3`) outside the documentation,
+IETF-protocol (including Teredo), and 6to4 blocks. IPv4-mapped IPv6 follows the IPv4
+rules; NAT64 and other forms that embed an IPv4 address are rejected. Generated
+canonical URLs and discovery documents therefore cannot silently point at localhost
+or a different base path. The check does not resolve DNS, so a public name that
+resolves to a private address still passes.
 
 ## Human and agent discovery
 
