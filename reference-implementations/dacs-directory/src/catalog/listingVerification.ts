@@ -248,9 +248,20 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
+/** Per-listing, per-pass bound on candidate reads and RB-4 verifications. */
+export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
+
+/** Candidates examined by one call: unreadable ones are retried later, rejected ones were read and failed RB-4. */
+export interface RevocationCandidateProgress {
+  unread: string[];
+  rejected: string[];
+}
+
 /**
- * Fully verify discovered candidates and return the RB-2 binding this catalog
- * can publish. A bogus candidate never shadows a later valid marker.
+ * Fully verify discovered candidates, in the given order and at most `limit`
+ * of them, and return the RB-2 binding this catalog can publish. A bogus
+ * candidate never shadows a later valid marker; unexamined candidates are
+ * left for a later call.
  */
 export async function findValidListingRevocation(
   candidateRefs: string[],
@@ -258,12 +269,19 @@ export async function findValidListingRevocation(
   expectedVersion: number,
   readCandidate: (ref: string) => Promise<Record<string, unknown> | null>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+  progress: RevocationCandidateProgress = { unread: [], rejected: [] },
+  limit = REVOCATION_VERIFICATIONS_PER_PASS,
 ): Promise<RevocationBinding | null> {
-  for (const ref of candidateRefs) {
+  for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
     const candidate = await readCandidate(ref);
-    if (!candidate || !(await verifyListingRevocation(
-      candidate, listing, expectedVersion, resolveKey,
-    ))) continue;
+    if (!candidate) {
+      progress.unread.push(ref);
+      continue;
+    }
+    if (!(await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey))) {
+      progress.rejected.push(ref);
+      continue;
+    }
     const scope = stripSignature(candidate);
     return {
       sellerPrimaryClaim: listing.sellerClaim,
@@ -295,7 +313,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    typeof scope.revokedAt !== "number"
+    !Number.isSafeInteger(scope.revokedAt) ||
+    Number(scope.revokedAt) < 0
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
@@ -306,7 +325,14 @@ export async function verifyListingRevocation(
   ) return false;
   const sig = decodeSignature(s.value);
   if (!sig) return false;
-  const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
+  let hash: string;
+  try {
+    hash = contentHash(scope);
+  } catch {
+    // An unknown member with no canonical form (e.g. JSON 1e400) cannot be signed.
+    return false;
+  }
+  const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, listing.signer, s.algorithm, resolveKey,
   );

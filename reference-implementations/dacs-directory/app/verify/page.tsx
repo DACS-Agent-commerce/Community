@@ -40,7 +40,7 @@ export default function VerifyPage() {
 
       // 2. seller-anchored copy → the catalog knows the deal's owners.
       if (!buyer && jobId) {
-        const o = await fetch(`/api/dacs/deal-owners?jobId=${encodeURIComponent(jobId)}`).then((r) => r.json());
+        const o = await fetch(`/api/dacs/deal-owners?jobId=${encodeURIComponent(jobId)}&bundleRef=${encodeURIComponent(address)}`).then((r) => r.json());
         buyer = o?.owners?.buyer ?? null;
       }
       // 3. manual override as last resort.
