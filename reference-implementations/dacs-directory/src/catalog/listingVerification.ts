@@ -1,4 +1,4 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
@@ -14,6 +14,8 @@ import { canonicalSignatureBytes, legacySignatureBytes } from "./signatureValue.
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
+/** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
+export const MAX_LISTING_CANONICAL_BYTES = 16_384;
 
 export interface VerifiedListing {
   listing: Listing | Record<string, unknown>;
@@ -27,10 +29,22 @@ export interface VerifiedListing {
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const PHASES = new Set([
-  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "commit-agreement", "commit-payee-bound-agreement",
+  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "negotiate-sealed-envelope-procurement",
+  "commit-agreement", "commit-payee-bound-agreement",
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
+/** DACS-3 PS-3: the pricing kinds each negotiation pattern accepts. */
+const NEGOTIATION_PRICING: Record<string, ReadonlySet<string>> = {
+  "negotiate-fixed-price": new Set(["fixed", "negotiable", "metered"]),
+  "negotiate-rfq": new Set(["negotiable", "metered"]),
+  "negotiate-sealed-envelope": new Set(["auction"]),
+  "negotiate-sealed-envelope-procurement": new Set(["auction"]),
+};
+/** DACS-4 PricingSpec auction `selectionRule`: a closed enum plus content-hash-bound rule refs. */
+const SELECTION_RULES = new Set(["lowest-price", "highest-price", "first-acceptable"]);
+const validSelectionRule = (value: unknown): boolean =>
+  typeof value === "string" && (SELECTION_RULES.has(value) || /^rule-ref:[0-9a-f]{64}:\S+$/.test(value));
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
 // fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
@@ -64,7 +78,7 @@ function currentListing(scope: Record<string, unknown>): {
   const tags = Array.isArray(offering?.tags) ? offering.tags : [];
   const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
     : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter) && typeof pricing.minPct === "number" && pricing.minPct >= 0 && pricing.minPct < 100 && typeof pricing.maxPct === "number" && pricing.maxPct >= 0
-      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && typeof pricing.selectionRule === "string"
+      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
         : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
           typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
           (pricing.minTotal === undefined || (
@@ -81,13 +95,8 @@ function currentListing(scope: Record<string, unknown>): {
   const commitmentIndexes = pipeline.flatMap((step, index) =>
     step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? [index] : []);
   const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
-  const expectedNegotiation = pricing?.kind === "fixed" ? "negotiate-fixed-price"
-    : pricing?.kind === "negotiable" ? "negotiate-rfq" : pricing?.kind === "auction" ? "negotiate-sealed-envelope" : "";
-  const negotiationOk = pricing?.kind === "metered"
-    ? negotiationKinds.length === 1 && (
-      negotiationKinds[0] === "negotiate-fixed-price" || negotiationKinds[0] === "negotiate-rfq"
-    )
-    : negotiationKinds.length === 1 && negotiationKinds[0] === expectedNegotiation;
+  const negotiationOk = negotiationKinds.length === 1 && typeof pricing?.kind === "string" &&
+    Boolean(NEGOTIATION_PRICING[negotiationKinds[0] as string]?.has(pricing.kind));
   const signer = typeof signature?.signer === "string" ? signature.signer : "";
   const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
   const signerIdentity = canonicalSigningIdentity(signer);
@@ -152,7 +161,7 @@ export async function verifyListing(
   if (current) {
     const scope = { ...raw };
     delete scope.signature;
-    if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) return null;
+    if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
     if (current.signature.algorithm !== "ed25519") return null;
     const hash = contentHash(scope);
     const verifiedSigner = await verifyEd25519(
@@ -306,8 +315,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    !Number.isSafeInteger(scope.revokedAt) ||
-    Number(scope.revokedAt) < 0
+    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
+    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;

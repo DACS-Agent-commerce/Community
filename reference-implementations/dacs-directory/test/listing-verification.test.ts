@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 
@@ -197,4 +200,96 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
     pipeline: [{ kind: "negotiate-sealed-envelope" }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })), null);
+});
+
+test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 allows", async () => {
+  const pricing: Record<string, Record<string, unknown>> = {
+    fixed: { kind: "fixed", price: { amount: "1", currency: "USDC" } },
+    negotiable: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
+    auction: { kind: "auction", reservePrice: { amount: "1", currency: "USDC" }, selectionRule: "lowest-price" },
+    metered: { kind: "metered", unitPrice: { amount: "1", currency: "USDC" }, unit: "call" },
+  };
+  const allowed: Record<string, string[]> = {
+    "negotiate-fixed-price": ["fixed", "negotiable", "metered"],
+    "negotiate-rfq": ["negotiable", "metered"],
+    "negotiate-sealed-envelope": ["auction"],
+    "negotiate-sealed-envelope-procurement": ["auction"],
+  };
+  const verdicts: Record<string, boolean> = {};
+  const expected: Record<string, boolean> = {};
+  for (const [negotiation, kinds] of Object.entries(allowed)) {
+    for (const kind of Object.keys(pricing)) {
+      const listing = signedCurrentListing({
+        pricing: pricing[kind],
+        pipeline: [{ kind: negotiation }, { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
+      });
+      verdicts[`${negotiation} ${kind}`] = (await verifyListing(listing)) !== null;
+      expected[`${negotiation} ${kind}`] = kinds.includes(kind);
+    }
+  }
+  assert.deepEqual(verdicts, expected);
+});
+
+test("auction pricing accepts only the DACS-4 selectionRule enum and content-hash-bound rule refs", async () => {
+  const auction = (selectionRule: unknown) => signedCurrentListing({
+    pricing: { kind: "auction", selectionRule },
+    pipeline: [{ kind: "negotiate-sealed-envelope" }, { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
+  });
+  for (const rule of ["lowest-price", "highest-price", "first-acceptable", `rule-ref:${"a".repeat(64)}:https://rules.example/r1`]) {
+    assert.ok(await verifyListing(auction(rule)), rule);
+  }
+  for (const rule of ["best-vibes", "", "rule-ref:not-a-hash:https://rules.example/r1", `rule-ref:${"a".repeat(64)}:`, 7]) {
+    assert.equal(await verifyListing(auction(rule)), null, String(rule));
+  }
+});
+
+test("LR-2 caps the canonical form at 16,384 bytes, signature omitted, not the raw JSON", async () => {
+  const unsigned = (listing: Record<string, unknown>) => {
+    const scope = { ...listing };
+    delete scope.signature;
+    return Buffer.byteLength(canonicalize(scope), "utf8");
+  };
+  const sized = (bytes: number) => signedCurrentListing({
+    padding: "x".repeat(bytes - unsigned(signedCurrentListing({ padding: "" }))),
+  });
+  const atCap = sized(16_384);
+  assert.equal(unsigned(atCap), 16_384);
+  assert.ok(Buffer.byteLength(JSON.stringify(atCap), "utf8") > 16_384, "the raw JSON with its signature is larger");
+  assert.ok(await verifyListing(atCap));
+  assert.equal(await verifyListing(sized(16_385)), null);
+  // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
+  const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
+  assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);
+  assert.ok(await verifyListing(composing));
+  const expanding = signedCurrentListing({ padding: "क़".repeat(4_000) });
+  assert.ok(Buffer.byteLength(JSON.stringify(expanding), "utf8") < 16_384);
+  assert.equal(await verifyListing(expanding), null);
+});
+
+test("the indexer publishes a current listing only once validity.notBefore has passed (DACS-1 validation step 3)", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dacs-directory-validity-"));
+  process.env.DACS_DIRECTORY_DATA = directory;
+  const { indexRegistration } = await import("../src/catalog/indexer.js");
+  const anchors: Record<string, Record<string, unknown>> = {
+    [`stor-${"a1".padStart(40, "0")}`]: signedCurrentListing({ listingId: "future", validity: { notBefore: Date.now() + 3_600_000 } }),
+    [`stor-${"a2".padStart(40, "0")}`]: signedCurrentListing({ listingId: "current", validity: { notBefore: Date.now() - 1_000 } }),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = anchors[String(input).split("/").pop() ?? ""];
+    return data
+      ? Response.json({ success: true, owner: `0x${publicKeyHex}`, programName: "opaque", data })
+      : new Response(null, { status: 404 });
+  };
+  try {
+    const record = await indexRegistration(
+      { primaryClaim: claim, displayName: "Seller", listingAnchors: Object.keys(anchors) },
+      undefined,
+      async () => { throw new Error("identity unavailable"); },
+    );
+    assert.deepEqual(record.listings.map((listing) => listing.listingId), ["current"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

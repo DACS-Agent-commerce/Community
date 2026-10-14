@@ -589,7 +589,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
 });
 
-test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
+test("standalone revocation verifier bounds a signed revokedAt to the CORE numeric profile, not to non-negative integers", async () => {
   const markerSeed = Uint8Array.from(randomBytes(32));
   const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
   const markerListing = { ...listing, agentId: markerDid };
@@ -639,21 +639,25 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
 
   assert.deepEqual(await outcome(Date.now()), { candidate: true, verified: true });
   assert.deepEqual(await outcome(0), { candidate: true, verified: true });
+  // DACS-1 types revokedAt as a number and CORE §B.2 bounds only its magnitude.
+  assert.deepEqual(await outcome(-1), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(-Number.MAX_SAFE_INTEGER), { candidate: true, verified: true });
   const rejected = { candidate: false, verified: false };
   assert.deepEqual({
+    // A valid marker, but the pinned SDK canonicalizer has no form for a fraction (SIG-3).
     fraction: await outcome(1791480684902.5),
-    negative: await outcome(-1),
     nan: await outcome(Number.NaN),
     infinity: await outcome(Number.POSITIVE_INFINITY),
     aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
-    // Canonicalizable, so only the safe-integer check rejects it.
+    belowMinSafeInteger: await outcome(-Number.MAX_SAFE_INTEGER - 1),
+    // Canonicalizable, so only the type check rejects it.
     numericString: await outcome("1791480684902"),
   }, {
-    fraction: rejected,
-    negative: rejected,
+    fraction: { candidate: true, verified: false },
     nan: rejected,
     infinity: rejected,
     aboveMaxSafeInteger: rejected,
+    belowMinSafeInteger: rejected,
     numericString: rejected,
   });
 });

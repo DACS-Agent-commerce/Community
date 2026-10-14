@@ -197,8 +197,8 @@ export function isListingRevocationCandidate(value: unknown): boolean {
     Number(marker.listingVersion) > 0 &&
     typeof marker.listingContentHash === "string" &&
     /^[0-9a-fA-F]{64}$/.test(marker.listingContentHash) &&
-    Number.isSafeInteger(marker.revokedAt) &&
-    Number(marker.revokedAt) >= 0 &&
+    typeof marker.revokedAt === "number" &&
+    Math.abs(marker.revokedAt) <= Number.MAX_SAFE_INTEGER &&
     (marker.reason === undefined || typeof marker.reason === "string") &&
     (signed.algorithm === "ed25519" ||
       signed.algorithm === "ecdsa-secp256k1" ||

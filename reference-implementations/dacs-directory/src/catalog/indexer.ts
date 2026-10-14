@@ -178,7 +178,9 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    const validity = scope.validity as { notAfter?: unknown } | undefined;
+    // DACS-1 validation step 3: notBefore ≤ now ≤ notAfter (if set).
+    const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
+    if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
