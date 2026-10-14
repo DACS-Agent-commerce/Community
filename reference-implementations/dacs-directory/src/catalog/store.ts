@@ -364,6 +364,13 @@ export function nextRevocationCandidates(listingHash: string, listingOwner: stri
   const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
   return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
 }
+const candidateOwner = db.prepare("SELECT owner FROM revocation_candidates WHERE listing_hash = ? AND locator = ?");
+/** Whether the listing's own owner anchored this revocation candidate; anyone else may anchor one too. */
+export function isOwnerRevocationCandidate(listingHash: string, locator: string, listingOwner: string | null): boolean {
+  if (!listingOwner) return false;
+  const row = candidateOwner.get(listingHash, locator) as { owner: string | null } | undefined;
+  return Boolean(row?.owner) && row?.owner === canonicalProgramOwner(listingOwner);
+}
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);

@@ -669,6 +669,54 @@ test("a successful read without content ends the rejected class", async () => {
   assert.equal(sql("SELECT status FROM artifacts WHERE locator=?", at)[0].status, "dead-letter");
 });
 
+test("an unreadable verified revocation marker never republishes its listing as freshly active", async () => {
+  resetIndex([sellerRegistration, later], 30);
+  chain({ [locator(1)]: { data: JSON.stringify(listing) }, [locator(60)]: { data: JSON.stringify(marker) } }, [locator(1), locator(60)]);
+  await reindex();
+  const summary = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
+  const published = summary();
+  assert.equal(published?.status, "revoked");
+  assert.ok(published?.revocation);
+
+  transactions = [];
+  unavailable.add(locator(60));
+  await reindex();
+  assert.equal(summary()?.status, "revoked", "the published binding stays in force");
+  assert.deepEqual(summary()?.revocation, published.revocation);
+
+  // Without a published binding to carry, the verified marker still withholds the listing.
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 31, sellers: [] });
+  await reindex();
+  assert.equal(summary(), undefined);
+
+  unavailable.clear();
+  await reindex();
+  assert.equal(summary()?.status, "revoked");
+});
+
+test("an unavailable candidate anchored by the listing owner withholds the listing; another writer's or a vanished one does not", async () => {
+  for (const [writer, after, expected] of [
+    [outsider, "unavailable", "active"],
+    [seller, "gone", "active"],
+    [seller, "unavailable", undefined],
+  ] as const) {
+    resetIndex([sellerRegistration, later], 32);
+    const programs: Record<string, StoredProgram> = { [locator(1)]: { data: JSON.stringify(listing) } };
+    const candidate = { data: JSON.stringify(marker), owner: ownerOf(writer) };
+    let served = false;
+    // The scan reads the candidate once; afterwards the node answers 503 or 404.
+    Object.defineProperty(programs, locator(61), {
+      enumerable: true,
+      get: () => after === "unavailable" || !served ? (served = true, candidate) : undefined,
+    });
+    chain(programs, [locator(1), locator(61)]);
+    if (after === "unavailable") scanOnly.add(locator(61));
+    await reindex();
+    assert.deepEqual(pending(listingHash), [locator(61)], "the candidate was discovered but not read");
+    assert.equal(listingStatus(), expected, `${writer} ${after}`);
+  }
+});
+
 test("a transient retry is read before rejected retries and the revocation it carries is applied", async () => {
   resetIndex([sellerRegistration, later], 10);
   chain({ [locator(1)]: { data: JSON.stringify(listing) }, [locator(60)]: { data: JSON.stringify(marker) } }, [locator(1), locator(60)]);

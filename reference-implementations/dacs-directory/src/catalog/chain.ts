@@ -47,12 +47,34 @@ export interface AnchorRecord {
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
-  if (!/^stor-[0-9a-f]{40}$/.test(address)) return null;
+  const outcome = await readAnchorOutcome(address);
+  return outcome.status === "found" ? outcome.record : null;
+}
+
+/**
+ * Like readAnchorRecord, but separates a node that could not answer (network
+ * failure, timeout, 5xx, 429) from an answer that holds no readable artifact.
+ */
+export async function readAnchorOutcome(
+  address: string,
+): Promise<{ status: "found"; record: AnchorRecord } | { status: "absent" | "unavailable" }> {
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
+  let res: Response;
   try {
-    const res = await fetch(`${RPC}/storage-program/${address}`, {
+    res = await fetch(`${RPC}/storage-program/${address}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
+  } catch {
+    return { status: "unavailable" };
+  }
+  if (res.status >= 500 || res.status === 429) return { status: "unavailable" };
+  const record = await anchorRecordFromResponse(res);
+  return record ? { status: "found", record } : { status: "absent" };
+}
+
+async function anchorRecordFromResponse(res: Response): Promise<AnchorRecord | null> {
+  try {
     if (!res.ok) return null;
     const json = (await storageResponseJson(res)) as {
       success?: boolean;

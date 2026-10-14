@@ -26,7 +26,7 @@ import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-import { readAnchor, readAnchorRecord } from "./chain.js";
+import { readAnchor, readAnchorOutcome, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
@@ -44,6 +44,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  isOwnerRevocationCandidate,
   nextRevocationCandidates,
   resolveProgramAddress,
   loadScanState,
@@ -81,6 +82,7 @@ import type {
   ListingSummary,
   Registration,
   RegisteredDeal,
+  RevocationBinding,
   SellerRecord,
 } from "./types.js";
 
@@ -118,6 +120,16 @@ export function listingIsCurrentlyEffective(
   if (typeof validity.notBefore === "number" && now < validity.notBefore) return false;
   if (typeof validity.notAfter === "number" && now > validity.notAfter) return false;
   return true;
+}
+
+/** A revocation this catalog already published stays in force while its marker is unreadable. */
+function priorUnreadRevocation(
+  prior: SellerRecord | undefined,
+  contentHash: string,
+  unread: readonly string[],
+): RevocationBinding | null {
+  return prior?.listings.find((listing) => listing.contentHash === contentHash && listing.revocation &&
+    unread.includes(listing.revocation.markerAnchor.locator))?.revocation ?? null;
 }
 
 /**
@@ -221,19 +233,33 @@ export async function indexRegistration(
     // those anchored by the listing's own owner first. Only one batch is ever selected.
     const limit = REVOCATION_VERIFICATIONS_PER_PASS;
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
+    const knownMarkers = (verifiedRevocations[verified.contentHash] ?? []).slice(0, limit);
+    const unavailableMarkers = new Set<string>();
     const revocation = await findValidListingRevocation(
       [
-        ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
+        ...knownMarkers,
         ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
       ],
       verified,
       version,
-      readAnchor,
+      async (ref) => {
+        const outcome = await readAnchorOutcome(ref);
+        if (outcome.status === "unavailable") unavailableMarkers.add(ref);
+        return outcome.status === "found" ? outcome.record.data : null;
+      },
       undefined,
       progress,
       limit,
-    );
+    ) ?? priorUnreadRevocation(prior, verified.contentHash, progress.unread);
     recordRevocationProgress(verified.contentHash, progress);
+    // SDK readers take a fresh `active` summary without a binding as established
+    // revocation absence, so a marker the node could not serve must never
+    // produce one. A published binding stays revoked (above); a verified marker
+    // without one, or a candidate the listing owner anchored, withholds the
+    // listing until it can be read. Anyone can anchor other candidates, so an
+    // outage on those cannot withhold it.
+    if (!revocation && [...unavailableMarkers].some((ref) => knownMarkers.includes(ref) ||
+      isOwnerRevocationCandidate(verified.contentHash, ref, anchored.owner ?? null))) continue;
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
