@@ -362,6 +362,10 @@ test("the local verification guide passes only CI's placeholder origin", () => {
   const assignments = [...guide.matchAll(/\b(NEXT_PUBLIC_\w+)=(\S+)/g)];
   assert.ok(assignments.length > 0, "the guide no longer passes an origin to the checks");
   for (const [, name, value] of assignments) assert.equal(value, ciEnv[name], name);
+  // CI's origin is a documentation name, so the strict check would fail on it.
+  const checks = [...guide.matchAll(/npm run check:deploy-config.*$/gm)].map(([line]) => line);
+  assert.ok(checks.length > 0, "the guide no longer runs the origin check");
+  for (const line of checks) assert.equal(line, "npm run check:deploy-config -- --allow-documentation-names");
   // The retired gateway demo's Butler origin and live/paid browser suite.
   assert.doesNotMatch(guide, /butler|live_paid|live\/paid/i);
 });
@@ -425,11 +429,18 @@ test("the denylists match the pinned registry snapshot", () => {
 
 const script = fileURLToPath(new URL("../scripts/check-directory-origin.mjs", import.meta.url));
 
-function runCli(value, { args = [], path = script } = {}) {
-  const env = { ...process.env };
+// The child inherits this process's environment, which can turn on runtime
+// warnings (NODE_USE_ENV_PROXY behind a proxy prints one at startup). Silence them
+// so the assertions see only the script's own output.
+function childEnv(value, extra = {}) {
+  const env = { ...process.env, ...extra, NODE_NO_WARNINGS: "1" };
   delete env.NEXT_PUBLIC_DIRECTORY_URL;
   if (value !== undefined) env.NEXT_PUBLIC_DIRECTORY_URL = value;
-  return spawnSync(process.execPath, [path, ...args], { env, encoding: "utf8" });
+  return env;
+}
+
+function runCli(value, { args = [], path = script, env = {} } = {}) {
+  return spawnSync(process.execPath, [path, ...args], { env: childEnv(value, env), encoding: "utf8" });
 }
 
 // railway.json and CI rely only on the exit status of check:deploy-config.
@@ -447,6 +458,12 @@ test("the CLI exits non-zero on an invalid or missing origin", () => {
   }
   const flagged = runCli("https://directory.test", { args: ["--allow-documentation-names"] });
   assert.equal(flagged.status, 1, flagged.stderr);
+  // Only the exact flag relaxes the check; any other argument leaves it strict.
+  for (const args of [["--allow-documentation-name"], ["--verbose"], ["allow-documentation-names"]]) {
+    const result = runCli("https://directory.ci.example", { args });
+    assert.equal(result.status, 1, `${args}: ${result.stderr}`);
+    assert.match(result.stderr, /^\[deployment config\] NEXT_PUBLIC_DIRECTORY_URL must be a public host/, String(args));
+  }
 });
 
 test("the CLI exits zero and reports a valid origin", () => {
@@ -477,8 +494,25 @@ test("importing the module does not run the CLI", () => {
   const result = spawnSync(
     process.execPath,
     ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(script).href)});`],
-    { env: { ...process.env, NEXT_PUBLIC_DIRECTORY_URL: "http://localhost:3400" }, encoding: "utf8" },
+    { env: childEnv("http://localhost:3400"), encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout + result.stderr, "");
+});
+
+test("the CLI checks ignore runtime warnings from the inherited environment", () => {
+  const warning = { NODE_OPTIONS: "--import=data:text/javascript,process.emitWarning(%22inherited%22)" };
+  // The injected setting does print a warning when nothing silences it.
+  const controlEnv = { ...process.env, ...warning };
+  delete controlEnv.NODE_NO_WARNINGS;
+  const control = spawnSync(process.execPath, ["-e", ""], { env: controlEnv, encoding: "utf8" });
+  assert.match(control.stderr, /Warning: inherited/);
+
+  const valid = runCli("https://directory.dacs.dev", { env: warning });
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, "Production directory origin valid: https://directory.dacs.dev\n");
+  assert.equal(valid.stderr, "");
+  const invalid = runCli("http://localhost:3400", { env: warning });
+  assert.equal(invalid.status, 1, invalid.stderr);
+  assert.match(invalid.stderr, /^\[deployment config\] NEXT_PUBLIC_DIRECTORY_URL must use HTTPS/);
 });
