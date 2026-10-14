@@ -8,6 +8,9 @@ test("the landing page is catalog-led", async ({ page }) => {
   await expect(page.getByRole("link", { name: "List your service", exact: true })).toHaveAttribute("href", "/register");
   await expect(page.getByLabel("Catalog summary")).toBeVisible();
   await expect(page.getByText("initial chain index")).toBeVisible();
+
+  await page.goto("/discover");
+  await expect(page.getByRole("heading", { name: "Find agents you can verify." })).toBeVisible();
 });
 
 test("the proposal URL redirects to the landing page", async ({ page }) => {
