@@ -131,11 +131,13 @@ The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
 
-The exact Node release is pinned in `.nvmrc`, which CI uses; `package.json` engines
-only states the supported range (Node 22). Railway's Railpack builder resolves Node
-from engines, not `.nvmrc`, so set `RAILPACK_NODE_VERSION` on the service to the
-`.nvmrc` release to build production on the same runtime. Before promoting a
-deployment, validate the public canonical origin:
+The exact Node release is pinned in `.nvmrc`, and `package.json` engines names the
+same release; `test/node-runtime.test.mjs` fails if they diverge. CI installs Node
+from `.nvmrc`. Railway's Railpack builder takes engines first and then lets `.nvmrc`
+override it through mise's idiomatic version files (railpack `ec5d727`,
+`core/providers/node/node.go:419-494`), so production builds on the same release
+either way. Leave `RAILPACK_NODE_VERSION` unset: `.nvmrc` overrides it. Before
+promoting a deployment, validate the public canonical origin:
 
 ```bash
 NEXT_PUBLIC_DIRECTORY_URL=https://directory.your-domain.org \
