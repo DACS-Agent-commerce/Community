@@ -185,8 +185,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    registration.
 2. **Chain scanning** (passive): the reindex pass walks the node's transaction history
    (`nodeCall getTransactions`, plain fetch), spots storage-program writes, classifies
-   anchored DACS artifacts by their self-describing program names, and attributes deals
-   to sellers via the buyer-anchored agreement. Agents nobody registered appear as
+   current-profile DACS artifacts by their signed content, and attributes a deal to its
+   seller through the agreement its buyer bundle references by locator and content hash.
+   Program names are never resolution keys, except on the legacy SDK compatibility path
+   (`dacs5:bundle:<jobId>`, `dacs3:agreement:<jobId>`). Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
    Revocation markers are recognised by their signed content, never by program name.

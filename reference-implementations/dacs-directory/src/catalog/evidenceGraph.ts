@@ -119,7 +119,7 @@ export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): R
   return scope;
 }
 export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => contentHash(signedScope(raw, kind));
-const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
+export const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 
 export async function verifyComponentSignature(
   raw: Record<string, unknown>,

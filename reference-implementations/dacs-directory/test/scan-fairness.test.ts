@@ -368,12 +368,15 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
   test(`deals are keyed by their owner: another owner's ${route} with the same jobId leaves the deal in place`, async () => {
     const jobId = "shared-job";
     const signedRoute = !route.startsWith("unsigned");
-    // The signed route uses current-format bundles; the unsigned route uses name-only programs.
-    const currentBundle = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer" });
+    // The signed route uses current-format bundles that sign their agreementRef; the unsigned route uses name-only programs.
+    const currentBundle = (at: string, agreement: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer",
+      agreementRef: { anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") } });
+    const firstAgreement = await agreementFor(jobId, 0, 1);
+    const secondAgreement = await agreementFor(jobId, 2, 3);
     resetIndex([later], 7);
     chain({
-      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle : '{"any":1}', owner: ownerOf(buyer) },
-      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle(locator(41), firstAgreement) : '{"any":1}', owner: ownerOf(buyer) },
+      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(firstAgreement), owner: ownerOf(buyer) },
     }, [locator(40), locator(41)]);
     transactions.unshift(memo(10));
     await reindex();
@@ -384,11 +387,11 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
     // The established writes are outside the next pass's replay overlap.
     const writer = signedRoute ? otherBuyer : outsider;
     storage[locator(42)] = signedRoute
-      ? { data: currentBundle, owner: ownerOf(writer) }
+      ? { data: currentBundle(locator(43), secondAgreement), owner: ownerOf(writer) }
       : { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(writer) };
     const second = [locator(42)];
     if (signedRoute) {
-      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 2, 3)), owner: ownerOf(otherBuyer) };
+      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(secondAgreement), owner: ownerOf(otherBuyer) };
       second.push(locator(43));
     }
     transactions = [...second.map((at, index) => memo(20 + index, at)).reverse(), ...transactions];
@@ -411,6 +414,47 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
     assert.equal(scanned.find((deal) => deal.owners.buyer === buyer)?.owners.seller, seller);
   });
 }
+
+test("a discovered current-profile deal is attributed through the agreementRef its bundle signs, never a program name (§10.4.2)", async () => {
+  const jobId = "01M4BD45XYXPF95E24JYPKNM2Y";
+  const agreement = await agreementFor(jobId, 0, 1);
+  const agreementRef = (at: string) => ({ anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") });
+  const bundle = (ref: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer", agreementRef: ref });
+  const sellerCopy = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "seller" });
+  const scannedDeal = async () => [...(await scanChain(null, { maxTxs: 100, sinceTxId: 0 })).deals.values()].find((deal) => deal.jobId === jobId);
+  // Conforming producers percent-encode the colons, which is how node2 stores these names.
+  chain({
+    [locator(980)]: { name: `dacs5%3Abundle%3A${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3%3Aagreement%3A${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(982)]: { name: "opaque-seller-copy", data: sellerCopy, owner: ownerOf(seller) },
+  }, [locator(980), locator(981), locator(982)]);
+  let deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, seller);
+  assert.equal(deal?.sellerBundleRef, locator(982));
+  assert.equal(deal?.agreementLocator, locator(981));
+
+  // A reference whose hash does not match attributes nothing, and a conventionally named
+  // agreement for the same job is not consulted in its place.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle({ ...agreementRef(locator(981)), contentHash: "0".repeat(64) }), owner: ownerOf(buyer) },
+    [locator(981)]: { name: "opaque", data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, "");
+
+  // Two programs sharing the conventional name do not void a deal its signed reference attributes.
+  resetIndex([later], 36);
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  assert.equal(store.loadScanState().programs[`${ownerOf(buyer)}\ndacs3:agreement:${jobId}`], null);
+  assert.equal(store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`]?.owners.seller, seller);
+});
 
 test("two buyers' attributed deals with the same jobId both reach the seller's record", async () => {
   const jobId = "two-buyers";
