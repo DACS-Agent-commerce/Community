@@ -42,11 +42,9 @@ jobs:
           node-version: "22"
 
       - name: Vendor + build the pinned dacs-sdk, install app deps
-        # The vendored dacs-sdk is a private repo; setup-sdk.sh authenticates
-        # the nested clone with DACS_SDK_GITHUB_TOKEN when present. Add a
-        # read-only token (repo secret) with access to DACS-Agent-commerce/dacs-sdk
-        # or this step fails at the clone. The default GITHUB_TOKEN cannot read
-        # sibling private repos.
+        # DACS-Agent-commerce/dacs-sdk is public, so the clone needs no token.
+        # setup-sdk.sh still authenticates the nested clone with
+        # DACS_SDK_GITHUB_TOKEN when present, for builds from a private mirror.
         env:
           DACS_SDK_GITHUB_TOKEN: ${{ secrets.DACS_SDK_GITHUB_TOKEN }}
         run: npm run setup

@@ -32,7 +32,8 @@ const keyFromDid = (did: string): Uint8Array | null => {
   return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
 };
 
-// Mirrors the SDK's sessionAnchorName (not exported publicly — dacs-sdk#14).
+// Mirrors the SDK's sessionAnchorName, which the pinned SDK_REV does not export
+// publicly (fixed upstream after the pin: dacs-sdk#14).
 const anchorName: Record<string, (jobId: string) => string> = {
   "dacs-3-agreement": (j) => `dacs3:agreement:${j}`,
   "dacs-4-evidence": (j) => `dacs4:evidence:${j}`,

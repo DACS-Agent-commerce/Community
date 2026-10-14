@@ -25,8 +25,9 @@ import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-// The SDK doesn't export sessionAnchorName from its public barrel
-// (dacs-sdk#178, follow-up to #14) — reach into the vendored build.
+// The SDK at SDK_REV (2026-07-04) doesn't export sessionAnchorName from its public
+// barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
+// reach into the vendored build until the pin moves.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
