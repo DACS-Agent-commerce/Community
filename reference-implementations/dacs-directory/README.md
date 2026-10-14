@@ -131,27 +131,46 @@ The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
 
-The project is pinned to Node 22 through `.nvmrc` and `package.json` engines. Before
-promoting a deployment, validate the public canonical origin:
+The exact Node release is pinned in `.nvmrc`, which CI uses; `package.json` engines
+only states the supported range (Node 22). Railway's Railpack builder resolves Node
+from engines, not `.nvmrc`, so set `RAILPACK_NODE_VERSION` on the service to the
+`.nvmrc` release to build production on the same runtime. Before promoting a
+deployment, validate the public canonical origin:
 
 ```bash
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.example \
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.your-domain.org \
 npm run check:deploy-config
 ```
 
 The deployment check requires one credential-free HTTPS origin with no path, query,
-fragment, or port 0, written exactly as that origin (an optional trailing `/` is
-allowed), on a public host. A host name needs at least two non-empty labels and must
-not be `localhost` or end in `.localhost`, `.local`, `.internal`, `.home.arpa`, or
-`.localdomain`. An IP literal must be globally routable: the IPv4 special-use ranges
-(loopback, unspecified, private, shared (CGNAT), link-local, documentation,
-benchmarking, protocol-assignment, and 6to4 relay), multicast, reserved, and
-broadcast are rejected, and IPv6 must be global unicast (`2000::/3`) outside the
-documentation, IETF-protocol (including Teredo), and 6to4 blocks. IPv4-mapped IPv6
-follows the IPv4 rules; NAT64 and other forms that embed an IPv4 address are
-rejected. Generated canonical URLs and discovery documents therefore cannot silently
-point at localhost or a different base path. The check does not resolve DNS, so a
-public name that resolves to a private address still passes.
+or fragment, written exactly as that origin (an optional trailing `/` is allowed),
+on a public host. Ports that browsers refuse to fetch (the Fetch Standard's bad
+ports, including 0) are rejected.
+
+- A host name needs at least two non-empty labels, must not end with a dot, and must
+  not be, or end in, an IANA special-use name (`localhost`, `local`, `test`,
+  `invalid`, `onion`, `alt`, or anything under `arpa`), the private-use `internal`,
+  or `localdomain`. The RFC 6761 documentation names (`example`, `example.com`,
+  `example.net`, `example.org`) are rejected too, unless the check runs with
+  `--allow-documentation-names`, as CI does for its placeholder origin. Production
+  builds (`railway.json`) run the check without it.
+- An IP literal must be global unicast and not special-purpose. IPv4 rejects every
+  block the IANA IPv4 Special-Purpose Address Registry marks not globally reachable
+  (loopback, unspecified, private, shared (CGNAT), link-local, documentation,
+  benchmarking, protocol assignments, reserved, and broadcast), plus multicast and
+  the deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
+  documentation, IETF-protocol (including Teredo), 6to4, and `3fff::/20` blocks, so
+  IPv4-mapped, NAT64, and other forms that embed an IPv4 address are rejected.
+- The check fails closed: the globally reachable anycast exceptions inside
+  `192.0.0.0/24` and `2001::/23` are protocol addresses, not hosting space, and are
+  rejected with their blocks.
+
+`test/fixtures/origin-policy-sources.json` records the pinned copies of the IANA
+registries and the Fetch Standard these rules were checked against (as of
+2026-10-14), and the deliberate deviations; the tests check the tables against it.
+Generated canonical URLs and discovery documents therefore cannot silently point at
+localhost or a different base path. The check does not resolve DNS, so a public name
+that resolves to a private address still passes.
 
 ## Human and agent discovery
 

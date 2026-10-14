@@ -6,8 +6,8 @@ It uses the Node version and SDK revision already pinned by the repository.
 
 ## Keep the worktree isolated
 
-- Use Node 22, as required by
-  `reference-implementations/dacs-directory/.nvmrc` and `package.json`.
+- Use the exact Node release in `reference-implementations/dacs-directory/.nvmrc`,
+  as CI does. `package.json` engines only states the supported range (Node 22).
 - Do not copy `.env` files, tokens, wallets, seeds, `data/`, `node_modules/`, or
   `vendor/` from another worktree.
 - Keep any mutable catalog state under this worktree's
@@ -81,13 +81,14 @@ origin-validation, and production-build steps. The install differs: CI runs
 `npm run setup` (`npm install`), while this workflow uses `npm ci`. Use the same
 placeholder origin as the `env:` block of
 `.github/workflows/dacs-directory-ci.yml` (today only
-`NEXT_PUBLIC_DIRECTORY_URL`). `check:deploy-config` rejects `.local` and other
-non-public hosts, so do not substitute a local origin:
+`NEXT_PUBLIC_DIRECTORY_URL`). That origin is a reserved documentation name, so,
+as in CI, the origin check runs with `--allow-documentation-names`. It still
+rejects `.local` and other non-public hosts, so do not substitute a local origin:
 
 ```bash
 npm run typecheck
 npm test
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run check:deploy-config
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run check:deploy-config -- --allow-documentation-names
 NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run build
 ```
 
