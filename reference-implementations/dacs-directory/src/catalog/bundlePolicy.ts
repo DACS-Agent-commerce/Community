@@ -68,6 +68,55 @@ export function bundleMatchesRegisteredAnchor(
   return expectedRole !== null && bundle?.anchoredByRole === expectedRole;
 }
 
+export type BrowserDealVerdict = "strict-pass" | "limited" | "fail";
+
+/**
+ * The in-browser verdict on a legacy deal copy. Strict needs the expected parties,
+ * the required signatures, strict referenced artifacts, and an anchoredByRole that
+ * matches the address the directory registered for this copy. Without a registered
+ * address-role binding, internally consistent evidence is only "limited".
+ */
+export function browserDealVerdict(input: {
+  verification: BundleVerification;
+  bundleRef: string;
+  buyerOwner: string;
+  expectedSeller?: string;
+  registered: { owners: unknown; buyerBundleRef: unknown; sellerBundleRef: unknown } | null;
+  signaturesOk: boolean;
+  refsOk: boolean;
+}): { verdict: BrowserDealVerdict; reason?: string } {
+  const { verification, bundleRef, registered } = input;
+  const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
+  const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
+  const anchorBindingAvailable = registeredAnchorRole(bundleRef, registered?.buyerBundleRef, registered?.sellerBundleRef) !== null;
+  const owners = registered?.owners && typeof registered.owners === "object" &&
+    !Array.isArray(registered.owners) ? registered.owners as Record<string, unknown> : null;
+  const registeredPartiesMatch = typeof owners?.buyer === "string" && typeof owners.seller === "string" &&
+    buyer === owners.buyer && seller === owners.seller;
+  const expectedPartiesMatch = buyer === input.buyerOwner && (!input.expectedSeller || seller === input.expectedSeller) &&
+    (!anchorBindingAvailable || registeredPartiesMatch);
+  const anchorRoleMatches = bundleMatchesRegisteredAnchor(
+    verification.bundle, bundleRef, registered?.buyerBundleRef, registered?.sellerBundleRef,
+  );
+  const internallyConsistent = verification.ok && expectedPartiesMatch && input.signaturesOk && input.refsOk;
+  const reason = !expectedPartiesMatch
+    ? "bundle parties do not match the expected buyer/seller"
+    : !input.signaturesOk
+      ? "required buyer/seller signatures are missing or invalid"
+      : !input.refsOk
+        ? "one or more referenced artifact signatures are missing or invalid"
+        : !anchorBindingAvailable
+          ? "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"
+          : !anchorRoleMatches
+            ? "bundle anchoredByRole does not match its registered buyer/seller address"
+            : verification.reason;
+  return {
+    verdict: internallyConsistent && anchorRoleMatches ? "strict-pass"
+      : internallyConsistent && !anchorBindingAvailable ? "limited" : "fail",
+    reason,
+  };
+}
+
 /**
  * Bind a catalog-submitted deal pointer to the identities and job id covered by
  * the verified bundle signatures. Registration fields are routing hints only;

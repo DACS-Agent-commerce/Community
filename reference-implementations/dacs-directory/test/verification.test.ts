@@ -11,6 +11,7 @@ import {
 } from "@kynesyslabs/dacs/crypto";
 
 import {
+  browserDealVerdict,
   bundleMatchesRegisteredAnchor,
   bundleMatchesRegisteredDeal,
   dedupeVerifiedDeals,
@@ -308,6 +309,32 @@ test("unhashed anchor role must match the registered copy address", () => {
     verification.bundle, "stor-unknown", "stor-buyer", "stor-seller",
   ), false);
   assert.equal(registeredAnchorRole("stor-seller", "stor-buyer", undefined), null);
+});
+
+test("the browser deal verdict is strict only with matching parties, signatures, refs and a registered copy role", () => {
+  const verification = result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "valid" }]);
+  const registered = { owners: { buyer: "buyer", seller: "seller" }, buyerBundleRef: "stor-buyer", sellerBundleRef: "stor-seller" };
+  type Input = Parameters<typeof browserDealVerdict>[0];
+  const base: Input = { verification, bundleRef: "stor-buyer", buyerOwner: "buyer", expectedSeller: "seller", registered, signaturesOk: true, refsOk: true };
+  const verdict = (change: Partial<Input>) => browserDealVerdict({ ...base, ...change });
+  assert.deepEqual(verdict({}), { verdict: "strict-pass", reason: undefined });
+  const cases: Array<[string, Partial<Input>, string, string | undefined]> = [
+    ["another buyer expected", { buyerOwner: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["another seller expected", { expectedSeller: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["registered owners differ", { registered: { ...registered, owners: { buyer: "buyer", seller: "someone" } } }, "fail",
+      "bundle parties do not match the expected buyer/seller"],
+    ["registered owners missing", { registered: { ...registered, owners: null } }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["signatures missing", { signaturesOk: false }, "fail", "required buyer/seller signatures are missing or invalid"],
+    ["refs not strict", { refsOk: false }, "fail", "one or more referenced artifact signatures are missing or invalid"],
+    ["SDK verification failed", { verification: { ...verification, ok: false, reason: "sdk" } }, "fail", "sdk"],
+    ["no registered copy address", { registered: null }, "limited",
+      "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"],
+    ["copy registered for the other role", { bundleRef: "stor-seller" }, "fail", "bundle anchoredByRole does not match its registered buyer/seller address"],
+  ];
+  for (const [name, change, expected, reason] of cases) assert.deepEqual(verdict(change), { verdict: expected, reason }, name);
+  // Without a registered binding only internal consistency is reported, and a failed check still fails.
+  assert.equal(verdict({ registered: null, signaturesOk: false }).verdict, "fail");
+  assert.equal(verdict({ registered: null, expectedSeller: undefined }).verdict, "limited");
 });
 
 test("verified reputation deals collapse to one authoritative copy per jobId, whoever the buyers are (§10.5.1, BB-6)", () => {
