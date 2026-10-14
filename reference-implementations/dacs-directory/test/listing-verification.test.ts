@@ -48,7 +48,7 @@ function signedCurrentListing(
       tags: ["sig5"],
       deliverable: { kind: "storage-program" },
     },
-    buyerRequirement: { kind: "none" },
+    buyerRequirement: { requirementVersion: "1", required: [] },
     pipeline: [
       { kind: "negotiate-fixed-price" },
       { kind: "commit-agreement" },
@@ -182,7 +182,7 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
   assert.ok(await verifyListing(listing));
   assert.ok(await verifyListing(signedCurrentListing({
     pricing: metered,
-    pipeline: [{ kind: "negotiate-rfq" }, ...pipeline.slice(1)],
+    pipeline: [{ kind: "negotiate-rfq", parameters: RFQ }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })));
   assert.equal(await verifyListing(signedCurrentListing({
@@ -200,6 +200,15 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
     pipeline: [{ kind: "negotiate-sealed-envelope" }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })), null);
+});
+
+const RFQ = { maxTurns: 6, timeoutSec: 300 };
+const sealed = (selectionRule: unknown, auctionMode?: string) => ({ commitDeadline: 1784016000000, revealWindow: 3600, selectionRule, ...(auctionMode ? { auctionMode } : {}) });
+const negotiationStep = (kind: string, selectionRule: unknown = "lowest-price") => ({
+  kind,
+  ...(kind === "negotiate-rfq" ? { parameters: RFQ }
+    : kind === "negotiate-sealed-envelope" ? { parameters: sealed(selectionRule) }
+      : kind === "negotiate-sealed-envelope-procurement" ? { parameters: sealed(selectionRule, "procurement") } : {}),
 });
 
 test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 allows", async () => {
@@ -221,7 +230,7 @@ test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 al
     for (const kind of Object.keys(pricing)) {
       const listing = signedCurrentListing({
         pricing: pricing[kind],
-        pipeline: [{ kind: negotiation }, { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
+        pipeline: [negotiationStep(negotiation), { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
       });
       verdicts[`${negotiation} ${kind}`] = (await verifyListing(listing)) !== null;
       expected[`${negotiation} ${kind}`] = kinds.includes(kind);
@@ -233,7 +242,7 @@ test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 al
 test("auction pricing accepts only the DACS-4 selectionRule enum and content-hash-bound rule refs", async () => {
   const auction = (selectionRule: unknown) => signedCurrentListing({
     pricing: { kind: "auction", selectionRule },
-    pipeline: [{ kind: "negotiate-sealed-envelope" }, { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
+    pipeline: [negotiationStep("negotiate-sealed-envelope", selectionRule), { kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
   });
   for (const rule of ["lowest-price", "highest-price", "first-acceptable", `rule-ref:${"a".repeat(64)}:https://rules.example/r1`]) {
     assert.ok(await verifyListing(auction(rule)), rule);
@@ -241,6 +250,64 @@ test("auction pricing accepts only the DACS-4 selectionRule enum and content-has
   for (const rule of ["best-vibes", "", "rule-ref:not-a-hash:https://rules.example/r1", `rule-ref:${"a".repeat(64)}:`, 7]) {
     assert.equal(await verifyListing(auction(rule)), null, String(rule));
   }
+});
+
+test("schema conformance: recognised listing members must have their DACS-1/3/4 types (validation step 1)", async () => {
+  const tail = [{ kind: "commit-agreement" }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }];
+  const auction = { kind: "auction", selectionRule: "lowest-price" };
+  const offering = (deliverable: unknown) => ({ title: "T", description: "D", category: "conformance.signature", tags: [], deliverable });
+  const accepted: Record<string, Record<string, unknown>> = {
+    "full BundleRequirement": { buyerRequirement: { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, maxAge: 60, recipeVersion: 2, parameters: {} }],
+      oneOf: [[{ scheme: "domain", verificationRequired: false }]], preferredPresentation: "per-claim", primaryClaimSelector: "lei" } },
+    "full ListingTerms": { terms: { termsOfServiceUrl: "https://t.example", termsOfServiceHash: "a".repeat(64), jurisdictions: ["GB", "US"],
+      conflictOfLawsRule: "rule-ref:https://law.example", deadlineSecAfterCommit: 3600, acceptanceModel: "auto-accept", cancellationPolicy: "pre-commit",
+      retentionYears: 7, transcriptDisclosurePolicy: "none", futureTerm: true } },
+    "entitlement deliverable": { offering: offering({ kind: "entitlement", durationSec: 86_400, renewable: true }) },
+    "attested-payload deliverable": { offering: offering({ kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" }, expectedSizeBytes: 10 }) },
+    "storage-program deliverable": { offering: offering({ kind: "storage-program", schemaUrl: "https://s.example", accessModel: "buyer-only" }) },
+    "external deliverable": { offering: offering({ kind: "external", description: "Signed courier receipt", verificationMethod: { kind: "tlsnotary", endpoint: "https://n.example" } }) },
+    "rate phase": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate", parameters: { required: true } }] },
+    "rail with version": { acceptedRails: [{ railId: "pay-x402", railVersion: 2, parameters: { network: "base" } }] },
+    "sealed-envelope demand": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: { ...sealed("lowest-price"), auctionMode: "demand" } }, ...tail] },
+    "sealed-envelope procurement": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope-procurement", parameters: sealed("lowest-price", "procurement") }, ...tail] },
+    "rfq with fallback": { pricing: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
+      pipeline: [{ kind: "negotiate-rfq", parameters: { ...RFQ, rfqInitiator: "seller", fixedPriceFallback: true } }, ...tail] },
+    "notAfter after notBefore": { validity: { notBefore: 1, notAfter: 2 } },
+    "required capabilities": { requiredCapabilities: ["SR-2", "SR-4"] },
+  };
+  const rejected: Record<string, Record<string, unknown>> = {
+    "BundleRequirement without its version": { buyerRequirement: { required: [] } },
+    "BundleRequirement without required": { buyerRequirement: { requirementVersion: "1" } },
+    "ClaimRequirement without verificationRequired": { buyerRequirement: { requirementVersion: "1", required: [{ scheme: "lei" }] } },
+    "empty oneOf group": { buyerRequirement: { requirementVersion: "1", required: [], oneOf: [[]] } },
+    "unknown preferred presentation": { buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "telepathy" } },
+    "unknown cancellation policy": { terms: { cancellationPolicy: "non-refundable" } },
+    "lowercase jurisdiction": { terms: { jurisdictions: ["gb"] } },
+    "negative deadline": { terms: { deadlineSecAfterCommit: -1 } },
+    "terms not an object": { terms: [] },
+    "unknown deliverable kind": { offering: offering({ kind: "telegram" }) },
+    "entitlement without renewable": { offering: offering({ kind: "entitlement", durationSec: 60 }) },
+    "attested payload without format": { offering: offering({ kind: "attested-payload" }) },
+    "external deliverable without description": { offering: offering({ kind: "external" }) },
+    "unknown access model": { offering: offering({ kind: "storage-program", accessModel: "friends" }) },
+    "rfq without parameters": { pricing: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 }, pipeline: [{ kind: "negotiate-rfq" }, ...tail] },
+    "rfq with one turn": { pricing: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 }, pipeline: [{ kind: "negotiate-rfq", parameters: { ...RFQ, maxTurns: 1 } }, ...tail] },
+    "sealed-envelope without parameters": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope" }, ...tail] },
+    "sealed-envelope rules disagree": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: sealed("highest-price") }, ...tail] },
+    "sealed-envelope short reveal window": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: { ...sealed("lowest-price"), revealWindow: 59 } }, ...tail] },
+    "demand phase in procurement mode": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: sealed("lowest-price", "procurement") }, ...tail] },
+    "procurement without its mode": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope-procurement", parameters: sealed("lowest-price") }, ...tail] },
+    "pipeline entry not an object": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, "rate"] },
+    "phase parameters not an object": { pipeline: [{ kind: "negotiate-fixed-price", parameters: [] }, ...tail] },
+    "rate required not a boolean": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate", parameters: { required: "yes" } }] },
+    "rail entry not an object": { acceptedRails: [{ railId: "pay-x402" }, "pay-dem"] },
+    "rail without an id": { acceptedRails: [{ railId: "pay-x402" }, { railVersion: 1 }] },
+    "notAfter not a number": { validity: { notBefore: 1, notAfter: "2999-01-01" } },
+    "unknown capability": { requiredCapabilities: ["SR-9"] },
+    "extended description hash not a string": { offering: { ...offering({ kind: "storage-program" }), extendedDescriptionHash: 7 } },
+  };
+  for (const [name, extra] of Object.entries(accepted)) assert.ok(await verifyListing(signedCurrentListing(extra)), name);
+  for (const [name, extra] of Object.entries(rejected)) assert.equal(await verifyListing(signedCurrentListing(extra)), null, name);
 });
 
 test("LR-2 caps the canonical form at 16,384 bytes, signature omitted, not the raw JSON", async () => {
