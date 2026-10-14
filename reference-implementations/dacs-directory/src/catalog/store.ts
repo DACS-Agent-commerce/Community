@@ -295,6 +295,11 @@ export function nextRevocationCandidates(listingHash: string, listingOwner: stri
   const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
   return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
 }
+const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND state = 'pending' LIMIT 1`);
+/** True while any candidate for a listing is unread or not yet examined, so its RB-4 check is incomplete. */
+export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
+  anyPendingCandidate.get(listingHash) !== undefined;
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);

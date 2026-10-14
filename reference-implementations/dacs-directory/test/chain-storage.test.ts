@@ -5,6 +5,7 @@ import {
   deriveAnchorAddress,
   deriveStorageAddress,
   LIVE_STORAGE_SALT,
+  readAnchorResult,
   resolveOwnedAnchorByName,
 } from "../src/catalog/chain.js";
 
@@ -110,6 +111,35 @@ test("producer resume lookup fails closed when the bounded result page is full",
     const resolution = await resolveOwnedAnchorByName(programName, owner);
     assert.equal(resolution.status, "indeterminate");
     if (resolution.status === "indeterminate") assert.match(resolution.reason, /candidate bound/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a storage read separates a definitive answer from a transport failure (RB-6)", async () => {
+  const at = "stor-4444444444444444444444444444444444444444";
+  const body = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const cases: Array<[string, () => Response | Promise<Response>, string]> = [
+    ["object data", () => body({ success: true, owner, programName, data: { marker: 1 } }), "present"],
+    ["not found", () => new Response(null, { status: 404 }), "absent"],
+    ["not public", () => new Response(null, { status: 403 }), "absent"],
+    ["unauthenticated", () => new Response(null, { status: 401 }), "absent"],
+    ["invalid request", () => new Response(null, { status: 400 }), "absent"],
+    ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "absent"],
+    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "absent"],
+    ["node failure", () => new Response(null, { status: 503 }), "unavailable"],
+    ["rate limited", () => new Response(null, { status: 429 }), "unavailable"],
+    ["unsuccessful body", () => body({ success: false }), "unavailable"],
+    ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable"],
+    ["network error", () => { throw new TypeError("fetch failed"); }, "unavailable"],
+  ];
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [name, respond, expected] of cases) {
+      globalThis.fetch = async () => respond();
+      assert.equal((await readAnchorResult(at)).status, expected, name);
+    }
+    assert.equal((await readAnchorResult("stor-../../admin")).status, "absent");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -189,13 +189,14 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   Revocation discovery retains at most 16 candidates per listing hash, except for
-   locators that already passed RB-4 verification; truncation is recorded in reindex logs.
-   New scan observations precede prior unverified state in that window; within each
-   group, the first distinct locators in scan iteration order survive. A valid marker
-   outside the retained window is not evaluated. Its publisher can anchor a fresh
-   marker to re-enter discovery, but continued overflow can exclude that marker again.
-   After one marker verifies, later pruning cannot make it disappear.
+   Revocation markers are recognised by their signed content, never by program name.
+   Every candidate locator is queued once per listing hash; each pass fully verifies
+   at most 16 per listing — markers that already passed RB-4 first, then those
+   anchored by the listing owner, then arrival order. The queue itself has no cap.
+   While any candidate is unread or not yet examined the RB-4 check is incomplete
+   (`indeterminate`, RB-5), so the listing is withheld from the catalog rather than
+   published `active`. Once a marker verifies, the listing stays `revoked` with its
+   binding even if the marker later cannot be read (RB-3).
    BB-4-valid BundleBindings are also classified and accumulated under a deterministic
    per-job/role total-work ceiling; any overflow is sticky and makes that side
    `indeterminate`, never absent.

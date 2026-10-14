@@ -61,13 +61,15 @@ async function agreementFor(jobId: string, buyerIndex: number, sellerIndex: numb
   return { ...scope, signatures: [await sign(buyerIndex), await sign(sellerIndex)] };
 }
 
-// Stubbed node. `unavailable` locators answer 503; `scanOnly` locators answer only their first read.
+// Stubbed node. `unavailable` locators answer 503; `scanOnly` locators answer only their first read;
+// `vanishing` locators answer 404 after their first read.
 interface StoredProgram { data: string; name?: string; owner?: string }
 let storage: Record<string, StoredProgram> = {};
 let transactions: Obj[] = [];
 let reads = new Map<string, number>();
 const unavailable = new Set<string>();
 const scanOnly = new Set<string>();
+const vanishing = new Set<string>();
 let nodeDown = false;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
@@ -78,6 +80,7 @@ globalThis.fetch = async (input, init) => {
     const entry = storage[at];
     if (!entry) return new Response(null, { status: 404 });
     if (unavailable.has(at) || (scanOnly.has(at) && count > 1)) return new Response(null, { status: 503 });
+    if (vanishing.has(at) && count > 1) return new Response(null, { status: 404 });
     return new Response(`{"success":true,"owner":${JSON.stringify(entry.owner ?? ownerOf(seller))},` +
       `"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${entry.data}}`, { headers: { "content-type": "application/json" } });
   }
@@ -93,6 +96,7 @@ function chain(programs: Record<string, StoredProgram>, written: string[], first
   reads = new Map();
   unavailable.clear();
   scanOnly.clear();
+  vanishing.clear();
   transactions = written.map((at, index) => memo(firstId + index, at)).reverse();
 }
 const readsOf = (locators: string[]) => locators.reduce((total, at) => total + (reads.get(at) ?? 0), 0);
@@ -259,6 +263,86 @@ test("a verified marker missing from the candidate queue is still checked first"
   await reindex();
   assert.equal(listingStatus(), "revoked");
   assert.ok(readsOf(others) === 0, "the verified marker is checked before any other candidate");
+});
+
+const publishedListing = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
+
+test("a verified revocation stays revoked while its marker cannot be read or no longer verifies (RB-3)", async () => {
+  resetIndex([sellerRegistration, later], 30);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(5)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(5)]);
+  await reindex();
+  const binding = publishedListing()?.revocationBinding;
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.equal(binding?.markerAnchor.locator, locator(5));
+  transactions = [];
+  // A transport failure is indeterminate, never absent: the record stays revoked with its binding.
+  unavailable.add(locator(5));
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+  // Later content at the marker's locator does not withdraw the revocation either.
+  unavailable.clear();
+  storage[locator(5)] = { data: JSON.stringify(unsigned(1)), owner: ownerOf(otherBuyer) };
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+});
+
+test("an unread or unexamined revocation candidate withholds the listing rather than publishing it active (RB-5)", async () => {
+  // Unread: the third-party marker answers the scanner, then the node fails its verification read.
+  resetIndex([sellerRegistration, later], 31);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(6)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(6)]);
+  scanOnly.add(locator(6));
+  await reindex();
+  assert.equal(publishedListing(), undefined, "an incomplete check publishes no active record");
+  scanOnly.clear();
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+
+  // Unexamined: the valid marker queues behind more bogus candidates than one pass verifies.
+  resetIndex([sellerRegistration, later], 32);
+  const bogus = range(500, 20);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(7)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+    ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+  }, [locator(1), ...bogus, locator(7)]);
+  await reindex();
+  assert.equal(publishedListing(), undefined, "16 of 21 candidates examined");
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+
+  // A candidate deleted after discovery holds no marker: it is rejected, so it cannot keep the check open.
+  resetIndex([sellerRegistration, later], 34);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(8)]: { data: JSON.stringify(unsigned(1)), owner: ownerOf(outsider) },
+  }, [locator(1), locator(8)]);
+  vanishing.add(locator(8));
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  assert.deepEqual(pending(listingHash), []);
+
+  // Every candidate examined and rejected: absent, and an active record carries no binding.
+  resetIndex([sellerRegistration, later], 33);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+  }, [locator(1), ...bogus]);
+  await reindex();
+  assert.equal(publishedListing(), undefined);
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  assert.equal(Object.hasOwn(publishedListing()!, "revocationBinding"), false);
 });
 
 for (const route of ["unsigned bundle-named program", "bundle and agreement signed by its own parties"]) {
