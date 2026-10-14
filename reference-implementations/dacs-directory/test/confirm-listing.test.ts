@@ -60,7 +60,7 @@ const listing = {
   signature: {
     algorithm: "ed25519",
     signer: sellerClaim,
-    value: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${listingHash}`, "utf8"), privateKey)).toString("hex"),
+    value: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${listingHash}`, "utf8"), privateKey)).toString("base64url"),
   },
 };
 const coordinates = {

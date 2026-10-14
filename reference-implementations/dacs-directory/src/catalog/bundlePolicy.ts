@@ -10,6 +10,7 @@ import {
   verifyPrimaryClaimSignature,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import { legacySignatureBytes } from "./signatureValue.js";
 import type { DealRecord, RegisteredDeal } from "./types.js";
 
 // This is the legacy SDK compatibility path. Current-profile agreement artifacts,
@@ -21,17 +22,6 @@ const SEPARATORS: Record<string, string> = {
   "dacs-4-evidence": "dacs-evidence:v1:",
   "dacs-2-verifyresult": "dacs-composite:v1:",
 };
-
-function decode(value: string): Uint8Array | null {
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try {
-    const bytes = Buffer.from(value, "base64url");
-    return bytes.length === 64 ? Uint8Array.from(bytes) : null;
-  } catch {
-    return null;
-  }
-}
 
 export function hasRequiredBundleSignatures(result: BundleVerification, rawBundle: unknown): boolean {
   const bundle = result.bundle;
@@ -199,7 +189,7 @@ export async function verifyReferencedArtifactSignature(
     const s = entry as Record<string, unknown>;
     const signer = typeof s.signer === "string" ? s.signer : typeof s.party === "string" ? s.party : null;
     if (s.algorithm !== "ed25519" || !signer || typeof s.value !== "string") return false;
-    const signature = decode(s.value);
+    const signature = legacySignatureBytes(s.value);
     if (!signature) return false;
     const verified = await verifyPrimaryClaimSignature(
       message, signature, signer, s.algorithm, resolveKey,

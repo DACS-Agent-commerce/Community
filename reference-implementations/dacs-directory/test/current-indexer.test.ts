@@ -26,7 +26,7 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("base64url");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
@@ -112,7 +112,7 @@ async function installAgreement(
     const value = Buffer.from(await ed25519Sign(
       Buffer.from(signaturePrefix + artifactHash(agreementScope, "agreement")),
       privateKeyFromSeed(seeds[signer]),
-    )).toString("hex");
+    )).toString("base64url");
     return { party: dids[signer], algorithm: "ed25519", value };
   }));
   const agreement = { ...agreementScope, signatures: agreementSignatures };

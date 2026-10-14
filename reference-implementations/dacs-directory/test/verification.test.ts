@@ -121,7 +121,7 @@ test("listing verification accepts a current structured listing and verifies its
   const value = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(currentScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const signed = { ...currentScope, signature: { algorithm: "ed25519", signer: did, value } };
   const verified = await verifyListing(signed);
   assert.equal(verified?.profile, "dacs-v0.1");
@@ -131,7 +131,7 @@ test("listing verification accepts a current structured listing and verifies its
   const unsafeValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(unsafeScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
@@ -555,7 +555,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
     revokedAt: Date.now(),
   };
   const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
-  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
   const bogus = { ...valid, revokedAt: scope.revokedAt + 1 };
   const records = new Map<string, Record<string, unknown>>([["bogus", bogus], ["valid", valid]]);
@@ -627,7 +627,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     if (sdkHash) assert.equal(lenientHash(scope), sdkHash);
     const hash = sdkHash ?? lenientHash(scope);
     const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
-    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("hex");
+    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("base64url");
     return { ...scope, signature: { algorithm: "ed25519", signer: markerDid, value } };
   };
   const outcome = async (revokedAt: unknown) => {
@@ -677,7 +677,7 @@ test("a revocation candidate with no canonical form never stops the candidate lo
     revokedAt: Date.now(),
   };
   const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
-  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
   // Valid required fields; the extension member has no canonical (CF-1) number form.
   const infinite = { ...valid, futureField: JSON.parse("1e400") };
@@ -716,7 +716,7 @@ test("revocation verification work per call is bounded and reports what it exami
   assert.ok(verified);
   if (!verified) return;
   const scope = { listingId: listing.listingId, listingVersion: listing.listingVersion, listingContentHash: verified.contentHash, revokedAt: 1 };
-  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("hex");
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value } };
   const refs = Array.from({ length: 20 }, (_, index) => `bogus-${index}`);
   const reads: string[] = [];
@@ -850,7 +850,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // top-level allowlist would (wrongly) reject this.
   const acceptValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(forwardScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const accepted = await verifyListing({ ...forwardScope, signature: { algorithm: "ed25519", signer: did, value: acceptValue } });
   assert.ok(accepted, "unknown additive top-level field must be tolerated (open-world)");
   assert.equal(accepted?.profile, "dacs-v0.1");
@@ -860,7 +860,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // open-world relaxation did NOT weaken signature binding.
   const baseValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(baseScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const injected = { ...baseScope, futureListingField: { evil: true }, signature: { algorithm: "ed25519", signer: did, value: baseValue } };
   assert.equal(await verifyListing(injected), null, "field injected after signing must fail the whole-scope hash");
 });

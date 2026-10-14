@@ -36,7 +36,7 @@ const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => locator(from + index));
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 
 const listingScope = {

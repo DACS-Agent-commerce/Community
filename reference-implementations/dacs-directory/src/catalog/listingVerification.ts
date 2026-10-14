@@ -10,20 +10,10 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import { canonicalSignatureBytes, legacySignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
-
-function decodeSignature(value: string): Uint8Array | null {
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try {
-    const decoded = Buffer.from(value, "base64url");
-    return decoded.length === 64 ? Uint8Array.from(decoded) : null;
-  } catch {
-    return null;
-  }
-}
 
 export interface VerifiedListing {
   listing: Listing | Record<string, unknown>;
@@ -124,10 +114,9 @@ function currentListing(scope: Record<string, unknown>): {
 async function verifyEd25519(
   message: Uint8Array,
   signer: string,
-  value: unknown,
+  sig: Uint8Array | null,
   resolveKey: ResolvePrimaryClaimKey,
 ): Promise<ResolvedPrimaryClaimKey | null> {
-  const sig = typeof value === "string" ? decodeSignature(value) : null;
   return sig
     ? verifyPrimaryClaimSignature(message, sig, signer, "ed25519", resolveKey)
     : null;
@@ -147,7 +136,10 @@ async function verifyIdentityPresentation(
   const bundleScope = { ...identity };
   delete bundleScope.presentation;
   const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
-  return verifyEd25519(message, sellerClaim, signature.signature, resolveKey);
+  // A per-claim PresentationSignature carries a bare `signature` string, not a
+  // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
+  const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
+  return verifyEd25519(message, sellerClaim, value, resolveKey);
 }
 
 /** Verify either the current normative Listing or the pinned SDK compatibility profile. */
@@ -161,10 +153,10 @@ export async function verifyListing(
     const scope = { ...raw };
     delete scope.signature;
     if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) return null;
-    if (current.signature.algorithm !== "ed25519" || typeof current.signature.value !== "string") return null;
+    if (current.signature.algorithm !== "ed25519") return null;
     const hash = contentHash(scope);
     const verifiedSigner = await verifyEd25519(
-      Buffer.from(SEPARATOR + hash, "utf8"), current.signer, current.signature.value, resolveKey,
+      Buffer.from(SEPARATOR + hash, "utf8"), current.signer, canonicalSignatureBytes(current.signature.value), resolveKey,
     );
     const seller = record(raw.seller);
     const identity = record(seller?.identity);
@@ -199,7 +191,8 @@ export async function verifyListing(
     typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return null;
-  const sig = decodeSignature(s.value);
+  // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
+  const sig = legacySignatureBytes(s.value);
   if (!sig) return null;
   const hash = contentHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
@@ -323,7 +316,8 @@ export async function verifyListingRevocation(
     s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return false;
-  const sig = decodeSignature(s.value);
+  // A marker is a current-profile artifact whatever the listing's profile: SIG-6 applies.
+  const sig = canonicalSignatureBytes(s.value);
   if (!sig) return false;
   let hash: string;
   try {

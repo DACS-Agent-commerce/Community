@@ -10,6 +10,7 @@ import {
   type PendingListingPublication,
 } from "@/src/components/listing-publication-recovery";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
+import { importLegacySignatureValue } from "@/src/catalog/signatureValue";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -284,9 +285,12 @@ export default function Register() {
         setStatus("Now approve the complete structured listing.");
         const signature = await wallet.sign(publication.message);
         if (!signature) throw new Error(wallet.error ?? "The listing signature was declined.");
+        // The wallet returns hex; a ListingSignature value is unpadded Base64URL (CORE SIG-6).
+        const value = importLegacySignatureValue(signature.replace(/^0x/i, "").toLowerCase(), "lowercase-hex");
+        if (!value) throw new Error("The wallet returned a listing signature that is not a 64-byte Ed25519 signature.");
         signedListing = {
           ...publication.listing,
-          signature: { algorithm: "ed25519", signer: claim, value: signature.replace(/^(0x)+/i, "") },
+          signature: { algorithm: "ed25519", signer: claim, value },
         };
         transaction = structuredClone(transaction);
         const content = transaction.content as Record<string, unknown> | undefined;

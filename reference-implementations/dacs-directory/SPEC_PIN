@@ -1,0 +1,8 @@
+# DACS Standard revision this Directory implements and tests against
+# github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
+4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
+# Profile notes: primary claims use the did:demos:agent ClaimReference profile
+# (src/catalog/claimRef.ts), which the pinned revision does not yet define.
+# Vendored conformance vectors (byte-identical copies; sha256 checked by test/sig6.test.ts):
+#   conformance/vectors/security/signature-value-encoding-v0.1.json  bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+#   conformance/vectors/security/revocation-binding-v0.3.json        3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce

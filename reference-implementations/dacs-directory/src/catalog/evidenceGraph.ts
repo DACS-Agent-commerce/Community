@@ -1,6 +1,7 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -120,12 +121,6 @@ export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): R
 export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => contentHash(signedScope(raw, kind));
 const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 
-function decodeSignature(value: unknown): Uint8Array | null {
-  if (typeof value !== "string") return null;
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try { const bytes = Buffer.from(value, "base64url"); return bytes.length === 64 ? Uint8Array.from(bytes) : null; } catch { return null; }
-}
 export async function verifyComponentSignature(
   raw: Record<string, unknown>,
   kind: ArtifactKind,
@@ -134,7 +129,7 @@ export async function verifyComponentSignature(
 ): Promise<boolean> {
   if (kind === "attestation") return false;
   if (signature.algorithm !== "ed25519" || typeof signature.signer !== "string") return false;
-  const value = decodeSignature(signature.value);
+  const value = canonicalSignatureBytes(signature.value);
   const separator = separatorFor(raw, kind);
   if (!value || !separator) return false;
   return Boolean(await verifyPrimaryClaimSignature(
@@ -162,7 +157,7 @@ async function verifyBundleSignature(
 ): Promise<boolean> {
   const party = signature.party;
   if (signature.algorithm !== "ed25519" || typeof party !== "string") return false;
-  const value = decodeSignature(signature.value);
+  const value = canonicalSignatureBytes(signature.value);
   const profile = bundleProfile(raw);
   if (!value || !profile) return false;
   const separator = profile === "fault" ? FAULT_BUNDLE_SEPARATOR : SEPARATORS.bundle;

@@ -9,6 +9,7 @@ import {
   verifyResolvedPrimaryClaimSignature,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding } from "./types.js";
 
 const BINDING_DOMAIN = "dacs-bundle-binding:v1:";
@@ -37,18 +38,6 @@ export function bundleBindingRoleKey(jobId: string, role: BundleBinding["role"])
 /** Discovery is bounded per authenticated signer, so one signer's bindings never use another's budget (BB-6). */
 export function bundleBindingOverflowKey(jobId: string, role: BundleBinding["role"], signer: string): string {
   return `${bundleBindingRoleKey(jobId, role)}\n${canonicalDemosAgentClaim(signer) ?? signer}`;
-}
-
-function strictSignatureBytes(value: unknown): Uint8Array | null {
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(value)) return null;
-  try {
-    const bytes = Buffer.from(value, "base64url");
-    return bytes.length === 64 && bytes.toString("base64url") === value
-      ? Uint8Array.from(bytes)
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 /** The whole value, signature envelope included, must serialize within the bound. */
@@ -83,7 +72,7 @@ export async function verifyBundleBinding(
   const signer = await resolvePrimaryClaimKey(raw.signer, signature.algorithm, resolveKey);
   const signatureSigner = await resolvePrimaryClaimKey(signature.signer, signature.algorithm, resolveKey);
   if (!signer || !signatureSigner || !sameResolvedPrimaryClaim(signer, signatureSigner)) return null;
-  const sig = strictSignatureBytes(signature.value);
+  const sig = canonicalSignatureBytes(signature.value);
   if (!sig) return null;
 
   const scope = { ...raw };
