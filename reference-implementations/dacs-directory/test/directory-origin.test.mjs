@@ -97,6 +97,13 @@ test("rejects missing, insecure, or non-origin deployment URLs", () => {
       value,
     );
   }
+  for (const value of ["https://directory.example:0", "https://directory.example:00/"]) {
+    assert.throws(
+      () => checkDirectoryOrigin({ env: { NEXT_PUBLIC_DIRECTORY_URL: value } }),
+      /NEXT_PUBLIC_DIRECTORY_URL must not use port 0/,
+      value,
+    );
+  }
 });
 
 // The app reads the raw variable (src/catalog/publicUrl.ts), so a value that only

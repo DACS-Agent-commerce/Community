@@ -83,6 +83,7 @@ export function httpsOrigin(env, name) {
   ) {
     throw new Error(`${name} must be an origin without credentials, path, query, or fragment`);
   }
+  if (url.port === "0") throw new Error(`${name} must not use port 0, which browsers cannot reach`);
   if (!isPublicHost(url.hostname)) {
     throw new Error(
       `${name} must be a public host (a multi-label DNS name or a globally routable IP address), `
