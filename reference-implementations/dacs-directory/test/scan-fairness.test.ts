@@ -250,6 +250,25 @@ test("a rejected candidate is verified again only when its content changes", asy
   assert.equal(listingStatus(), "revoked");
 });
 
+test("a rejected marker re-published in place with a corrected signature envelope is examined again", async () => {
+  resetIndex([sellerRegistration, later], 35);
+  // The signed scope is the seller's, but the value is spelled in hex, which SIG-6 rejects.
+  const hexMarker = { ...marker, signature: { ...marker.signature, value: Buffer.from(marker.signature.value, "base64url").toString("hex") } };
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(9)]: { data: JSON.stringify(hexMarker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(9)]);
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  // Re-encoding the signature leaves the content hash unchanged, but not the stored value.
+  assert.equal(contentHash(hexMarker), contentHash(marker));
+  storage[locator(9)] = { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) };
+  transactions = [memo(50, locator(9)), ...transactions];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.equal(publishedListing()?.revocationBinding?.markerAnchor.locator, locator(9));
+});
+
 test("a verified marker missing from the candidate queue is still checked first", async () => {
   resetIndex([sellerRegistration, later], 15);
   const others = range(400, 20);

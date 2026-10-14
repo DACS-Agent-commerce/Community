@@ -238,7 +238,8 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 /**
  * Revocation candidates, per listing content hash. Each locator is admitted
  * once and stays pending until it is read and fails RB-4; a rejected locator
- * is admitted again only when the chain shows it with different content.
+ * is admitted again only when the chain shows it with a different stored
+ * value (`content_hash` hashes the whole value, signature envelope included).
  * `seq` is arrival order; an unreadable candidate is given a new one, so it
  * moves behind the others and is retried later.
  */

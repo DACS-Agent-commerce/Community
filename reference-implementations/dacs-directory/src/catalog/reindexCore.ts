@@ -6,6 +6,7 @@
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
+import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
@@ -200,11 +201,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       if (!deal.owners.seller) delete deal.sellerBundleRef;
     }
     omitted.omittedBindings += scan.omittedBindings;
-    // Every candidate is queued once, in arrival order, with the owner and content it was read with.
+    // Every candidate is queued once, in arrival order, with the owner and stored value it was read
+    // with. The value hash covers the signature envelope, which the content hash omits, so a marker
+    // re-published with a corrected signature is examined again.
     const observed = new Map(scan.observations.map((observation) => [observation.locator, observation]));
+    const storedValueHash = (data: Record<string, unknown> | undefined) => {
+      const json = data ? boundedJson(data) : null;
+      return json === null ? null : createHash("sha256").update(json, "utf8").digest("hex");
+    };
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
-        ({ locator, owner: observed.get(locator)?.owner, contentHash: observed.get(locator)?.contentHash })));
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
