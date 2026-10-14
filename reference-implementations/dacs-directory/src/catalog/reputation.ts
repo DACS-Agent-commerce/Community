@@ -67,12 +67,16 @@ export function deriveSellerReputation(
     return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
   });
   // SB-2: a settlement transaction reused across jobs contributes once, at
-  // its earliest evidence observation. Deterministic jobId breaks exact ties.
+  // its earliest evidence observation; the lower evidence hash breaks a tie,
+  // then the jobId, so the choice is deterministic.
   const settlementOwner = new Map<string, DealRecord>();
   for (const deal of scoped) for (const tx of deal.settlementTxIds ?? []) {
     const prior = settlementOwner.get(tx.id);
-    const priorTime = prior?.settlementTxIds?.find((candidate) => candidate.id === tx.id)?.observedAt ?? Infinity;
-    if (!prior || tx.observedAt < priorTime || (tx.observedAt === priorTime && deal.jobId < prior.jobId)) settlementOwner.set(tx.id, deal);
+    const priorTx = prior?.settlementTxIds?.find((candidate) => candidate.id === tx.id);
+    const priorTime = priorTx?.observedAt ?? Infinity;
+    const order = byteOrder(tx.evidenceHash ?? "", priorTx?.evidenceHash ?? "");
+    if (!prior || tx.observedAt < priorTime ||
+      (tx.observedAt === priorTime && (order < 0 || (order === 0 && deal.jobId < prior.jobId)))) settlementOwner.set(tx.id, deal);
   }
   scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;

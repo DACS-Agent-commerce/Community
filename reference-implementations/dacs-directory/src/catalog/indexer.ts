@@ -399,7 +399,7 @@ export async function indexRegistration(
           const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
           const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
           return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
-            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
+            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex, evidenceHash: artifact.contentHash }));
         });
       const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
         .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;

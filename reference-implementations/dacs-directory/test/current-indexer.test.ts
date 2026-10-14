@@ -999,6 +999,8 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals[0].refsVerified, true);
     assert.equal(record.deals[0].fullSignatureStanding, true, "both parties signed the authoritative copy");
+    assert.deepEqual(record.deals[0].settlementTxIds, [{ id: `tx-${deal.jobId}`, observedAt: 100, phaseIndex: 2,
+      evidenceHash: artifactHash(fixture.evidence, "evidence") }], "SB-2 carries the citing evidence hash");
     assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
@@ -1184,6 +1186,21 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
   assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+});
+
+test("SB-2: a settlement id cited at the same time by two jobs counts for the lower evidence hash", () => {
+  const deal = (jobId: string, evidenceHash: string, amount: string): DealRecord => ({
+    jobId, rail: "pay-dem", buyerBundleRef: locator(jobId === "a" ? 160 : 161), owners: { buyer: dids[0], seller: dids[1] },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
+    verifiedAt: 1, bundleContentHash: jobId.repeat(64), agreementPrice: { amount, currency: "DEM" },
+    settlementTxIds: [{ id: "demos:tx", observedAt: 10, phaseIndex: 2, evidenceHash }],
+  });
+  const volume = (deals: DealRecord[]) => deriveSellerReputation(deals, 0, 200).observedTransactionalVolume;
+  // Job "z" sorts after "a", but its evidence hash is lower, so it keeps the settlement.
+  assert.deepEqual(volume([deal("a", "f".repeat(64), "1"), deal("z", "0".repeat(64), "2")]), [{ currency: "DEM", amount: "2" }]);
+  assert.deepEqual(volume([deal("z", "0".repeat(64), "2"), deal("a", "f".repeat(64), "1")]), [{ currency: "DEM", amount: "2" }]);
+  // Equal evidence hashes fall back to the jobId.
+  assert.deepEqual(volume([deal("z", "0".repeat(64), "2"), deal("a", "0".repeat(64), "1")]), [{ currency: "DEM", amount: "1" }]);
 });
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {
