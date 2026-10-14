@@ -7,7 +7,7 @@ It uses the Node version and SDK revision already pinned by the repository.
 ## Keep the worktree isolated
 
 - Use the exact Node release in `reference-implementations/dacs-directory/.nvmrc`,
-  as CI does. `package.json` engines only states the supported range (Node 22).
+  as CI and Railway do. `package.json` engines names the same release.
 - Do not copy `.env` files, tokens, wallets, seeds, `data/`, `node_modules/`, or
   `vendor/` from another worktree.
 - Keep any mutable catalog state under this worktree's
@@ -18,10 +18,11 @@ It uses the Node version and SDK revision already pinned by the repository.
 
 ## Install the pinned dependencies
 
-From the Community repository root, use your normally initialized version
-manager to select an already-installed Node 22 (for example `nvm use 22`) and
-confirm that `node --version` prints `v22.x`. Then set paths from the current
-worktree rather than a fixed checkout location:
+Use your normally initialized version manager to select the `.nvmrc` release
+(with nvm, run `nvm install` from `reference-implementations/dacs-directory`, which
+reads `.nvmrc`) and confirm that `node --version` prints `v` followed by that
+file's content. Then, from the Community repository root, set paths from the
+current worktree rather than a fixed checkout location:
 
 ```bash
 repo_root=$(git rev-parse --show-toplevel)
