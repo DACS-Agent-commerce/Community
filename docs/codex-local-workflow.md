@@ -38,7 +38,9 @@ reuse a clean vendor checkout in this worktree and install both dependency trees
 from their lockfiles. The block runs in a subshell with `set -euo pipefail`, so
 pasting it into an interactive shell stops at the first failure instead of
 building whatever the SDK checkout happens to contain. It builds only after
-`HEAD` is verified to be the pinned commit:
+`HEAD` is verified to be the pinned commit. The object-store check uses
+`git rev-parse --path-format=absolute`, which needs Git 2.31 or later; older Git
+stops at that check:
 
 ```bash
 (
@@ -76,6 +78,9 @@ building whatever the SDK checkout happens to contain. It builds only after
   for alternate in alternates http-alternates; do
     [ ! -e "$objects/info/$alternate" ] && [ ! -L "$objects/info/$alternate" ] \
       || die "$sdk shares an object store; use a standalone clone"
+  done
+  for metadata in shallow FETCH_HEAD; do
+    [ ! -L "$sdk/.git/$metadata" ] || die "$sdk/.git/$metadata must not be a symlink"
   done
   [ "$(git -C "$sdk" rev-parse --show-toplevel)" = "$sdk" ] \
     || die "$sdk is not a Git checkout of its own; inspect it, do not overwrite it"

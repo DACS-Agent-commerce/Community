@@ -1,6 +1,8 @@
 /**
  * POST /api/dacs/prepare-registration — issue a fresh, content-bound owner
- * signing message for an already finalized and authenticated listing pointer.
+ * signing message for a registration pointer set. It only parses and signs:
+ * the `/register` page calls it after confirm-listing has checked finality,
+ * and the indexer re-authenticates every anchor before catalog admission.
  *
  * The browser can safely resume registration after a reload or an expired
  * signature without rebuilding or rebroadcasting the on-chain listing.

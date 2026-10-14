@@ -118,7 +118,7 @@ test("documented SDK install rejects redirected and shared checkouts before muta
   for (const kind of [
     "vendor-symlink", "sdk-symlink", "dangling-symlink", "git-symlink", "linked-worktree",
     "objects-symlink", "objects-pack-symlink", "objects-fanout-symlink", "common-directory",
-    "shared-objects", "http-alternates", "dangling-alternates", "dirty",
+    "shared-objects", "http-alternates", "dangling-alternates", "shallow-symlink", "fetch-head-symlink", "dirty",
   ]) {
     const f = fixture(t);
     const source = sdkFixture(f);
@@ -156,6 +156,10 @@ test("documented SDK install rejects redirected and shared checkouts before muta
           writeFileSync(join(sdk, ".git/objects/info/http-alternates"), "https://example.invalid/objects\n");
         } else if (kind === "dangling-alternates") {
           symlinkSync(join(f.root, "missing"), join(sdk, ".git/objects/info/alternates"));
+        } else if (kind === "shallow-symlink" || kind === "fetch-head-symlink") {
+          const metadata = kind === "shallow-symlink" ? "shallow" : "FETCH_HEAD";
+          rmSync(join(sdk, ".git", metadata), { force: true });
+          symlinkSync(join(f.root, `external-${metadata}`), join(sdk, ".git", metadata));
         } else writeFileSync(join(sdk, "README.md"), "local edit\n");
       }
     }

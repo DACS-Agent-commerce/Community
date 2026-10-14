@@ -7,7 +7,8 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
 the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
-listings must pass the pinned SDK's normative `isListing()` gate before catalog admission. They are exposed as
+listings must pass the pinned SDK's normative `isListing()` gate on their exact signed bytes, with CORE §B.7
+SIG-6 base64url signature values, before catalog admission. They are exposed as
 authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
 rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display
 name and (when owner-signed) the "owner-registered" badge — it is never a gate.
@@ -23,7 +24,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Surface | Spec | How |
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
-| Seller publication | DACS-1 §6.3.4 | `/register` uses the SDK rail resolver over release-authenticated PA-1 definitions, refuses attested-payload methods whose seller-runtime production capability it cannot prove, shows the exact server-built unsigned Listing before signature, creates its StorageProgram with the current SDK name/next-nonce/empty-salt mapping, persists non-secret recovery coordinates before broadcast, obtains a portable BFT-finalized `AnchorReceipt`, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
+| Seller publication | DACS-1 §6.3.4 | `/register` uses the SDK rail resolver over release-authenticated PA-1 definitions, refuses attested-payload methods whose seller-runtime production capability it cannot prove, shows the exact server-built unsigned Listing before signature, creates its StorageProgram with the current SDK name/next-nonce/empty-salt mapping, persists non-secret recovery coordinates before broadcast, obtains a portable BFT-finalized `AnchorReceipt`, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before the browser submits its catalog registration. The receipt gates only this cooperative flow: `POST /api/dacs/register` accepts pointer sets without one, and the indexer re-reads and re-authenticates every anchor on each pass |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
 | Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
@@ -201,7 +202,8 @@ npm run check:listing-upgrade
 
 It proves the actual old anchor bytes fail with `VERIFICATION_METHOD_INVALID`, their public
 diagnostics carry the affected listing coordinates, each replacement passes the complete
-SDK reader, the reindexed catalog exposes the exact replacement pin with transaction
+SDK reader with its Listing signature and identity presentation verified independently
+(SIG-6 base64url, Ed25519 against the signer's key), the reindexed catalog exposes the exact replacement pin with transaction
 readiness still unassessed. It never contacts a gateway and never writes, reindexes,
 purchases, or invokes an agent. Gateway demo deployment and smoke testing are owned by the
 private gateway release and are not Directory/indexer acceptance criteria.
@@ -224,7 +226,10 @@ private gateway release and are not Directory/indexer acceptance criteria.
    group, the first distinct locators in scan iteration order survive. A valid marker
    outside the retained window is not evaluated. Its publisher can anchor a fresh
    marker to re-enter discovery, but continued overflow can exclude that marker again.
-   After one marker verifies, later pruning cannot make it disappear.
+   After one marker verifies, later pruning cannot make it disappear, and an unreadable
+   marker never turns its listing back into a fresh `active` summary: a published
+   revocation stays in force, and a pass that cannot get a verified marker or a candidate
+   anchored by the listing's owner from the node withholds the listing until it can.
    BB-4-valid BundleBindings are also classified and accumulated under a deterministic
    per-job/role total-work ceiling; any overflow is sticky and makes that side
    `indeterminate`, never absent.
@@ -246,7 +251,8 @@ is bundler-hostile. SDK verification names resolve through one compatibility sea
 the current top-level SDK barrel statically re-exports those optional rail modules; replace
 that seam when the SDK publishes a browser-safe verification subpath. The same verification
 code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow `node:util`
-shim over JSON-owned values, and base64url-patched Buffer).
+shim over JSON-owned values, WHATWG-subset `node:net` and `node:url` shims, and
+base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
@@ -263,7 +269,10 @@ shim over JSON-owned values, and base64url-patched Buffer).
   any StorageProgram broadcast, the browser persists the public signed artifact, exact
   native/write coordinates and unsigned registration. After broadcast, registration waits
   for canonical transaction inclusion, a BFT-confirmed block, portable finalized
-  `AnchorReceipt`, and independent native readback. A reload re-verifies that same anchor
+  `AnchorReceipt`, and independent native readback. That wait protects this browser flow
+  only: registrations do not carry the receipt, `POST /api/dacs/register` accepts pointer
+  sets from any client, and catalog admission rests on the indexer re-reading and
+  re-authenticating each anchor rather than on transaction finality. A reload re-verifies that same anchor
   and refreshes only the catalog-pointer signature; it never creates another listing version
   or re-sends a chain transaction automatically. The browser publisher intentionally omits
   attested-payload delivery: publish that shape through the seller runtime's current SDK so
@@ -281,7 +290,9 @@ shim over JSON-owned values, and base64url-patched Buffer).
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
-  otherwise propose the same next version.
+  otherwise propose the same next version. A version whose owner-held program no longer
+  authenticates (for example a Listing an earlier publisher signed with raw hex) is
+  stepped past, up to four per request.
 
 ## DACS surface / conformance declaration
 
