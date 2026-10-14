@@ -346,8 +346,10 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
-    agreementVersion: "1", jobId, listingRef, parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
+    parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" },
+      deliverable: { deliverableType: "attested-payload", hash: contentHash((listingRaw.offering as Obj).deliverable as Obj) } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
