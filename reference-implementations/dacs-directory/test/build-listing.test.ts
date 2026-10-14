@@ -5,9 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import {
+  ed25519Sign,
+  ed25519Verify,
+  privateKeyFromSeed,
+  publicKeyFromRaw,
+  publicKeyFromSeed,
+  rawPublicKey,
+} from "@kynesyslabs/dacs/crypto";
 import { deriveStorageAddress, LIVE_STORAGE_SALT } from "../src/catalog/chain.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
+import { authenticateReadableListingArtifact } from "../vendor/dacs-sdk/dist/agent/discover.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
@@ -150,6 +158,78 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
     );
     assert.equal(built.contentHash.length, 64);
 
+    assert.ok(await verifyListing(built.listing));
+    const sig6 = /^[A-Za-z0-9_-]{86}$/;
+    assert.match((built.listing.signature as { value: string }).value, sig6, "CORE §B.7 SIG-6 base64url");
+    const identityBundle = (built.listing.seller as { identity: { presentation: { signatures: Array<{ signature: string }> } } }).identity;
+    assert.match(identityBundle.presentation.signatures[0].signature, sig6);
+    assert.ok(await authenticateReadableListingArtifact(built.listing, {
+      verify: (bytes, signature, publicKey) => ed25519Verify(bytes, signature, publicKeyFromRaw(publicKey)),
+    }), "an SDK buyer authenticates the published Listing");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("publisher steps past an owner-held version whose artifact no longer authenticates", async () => {
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const walletHex = (message: string) =>
+    Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
+  const finalInput = {
+    ...base,
+    identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: walletHex(identity.identityMessage),
+  };
+  let occupied: { address: string; name: string; data: Record<string, unknown> } | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const rpc = JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> };
+      if (rpc.params?.[0]?.message === "searchStoragePrograms") {
+        return Response.json({
+          result: 200,
+          response: occupied && rpc.params[0].data?.query === occupied.name
+            ? [{ storageAddress: occupied.address, programName: occupied.name }]
+            : [],
+        });
+      }
+      return Response.json({ result: 200, response: 0 });
+    }
+    return occupied && String(input).endsWith(occupied.address)
+      ? Response.json({ success: true, data: occupied.data, owner: `0x${keyHex}`, programName: occupied.name })
+      : new Response(null, { status: 404 });
+  };
+  type Built = {
+    listing: Record<string, unknown>;
+    message: string;
+    logicalAddress: string;
+    programName: string;
+    anchorAddress: string;
+    exists: boolean;
+    tx: unknown;
+  };
+  try {
+    const v1Preview = await (await POST(request(finalInput))).json() as Built;
+    const v1 = await (await POST(request({ ...finalInput, listingSignature: walletHex(v1Preview.message) }))).json() as Built;
+    // What the earlier browser publisher anchored: the same bytes with a raw hex signature value.
+    const signature = v1.listing.signature as Record<string, unknown> & { value: string };
+    occupied = {
+      address: v1.anchorAddress,
+      name: v1.programName,
+      data: { ...v1.listing, signature: { ...signature, value: Buffer.from(signature.value, "base64url").toString("hex") } },
+    };
+    assert.equal(await verifyListing(occupied.data), null);
+
+    const preview = await (await POST(request(finalInput))).json() as Built;
+    assert.equal(preview.exists, false);
+    assert.equal(preview.listing.listingVersion, 2);
+    assert.match(preview.logicalAddress, /:metered-ap2:v2$/);
+    const builtResponse = await POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
+    assert.equal(builtResponse.status, 200);
+    const built = await builtResponse.json() as Built;
+    assert.equal(built.listing.listingVersion, 2);
+    assert.notEqual(built.programName, occupied.name);
+    assert.ok(built.tx, "the republished version is a new write");
     assert.ok(await verifyListing(built.listing));
   } finally {
     globalThis.fetch = originalFetch;

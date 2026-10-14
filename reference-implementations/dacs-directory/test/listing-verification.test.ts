@@ -82,12 +82,35 @@ function signedCurrentListing(
   };
 }
 
-test("verifyListing canonicalizes mixed-case DID scheme spelling on read", async () => {
+test("verifyListing applies the SDK shape gate to the exact signed bytes, including DID scheme case", async () => {
   const mixedCaseClaim = `DID:demos:agent:${publicKeyHex}`;
-  const verified = await verifyListing(signedCurrentListing({}, mixedCaseClaim));
+  const everyRole = signedCurrentListing({}, mixedCaseClaim);
+  const lowercase = signedCurrentListing();
+  // The signature envelope is outside the signed scope, so this value stays cryptographically valid.
+  const signerOnly = {
+    ...lowercase,
+    signature: { ...(lowercase.signature as Record<string, unknown>), signer: mixedCaseClaim },
+  };
 
-  assert.equal(verified?.signer, claim);
-  assert.equal(verified?.sellerClaim, claim);
+  for (const listing of [everyRole, signerOnly]) {
+    assert.equal(isListing(listing), false, "the pinned SDK reader rejects it at step 1");
+    assert.deepEqual(await verifyListingResult(listing), { ok: false, code: "NORMATIVE_LISTING_INVALID" });
+  }
+  assert.equal((await verifyListing(lowercase))?.signer, claim);
+});
+
+test("a current Listing signature must be CORE §B.7 SIG-6 base64url, never raw hex", async () => {
+  const listing = signedCurrentListing();
+  const signature = listing.signature as Record<string, unknown> & { value: string };
+  const hex = Buffer.from(signature.value, "base64url").toString("hex");
+  const withValue = (value: string) => ({ ...listing, signature: { ...signature, value } });
+
+  assert.equal(isListing(withValue(hex)), true, "128 hex characters are also valid base64url text");
+  assert.deepEqual(await verifyListingResult(withValue(hex)), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.deepEqual(await verifyListingResult(withValue(hex.toUpperCase())), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.equal((await verifyListingResult(withValue(`0x${hex}`))).ok, false);
+  assert.equal((await verifyListingResult(withValue(`${signature.value}==`))).ok, false);
+  assert.equal((await verifyListingResult(listing)).ok, true);
 });
 
 test("verifyListing rejects suffix-shaped aliases even when their signatures are valid", async () => {

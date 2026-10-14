@@ -1,0 +1,105 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import { PUBLISHER_IN_CODE_RAIL_DEFINITIONS } from "../src/catalog/listingOptions.js";
+import {
+  sdkIdentityPresentationVerifier,
+  sdkListingSignatureVerifier,
+} from "../src/catalog/sdkReaderVerifiers.js";
+import { validateListingArtifact, type ListingValidationDeps } from "../src/sdkListingValidation.js";
+
+const seed = Uint8Array.from(Buffer.alloc(32, 31));
+const privateKey = privateKeyFromSeed(seed);
+const claim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
+const otherClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 32))))).toString("hex")}`;
+const sign = (message: string) =>
+  Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("base64url");
+
+const identityScope = { bundleVersion: "1", presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
+const scope = {
+  dacsVersion: "1",
+  listingId: "reader-verifiers",
+  listingVersion: 1,
+  requiredCapabilities: ["SR-2"],
+  seller: {
+    identity: {
+      ...identityScope,
+      presentation: {
+        kind: "per-claim",
+        signatures: [{ ref: claim, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`) }],
+      },
+    },
+    displayName: "Reader verifier fixture",
+  },
+  offering: {
+    title: "Reader verifier fixture",
+    description: "Pins the deployment acceptance verifiers.",
+    category: "services.test",
+    tags: [],
+    deliverable: { kind: "storage-program", accessModel: "public" },
+  },
+  buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
+  pipeline: [
+    { kind: "negotiate-fixed-price" },
+    { kind: "commit-agreement" },
+    { kind: "pay-dem", parameters: { rail: "pay-dem" } },
+    { kind: "deliver-storage-program" },
+  ],
+  pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } },
+  acceptedRails: [{ railId: "pay-dem" }],
+  terms: {},
+  validity: { notBefore: 1 },
+};
+const listing = {
+  ...scope,
+  signature: { algorithm: "ed25519" as const, signer: claim, value: sign(`dacs-listing:v1:${contentHash(scope)}`) },
+};
+const hexValue = Buffer.from(listing.signature.value, "base64url").toString("hex");
+
+function readerDeps(): ListingValidationDeps {
+  return {
+    nowMs: () => 2,
+    verifyListingSignature: sdkListingSignatureVerifier(),
+    revocation: {
+      surfaces: [{ kind: "catalog", status: "active", catalogObservedAt: 2 }],
+      readMarker: async () => null,
+      verifyMarkerSignature: () => false,
+    },
+    verifyIdentityPresentation: sdkIdentityPresentationVerifier(),
+    loadRailResolution: () => ({
+      trustPhase: "PA-1",
+      trustPolicyAcceptsPA1: true,
+      registry: { state: "not-used", entries: [], definitions: [] },
+      inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+    }),
+    resolvePayloadVerificationCapability: () => ({ disposition: "unsupported", reason: "not configured" }),
+    verifySellerControl: ({ bundle, signer }) => signer === bundle.presentedBy,
+  } as ListingValidationDeps;
+}
+
+test("acceptance verifiers verify SIG-6 values against the signer key, never by self-comparison", async () => {
+  const verifyListingSignature = sdkListingSignatureVerifier();
+  const signedBytes = Buffer.from(`dacs-listing:v1:${contentHash(scope)}`, "utf8");
+  assert.equal(await verifyListingSignature({ signedBytes, signature: listing.signature }), true);
+  assert.equal(await verifyListingSignature({ signedBytes, signature: { ...listing.signature, value: hexValue } }), false);
+  assert.equal(await verifyListingSignature({ signedBytes, signature: { ...listing.signature, signer: otherClaim } }), false);
+  assert.equal(await verifyListingSignature({
+    signedBytes: Buffer.from(`dacs-listing:v1:${"0".repeat(64)}`, "utf8"),
+    signature: listing.signature,
+  }), false);
+
+  const verifyIdentityPresentation = sdkIdentityPresentationVerifier();
+  const bundle = scope.seller.identity as unknown as Parameters<typeof verifyIdentityPresentation>[0]["bundle"];
+  const presentationBytes = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8");
+  assert.equal(await verifyIdentityPresentation({ bundle, signedBytes: presentationBytes }), true);
+  assert.equal(await verifyIdentityPresentation({ bundle, signedBytes }), false);
+});
+
+test("the SDK ordered reader with the acceptance verifiers accepts SIG-6 and rejects the same bytes as hex", async () => {
+  assert.equal((await validateListingArtifact(listing, readerDeps())).disposition, "verified");
+  const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
+  const rejected = await validateListingArtifact(hexListing, readerDeps());
+  assert.equal(rejected.disposition, "rejected");
+});

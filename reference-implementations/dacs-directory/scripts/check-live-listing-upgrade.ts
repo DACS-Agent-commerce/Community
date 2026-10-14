@@ -7,9 +7,12 @@
  *   DACS_LISTING_UPGRADE_REPLACEMENTS='[{"listingId":"...","replacementLocator":"stor-...","replacementVersion":4,"supportedPayloadMethods":["self-signed"]}, ...]'
  */
 import invalidLiveListings from "../test/fixtures/live-invalid-verification-methods.json";
-import { canonicalize } from "@kynesyslabs/dacs/canonical";
 import { validateListingArtifact } from "../src/sdkListingValidation.js";
 import { verifyListingResult } from "../src/catalog/listingVerification.js";
+import {
+  sdkIdentityPresentationVerifier,
+  sdkListingSignatureVerifier,
+} from "../src/catalog/sdkReaderVerifiers.js";
 import { PUBLISHER_IN_CODE_RAIL_DEFINITIONS } from "../src/catalog/listingOptions.js";
 
 type Replacement = {
@@ -78,10 +81,6 @@ async function anchor(locator: string): Promise<Record<string, unknown>> {
   return body.data as Record<string, unknown>;
 }
 
-const same = (left: unknown, right: unknown): boolean => {
-  try { return canonicalize(left) === canonicalize(right); } catch { return false; }
-};
-
 async function main() {
   const directory = httpsOrigin("NEXT_PUBLIC_DIRECTORY_URL");
   const manifest = replacements();
@@ -130,8 +129,7 @@ async function main() {
 
     const validation = await validateListingArtifact(replacementRaw, {
       nowMs: () => Date.now(),
-      verifyListingSignature: ({ signature }) =>
-        same(signature, listing.signature),
+      verifyListingSignature: sdkListingSignatureVerifier(),
       revocation: {
         surfaces: [{
           kind: "catalog",
@@ -141,8 +139,7 @@ async function main() {
         readMarker: async (marker) => anchor(marker.locator),
         verifyMarkerSignature: () => false,
       },
-      verifyIdentityPresentation: ({ bundle }) =>
-        same(bundle, listing.seller.identity),
+      verifyIdentityPresentation: sdkIdentityPresentationVerifier(),
       loadRailResolution: () => ({
         trustPhase: "PA-1",
         trustPolicyAcceptsPA1: true,

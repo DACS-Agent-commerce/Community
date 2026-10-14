@@ -30,7 +30,9 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
+  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer])))
+    .toString(kind === "listing" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({

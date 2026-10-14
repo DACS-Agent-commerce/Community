@@ -47,6 +47,8 @@ import {
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
+/** Owner-held versions that no longer authenticate and may be stepped past per request. */
+const MAX_OCCUPIED_VERSIONS = 4;
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
 async function accountNonce(addressHex: string): Promise<number> {
@@ -118,7 +120,7 @@ export async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  const listingVersion = Math.max(0, ...priorVersions) + 1;
+  let listingVersion = Math.max(0, ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -244,7 +246,10 @@ export async function POST(req: NextRequest) {
     seller: {
       identity: {
         ...identityScope,
-        presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySigHex }] },
+        presentation: {
+          kind: "per-claim",
+          signatures: [{ ref: did, signature: Buffer.from(identitySigHex, "hex").toString("base64url") }],
+        },
       },
       displayName: knownSeller?.displayName ?? body.name.trim(),
       ...(publicEndpoint ? { publicEndpoint } : {}),
@@ -289,6 +294,31 @@ export async function POST(req: NextRequest) {
       { status: 409 },
     );
   }
+
+  // StorageProgram names are producer-held write inputs, not public resolution
+  // keys. This deterministic colon-free encoding lets THIS producer recover a
+  // broadcast whose response was lost without pretending consumers can derive
+  // the native address from the logical one.
+  const programNameFor = (version: number) =>
+    logicalToStorageProgramName(listingAddress(did, serviceId, version));
+  const recoverable = (verified: Awaited<ReturnType<typeof verifyListing>>) => Boolean(
+    verified &&
+    verified.profile === "dacs-v0.1" &&
+    verified.sellerClaim === did &&
+    verified.scope.listingId === serviceId &&
+    verified.scope.listingVersion === listingVersion,
+  );
+  // Versions are immutable. A program at this owner's name whose artifact no
+  // longer authenticates (for example a Listing an earlier publisher signed
+  // with raw hex) occupies that version permanently and leaves the catalog, so
+  // step past a bounded number of them instead of refusing republication.
+  let resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
+  for (let skipped = 0; skipped < MAX_OCCUPIED_VERSIONS && resolution.status === "present"; skipped += 1) {
+    if (recoverable(await verifyListing(resolution.record.data))) break;
+    listingVersion += 1;
+    listing.listingVersion = listingVersion;
+    resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
+  }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
   let signedCandidate: Record<string, unknown> | undefined;
@@ -305,9 +335,14 @@ export async function POST(req: NextRequest) {
         publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
       );
     } catch { /* malformed signatures fail closed */ }
+    // Wallets return hex; CORE §B.7 SIG-6 stores canonical unpadded base64url.
     signedCandidate = {
       ...listing,
-      signature: { algorithm: "ed25519", signer: did, value: listingSigHex },
+      signature: {
+        algorithm: "ed25519",
+        signer: did,
+        value: Buffer.from(listingSigHex, "hex").toString("base64url"),
+      },
     };
     if (!listingSignatureValid || !isListing(signedCandidate)) {
       return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
@@ -315,12 +350,7 @@ export async function POST(req: NextRequest) {
   }
 
   const logicalAddress = listingAddress(did, serviceId, listingVersion);
-  // StorageProgram names are producer-held write inputs, not public resolution
-  // keys. This deterministic colon-free encoding lets THIS producer recover a
-  // broadcast whose response was lost without pretending consumers can derive
-  // the native address from the logical one.
-  const programName = logicalToStorageProgramName(logicalAddress);
-  const resolution = await resolveOwnedAnchorByName(programName, owner);
+  const programName = programNameFor(listingVersion);
   if (resolution.status === "indeterminate") {
     return NextResponse.json(
       { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
@@ -335,13 +365,7 @@ export async function POST(req: NextRequest) {
   const exists = resolution.status === "present";
   if (resolution.status === "present") {
     const verified = await verifyListing(resolution.record.data);
-    if (
-      !verified ||
-      verified.profile !== "dacs-v0.1" ||
-      verified.sellerClaim !== did ||
-      verified.scope.listingId !== serviceId ||
-      verified.scope.listingVersion !== listingVersion
-    ) {
+    if (!verified || !recoverable(verified)) {
       return NextResponse.json(
         { error: "the existing owner-bound program does not contain the expected authenticated listing candidate" },
         { status: 409 },

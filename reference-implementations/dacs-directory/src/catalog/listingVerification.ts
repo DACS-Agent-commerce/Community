@@ -1,6 +1,7 @@
 import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import {
   ARTIFACT_SEPARATORS,
+  isCanonicalBase64Url,
   isListing,
   isVerificationMethod,
   readListingArtifact,
@@ -8,7 +9,6 @@ import {
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
-import { canonicalDemosAgentReference } from "./claimRef.js";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
@@ -23,6 +23,12 @@ import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
 
+/**
+ * Legacy-MVP raw hex or base64url. Used for legacy Listings, identity
+ * presentations (whose encoding the SDK leaves to the presentation verifier)
+ * and revocation markers, where accepting either encoding can only withdraw a
+ * Listing. Never used for a current Listing's own signature.
+ */
 function decodeSignature(value: string): Uint8Array | null {
   const hex = value.replace(/^(0x)+/i, "");
   if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
@@ -32,6 +38,18 @@ function decodeSignature(value: string): Uint8Array | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * CORE §B.7 SIG-6: a current ComponentSignature value is canonical unpadded
+ * base64url, and Ed25519 values decode to exactly 64 bytes. Raw hex is the
+ * legacy-MVP representation; 128 hex characters are valid base64url text but
+ * decode to 96 bytes, so SDK readers reject them.
+ */
+function decodeComponentSignature(value: string): Uint8Array | null {
+  if (!isCanonicalBase64Url(value)) return null;
+  const decoded = Buffer.from(value, "base64url");
+  return decoded.length === 64 ? Uint8Array.from(decoded) : null;
 }
 
 interface VerifiedListingBase {
@@ -69,41 +87,6 @@ function verificationMethodFailure(raw: Record<string, unknown>): boolean {
   return requiresMethod && (
     deliverable?.kind !== "attested-payload" || !isVerificationMethod(method)
   );
-}
-
-/**
- * DACS-1 CF-2 makes only the leading `did` scheme token case-insensitive on
- * read. The current SDK validator still requires a lowercase claim scheme, so
- * validate a scheme-canonical projection while preserving and verifying the
- * exact received bytes. Method text, key casing and advisory parameters are
- * never rewritten.
- */
-function listingValidationView(raw: Record<string, unknown>): Record<string, unknown> {
-  const view = structuredClone(raw);
-  const normalize = (value: unknown): unknown => typeof value === "string"
-    ? canonicalDemosAgentReference(value) ?? value
-    : value;
-  const seller = record(view.seller);
-  const identity = record(seller?.identity);
-  if (identity) {
-    identity.presentedBy = normalize(identity.presentedBy);
-    if (Array.isArray(identity.claims)) {
-      identity.claims = identity.claims.map((claim) => {
-        const item = record(claim);
-        return item ? { ...item, ref: normalize(item.ref) } : claim;
-      });
-    }
-    const presentation = record(identity.presentation);
-    if (presentation && Array.isArray(presentation.signatures)) {
-      presentation.signatures = presentation.signatures.map((signature) => {
-        const item = record(signature);
-        return item ? { ...item, ref: normalize(item.ref) } : signature;
-      });
-    }
-  }
-  const signature = record(view.signature);
-  if (signature) signature.signer = normalize(signature.signer);
-  return view;
 }
 
 function invalid(
@@ -164,13 +147,10 @@ async function verifyListingArtifact(
 ): Promise<ListingVerificationResult> {
   if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
   if (raw.dacsVersion === "1") {
-    let validationView: Record<string, unknown>;
-    try {
-      validationView = listingValidationView(raw);
-    } catch {
-      return invalid("NORMATIVE_LISTING_INVALID");
-    }
-    if (!isListing(validationView)) {
+    // Validate the exact received bytes, as the pinned SDK reader does at step
+    // 1. CF-2 scheme-case leniency applies to standalone ClaimReference
+    // lookups, never to ClaimReferences inside a signed artifact.
+    if (!isListing(raw)) {
       return invalid(verificationMethodFailure(raw)
         ? "VERIFICATION_METHOD_INVALID"
         : "NORMATIVE_LISTING_INVALID");
@@ -192,7 +172,7 @@ async function verifyListingArtifact(
           return resolved;
         },
         verify: ({ signedBytes, signature, publicKey }) => {
-          const decoded = decodeSignature(signature.value);
+          const decoded = decodeComponentSignature(signature.value);
           return Boolean(
             decoded && verifyResolvedPrimaryClaimSignature(
               signedBytes,

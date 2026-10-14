@@ -39,7 +39,8 @@ const PREFIXES: Record<string, string> = {
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
-  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
+  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
+  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer, kind === "listing" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: ArtifactKind, extra: Obj = {}) => ({
