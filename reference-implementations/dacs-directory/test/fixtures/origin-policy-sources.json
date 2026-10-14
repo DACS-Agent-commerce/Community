@@ -32,7 +32,7 @@
   },
   "ipv6": {
     "registry": "https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml",
-    "pinnedCopy": "https://github.com/python/cpython/blob/v3.15.0/Lib/ipaddress.py#L2376-L2402 (sha256 8e3cbda946c87a10e0c7454613b8dcfdc29b320eac8b92e1b5067ece60285e9b)",
+    "pinnedCopy": "https://github.com/python/cpython/blob/v3.15.0/Lib/ipaddress.py#L2376-L2402 (sha256 8e3cbda946c87a10e0c7454613b8dcfdc29b320eac8b92e1b5067ece60285e9b), plus the registry rows that copy lacks, each marked",
     "notGloballyReachable": [
       ["::1", 128],
       ["::", 128],
@@ -43,6 +43,7 @@
       ["2001:db8::", 32],
       ["2002::", 16],
       ["3fff::", 20],
+      ["5f00::", 16, "SRv6 SIDs (RFC 9602), not in CPython v3.15.0's copy; outside 2000::/3"],
       ["fc00::", 7],
       ["fe80::", 10]
     ],
