@@ -91,8 +91,9 @@ secret variable for the operational indexing endpoints.
 
 For GitHub deployments from the Community monorepo, set the service root directory to
 `/reference-implementations/dacs-directory` and the Railway config file to
-`/reference-implementations/dacs-directory/railway.json`. Until the pinned SDK is
-published as a package, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
+`/reference-implementations/dacs-directory/railway.json`. The build clones the pinned
+SDK from its public repository, so it needs no credentials. To authenticate that
+clone anyway, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
 fine-grained GitHub token scoped only to `DACS-Agent-commerce/dacs-sdk` with read-only
 Contents access. The build passes it to Git without writing it to the checkout or remote
 URL.
@@ -114,7 +115,7 @@ vendor directory.
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
-| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
+| `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
@@ -163,13 +164,15 @@ ports, including 0) are rejected.
   the deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
   documentation, IETF-protocol (including Teredo), 6to4, and `3fff::/20` blocks, so
   IPv4-mapped, NAT64, and other forms that embed an IPv4 address are rejected.
-- The check fails closed: the globally reachable anycast exceptions inside
-  `192.0.0.0/24` and `2001::/23` are protocol addresses, not hosting space, and are
-  rejected with their blocks.
+- The check fails closed: the globally reachable exceptions inside `192.0.0.0/24`
+  (PCP and TURN anycast) and `2001::/23` (protocol anycast, AMT, AS112, ORCHIDv2,
+  and DRIP) are protocol addresses, not hosting space, and are rejected with their
+  blocks.
 
-`test/fixtures/origin-policy-sources.json` records the pinned copies of the IANA
-registries and the Fetch Standard these rules were checked against (as of
-2026-10-14), and the deliberate deviations; the tests check the tables against it.
+`test/fixtures/origin-policy-sources.json` records where these rules come from: the
+pinned copies of the IANA registries (CPython v3.15.0 and Unbound at a fixed commit)
+and of the Fetch Standard, the registry rows those copies lack (as of 2026-10-14),
+and the deliberate deviations. The tests check the tables against it.
 Generated canonical URLs and discovery documents therefore cannot silently point at
 localhost or a different base path. The check does not resolve DNS, so a public name
 that resolves to a private address still passes.
