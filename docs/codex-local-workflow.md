@@ -12,8 +12,9 @@ It uses the Node version and SDK revision already pinned by the repository.
   `vendor/` from another worktree.
 - Keep any mutable catalog state under this worktree's
   `reference-implementations/dacs-directory/data/` directory.
-- Do not run the indexer or live/paid browser tests as part of local static and
-  unit verification. They are separate, networked activities.
+- Do not run the indexer or browser tests as part of local static and unit
+  verification. The indexer is a separate, networked activity, and the browser
+  tests need their own setup.
 
 ## Install the pinned dependencies
 
@@ -29,7 +30,6 @@ cd "$app_dir"
 
 export DACS_DIRECTORY_DATA="$app_dir/data"
 export NEXT_TELEMETRY_DISABLED=1
-unset RUN_LIVE_PAID_E2E LIVE_BUTLER_ORIGIN
 ```
 
 Read the exact SDK commit from the committed setup script, then create or
@@ -79,20 +79,16 @@ a remote URL or committed file.
 These are the same check commands as the Directory CI's typecheck, test,
 origin-validation, and production-build steps. The install differs: CI runs
 `npm run setup` (`npm install`), while this workflow uses `npm ci`. Use the same
-placeholder origins as the `env:` block of
-`.github/workflows/dacs-directory-ci.yml` (today
-`NEXT_PUBLIC_DIRECTORY_URL` and `NEXT_PUBLIC_BUTLER_ORIGIN`; drop any variable
-the workflow no longer sets):
+placeholder origin as the `env:` block of
+`.github/workflows/dacs-directory-ci.yml` (today only
+`NEXT_PUBLIC_DIRECTORY_URL`). `check:deploy-config` rejects `.local` and other
+non-public hosts, so do not substitute a local origin:
 
 ```bash
 npm run typecheck
 npm test
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.local \
-  NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.ci.local \
-  npm run check:deploy-config
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.local \
-  NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.ci.local \
-  npm run build
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run check:deploy-config
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run build
 ```
 
 These commands do not require the indexer, a wallet, paid commerce, or a shared

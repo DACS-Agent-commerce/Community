@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { checkDirectoryOrigin, httpsOrigin } from "../scripts/check-directory-origin.mjs";
@@ -225,4 +226,25 @@ test("rejects IPv6 transition forms that embed an IPv4 address", () => {
     "https://[::7f00:1]",
     "https://[::ffff:0:7f00:1]",
   ]) assertNotPublic(value);
+});
+
+// docs/codex-local-workflow.md reruns CI's origin check and build locally, so
+// every origin it passes must be CI's own value, and that value must pass.
+test("the local verification guide passes only CI's placeholder origin", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  const ciEnv = Object.fromEntries(
+    [...read("../../../.github/workflows/dacs-directory-ci.yml").matchAll(/^ +(NEXT_PUBLIC_\w+): (\S+)$/gm)]
+      .map(([, name, value]) => [name, value]),
+  );
+  assert.equal(
+    checkDirectoryOrigin({ env: ciEnv }),
+    `Production directory origin valid: ${ciEnv.NEXT_PUBLIC_DIRECTORY_URL}`,
+  );
+
+  const guide = read("../../../docs/codex-local-workflow.md");
+  const assignments = [...guide.matchAll(/\b(NEXT_PUBLIC_\w+)=(\S+)/g)];
+  assert.ok(assignments.length > 0, "the guide no longer passes an origin to the checks");
+  for (const [, name, value] of assignments) assert.equal(value, ciEnv[name], name);
+  // The retired gateway demo's Butler origin and live/paid browser suite.
+  assert.doesNotMatch(guide, /butler|live_paid|live\/paid/i);
 });
