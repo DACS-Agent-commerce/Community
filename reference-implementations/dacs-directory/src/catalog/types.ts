@@ -199,6 +199,8 @@ export interface DealRecord extends RegisteredDeal {
   sellerOutcome?: string;
   anchoredByRole?: "buyer" | "seller" | "orchestrator";
   bundleContentHash?: string;
+  /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
+  fullSignatureStanding?: boolean;
   /** True only when the outcome belongs to the current DACS-5 closed set. */
   reputationEligible?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */

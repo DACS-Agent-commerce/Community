@@ -69,6 +69,7 @@ import {
   bundleCategory,
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
+  legacyFullSignatureStanding,
   refsPassStrictPolicy,
   verifiedListingTerms,
   type ResolvedArtifact,
@@ -411,6 +412,7 @@ export async function indexRegistration(
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
+        fullSignatureStanding: (authoritative === sellerGraph ? sellerResolution : buyerResolution).inspected.fullSignatureStanding,
         reputationEligible: refsVerified,
         cancellationNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
@@ -497,6 +499,7 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      fullSignatureStanding: legacyFullSignatureStanding(authoritative.verification),
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,

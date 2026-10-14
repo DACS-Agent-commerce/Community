@@ -89,22 +89,41 @@ export function bundleMatchesRegisteredDeal(
 }
 
 /**
- * Keep at most one verified reputation record per buyer and signed job, and per
- * bundle ref. A jobId is unique only per producer, so two buyers' deals with
- * the same jobId are distinct records.
+ * DACS-5 §10.5.1 per-jobId reconciliation over one seller's verified deals.
+ * One record is kept per bundle ref, and canonically equal copies of a jobId
+ * collapse to one. Among divergent copies a lone fully signed one takes
+ * precedence; equal standing voids the jobId (BB-6), whoever the buyers are.
+ * A superseded or voided record stays listed but is never reputation-eligible.
  */
 export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
-  const jobs = new Set<string>();
   const refs = new Set<string>();
-  return deals.filter((deal) => {
+  const forms = new Set<string>();
+  const unique = deals.filter((deal) => {
     if (!deal.refsVerified) return true;
-    const job = `${demosSigningIdentity(deal.owners.buyer)}\n${deal.jobId}`;
     const ref = deal.buyerBundleRef.toLowerCase();
-    if (jobs.has(job) || refs.has(ref)) return false;
-    jobs.add(job);
+    const form = `${deal.jobId}\n${deal.bundleContentHash ?? ref}`;
+    if (refs.has(ref) || forms.has(form)) return false;
     refs.add(ref);
+    forms.add(form);
     return true;
   });
+  const byJob = new Map<string, DealRecord[]>();
+  for (const deal of unique) if (deal.refsVerified) byJob.set(deal.jobId, [...(byJob.get(deal.jobId) ?? []), deal]);
+  const authoritative = new Set<DealRecord>();
+  for (const copies of byJob.values()) {
+    const full = copies.filter((deal) => deal.fullSignatureStanding);
+    if (copies.length === 1) authoritative.add(copies[0]);
+    else if (full.length === 1) authoritative.add(full[0]);
+  }
+  return unique.map((deal) => !deal.refsVerified || authoritative.has(deal) ? deal : { ...deal, reputationEligible: false });
+}
+
+/** Every bundle party carries a valid signature in a legacy SDK verification. */
+export function legacyFullSignatureStanding(verification: BundleVerification | null | undefined): boolean {
+  const parties = verification?.bundle?.parties ?? [];
+  const valid = new Set((verification?.signatures ?? []).filter((signature) => signature.verdict === "valid")
+    .map((signature) => demosSigningIdentity(signature.party)));
+  return parties.length >= 2 && parties.every((party) => valid.has(demosSigningIdentity(party.primaryClaim)));
 }
 
 export interface ResolvedArtifact {

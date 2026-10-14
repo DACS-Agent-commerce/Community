@@ -803,6 +803,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
       bundleBindings,
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].fullSignatureStanding, true, "both parties signed the authoritative copy");
     assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);

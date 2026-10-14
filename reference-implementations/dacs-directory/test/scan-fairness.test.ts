@@ -469,11 +469,12 @@ test("two buyers' attributed deals with the same jobId both reach the seller's r
   const deals = store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals ?? [];
   assert.deepEqual(deals.map((deal) => `${deal.owners.buyer} ${deal.buyerBundleRef}`).sort(),
     [`${buyer} ${locator(70)}`, `${otherBuyer} ${locator(72)}`].sort());
-  // Verified-deal deduplication keeps one record per buyer and jobId, and per bundle ref.
+  // Both are listed, but §10.5.1 reconciles per jobId: equal-standing divergent copies count for neither.
   const verifiedDeal = (who: string, at: number) => ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at),
-    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, verifiedAt: 1 });
-  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(buyer, 74), verifiedDeal(outsider, 70)])
-    .map((deal) => deal.buyerBundleRef), [locator(70), locator(72)]);
+    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+    bundleContentHash: at.toString(16).padStart(64, "0"), fullSignatureStanding: true, verifiedAt: 1 });
+  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(outsider, 70)])
+    .map((deal) => [deal.buyerBundleRef, deal.reputationEligible]), [[locator(70), false], [locator(72), false]]);
 });
 
 test("v9 scan state is completed by a full deal-history replay before it is marked migrated", async () => {
