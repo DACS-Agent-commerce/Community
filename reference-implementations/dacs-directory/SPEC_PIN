@@ -2,9 +2,26 @@
 # github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
 4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
 # Profile notes: primary claims use the did:demos:agent ClaimReference profile
-# (src/catalog/claimRef.ts), which the pinned revision does not yet define. Its keys
-# are Ed25519, so artifacts signed with ecdsa-secp256k1 or sr1-aggregate cannot be
-# verified under this profile and are not published or counted.
-# Vendored conformance vectors (byte-identical copies; sha256 checked by test/sig6.test.ts):
-#   conformance/vectors/security/signature-value-encoding-v0.1.json  bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
-#   conformance/vectors/security/revocation-binding-v0.3.json        3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+# (src/catalog/claimRef.ts), which the pinned revision does not yet define. It comes from
+# DACS-Standard #296, merged into `next` at 725fa78bd124a7adb65df27adee376d5d44a4bd7; its fixture
+# is vendored below. Its keys are Ed25519, so artifacts signed with ecdsa-secp256k1 or
+# sr1-aggregate cannot be verified under this profile and are not published or counted.
+# Recorded deviations (test/standard-vectors.test.ts pins each):
+#   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not
+#     reference: a session whose listing sets deadlineSecAfterCommit or validity.notAfter is
+#     indeterminate and never counted.
+#   CD-1: a non-canonical amount (e.g. "95.00") is rejected rather than canonicalised (fail-closed).
+#   agreement-listing-v0.1 `fractional-pct-out` expects reject; the §8.5.2 text (round to the CD-1
+#     digits of bandCenter) accepts it, and the Directory follows the text.
+#   SB-1: the evm and x402 ChainTxRef variants carry no logIndex, so their references are `error`
+#     and the deal is not counted.
+# Vendored conformance vectors (byte-identical copies; sha256 checked by test/standard-vectors.test.ts):
+#   conformance/vectors/security/signature-value-encoding-v0.1.json   bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+#   conformance/vectors/security/revocation-binding-v0.3.json         3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+#   conformance/vectors/security/sb2-settlement-uniqueness-v0.1.json  31c9455dc0147f27cf7a7d47cb17ffc019016bf63aa366b9dbadd720f8b16b81
+#   conformance/vectors/security/agreement-listing-v0.1.json          857ebf0ea4b885b92b0d6ad509a37cf5076218881c510ef2f2d05d734d94503b
+#   conformance/vectors/security/mixed-version-reconciliation-v0.3.json 41c1bc7eee95ac3bf625eaea4db88929e2eb6cb20c6bade9c3192dc3337a9e0b
+#   conformance/vectors/security/fault-bundle-perspective-pair-v0.3.json f56586a27afa851202a121576814eb0a68bddc4bdc9ce675740ba085870ed285
+#   conformance/vectors/security/payee-destination-binding-v0.1.json  cd83d95982d6529ac3f776d48df8d92c86b80806a88e96a62d80674563aaa779
+#   conformance/vectors/security/listing-preserve-unknown-v0.1.json   7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+#   conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78) demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
