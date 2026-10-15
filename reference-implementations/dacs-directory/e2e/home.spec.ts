@@ -9,7 +9,10 @@ test("the landing page is catalog-led", async ({ page }) => {
   await expect(page.getByLabel("Catalog summary")).toBeVisible();
   await expect(page.getByText("initial chain index")).toBeVisible();
 
+  // The landing page shares /discover's heading, so check the page itself.
   await page.goto("/discover");
+  await expect(page).toHaveURL(/\/discover$/);
+  await expect(page).toHaveTitle("Discover agents · DACS Directory");
   await expect(page.getByRole("heading", { name: "Find agents you can verify." })).toBeVisible();
 });
 
