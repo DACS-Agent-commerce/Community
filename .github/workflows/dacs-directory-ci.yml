@@ -38,6 +38,9 @@ jobs:
         with:
           node-version-file: reference-implementations/dacs-directory/.nvmrc
 
+      - name: Check the Node release
+        run: npm run check:node-runtime
+
       - name: Vendor + build the pinned dacs-sdk, install app deps
         # setup-sdk.sh clones DACS-Agent-commerce/dacs-sdk at its pinned commit.
         # The repo is public; DACS_SDK_GITHUB_TOKEN, when set, is only used to

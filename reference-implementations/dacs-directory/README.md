@@ -133,12 +133,16 @@ registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemon
 or an admin token.
 
 The exact Node release is pinned in `.nvmrc`, and `package.json` engines names the
-same release; `test/node-runtime.test.mjs` fails if they diverge. CI installs Node
-from `.nvmrc`. Railway's Railpack builder takes engines first and then lets `.nvmrc`
-override it through mise's idiomatic version files (railpack `ec5d727`,
+same release; `test/node-runtime.test.mjs` fails if they diverge or if any other
+file Railpack's mise reads could pick a release. CI installs Node from `.nvmrc`.
+Railway's Railpack builder takes engines first and then lets `.nvmrc` override it
+through mise's idiomatic version files (railpack `v0.41.0`,
 `core/providers/node/node.go:419-494`), so production builds on the same release
-either way. Leave `RAILPACK_NODE_VERSION` unset: `.nvmrc` overrides it. Before
-promoting a deployment, validate the public canonical origin:
+either way. Leave `RAILPACK_NODE_VERSION` unset: `.nvmrc` overrides it. Railway does
+not pin which Railpack release builds the service, so the build and
+`start:railway` both run `npm run check:node-runtime` first, which fails unless the
+running Node is the `.nvmrc` release. Before promoting a deployment, validate the
+public canonical origin:
 
 ```bash
 NEXT_PUBLIC_DIRECTORY_URL=https://directory.your-domain.org \

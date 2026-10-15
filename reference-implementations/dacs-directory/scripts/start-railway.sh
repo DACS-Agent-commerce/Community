@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Refuse to serve on a Node release other than .nvmrc's.
+node scripts/check-node-runtime.mjs
+
 DATA_DIR="${DACS_DIRECTORY_DATA:-${RAILWAY_VOLUME_MOUNT_PATH:-$(pwd)/data}}"
 export DACS_DIRECTORY_DATA="$DATA_DIR"
 mkdir -p "$DATA_DIR"
