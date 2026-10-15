@@ -386,8 +386,9 @@ TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commi
 `minCompletionRate` and `minRating` return 400, and `completionRate` remains null
 even when `bundleCount` is positive. `metricsProfile: "TP-1"` and
 `metricsUnavailableReason` identify this restriction. A cached listing with no
-scoped history still has null metrics; its count and window fields are absent
-and its label says observed outcomes are unavailable. Seller reputation retains
+hint still has null metrics; its observed count is computed from retained eligible
+category records using the existing indexer rule, with the catalog snapshot window.
+The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
 `completed` and `totalAgreements` for compatibility, with explicit observed-count
 labels. Currency totals count observed priced completed outcomes and do not
 establish completion or settlement.

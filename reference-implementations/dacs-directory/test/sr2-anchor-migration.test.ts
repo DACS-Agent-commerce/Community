@@ -98,6 +98,6 @@ test("SR-2 migration removes every legacy producer-controlled anchor time once",
   const hint = catalog.sellers[0]?.listings[0]?.reputationHint;
   assert.equal(hint?.completionRate, null);
   assert.equal(hint?.metricsUnavailableReason, "Completion verification unavailable");
-  assert.equal(hint?.bundleCount, undefined);
-  assert.equal(hint?.observedOutcomesLabel, "Observed outcomes unavailable, not verified");
+  assert.equal(hint?.bundleCount, 0, "uncategorized records cannot count as scoped observations");
+  assert.equal(hint?.observedOutcomesLabel, "Observed outcomes: 0, not verified");
 });

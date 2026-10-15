@@ -1,4 +1,4 @@
-import type { Catalog } from "./types.js";
+import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
 
 export const COMPLETION_VERIFICATION_UNAVAILABLE = "Completion verification unavailable";
 
@@ -23,6 +23,32 @@ export const OBSERVED_REPUTATION_COUNTS = {
   observedTransactionalVolumeLabel: "Observed amounts in completed outcomes, not verified completion or settlement",
   transactionCountByCurrencyLabel: "Observed priced completed outcomes, not verified completion or settlement",
 } as const;
+
+function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number): ReputationHint {
+  // Match the indexer's existing category-scoped observation count. A missing
+  // cached hint must still have the count/window shape the SDK catalog reader
+  // requires; no completion authority follows from these retained records.
+  const category = listing.offering?.category ?? "";
+  const hint = listing.reputationHint ?? {
+    categoryScope: category,
+    bundleCount: (seller.deals ?? []).filter((deal) =>
+      deal.refsVerified && deal.reputationEligible &&
+      (deal.category === category || deal.category?.startsWith(`${category}.`)),
+    ).length,
+    windowStart: 0,
+    windowEnd: generatedAt,
+    computedAt: generatedAt,
+  };
+  return {
+    categoryScope: hint.categoryScope,
+    bundleCount: hint.bundleCount,
+    windowStart: hint.windowStart,
+    windowEnd: hint.windowEnd,
+    computedAt: hint.computedAt,
+    ...UNAVAILABLE_TESTNET_METRICS,
+    observedOutcomesLabel: observedOutcomesLabel(hint.bundleCount),
+  };
+}
 
 export function projectTestnetCatalog(catalog: Catalog): Catalog {
   return {
@@ -67,15 +93,7 @@ export function projectTestnetCatalog(catalog: Catalog): Catalog {
       ...(seller.listings ? {
         listings: seller.listings.map((listing) => ({
           ...listing,
-          reputationHint: {
-            categoryScope: listing.reputationHint?.categoryScope ?? listing.offering?.category ?? "",
-            bundleCount: listing.reputationHint?.bundleCount,
-            windowStart: listing.reputationHint?.windowStart,
-            windowEnd: listing.reputationHint?.windowEnd,
-            computedAt: listing.reputationHint?.computedAt,
-            ...UNAVAILABLE_TESTNET_METRICS,
-            observedOutcomesLabel: observedOutcomesLabel(listing.reputationHint?.bundleCount),
-          },
+          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt),
         })),
       } : {}),
     })),

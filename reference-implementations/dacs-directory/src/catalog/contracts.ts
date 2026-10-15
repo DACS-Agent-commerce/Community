@@ -83,7 +83,7 @@ export const listingSummarySchema = {
     },
     reputationHint: {
       type: "object",
-      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. Missing scoped counts and windows are omitted, never inferred as zero.",
+      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. Missing cached hints use the existing category-scoped observation count from retained records.",
       additionalProperties: false,
       required: ["completionRate", "averageSellerRating", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel"],
       properties: {

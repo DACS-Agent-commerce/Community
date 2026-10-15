@@ -6,6 +6,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { noRateCatalog, noRateClaim, noRateOutcomes } from "./fixtures/no-rate-catalog.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
+import { queryListingCatalog } from "../vendor/dacs-sdk/dist/discovery/catalog.js";
 import { COMPLETION_VERIFICATION_UNAVAILABLE, UNAVAILABLE_TESTNET_METRICS } from "../src/catalog/testnetMetrics.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-testnet-no-rates-"));
@@ -93,9 +94,13 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
   assert.equal((fixture.sellers[0].reputation as unknown as Record<string, unknown>).reputationScore, 7);
 });
 
-test("cached listings without a scoped hint publish null metrics and explicitly unavailable counts through both APIs", async () => {
+test("cached listings without a hint publish null metrics and scoped observations accepted by the SDK through both APIs", async () => {
   const fixture = noRateCatalog();
   delete fixture.sellers[0].listings[0].reputationHint;
+  fixture.sellers[0].deals.forEach((deal) => { deal.category = "services.test.child"; });
+  fixture.sellers[0].deals[0].category = "services.other";
+  fixture.sellers[0].deals[1].refsVerified = false;
+  fixture.sellers[0].deals[2].reputationEligible = false;
   saveCatalog(fixture);
   const listings = await getListings(new NextRequest("https://directory.example/api/dacs/listings"));
   const seller = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
@@ -106,9 +111,17 @@ test("cached listings without a scoped hint publish null metrics and explicitly 
   for (const body of [await listings.json(), await seller.json()]) {
     const hint = body.listings[0].reputationHint;
     for (const [key, value] of Object.entries(UNAVAILABLE_TESTNET_METRICS)) assert.equal(hint[key], value, key);
-    assert.equal(hint.bundleCount, undefined, "missing scoped history is not a zero count");
-    assert.equal(hint.observedOutcomesLabel, "Observed outcomes unavailable, not verified");
+    assert.equal(hint.bundleCount, 3, "only retained eligible category observations count");
+    assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 3, not verified");
+    assert.equal(hint.windowStart, 0);
+    assert.equal(hint.windowEnd, fixture.generatedAt);
+    assert.equal(hint.computedAt, fixture.generatedAt);
     assertNoNumericMetrics(body);
+    const result = await queryListingCatalog({
+      catalogUrl: "https://directory.example/api/dacs/listings",
+      fetchImpl: async () => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }),
+    });
+    assert.equal(result.status, "ok", JSON.stringify(result));
   }
   assert.equal(fixture.sellers[0].listings[0].reputationHint, undefined, "input is untouched");
 });

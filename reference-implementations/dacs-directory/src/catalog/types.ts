@@ -165,11 +165,10 @@ export interface ReputationHint {
   metricsProfile?: "TP-1";
   completionRate: number | null;
   averageSellerRating?: number | null;
-  /** Absent when a cached listing has no scoped history observation. */
-  bundleCount?: number;
-  windowStart?: number;
-  windowEnd?: number;
-  computedAt?: number;
+  bundleCount: number;
+  windowStart: number;
+  windowEnd: number;
+  computedAt: number;
 }
 
 export interface VerifiedRating {
