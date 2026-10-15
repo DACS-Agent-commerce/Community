@@ -91,8 +91,9 @@ secret variable for the operational indexing endpoints.
 
 For GitHub deployments from the Community monorepo, set the service root directory to
 `/reference-implementations/dacs-directory` and the Railway config file to
-`/reference-implementations/dacs-directory/railway.json`. Until the pinned SDK is
-published as a package, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
+`/reference-implementations/dacs-directory/railway.json`. The build clones the pinned
+SDK from its public repository, so it needs no credentials. To authenticate that
+clone anyway, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
 fine-grained GitHub token scoped only to `DACS-Agent-commerce/dacs-sdk` with read-only
 Contents access. The build passes it to Git without writing it to the checkout or remote
 URL.
@@ -114,7 +115,7 @@ vendor directory.
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
-| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
+| `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
@@ -126,25 +127,69 @@ vendor directory.
 | `DACS_RECIPE_POLICIES` | For tier elevation | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy fails closed to `self-declared` |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
-| `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
 
-The project is pinned to Node 22 through `.nvmrc` and `package.json` engines. Before
-promoting a deployment, verify both gateway reachability and its explicit CORS allowlist:
+The exact Node release is pinned in `.nvmrc`, and `package.json` engines names the
+same release; `test/node-runtime.test.mjs` fails if they diverge or if any other
+file Railpack's mise reads could pick a release. CI installs Node from `.nvmrc`.
+Railway's Railpack builder takes engines first and then lets `.nvmrc` override it
+through mise's idiomatic version files (railpack `v0.41.0`,
+`core/providers/node/node.go:419-494`), so production builds on the same release
+either way. Leave `RAILPACK_NODE_VERSION` unset: `.nvmrc` overrides it. Railway does
+not pin which Railpack release builds the service, so the build and
+`start:railway` both run `npm run check:node-runtime` first, which fails unless the
+running Node is the `.nvmrc` release. Before promoting a deployment, validate the
+public canonical origin:
 
 ```bash
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.example \
-NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.example \
-npm run check:butler
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.your-domain.org \
+npm run check:deploy-config
 ```
 
-The probe fails unless the gateway returns at least one Butler agent, its
-`Access-Control-Allow-Origin` exactly matches the directory origin, and browser
-preflights for both execution routes allow `POST` with `content-type`. Configure
-the gateway's `BUTLER_ALLOWED_ORIGINS` with that directory origin before running it.
+The deployment check requires one credential-free HTTPS origin with no path, query,
+or fragment, written exactly as that origin (an optional trailing `/` is allowed),
+on a public host. Ports that browsers refuse to fetch (the Fetch Standard's bad
+ports, including 0) are rejected.
+
+- A host name needs at least two non-empty labels, must not end with a dot, and must
+  not be, or end in, an IANA special-use name (`localhost`, `local`, `test`,
+  `invalid`, `onion`, `alt`, or anything under `arpa`), the private-use `internal`,
+  or `localdomain`. The RFC 6761 documentation names (`example`, `example.com`,
+  `example.net`, `example.org`) are rejected too, unless the check runs with
+  `--allow-documentation-names`, as CI does for its placeholder origin. Production
+  builds (`railway.json`) run the check without it.
+  Other names that are merely undelegated (for example `lan` or `corp`) are not
+  rejected.
+- An IP literal must be global unicast and outside every block in the IANA IPv4 and
+  IPv6 Special-Purpose Address Registries. IPv4 rejects loopback, unspecified,
+  private, shared (CGNAT), link-local, documentation, benchmarking, protocol
+  assignments, AS112, AMT, reserved, and broadcast, plus multicast and the
+  deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
+  documentation, IETF-protocol (including Teredo), 6to4, Direct Delegation AS112,
+  and `3fff::/20` blocks, so IPv4-mapped, NAT64, and other forms that embed an IPv4
+  address are rejected.
+- The check fails closed: the registries' globally reachable rows (PCP and TURN
+  anycast inside `192.0.0.0/24`; AS112 and AMT; protocol anycast, ORCHIDv2, and
+  DRIP inside `2001::/23`) are protocol addresses, not hosting space, and are
+  rejected too.
+
+`test/fixtures/origin-policy-sources.json` records where these rules come from:
+every unexpired row of both IP registries (from Wireshark's IANA-generated tables,
+which drop terminated rows and record an N/A Globally Reachable as false; the two
+terminated blocks IANA still lists are rejected anyway), every special-use name
+(IANA's registry XML from a mirror, cross-checked with Unbound and Knot Resolver),
+and the Fetch Standard's bad ports. Each comes through a copy pinned to an upstream
+revision and sha256 (as of 2026-10-15), plus the deliberate deviations. The tests
+check the tables against it offline, and check the verifier against in-memory
+copies; `npm run verify:origin-sources` (needs network) re-fetches each pinned copy
+and checks the fixture against it. Node's `fetch` ignores `HTTPS_PROXY`, so behind
+a proxy run `node --use-env-proxy scripts/verify-origin-sources.mjs` instead.
+Generated canonical URLs and discovery documents therefore cannot silently point at
+localhost or a different base path. The check does not resolve DNS, so a public name
+that resolves to a private address still passes.
 
 ## Human and agent discovery
 

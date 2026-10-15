@@ -21,32 +21,30 @@ concurrency:
 jobs:
   verify:
     name: typecheck · test · build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: reference-implementations/dacs-directory
     env:
-      # The SDK dependency tree emits patch-level engine requirements above
-      # Node 20.10; the app is validated on Node 22.
-      NODE_VERSION: "22"
       # Keeps canonical URLs / sitemap deterministic during the build instead
-      # of falling back to localhost (which the build warns about).
-      NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.local
-      # Exercise the same production build-time path as the public /try page.
-      NEXT_PUBLIC_BUTLER_ORIGIN: https://agents.ci.local
+      # of falling back to localhost (which the build warns about). A reserved
+      # RFC 6761 documentation name: only the flagged CI check below accepts it.
+      NEXT_PUBLIC_DIRECTORY_URL: https://directory.ci.example
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      # The exact Node release is pinned in .nvmrc.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: reference-implementations/dacs-directory/.nvmrc
+
+      - name: Check the Node release
+        run: npm run check:node-runtime
 
       - name: Vendor + build the pinned dacs-sdk, install app deps
-        # The vendored dacs-sdk is a private repo; setup-sdk.sh authenticates
-        # the nested clone with DACS_SDK_GITHUB_TOKEN when present. Add a
-        # read-only token (repo secret) with access to DACS-Agent-commerce/dacs-sdk
-        # or this step fails at the clone. The default GITHUB_TOKEN cannot read
-        # sibling private repos.
+        # setup-sdk.sh clones DACS-Agent-commerce/dacs-sdk at its pinned commit.
+        # The repo is public; DACS_SDK_GITHUB_TOKEN, when set, is only used to
+        # authenticate that clone.
         env:
           DACS_SDK_GITHUB_TOKEN: ${{ secrets.DACS_SDK_GITHUB_TOKEN }}
         run: npm run setup
@@ -57,8 +55,10 @@ jobs:
       - name: Test (includes seed smoke)
         run: npm test
 
-      - name: Validate production origins
-        run: npm run check:deploy-config
+      # CI's origin is a documentation name, so this is the flagged check;
+      # railway.json runs the strict production one.
+      - name: Validate directory origin
+        run: npm run check:deploy-config -- --allow-documentation-names
 
       - name: Production build
         run: npm run build
