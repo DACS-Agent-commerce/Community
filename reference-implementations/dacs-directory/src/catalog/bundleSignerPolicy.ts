@@ -1,3 +1,4 @@
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { canonicalSigningIdentity } from "./primaryClaimKey.js";
 
 const ROLES = new Set(["buyer", "seller", "orchestrator"] as const);
@@ -11,6 +12,21 @@ interface BundleLike {
   outcome?: unknown;
   anchoredByRole?: unknown;
   parties?: unknown;
+}
+
+/**
+ * DACS-5 §10.4.1 full signature standing: every declared buyer, seller and distinct orchestrator
+ * has a verified signature. A copy signed by its anchor alone has lesser standing, which BB-6
+ * precedence and the §10.5.1 reconciliation rank below full.
+ */
+export function fullSignatureStanding(parties: unknown, verifiedSigners: Iterable<string>): boolean {
+  const required = (Array.isArray(parties) ? parties : [])
+    .filter((party): party is Record<string, unknown> => Boolean(party && typeof party === "object" && !Array.isArray(party)) &&
+      ROLES.has((party as Record<string, unknown>).role as BundleRole))
+    .map((party) => typeof party.primaryClaim === "string" ? canonicalDemosAgentClaim(party.primaryClaim) : null)
+    .filter((claim): claim is string => claim !== null);
+  const signed = new Set([...verifiedSigners].map(canonicalDemosAgentClaim).filter((claim): claim is string => claim !== null));
+  return required.length >= 2 && required.every((claim) => signed.has(claim));
 }
 
 /** Explicit compatibility identity used only by the legacy SDK reader. */

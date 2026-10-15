@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "../src/catalog/reputation.js";
+import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "../src/catalog/reputation.js";
 import type { DealRecord } from "../src/catalog/types.js";
 
 // DACS-5 §10.5 derivation: which deals count, on which time basis, and what the reported
@@ -115,23 +115,55 @@ test("observed volume sums completed deals' agreed prices exactly, per currency 
 
 test("ST-10: a cancellation is neutral only for a pre-commit abort under a signed pre-commit policy", () => {
   const ok = { claimedPolicy: "pre-commit" }; const terms = { cancellationPolicy: "pre-commit" };
-  assert.equal(isNeutralCancellation("aborted-by-self", ok, terms, []), true);
-  assert.equal(isNeutralCancellation("aborted-by-other", ok, terms, [{ kind: "negotiate-fixed-price", outcome: "ok" }]), true);
-  assert.equal(isNeutralCancellation("aborted-by-self", ok, terms, [{ kind: "commit-agreement", outcome: "fail" }]), true);
+  assert.equal(isNeutralCancellation("aborted-by-self", ok, terms, [], undefined), true);
+  assert.equal(isNeutralCancellation("aborted-by-other", ok, terms, [{ kind: "negotiate-fixed-price", outcome: "ok" }], undefined), true);
+  assert.equal(isNeutralCancellation("aborted-by-self", ok, terms, [{ kind: "vet-credentials", outcome: "ok" }, { kind: "negotiate-rfq", outcome: "fail" }], undefined), true);
+  const agreementRef = { anchor: { kind: "storage-program", locator: `stor-${"1".repeat(40)}` }, contentHash: "1".repeat(64) };
   for (const [name, args] of Object.entries({
-    "a completed session": ["completed", ok, terms, []],
-    "a failed session": ["failed-perm", ok, terms, []],
-    "no marker": ["aborted-by-self", undefined, terms, []],
-    "a marker list": ["aborted-by-self", [ok], terms, []],
-    "a with-fee claim": ["aborted-by-self", { claimedPolicy: "with-fee" }, terms, []],
-    "no listing terms": ["aborted-by-self", ok, undefined, []],
-    "terms as a list": ["aborted-by-self", ok, [terms], []],
-    "a none policy": ["aborted-by-self", ok, { cancellationPolicy: "none" }, []],
-    "after commit-agreement": ["aborted-by-self", ok, terms, [{ kind: "commit-agreement", outcome: "ok" }]],
-    "after commit-payee-bound-agreement": ["aborted-by-other", ok, terms, [null, { kind: "commit-payee-bound-agreement", outcome: "ok" }]],
-  } as Record<string, [string, unknown, unknown, unknown]>)) assert.equal(isNeutralCancellation(...args), false, name);
+    "a completed session": ["completed", ok, terms, [], undefined],
+    "a failed session": ["failed-perm", ok, terms, [], undefined],
+    "no marker": ["aborted-by-self", undefined, terms, [], undefined],
+    "a marker list": ["aborted-by-self", [ok], terms, [], undefined],
+    "a with-fee claim": ["aborted-by-self", { claimedPolicy: "with-fee" }, terms, [], undefined],
+    "no listing terms": ["aborted-by-self", ok, undefined, [], undefined],
+    "terms as a list": ["aborted-by-self", ok, [terms], [], undefined],
+    "a none policy": ["aborted-by-self", ok, { cancellationPolicy: "none" }, [], undefined],
+    "after commit-agreement": ["aborted-by-self", ok, terms, [{ kind: "commit-agreement", outcome: "ok" }], undefined],
+    "after commit-payee-bound-agreement": ["aborted-by-other", ok, terms, [null, { kind: "commit-payee-bound-agreement", outcome: "ok" }], undefined],
+    // The session reached its commitment phase, so it was no longer vet- or negotiate-pending.
+    "a failed commit phase": ["aborted-by-self", ok, terms, [{ kind: "commit-agreement", outcome: "fail" }], undefined],
+    "a settle phase without a commit entry": ["aborted-by-self", ok, terms, [{ kind: "pay-dem", outcome: "fail" }], undefined],
+    "a bundle carrying an agreementRef": ["aborted-by-self", ok, terms, [{ kind: "negotiate-fixed-price", outcome: "ok" }], agreementRef],
+    "a phaseSummary that is not a list": ["aborted-by-self", ok, terms, {}, undefined],
+  } as Record<string, [string, unknown, unknown, unknown, unknown]>)) assert.equal(isNeutralCancellation(...args), false, name);
   assert.deepEqual(["aborted-by-self", "aborted-by-other", "failed-perm", "failed-counterparty", "completed", undefined].map(flipOutcome),
     ["aborted-by-other", "aborted-by-self", "failed-counterparty", "failed-perm", "completed", undefined]);
+});
+
+test("DACS-1 §6.3.6 ReputationHint: the listing's category scopes the metrics, sub-categories included, others never", () => {
+  const rating = (value: number) => [{ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt: 5, contentHash: "1".repeat(64) }];
+  const deals = [
+    deal({ category: "data.finance", ratings: rating(5) }),
+    deal({ category: "data.finance.equities", sellerOutcome: "failed-perm", ratings: rating(3) }),
+    deal({ category: "data.finance", sellerOutcome: "failed-substrate" }),
+    // Other categories, including a sibling that only shares a string prefix.
+    deal({ category: "data.weather", sellerOutcome: "failed-perm", ratings: rating(1) }),
+    deal({ category: "data.financial", sellerOutcome: "failed-perm", ratings: rating(1) }),
+    deal({ category: undefined, sellerOutcome: "failed-perm" }),
+  ];
+  const hint = categoryReputationHint("data.finance", deals, 0, 100, 7);
+  assert.deepEqual(hint, {
+    categoryScope: "data.finance", completionRate: 1 / 2, averageSellerRating: 4, bundleCount: 3, windowStart: 0, windowEnd: 100, computedAt: 7,
+  });
+  assert.equal(categoryReputationHint("data", deals, 0, 100, 7).bundleCount, 5, "a parent category scopes every sub-category");
+  assert.deepEqual(categoryReputationHint("legal", deals, 0, 100, 7), {
+    categoryScope: "legal", completionRate: null, averageSellerRating: null, bundleCount: 0, windowStart: 0, windowEnd: 100, computedAt: 7,
+  });
+  // The hint applies SB-2 and the window exactly as the seller derivation does.
+  const tx = [{ id: "shared", observedAt: 1, phaseIndex: 2, evidenceHash: "a".repeat(64) }];
+  const reused = [deal({ category: "data.finance", settlementTxIds: tx }), deal({ category: "data.finance", settlementTxIds: [{ ...tx[0], observedAt: 2 }] })];
+  assert.equal(categoryReputationHint("data.finance", reused, 0, 100, 7).bundleCount, 1);
+  assert.equal(categoryReputationHint("data.finance", [deal({ category: "data.finance", finalisedAt: 500 })], 0, 100, 7).bundleCount, 0);
 });
 
 test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and rating recency before hash", () => {

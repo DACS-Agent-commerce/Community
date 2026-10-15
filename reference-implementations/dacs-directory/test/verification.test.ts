@@ -850,7 +850,7 @@ test("indexer skips a listing with no canonical form and still indexes the next 
     return data
       ? new Response(`{"success":true,"owner":"0x${did.slice(-64)}","programName":"dacs1:listing:test","data":${data}}`,
         { status: 200, headers: { "content-type": "application/json" } })
-      : new Response(null, { status: 404 });
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration(

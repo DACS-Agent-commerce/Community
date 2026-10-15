@@ -78,9 +78,9 @@ globalThis.fetch = async (input, init) => {
     const count = (reads.get(at) ?? 0) + 1;
     reads.set(at, count);
     const entry = storage[at];
-    if (!entry) return new Response(null, { status: 404 });
+    if (!entry) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     if (unavailable.has(at) || (scanOnly.has(at) && count > 1)) return new Response(null, { status: 503 });
-    if (vanishing.has(at) && count > 1) return new Response(null, { status: 404 });
+    if (vanishing.has(at) && count > 1) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     return new Response(`{"success":true,"owner":${JSON.stringify(entry.owner ?? ownerOf(seller))},` +
       `"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${entry.data}}`, { headers: { "content-type": "application/json" } });
   }
@@ -454,6 +454,52 @@ test("a discovered current-profile deal is attributed through the agreementRef i
   await reindex();
   assert.equal(store.loadScanState().programs[`${ownerOf(buyer)}\ndacs3:agreement:${jobId}`], null);
   assert.equal(store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`]?.owners.seller, seller);
+});
+
+test("discovery attributes no seller from an unsigned, mismatched or foreign agreement, on either path", async () => {
+  const jobId = "attribution-negatives";
+  const good = await agreementFor(jobId, 0, 1);
+  const refTo = (at: string, raw: Obj) => ({ anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, "agreement") });
+  const scanned = async (programs: Record<string, StoredProgram>, owner = buyer) => {
+    chain(programs, Object.keys(programs));
+    return [...(await scanChain(null, { maxTxs: 100, sinceTxId: 0 })).deals.values()]
+      .find((deal) => deal.jobId === jobId && deal.owners.buyer === owner);
+  };
+  // Current profile: the bundle names its agreement by the locator and hash it signs.
+  const viaRef = async (agreement: Obj, owner = buyer, ref: Obj = refTo(locator(991), agreement)) => (await scanned({
+    [locator(990)]: { name: "opaque-bundle", data: JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer", agreementRef: ref }), owner: ownerOf(owner) },
+    [locator(991)]: { name: "opaque-agreement", data: JSON.stringify(agreement), owner: ownerOf(owner) },
+  }, owner))?.owners.seller;
+  // Legacy SDK profile: the agreement is the buyer's program named for the job.
+  const viaName = async (agreement: Obj, owner = buyer, extra: Record<string, StoredProgram> = {}) => (await scanned({
+    [locator(992)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(owner) },
+    [locator(993)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(owner) }, ...extra,
+  }, owner));
+  const { signatures: _, ...unsigned } = good as Obj & { signatures: unknown };
+  const buyerOnly = { ...good, signatures: [(good.signatures as Obj[])[0]] };
+  const otherJob = await agreementFor("another-job", 0, 1);
+  const otherPair = await agreementFor(jobId, 2, 3);
+  assert.equal(await viaRef(good), seller);
+  assert.equal((await viaName(good))?.owners.seller, seller);
+  assert.deepEqual({
+    "ref: unsigned": await viaRef(unsigned),
+    "ref: signed by the buyer alone": await viaRef(buyerOnly),
+    "ref: another job's agreement": await viaRef(otherJob),
+    "ref: another buyer's agreement": await viaRef(otherPair),
+    "ref: cited from another buyer's bundle": await viaRef(good, otherBuyer),
+    "ref: a hash that is not the agreement's": await viaRef(good, buyer, { ...refTo(locator(991), good), contentHash: "0".repeat(64) }),
+    "ref: not a current reference": await viaRef(good, buyer, { locator: locator(991) }),
+    "name: unsigned": (await viaName(unsigned))?.owners.seller,
+    "name: another job's agreement": (await viaName(otherJob))?.owners.seller,
+    "name: another buyer's agreement": (await viaName(otherPair))?.owners.seller,
+  }, {
+    "ref: unsigned": "", "ref: signed by the buyer alone": "", "ref: another job's agreement": "",
+    "ref: another buyer's agreement": "", "ref: cited from another buyer's bundle": "",
+    "ref: a hash that is not the agreement's": "", "ref: not a current reference": "",
+    "name: unsigned": "", "name: another job's agreement": "", "name: another buyer's agreement": "",
+  });
+  // Two legacy bundles under one owner and name are indeterminate: no deal is discovered at all.
+  assert.equal(await viaName(good, buyer, { [locator(994)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":2}', owner: ownerOf(buyer) } }), undefined);
 });
 
 test("two buyers' attributed deals with the same jobId both reach the seller's record", async () => {

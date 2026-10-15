@@ -92,7 +92,7 @@ globalThis.fetch = async (input, init) => {
   if (path.startsWith("/storage-program/")) {
     const at = path.slice("/storage-program/".length);
     const entry = storage[at];
-    if (!entry) return new Response(null, { status: 404 });
+    if (!entry) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     const count = (reads.get(at) ?? 0) + 1;
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));

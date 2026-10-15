@@ -17,6 +17,8 @@ type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
+/** A distinct 32-byte Demos transaction hash per job, so each fixture cites its own settlement (SB-1). */
+const txHashOf = (jobId: string) => contentHash({ settlement: jobId });
 const maps = new Map<string, Obj>();
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
@@ -61,7 +63,8 @@ async function vector(jobId = "job-1", offset = 0) {
       deliverable: deliverableRef,
     } };
   const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [`tx-${jobId}`], observedAt: 100 };
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: txHashOf(jobId) }],
+    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
   const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
   const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110 };
   const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
@@ -70,7 +73,7 @@ async function vector(jobId = "job-1", offset = 0) {
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
       { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[1] },
     ],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [],
+    phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
   const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", 1, true)];
@@ -281,7 +284,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const linkedPhase = signedScope(bundle, "bundle");
   linkedPhase.phaseSummary = [{
     index: 2,
-    kind: "settle",
+    kind: "pay-dem",
     outcome: "ok",
     attestationRef: (bundle.settlementEvidence as unknown[])[0],
   }];
@@ -321,7 +324,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const amendment = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(amendment.ok, false);
-  assert.equal(amendment.reason, "invalid current DACS-5 bundle shape");
+  assert.equal(amendment.reason, "duplicate or invalid top-level reference", "an amendments entry must be a reference");
 
   const invalidRatingRefs = signedScope(bundle, "bundle");
   invalidRatingRefs.ratingRefs = "not-an-array";
@@ -344,7 +347,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const orphanedPhase = signedScope(bundle, "bundle");
   orphanedPhase.phaseSummary = [{
     index: 2,
-    kind: "settle",
+    kind: "pay-dem",
     outcome: "ok",
     attestationRef: {
       anchor: { kind: "storage-program", locator: locator(99) },
@@ -692,11 +695,11 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   const scope = signedScope(bundle, "bundle");
   scope.vetRecords = [ref(locator(6), composite, "composite")];
   scope.phaseSummary = [{
-    index: 2,
+    index: 0,
     kind: "vet-credentials",
     outcome: "ok",
     attestationRef: (scope.vetRecords as unknown[])[0],
-  }];
+  }, { index: 2, kind: "pay-dem", outcome: "ok" }];
   maps.set(locator(5), await resignBundle(scope));
 
   const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
@@ -721,7 +724,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     }
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = refs;
-    if (vetPhase !== null) scope.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }];
+    if (vetPhase !== null) scope.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }, { index: 2, kind: "pay-dem", outcome: "ok" }];
     maps.set(locator(5), await resignBundle(scope));
     return buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
@@ -869,7 +872,6 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   const outcomeFixture = await vector("disputed-job", 10);
   const outcomeScope = signedScope(outcomeFixture.sellerBundle, "bundle");
   outcomeScope.outcome = "failed-counterparty";
-  outcomeScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "counterparty" }];
   maps.set(outcomeFixture.locators.seller, {
     ...outcomeScope,
     signatures: [await sign(outcomeScope, "bundle", 0, true), await sign(outcomeScope, "bundle", 1, true)],
@@ -887,7 +889,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
 
   const indexFixture = await vector("index-set-job", 20);
   const indexScope = signedScope(indexFixture.sellerBundle, "bundle");
-  indexScope.phaseSummary = [{ index: 3, kind: "settle", outcome: "ok" }];
+  indexScope.phaseSummary = [{ index: 3, kind: "pay-dem", outcome: "ok" }];
   maps.set(indexFixture.locators.seller, {
     ...indexScope,
     signatures: [await sign(indexScope, "bundle", 0, true), await sign(indexScope, "bundle", 1, true)],
@@ -904,13 +906,16 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   assert.equal(indexDivergence.refsVerified, false, "#224 equal-length index-set mismatch must be excluded");
 
   const kindFixture = await vector("kind-substitution-job", 30);
-  const kindScope = signedScope(kindFixture.sellerBundle, "bundle");
-  kindScope.phaseSummary = [{ index: 2, kind: "commit-agreement", outcome: "ok" }];
-  maps.set(kindFixture.locators.seller, {
-    ...kindScope,
-    signatures: [await sign(kindScope, "bundle", 0, true), await sign(kindScope, "bundle", 1, true)],
-    anchoredByRole: "seller",
-  });
+  // Both copies stay valid on their own; they disagree only on which phase ran at index 3.
+  for (const [role, kind] of [["buyer", "rate"], ["seller", "commit-agreement"]] as const) {
+    const kindScope = signedScope(role === "buyer" ? kindFixture.buyerBundle : kindFixture.sellerBundle, "bundle");
+    kindScope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "ok" }];
+    maps.set(kindFixture.locators[role], {
+      ...kindScope,
+      signatures: [await sign(kindScope, "bundle", 0, true), await sign(kindScope, "bundle", 1, true)],
+      anchoredByRole: role,
+    });
+  }
   const kindDeal = registeredDeal("kind-substitution-job", kindFixture.locators.buyer, kindFixture.locators.seller);
   const kindDivergence = reconcileCurrentCopies(
     kindDeal,
@@ -999,7 +1004,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals[0].refsVerified, true);
     assert.equal(record.deals[0].fullSignatureStanding, true, "both parties signed the authoritative copy");
-    assert.deepEqual(record.deals[0].settlementTxIds, [{ id: `tx-${deal.jobId}`, observedAt: 100, phaseIndex: 2,
+    assert.deepEqual(record.deals[0].settlementTxIds, [{ id: `demos:${txHashOf(deal.jobId)}`, observedAt: 100, phaseIndex: 2,
       evidenceHash: artifactHash(fixture.evidence, "evidence") }], "SB-2 carries the citing evidence hash");
     assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
@@ -1007,6 +1012,11 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
     assert.equal(record.deals[0].rail, "pay-dem");
     assert.equal(record.reputation.bundleCount, 1);
+    // The listing's hint is scoped to its own category and counts the deal made under it (DACS-1 §6.3.6).
+    // A listing IdentityBundle with no verified claim leaves the seller self-declared (IT-3).
+    assert.equal(record.identityTier, "self-declared");
+    const hint = record.listings[0].reputationHint;
+    assert.deepEqual([hint?.categoryScope, hint?.bundleCount, hint?.completionRate, hint?.averageSellerRating], ["services.test", 1, 1, 5]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1103,7 +1113,7 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
   const fixture = await vector("malformed-current-job", 120);
   maps.delete(fixture.locators.buyer);
   const sellerScope = signedScope(fixture.sellerBundle, "bundle");
-  sellerScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+  sellerScope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "banana" }];
   maps.set(fixture.locators.seller, {
     ...sellerScope,
     signatures: [await sign(sellerScope, "bundle", 0, true), await sign(sellerScope, "bundle", 1, true)],
@@ -1165,15 +1175,15 @@ test("current bundle shape requires registry pins, party hashes and valid unique
   });
   await rejects("duplicate-phase-index", 70, (scope) => {
     scope.phaseSummary = [
-      { index: 2, kind: "settle", outcome: "ok" },
+      { index: 2, kind: "pay-dem", outcome: "ok" },
       { index: 2, kind: "deliver", outcome: "ok" },
     ];
   });
   await rejects("invalid-phase-outcome", 90, (scope) => {
-    scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+    scope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "banana" }];
   });
   await rejects("invalid-phase-error-class", 100, (scope) => {
-    scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "banana" }];
+    scope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "fail", errorClass: "banana" }];
   });
 });
 
@@ -1226,11 +1236,11 @@ test("DACS-5 uses one window basis and omits malformed currency aggregates", () 
 
 test("current pre-commit policy cancellations are reputation-neutral", () => {
   assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
-    { cancellationPolicy: "pre-commit" }, [{ kind: "negotiate-fixed-price", outcome: "ok" }]), true);
+    { cancellationPolicy: "pre-commit" }, [{ kind: "negotiate-fixed-price", outcome: "ok" }], undefined), true);
   assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
-    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-agreement", outcome: "ok" }]), false);
+    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-agreement", outcome: "ok" }], undefined), false);
   assert.equal(isNeutralCancellation("aborted-by-self", { claimedPolicy: "pre-commit" },
-    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-payee-bound-agreement", outcome: "ok" }]), false);
+    { cancellationPolicy: "pre-commit" }, [{ kind: "commit-payee-bound-agreement", outcome: "ok" }], undefined), false);
 });
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {

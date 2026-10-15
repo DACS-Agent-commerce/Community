@@ -9,7 +9,7 @@ import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registrat
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
+import { boundedBundleBindings, catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
   scanChain,
@@ -143,14 +143,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
     const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
     omitted.omittedBindings += raw.length - verified.length;
-    state.bundleBindings[jobId] = boundedBundleBindings(verified).bindings;
+    state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
   }
   // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
   // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
   for (const reg of regs) {
     const verified = reg.bundleBindings ?? [];
     for (const binding of verified) {
-      const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
       state.bundleBindings[binding.jobId] = bounded.bindings;
       state.bundleBindingOverflow = [...new Set([
         ...state.bundleBindingOverflow,
@@ -216,7 +216,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
-      const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
+      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
       state.bundleBindings[jobId] = bounded.bindings;
       state.bundleBindingOverflow = [...new Set([
         ...state.bundleBindingOverflow,
@@ -356,7 +356,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           const carried = boundedBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
           reg.bundleBindings = carried.bindings;
           for (const binding of carried.bindings) {
-            const accumulated = boundedBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+            const accumulated = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
             state.bundleBindings[binding.jobId] = accumulated.bindings;
             state.bundleBindingOverflow = [...new Set([
               ...state.bundleBindingOverflow,

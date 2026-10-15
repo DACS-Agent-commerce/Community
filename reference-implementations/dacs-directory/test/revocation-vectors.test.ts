@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -86,6 +87,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   const verdict = async (marker: Obj, expectedVersion = 2, against = listing) => verifyListingRevocation(marker, against, expectedVersion);
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
+  assert.equal(await verdict(await signed({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER })), true, "the largest safe integer is in range");
   const rejected: Record<string, boolean> = {
     "another listingId": await verdict(await signed({ ...tuple, listingId: "svc-2" })),
     "another listingVersion": await verdict(await signed({ ...tuple, listingVersion: 3 })),
@@ -98,7 +100,15 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "an envelope naming another signer": await verdict(await signed(tuple, seed, { signer: didOf(otherSeed) })),
     "a non-Ed25519 algorithm": await verdict(await signed(tuple, seed, { algorithm: "ecdsa-secp256k1" })),
     "a listing signed by someone else": await verdict(await signed(tuple), 2, { ...listing, signer: didOf(otherSeed) }),
-    "a revokedAt beyond the safe-integer range": await verdict({ ...(await signed(tuple)), revokedAt: Number.MAX_SAFE_INTEGER + 2 }),
+    // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
+    // producer would emit; nothing but the CORE §B.2 magnitude bound can reject it.
+    "a revokedAt beyond the safe-integer range": await (async () => {
+      const unsafe: Obj = { ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 };
+      const jcs = JSON.stringify(Object.fromEntries(Object.entries(unsafe).sort(([a], [b]) => a < b ? -1 : 1)));
+      const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
+        privateKeyFromSeed(seed))).toString("base64url");
+      return verdict({ ...unsafe, signature: { algorithm: "ed25519", signer: didOf(seed), value } });
+    })(),
     "no signature": await verdict({ ...tuple }),
     "a signature list": await verdict({ ...tuple, signature: [(await signed(tuple)).signature] }),
     "a bare signature string": await verdict({ ...tuple, signature: (await signed(tuple)).signature.value }),

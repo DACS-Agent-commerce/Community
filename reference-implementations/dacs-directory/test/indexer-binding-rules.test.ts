@@ -14,6 +14,7 @@ const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { artifactHash, signedScope } = await import("../src/catalog/evidenceGraph.js");
 const { bundleBindingOverflowKey, logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
 const { loadScanState, saveScanState } = await import("../src/catalog/store.js");
+const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 type Obj = Record<string, unknown>;
@@ -46,7 +47,8 @@ const agreementScope: Obj = { agreementVersion: "1", jobId: JOB, listingRef, der
   parties: [{ role: "buyer", primaryClaim: dids[BUYER] }, { role: "seller", primaryClaim: dids[SELLER] }],
   terms: { price: { amount: "2", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: { deliverableType: "attested-payload", hash: contentHash({ kind: "attested-payload", payloadFormat: "application/json" }) } } };
 const agreement = { ...agreementScope, signatures: [signedWith(agreementScope, "agreement", BUYER, "party"), signedWith(agreementScope, "agreement", SELLER, "party")] };
-const evidenceScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [{ txId: "tx-binding" }], observedAt: 100 };
+const evidenceScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: `0x${"AB".repeat(32)}` }],
+  paymentAmount: { amount: "2", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
 const evidence = { ...evidenceScope, signature: signedWith(evidenceScope, "evidence", SELLER) };
 const ratingScope: Obj = { ratingVersion: "1", jobId: JOB, rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 4, ratedAt: 110 };
 const rating = { ...ratingScope, signature: signedWith(ratingScope, "rating", BUYER) };
@@ -76,7 +78,7 @@ async function index(bindings: Obj[], overflow: string[] = []) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = store.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: "opaque", data }) : new Response(null, { status: 404 });
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: "opaque", data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1)],
@@ -103,7 +105,8 @@ test("a deal resolved through its holders' bindings carries the authoritative co
   assert.equal(deal.category, "rules.binding");
   assert.equal(deal.finalisedAt, 120);
   assert.deepEqual(deal.agreementPrice, { amount: "2", currency: "DEM" });
-  assert.deepEqual(deal.settlementTxIds, [{ id: "tx-binding", observedAt: 100, phaseIndex: 2, evidenceHash: artifactHash(evidence, "evidence") }]);
+  // SB-1: the key is the canonical demos:{lower-case hash without 0x}, and the phase index is the bundle entry's.
+  assert.deepEqual(deal.settlementTxIds, [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2, evidenceHash: artifactHash(evidence, "evidence") }]);
   assert.deepEqual(deal.ratings, [{ rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 4, ratedAt: 110, contentHash: artifactHash(rating, "rating") }]);
   assert.equal(deal.cancellationNeutral, false);
 });
@@ -152,6 +155,27 @@ test("a side resolves only from a valid binding its role holder signed for this 
   // The registration's own stale pointers never stand in for a resolved copy.
   assert.equal((await index(holders())).buyerBundleRef, at(5));
   assert.equal(signedScope(copy("buyer"), "bundle").anchoredByRole, undefined);
+});
+
+test("§10.4.1 full standing needs every declared party, a distinct orchestrator included, and the authoritative copy's is recorded", async () => {
+  const parties = (orchestrator?: string) => [{ role: "buyer", primaryClaim: dids[BUYER] }, { role: "seller", primaryClaim: dids[SELLER] },
+    ...(orchestrator ? [{ role: "orchestrator", primaryClaim: orchestrator }] : [])];
+  assert.equal(fullSignatureStanding(parties(), [dids[BUYER], dids[SELLER]]), true);
+  assert.equal(fullSignatureStanding(parties(), [dids[SELLER]]), false);
+  assert.equal(fullSignatureStanding(parties(dids[OUTSIDER]), [dids[BUYER], dids[SELLER]]), false, "a distinct orchestrator must sign too");
+  assert.equal(fullSignatureStanding(parties(dids[OUTSIDER]), [dids[BUYER], dids[SELLER], dids[OUTSIDER]]), true);
+  assert.equal(fullSignatureStanding(parties(dids[BUYER]), [dids[BUYER], dids[SELLER]]), true, "an orchestrator who is also the buyer adds no signer");
+  assert.equal(fullSignatureStanding([{ role: "buyer", primaryClaim: dids[BUYER] }], [dids[BUYER]]), false);
+  // An asymmetric abort pair: the seller's own copy is authoritative, so its standing is the one recorded.
+  const aborted = (outcome: string) => { const scope = bundleScope({ outcome }); delete scope.agreementRef; return scope; };
+  store.set(at(13), copy("buyer", aborted("aborted-by-self"), [BUYER]));
+  store.set(at(14), copy("seller", aborted("aborted-by-other"), [BUYER, SELLER]));
+  const sellerFull = await index([binding("buyer", at(13), BUYER), binding("seller", at(14), SELLER)]);
+  assert.deepEqual([sellerFull.refsVerified, sellerFull.anchoredByRole, sellerFull.fullSignatureStanding], [true, "seller", true]);
+  store.set(at(15), copy("buyer", aborted("aborted-by-self"), [BUYER, SELLER]));
+  store.set(at(16), copy("seller", aborted("aborted-by-other"), [SELLER]));
+  const sellerLesser = await index([binding("buyer", at(15), BUYER), binding("seller", at(16), SELLER)]);
+  assert.deepEqual([sellerLesser.refsVerified, sellerLesser.anchoredByRole, sellerLesser.fullSignatureStanding], [true, "seller", false]);
 });
 
 test("a session aborted before commitment verifies with each copy signed by its anchor alone, without full standing", async () => {

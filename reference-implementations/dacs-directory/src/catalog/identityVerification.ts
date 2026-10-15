@@ -75,6 +75,11 @@ async function verifiedClaim(
   return { scheme: parts.scheme };
 }
 
+/** IT-1..IT-3 for a seller: the highest tier any of its current listings' IdentityBundles reaches. */
+export function sellerIdentityTier(tiers: readonly IdentityTier[]): IdentityTier {
+  return tiers.includes("institutional") ? "institutional" : tiers.includes("verified") ? "verified" : "self-declared";
+}
+
 export async function deriveIdentityTier(
   identityBundle: Obj | undefined,
   resolveRecipe: ResolveRecipe = resolveConfiguredRecipe,

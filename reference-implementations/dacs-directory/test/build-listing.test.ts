@@ -141,7 +141,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
         ? Response.json({ result: 200, response: [] })
         : Response.json({ result: 200, response: 6 });
     }
-    return new Response(null, { status: 404 });
+    return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const builtResponse = await POST(request(finalInput));

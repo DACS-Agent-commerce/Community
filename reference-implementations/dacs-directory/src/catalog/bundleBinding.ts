@@ -100,15 +100,8 @@ const bindingOrder = (left: BundleBinding, right: BundleBinding): number =>
   left.nativeAddress.localeCompare(right.nativeAddress) ||
   contentHash(left).localeCompare(contentHash(right));
 
-/**
- * Deterministic work ceiling per signer of each jobId and role. Overflow is
- * sticky in ScanState and must make that signer's side indeterminate;
- * truncation can never manufacture absence.
- */
-export function boundedBundleBindings(
-  bindings: Iterable<BundleBinding>,
-  limit = MAX_BUNDLE_BINDINGS_PER_JOB_ROLE,
-): { bindings: BundleBinding[]; overflowKeys: string[] } {
+/** Unique bindings grouped per signer of each jobId and role, in a deterministic order. */
+function bindingsBySigner(bindings: Iterable<BundleBinding>): Array<[string, BundleBinding[]]> {
   const unique = new Map<string, BundleBinding>();
   for (const binding of bindings) unique.set(contentHash(binding), binding);
   const byRole = new Map<string, BundleBinding[]>();
@@ -118,14 +111,43 @@ export function boundedBundleBindings(
     values.push(binding);
     byRole.set(key, values);
   }
+  return [...byRole].sort(([a], [b]) => a.localeCompare(b)).map(([key, values]) => [key, values.sort(bindingOrder)]);
+}
+
+/**
+ * Deterministic work ceiling per signer of each jobId and role, for the
+ * Directory's own BB-6 resolution. Overflow is sticky in ScanState and must
+ * make that signer's side indeterminate; truncation can never manufacture
+ * absence. The catalog itself never truncates (catalogBundleBindings).
+ */
+export function boundedBundleBindings(
+  bindings: Iterable<BundleBinding>,
+  limit = MAX_BUNDLE_BINDINGS_PER_JOB_ROLE,
+): { bindings: BundleBinding[]; overflowKeys: string[] } {
   const kept: BundleBinding[] = [];
   const overflowKeys: string[] = [];
-  for (const [key, values] of [...byRole].sort(([a], [b]) => a.localeCompare(b))) {
-    values.sort(bindingOrder);
+  for (const [key, values] of bindingsBySigner(bindings)) {
     kept.push(...values.slice(0, limit));
     if (values.length > limit) overflowKeys.push(key);
   }
   return { bindings: kept, overflowKeys };
+}
+
+/**
+ * The catalog's copy of the BB-4-valid bindings. DACS-1 §6.3.6 requires a
+ * carrying catalog to serve every such record whoever authored it, so all of
+ * them are kept; the per-signer ceiling is only reported, as the sticky
+ * overflow that bounds the Directory's own BB-6 work.
+ */
+export function catalogBundleBindings(
+  bindings: Iterable<BundleBinding>,
+  limit = MAX_BUNDLE_BINDINGS_PER_JOB_ROLE,
+): { bindings: BundleBinding[]; overflowKeys: string[] } {
+  const grouped = bindingsBySigner(bindings);
+  return {
+    bindings: grouped.flatMap(([, values]) => values),
+    overflowKeys: grouped.filter(([, values]) => values.length > limit).map(([key]) => key),
+  };
 }
 
 export interface InspectedBundle<T> {

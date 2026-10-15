@@ -346,7 +346,7 @@ test("the indexer publishes a current listing only once validity.notBefore has p
     const data = anchors[String(input).split("/").pop() ?? ""];
     return data
       ? Response.json({ success: true, owner: `0x${publicKeyHex}`, programName: "opaque", data })
-      : new Response(null, { status: 404 });
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration(

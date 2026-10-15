@@ -27,7 +27,7 @@ import { programBindingKey } from "./store.js";
 import { discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
-  boundedBundleBindings,
+  catalogBundleBindings,
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "./types.js";
@@ -88,15 +88,15 @@ export type StorageReadFailureCode =
 /** Safe cause classification; response bodies and upstream text are never persisted. */
 export function storageReadFailureCode(status: number, errorCode?: string): StorageReadFailureCode {
   const normalized = typeof errorCode === "string" ? errorCode.trim().toUpperCase() : undefined;
-  if (status === 404) {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (status === 401 || status === 403) {
-    return "STORAGE_NOT_PUBLIC";
-  }
   // A server-side or transport-class status remains retryable even if an
   // untrusted error body happens to carry a terminal-looking code.
   if (status >= 500 || status < 100) return "STORAGE_RPC_UNAVAILABLE";
+  // Only the node's own answer is terminal: NOT_FOUND on a 404, PERMISSION_DENIED on a 403. Any
+  // other 4xx (a proxy's, a wrong route's; the node never answers 401) stays retryable rather than
+  // hiding an artifact, such as a revocation marker, for good (RB-6).
+  if (status === 404) return normalized === "NOT_FOUND" ? "STORAGE_NOT_FOUND" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 403) return normalized === "PERMISSION_DENIED" ? "STORAGE_NOT_PUBLIC" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 401) return "STORAGE_RPC_UNAVAILABLE";
   if (normalized === "NOT_FOUND" || normalized === "STORAGE_NOT_FOUND" || normalized === "PROGRAM_NOT_FOUND") {
     return "STORAGE_NOT_FOUND";
   }
@@ -544,7 +544,7 @@ export async function scanChain(
     if (verifiedBundleBinding) {
       artifactKind = "bundle-binding";
       const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
-      const bounded = boundedBundleBindings([...prior, verifiedBundleBinding]);
+      const bounded = catalogBundleBindings([...prior, verifiedBundleBinding]);
       bundleBindings.set(verifiedBundleBinding.jobId, bounded.bindings);
       for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
     } else if (isListingRevocationCandidate(data)) {

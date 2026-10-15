@@ -3,7 +3,7 @@ import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash } from "../src/catalog/evidenceGraph.js";
-import { deriveIdentityTier, resolveConfiguredRecipe, type RecipePolicy } from "../src/catalog/identityVerification.js";
+import { deriveIdentityTier, resolveConfiguredRecipe, sellerIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 
 // The identity tier the Directory reports: a claim counts only through a hash-bound, signed,
 // passing VerifyResult from a trusted signer under a live, version-pinned recipe (DACS-2 §7.4-§7.5).
@@ -152,4 +152,11 @@ test("further identity rules: any listed trusted signer counts, and an inverted 
   assert.equal(await tier({ recipe: policy({ trustedResultSigners: ["cci:unknown", dids[TRUSTED]] }) }), "institutional");
   // validUntil before verifiedAt is never valid, even before validUntil passes.
   assert.equal(await tier({ result: { validUntil: VERIFIED_AT - 10 }, now: VERIFIED_AT - 20 }), "self-declared");
+});
+
+test("IT-1..IT-3 at the seller: the highest tier among its listings' bundles", () => {
+  assert.equal(sellerIdentityTier([]), "self-declared");
+  assert.equal(sellerIdentityTier(["self-declared", "self-declared"]), "self-declared");
+  assert.equal(sellerIdentityTier(["self-declared", "verified"]), "verified");
+  assert.equal(sellerIdentityTier(["verified", "institutional", "self-declared"]), "institutional");
 });

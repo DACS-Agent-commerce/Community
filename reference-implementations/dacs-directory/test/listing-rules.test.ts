@@ -302,6 +302,8 @@ test("the indexer publishes a verified listing only when it is readable, bound t
     mispinned: anchor(3, named("mispinned")),
     expired: anchor(4, named("expired", set("validity", { notBefore: 1, notAfter: now - 60_000 }))),
     future: anchor(5, named("future", set("validity", { notBefore: now + 3_600_000 }))),
+    // Inside its window, with an end still ahead: notBefore <= now <= notAfter.
+    current: anchor(10, named("current", set("validity", { notBefore: now - 60_000, notAfter: now + 3_600_000 }))),
     foreign: anchor(6, named("foreign"), keys[1]),
     unsigned: anchor(7, named("unsigned", set("offering.title", 7))),
     legacy: anchor(8, { ...legacyScope, listingVersion: 3, signature: legacyValue(0, { ...legacyScope, listingVersion: 3 }) }),
@@ -313,7 +315,7 @@ test("the indexer publishes a verified listing only when it is readable, bound t
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const entry = stored[String(input).split("/").pop() ?? ""];
-    return entry ? Response.json({ success: true, owner: entry.owner, programName: "opaque", data: entry.data }) : new Response(null, { status: 404 });
+    return entry ? Response.json({ success: true, owner: entry.owner, programName: "opaque", data: entry.data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({
@@ -321,7 +323,8 @@ test("the indexer publishes a verified listing only when it is readable, bound t
       listingContentHashes: { [anchors.pinned]: `sha256-${contentHash({ ...pinned, signature: undefined })}`, [anchors.mispinned]: "0".repeat(64) },
     }, undefined, async () => { throw new Error("identity unavailable"); });
     const published = Object.fromEntries(record.listings.map((entry) => [entry.listingId, entry]));
-    assert.deepEqual(Object.keys(published).sort(), ["legacy", "pinned", "published", "unversioned"]);
+    assert.deepEqual(Object.keys(published).sort(), ["current", "legacy", "pinned", "published", "unversioned"]);
+    assert.equal(published.current.status, "active");
     assert.equal(published.legacy.version, 3);
     assert.equal(published.unversioned.version, 1);
     assert.equal(published.legacy.artifactProfile, "legacy-sdk-v0.1");
@@ -377,7 +380,7 @@ test("RB-3 retention carries forward only this listing version's own revoked rec
   const prior = (listings: Obj[]) => ({ primaryClaim: dids[0], displayName: "Rules desk", identityTier: "self-declared", cci: [], listings, deals: [] } as never);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => String(input).endsWith(at)
-    ? Response.json({ success: true, owner: `0x${keys[0]}`, programName: "opaque", data: current }) : new Response(null, { status: 404 });
+    ? Response.json({ success: true, owner: `0x${keys[0]}`, programName: "opaque", data: current }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   try {
     const statusWith = async (listings: Obj[]) => {
       const record = await indexRegistration({ primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [at] }, prior(listings),

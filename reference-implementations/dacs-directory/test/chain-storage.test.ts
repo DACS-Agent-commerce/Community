@@ -7,6 +7,7 @@ import {
   LIVE_STORAGE_SALT,
   readAnchorResult,
   resolveOwnedAnchorByName,
+  UNKNOWN_NODE_CALL,
 } from "../src/catalog/chain.js";
 
 const owner = `0x${"12".repeat(32)}`;
@@ -55,6 +56,65 @@ test("producer resume lookup binds an exact program name to exactly one owner", 
       assert.equal(resolution.address, honest);
       assert.equal(resolution.record.programName, programName);
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("producer resume lookup uses the pinned node's gcr_routine search when the node does not know the nodeCall", async () => {
+  const honest = "stor-1111111111111111111111111111111111111111";
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; params: unknown; identity: string | null }> = [];
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const request = JSON.parse(String(init.body)) as { method: string; params: Array<Record<string, unknown>> };
+      calls.push({ method: request.method, params: request.params[0], identity: new Headers(init.headers).get("identity") });
+      // kynesyslabs/node ac8f45f: an unknown nodeCall message is result 200 with this literal.
+      if (request.method === "nodeCall") return Response.json({ result: 200, response: UNKNOWN_NODE_CALL, require_reply: false, extra: null });
+      return Response.json({ result: 200, response: [{ storageAddress: honest, programName }] });
+    }
+    return Response.json({ success: true, data: { listingId: "service" }, owner, programName });
+  };
+  try {
+    const resolution = await resolveOwnedAnchorByName(programName, owner);
+    assert.equal(resolution.status, "present");
+    assert.deepEqual(calls.map((call) => call.method), ["nodeCall", "gcr_routine"]);
+    assert.deepEqual(calls[1].params, { method: "searchStoragePrograms", params: [programName, { exactMatch: true, limit: 32, offset: 0 }] });
+    assert.match(calls[1].identity ?? "", /^ed25519:0x[0-9a-f]{64}$/, "the gcr_routine read carries the indexer's read-auth headers");
+    // Any other non-list answer is not the pinned node's unknown-message reply: no fallback, indeterminate.
+    calls.length = 0;
+    globalThis.fetch = async (_input, init) => {
+      calls.push({ method: JSON.parse(String(init?.body)).method, params: null, identity: null });
+      return Response.json({ result: 200, response: "{ error: \"Rate limited\"}" });
+    };
+    assert.equal((await resolveOwnedAnchorByName(programName, owner)).status, "indeterminate");
+    assert.deepEqual(calls.map((call) => call.method), ["nodeCall"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the read-only node contract probe compares both search paths and the storage not-found answer", async () => {
+  const { probeNodeContract } = await import("../src/catalog/nodeContract.js");
+  const originalFetch = globalThis.fetch;
+  const node = (nodeCall: unknown, gcr: unknown, notFound = Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })) =>
+    async (_input: unknown, init?: RequestInit) => {
+      if (init?.method !== "POST") return notFound.clone();
+      return Response.json(JSON.parse(String(init.body)).method === "nodeCall" ? nodeCall : gcr);
+    };
+  const found = { result: 200, response: [{ storageAddress: `stor-${"1".repeat(40)}`, programName }] };
+  try {
+    const verdict = async (fetcher: ReturnType<typeof node>) => {
+      globalThis.fetch = fetcher as typeof fetch;
+      const { rpc: _, observedAt: __, ...report } = await probeNodeContract("https://node.example/", programName);
+      return report;
+    };
+    assert.deepEqual(await verdict(node(found, found)),
+      { storageNotFound: true, nodeCallSearch: "supported", gcrRoutineSearch: "supported", searchesAgree: true, ok: true });
+    assert.deepEqual(await verdict(node({ result: 200, response: UNKNOWN_NODE_CALL }, found)),
+      { storageNotFound: true, nodeCallSearch: "unknown-message", gcrRoutineSearch: "supported", searchesAgree: null, ok: true }, "the pinned revision");
+    assert.equal((await verdict(node(found, { result: 200, response: [] }))).ok, false, "the two paths disagree");
+    assert.equal((await verdict(node(found, found, new Response(null, { status: 404 })))).ok, false, "a bare 404 is not the node's answer");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -118,13 +178,23 @@ test("producer resume lookup fails closed when the bounded result page is full",
 
 test("a storage read separates a definitive answer from a transport failure (RB-6)", async () => {
   const at = "stor-4444444444444444444444444444444444444444";
-  const body = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const body = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+  const nodeError = (status: number, errorCode: string) => body({ success: false, error: "storage program read failed", errorCode }, status);
   const cases: Array<[string, () => Response | Promise<Response>, string]> = [
     ["object data", () => body({ success: true, owner, programName, data: { marker: 1 } }), "present"],
-    ["not found", () => new Response(null, { status: 404 }), "absent"],
-    ["not public", () => new Response(null, { status: 403 }), "absent"],
-    ["unauthenticated", () => new Response(null, { status: 401 }), "absent"],
-    ["invalid request", () => new Response(null, { status: 400 }), "absent"],
+    // The node's own answers are definitive.
+    ["not found", () => nodeError(404, "NOT_FOUND"), "absent"],
+    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "absent"],
+    // A 4xx without the node's matching errorCode is a proxy, a route or a mismatch: incomplete (RB-6).
+    ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable"],
+    ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable"],
+    ["a body-less 403", () => new Response(null, { status: 403 }), "unavailable"],
+    ["a 404 naming another error", () => nodeError(404, "PERMISSION_DENIED"), "unavailable"],
+    ["a 403 naming another error", () => nodeError(403, "NOT_FOUND"), "unavailable"],
+    ["a 404 reporting success", () => body({ success: true, errorCode: "NOT_FOUND" }, 404), "unavailable"],
+    ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable"],
+    ["invalid request", () => new Response(null, { status: 400 }), "unavailable"],
+    ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable"],
     ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "absent"],
     ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "absent"],
     ["node failure", () => new Response(null, { status: 503 }), "unavailable"],

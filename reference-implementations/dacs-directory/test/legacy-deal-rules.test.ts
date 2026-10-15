@@ -39,7 +39,7 @@ const agreementSignature = (signer: number, as = signer, field = "signer") =>
 const agreement = { ...agreementScope, signatures: [agreementSignature(BUYER), agreementSignature(SELLER)] };
 const evidenceScope: Obj = {
   evidenceVersion: "1", jobId: JOB, phase: "pay-dem", phaseIndex: 0, outcome: "success",
-  paymentTxRefs: [{ rail: "demos", txHash: "0xabc", kind: "payment" }], paymentAmount: { amount: "5", currency: "DEM" },
+  paymentTxRefs: [{ rail: "demos", txHash: `0x${"ab".repeat(32)}`, kind: "payment" }], paymentAmount: { amount: "5", currency: "DEM" },
   settlementFinality: { model: "bft-final", finalityBlocks: 1, finalityObservedAt: 100 }, observedAt: 100,
 };
 const evidence = { ...evidenceScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(evidenceScope)}`, SELLER) } };
@@ -107,6 +107,7 @@ test("referenced legacy artifacts carry exactly one signature form, each entry a
     "both signature forms": signed("dacs-4-evidence", { ...evidence, signatures: [evidence.signature] }),
     "neither signature form": signed("dacs-4-evidence", evidenceScope),
     "an empty signatures list": signed("dacs-4-evidence", { ...evidenceScope, signatures: [] }),
+    "a vet record with an empty signatures list": signed("dacs-2-verifyresult", { ...vet, signatures: [] }),
     "a signatures member that is not a list": signed("dacs-4-evidence", { ...evidenceScope, signatures: evidence.signature }),
     "a singular signature that is a list": signed("dacs-4-evidence", { ...evidenceScope, signature: [evidence.signature] }),
     "a singular signature that is a string": signed("dacs-4-evidence", { ...evidenceScope, signature: evidence.signature.value }),
@@ -218,15 +219,15 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   const bundleSignature = (signer: number) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(bundleScope)}`, signer, "base64url") });
   const copy = (anchoredByRole: string, change: Obj = {}) => ({ ...bundleScope, signatures: [bundleSignature(BUYER), bundleSignature(SELLER)], anchoredByRole, ...change });
   const owner = `0x${dids[SELLER].slice(-64)}`;
-  const run = async (stored: Record<string, Obj>) => {
+  const run = async (stored: Record<string, Obj>, registered: Obj = {}) => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input) => {
       const data = stored[String(input).split("/").pop() ?? ""];
-      return data ? Response.json({ success: true, owner, programName: "opaque", data }) : new Response(null, { status: 404 });
+      return data ? Response.json({ success: true, owner, programName: "opaque", data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     };
     try {
       return await indexRegistration({ primaryClaim: dids[SELLER], displayName: "Legacy seller", listingAnchors: [at(1)],
-        deals: [{ jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] } }] },
+        deals: [{ jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] }, ...registered }] },
       undefined, async () => { throw new Error("identity unavailable"); });
     } finally {
       globalThis.fetch = originalFetch;
@@ -244,13 +245,19 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
     signatureVerified: true, refsVerified: true, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
     bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: true, cancellationNeutral: false,
     finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", verifiedAt: 0,
+    // SB-1 on the legacy profile: a pay-dem TxRef keys as demos:{hash}, under the evidence's own phaseIndex.
+    settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 0, evidenceHash: contentHash(evidenceScope) }],
   });
   assert.equal(record.reputation.completed, 1);
-  const verdict = async (stored: Record<string, Obj>) => {
-    const deal = (await run(stored)).deals[0];
+  const verdict = async (stored: Record<string, Obj>, registered: Obj = {}) => {
+    const deal = (await run(stored, registered)).deals[0];
     return `${deal.refsVerified ? "verified" : "unverified"} ${deal.reputationEligible ? "eligible" : "ineligible"} ${deal.sellerOutcome}`;
   };
   const evidenceAt = resolveProgramAddress(dids[BUYER], `dacs4:evidence:${JOB}`)!;
+  // A seller copy that is strict on its own but reports another outcome than the buyer's (§10.4.3(d)).
+  const divergentScope = { ...bundleScope, outcome: "failed-perm" };
+  const divergentSignature = (signer: number) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(divergentScope)}`, signer, "base64url") });
+  const divergentSeller = { ...divergentScope, signatures: [divergentSignature(BUYER), divergentSignature(SELLER)], anchoredByRole: "seller" };
   assert.deepEqual({
     "no seller copy": await verdict({ ...base, [at(3)]: undefined as unknown as Obj }),
     "a seller copy anchored as the buyer": await verdict({ ...base, [at(3)]: copy("buyer") }),
@@ -258,6 +265,9 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
     "a seller copy signed by the buyer alone": await verdict({ ...base, [at(3)]: { ...copy("seller"), signatures: [bundleSignature(BUYER)] } }),
     "missing evidence": await verdict({ ...base, [evidenceAt]: undefined as unknown as Obj }),
     "a seller copy also signed by an outsider": await verdict({ ...base, [at(3)]: { ...copy("seller"), signatures: [bundleSignature(BUYER), bundleSignature(SELLER), bundleSignature(OUTSIDER)] } }),
+    "a registered deal naming another job than its bundles": await verdict(base, { jobId: "another-job" }),
+    "a registered deal naming another buyer than its bundles": await verdict(base, { owners: { buyer: dids[OUTSIDER], seller: dids[SELLER] } }),
+    "two strict copies that diverge": await verdict({ ...base, [at(3)]: divergentSeller }),
   }, {
     "no seller copy": "unverified ineligible completed",
     "a seller copy anchored as the buyer": "unverified ineligible completed",
@@ -265,6 +275,9 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
     "a seller copy signed by the buyer alone": "unverified ineligible completed",
     "missing evidence": "unverified ineligible completed",
     "a seller copy also signed by an outsider": "unverified ineligible completed",
+    "a registered deal naming another job than its bundles": "unverified ineligible completed",
+    "a registered deal naming another buyer than its bundles": "unverified ineligible completed",
+    "two strict copies that diverge": "unverified ineligible failed-perm",
   });
   // Signature order is not significant.
   assert.equal(await verdict({ ...base, [at(3)]: { ...copy("seller"), signatures: [bundleSignature(SELLER), bundleSignature(BUYER)] } }), "verified eligible completed");
@@ -293,4 +306,56 @@ test("further legacy rules: an invalid presented signature, empty optional lists
     [{ kind: "dacs-1-listing", raw: { ...served, signature: "verified-by-strict-policy" } }], true);
   assert.equal(pinnedTo({ ...listingScope, terms: { cancellationPolicy: "none" } }, { ...listingScope, terms }), undefined);
   assert.equal(pinnedTo({ ...listingScope, listingVersion: 0, terms }, { ...listingScope, listingVersion: 0, terms }), undefined, "version 0");
+});
+
+test("the in-browser verifier: a strict pass, limited without a registered copy, and failure on an altered record", async () => {
+  const { detailRows, verdictPresentation, verificationErrorMessage, verifyDealInBrowser } = await import("../src/components/verifyDealModel.js");
+  const bundleScope: Obj = { ...verification().bundle } as Obj;
+  delete bundleScope.anchoredByRole;
+  const signature = (signer: number) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(bundleScope)}`, signer, "base64url") });
+  const stored = new Map<string, Obj>([
+    [at(1), listing], [at(2), { ...bundleScope, signatures: [signature(BUYER), signature(SELLER)], anchoredByRole: "buyer" }],
+    [`dacs3:agreement:${JOB}`, agreement], [`dacs4:evidence:${JOB}`, evidence],
+  ]);
+  const requested: string[] = [];
+  const deps = (registered: { owners: unknown; buyerBundleRef: unknown; sellerBundleRef: unknown } | null, from = stored) => ({
+    fetchArtifact: async (params: string) => {
+      requested.push(params);
+      const query = new URLSearchParams(params);
+      return from.get(query.get("ref") ?? query.get("name") ?? "") ?? null;
+    },
+    registeredBundleRefs: async () => registered,
+  });
+  const registered = { owners: { buyer: dids[BUYER], seller: dids[SELLER] }, buyerBundleRef: at(2), sellerBundleRef: at(3) };
+  const input = { bundleRef: at(2), buyerOwner: dids[BUYER], expectedSeller: dids[SELLER] };
+
+  const strict = await verifyDealInBrowser(input, deps(registered));
+  assert.equal(strict.verdict, "strict-pass");
+  const shown = verdictPresentation(strict.result, strict.verdict);
+  assert.deepEqual([shown.tone, shown.headline, shown.checks.map((check) => check.mark)], ["ok", "✓ Evidence is strictly verified", ["✓", "✓", "✓"]]);
+  // Session artifacts are read from the buyer's owner-scoped programs, by name; the bundle by its ref.
+  assert.ok(requested.includes(`owner=${encodeURIComponent(dids[BUYER])}&name=${encodeURIComponent(`dacs3:agreement:${JOB}`)}`));
+  assert.ok(requested.includes(`ref=${encodeURIComponent(at(2))}`));
+  const rows = detailRows(strict.result);
+  assert.deepEqual(rows.signatures.map((row) => [row.title, row.badge]), [["The buyer’s", "genuine ✓"], ["The seller’s", "genuine ✓"]]);
+  assert.ok(rows.refs.length > 0 && rows.refs.every((row) => row.ok && row.badge === "untampered ✓"));
+
+  const limited = await verifyDealInBrowser(input, deps(null));
+  assert.equal(limited.verdict, "limited");
+  const limitedShown = verdictPresentation(limited.result, limited.verdict);
+  assert.deepEqual([limitedShown.tone, limitedShown.headline, limitedShown.checks.map((check) => check.mark)],
+    ["limited", "◇ Evidence is internally consistent; copy role unverified", ["✓", "✓", "?"]]);
+
+  const altered = new Map(stored).set(`dacs4:evidence:${JOB}`, { ...evidence, observedAt: 101 });
+  const failed = await verifyDealInBrowser(input, deps(registered, altered));
+  assert.equal(failed.verdict, "fail");
+  const failedShown = verdictPresentation(failed.result, failed.verdict);
+  assert.deepEqual([failedShown.tone, failedShown.headline, failedShown.checks[1].mark, failedShown.checks[2].mark],
+    ["err", "✗ Evidence failed verification", "✗", "✗"]);
+  assert.ok(detailRows(failed.result).refs.some((row) => !row.ok && row.badge === "problem ✗"));
+  // A strict pass is never shown for a result the policy failed.
+  assert.equal(verdictPresentation({ ...strict.result, ok: false }, "fail").tone, "err");
+
+  assert.match(verificationErrorMessage(new TypeError("fetch failed")), /could not be reached/);
+  assert.equal(verificationErrorMessage(new Error("unsupported artifact")), "unsupported artifact");
 });

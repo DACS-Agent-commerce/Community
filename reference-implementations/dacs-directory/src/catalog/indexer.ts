@@ -54,17 +54,20 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
+import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
+import { legacySettlementTxId, settlementTxId } from "./settlementKey.js";
+import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
+  boundedBundleBindings,
   bundleBindingOverflowKey,
   resolveBundleSide,
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
-import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
+import { deriveIdentityTier, sellerIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -89,6 +92,45 @@ import type {
 
 const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
   ed25519Verify(b, s, publicKeyFromRaw(p));
+
+type SettlementTxIds = NonNullable<DealRecord["settlementTxIds"]>;
+
+/**
+ * DACS-4 SB-1 claims of a current bundle's successful payment evidence, keyed on
+ * (settlement-tx-id, jobId, phaseIndex). The phase index comes from the bundle's phase entry,
+ * never from the evidence. Null means a claim could not be keyed (`error`).
+ */
+function currentSettlementClaims(settlement: ResolvedEvidence[]): SettlementTxIds | null {
+  const claims: SettlementTxIds = [];
+  for (const evidence of settlement) {
+    if (evidence.raw.outcome !== "success" || typeof evidence.raw.phase !== "string" || !evidence.raw.phase.startsWith("pay-")) continue;
+    const refs = Array.isArray(evidence.raw.paymentTxRefs) ? evidence.raw.paymentTxRefs : [];
+    if (evidence.phaseIndex === undefined || refs.length === 0) return null;
+    for (const ref of refs) {
+      const id = settlementTxId(ref);
+      if (!id) return null;
+      claims.push({ id, observedAt: Number(evidence.raw.observedAt), phaseIndex: evidence.phaseIndex, evidenceHash: evidence.contentHash });
+    }
+  }
+  return claims;
+}
+
+/** The pinned SDK's legacy evidence carries its own phaseIndex and pre-SB-1 TxRefs. */
+function legacySettlementClaims(artifacts: ResolvedArtifact[]): SettlementTxIds | null {
+  const claims: SettlementTxIds = [];
+  for (const artifact of artifacts) {
+    const raw = artifact.raw;
+    if (artifact.kind !== "dacs-4-evidence" || raw.outcome !== "success") continue;
+    const refs = Array.isArray(raw.paymentTxRefs) ? raw.paymentTxRefs : [];
+    if (!Number.isSafeInteger(raw.phaseIndex) || Number(raw.phaseIndex) < 0 || refs.length === 0) return null;
+    for (const ref of refs) {
+      const id = legacySettlementTxId(raw.phase, ref);
+      if (!id) return null;
+      claims.push({ id, observedAt: Number(raw.observedAt), phaseIndex: Number(raw.phaseIndex), evidenceHash: contentHash(raw) });
+    }
+  }
+  return claims;
+}
 
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
@@ -277,10 +319,14 @@ export async function indexRegistration(
     .map((claim) => `${deal.jobId}\n${canonicalDemosAgentClaim(claim)}`)));
   const signedByHolder = (binding: BundleBinding) => typeof binding?.signer === "string" &&
     canonicalDemosAgentClaim(binding.signer) !== null && holders.has(`${binding.jobId}\n${canonicalDemosAgentClaim(binding.signer)}`);
-  const rawBindings = [
+  // The catalog keeps every binding; the Directory's own BB-6 work is capped per signer, and a
+  // signer over the cap leaves its side indeterminate (sticky overflow).
+  const workCapped = boundedBundleBindings([
     ...[...relevantJobs].flatMap((jobId) => ownArray(scanState.bundleBindings, jobId)),
     ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
-  ].filter(signedByHolder);
+  ].filter(signedByHolder));
+  for (const key of workCapped.overflowKeys) overflowBindings.add(key);
+  const rawBindings = workCapped.bindings;
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
   onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
@@ -331,24 +377,11 @@ export async function indexRegistration(
           typeof roleHolder !== "string" ||
           canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
         ) return null;
-        const signed = new Set(
-          (Array.isArray(graph.bundle.signatures) ? graph.bundle.signatures : [])
-            .map((signature) => signature && typeof signature === "object" && !Array.isArray(signature)
-              ? (signature as Record<string, unknown>).party : undefined)
-            .filter((party): party is string => typeof party === "string")
-            .map(canonicalDemosAgentClaim)
-            .filter((party): party is string => party !== null),
-        );
-        const required = parties.filter((party) =>
-          party.role === "buyer" || party.role === "seller" || party.role === "orchestrator")
-          .map((party) => party.primaryClaim)
-          .filter((claim): claim is string => typeof claim === "string")
-          .map(canonicalDemosAgentClaim)
-          .filter((claim): claim is string => claim !== null);
         return {
           value: graph,
           bundleContentHash: graph.bundleContentHash,
-          fullSignatureStanding: required.length >= 2 && required.every((claim) => signed.has(claim)),
+          // Standing counts only signatures the graph verified, never the parties a bundle presents.
+          fullSignatureStanding: fullSignatureStanding(parties, graph.signedParties),
         };
       };
       const buyerResolution = await resolveBundleSide({
@@ -395,17 +428,12 @@ export async function indexRegistration(
         ratedAt: Number(rating.ratedAt),
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
-      const settlementTxIds = (authoritative?.artifacts ?? []).filter((artifact) => artifact.kind === "evidence")
-        .flatMap((artifact) => {
-          const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
-          const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
-          return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
-            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex, evidenceHash: artifact.contentHash }));
-        });
+      const settlement = currentSettlementClaims(authoritative?.settlement ?? []);
       const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
         .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
       const cancellationNeutral = isNeutralCancellation(
         sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
+        authoritative?.bundle.agreementRef,
       );
       dealCandidates.push({
         ...resolvedDeal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
@@ -414,12 +442,13 @@ export async function indexRegistration(
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
         fullSignatureStanding: (authoritative === sellerGraph ? sellerResolution : buyerResolution).inspected.fullSignatureStanding,
-        reputationEligible: refsVerified,
+        // SB-1: a settlement the deal cites without a canonical key is `error`, so the deal is not counted.
+        reputationEligible: refsVerified && settlement !== null,
         cancellationNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
-        ratings, settlementTxIds,
+        ratings, settlementTxIds: settlement ?? [],
         category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
         verifiedAt: now,
@@ -488,8 +517,9 @@ export async function indexRegistration(
       authoritative.resolvedArtifacts,
       strictRefsVerified,
     );
-    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
+    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary, bundle?.agreementRef);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
+    const settlement = legacySettlementClaims(authoritative.resolvedArtifacts);
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -501,10 +531,11 @@ export async function indexRegistration(
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
       fullSignatureStanding: legacyFullSignatureStanding(authoritative.verification),
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? "") && settlement !== null,
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
+      settlementTxIds: settlement ?? [],
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
@@ -529,22 +560,7 @@ export async function indexRegistration(
   const windowEnd = now;
   const listingsWithHint = listings.map((l) => ({
     ...l,
-    reputationHint: (() => {
-      const categoryDeals = counted.filter(
-        (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
-      );
-      const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
-      return {
-        categoryScope: l.offering.category,
-        completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
-        averageSellerRating: deriveSellerReputation(categoryDeals, windowStart, windowEnd).averageSellerRating ?? null,
-        bundleCount: categoryDeals.length,
-        windowStart,
-        windowEnd,
-        computedAt: now,
-      };
-    })(),
+    reputationHint: categoryReputationHint(l.offering.category, counted, windowStart, windowEnd, now),
   }));
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
@@ -552,9 +568,7 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
-  const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
-  const identityTier = identityTiers.includes("institutional") ? "institutional"
-    : identityTiers.includes("verified") ? "verified" : "self-declared";
+  const identityTier = sellerIdentityTier(await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe))));
 
   return {
     primaryClaim: reg.primaryClaim,

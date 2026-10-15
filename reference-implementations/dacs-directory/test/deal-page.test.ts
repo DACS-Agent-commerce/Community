@@ -35,7 +35,7 @@ test("the deal page shows a delivery attestation only from the seller's own stor
       const at = String(input).replace(/^.*\/storage-program\//, "");
       const [owner, data] = at === bundleRef ? [`0x${"1".repeat(64)}`, { jobId: "job-delivered", outcome: "completed" }]
         : at === attestationAt ? [attestationOwner, attestation] : [null, null];
-      return data ? Response.json({ success: true, owner, programName: "opaque", data }) : new Response(null, { status: 404 });
+      return data ? Response.json({ success: true, owner, programName: "opaque", data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     };
     return texts(await Deal({ params: Promise.resolve({ ref: bundleRef }), searchParams: Promise.resolve({ seller }) })).join("");
   };

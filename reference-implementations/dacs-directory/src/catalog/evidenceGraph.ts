@@ -10,9 +10,13 @@ import {
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
 
-export type ArtifactKind = "agreement" | "evidence" | "verify-result" | "composite" | "rating" | "listing" | "bundle" | "attestation";
+export type ArtifactKind = "agreement" | "evidence" | "amendment" | "verify-result" | "composite" | "rating" | "listing" | "bundle" | "attestation";
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
-export interface ResolvedEvidence { kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string }
+export interface ResolvedEvidence {
+  kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string;
+  /** For a bundle's settlementEvidence entry: the BundlePhaseEntry.index it settles (SB-1), when the bundle determines it. */
+  phaseIndex?: number;
+}
 export interface EvidenceGraph {
   profile: "dacs-v0.1";
   ok: boolean;
@@ -20,11 +24,17 @@ export interface EvidenceGraph {
   bundle: Record<string, unknown>;
   bundleContentHash: string;
   signaturesVerified: boolean;
+  /** Canonical claims of the parties whose bundle signatures verified; standing is computed from these only. */
+  signedParties: string[];
   refsVerified: boolean;
   artifacts: ResolvedEvidence[];
+  /** The bundle's own settlementEvidence entries, each paired with its phase index when the bundle determines it. */
+  settlement: ResolvedEvidence[];
   agreement?: Record<string, unknown>;
   listing?: Record<string, unknown>;
   ratings: Record<string, unknown>[];
+  /** DACS-4 AMEND-4: amendments that fail AMEND-1..3 are flagged, kept for audit, and never an unwind. */
+  flaggedAmendments: Array<{ locator: string; reason: string }>;
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
@@ -50,9 +60,16 @@ const priceTermOk = (value: unknown): boolean => {
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
-  agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", "verify-result": "dacs-verifyresult:v1:",
+  agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", amendment: "dacs-amendment:v1:", "verify-result": "dacs-verifyresult:v1:",
   composite: "dacs-composite:v1:", rating: "dacs-rating:v1:", listing: "dacs-listing:v1:", bundle: "dacs-bundle:v1:",
 };
+/** DACS-4 §9.7 PaymentPhaseType and DeliveryPhaseType: the phases that produce SettlementEvidence. */
+const PAYMENT_PHASES = new Set(["pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem"]);
+const DELIVERY_PHASES = new Set(["deliver-storage-program", "deliver-entitlement", "deliver-attested-payload"]);
+const settlesPhase = (kind: unknown): boolean => PAYMENT_PHASES.has(String(kind)) || DELIVERY_PHASES.has(String(kind));
+/** DACS-4 SettlementFinalityRecord.model. */
+const FINALITY_MODELS = new Set(["block-depth", "commitment-level", "provider-receipt", "htlc-reveal", "liquidity-tank", "bft-final"]);
+const AMENDMENT_TYPES = new Set(["refund", "partial-refund", "correction"]);
 const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
@@ -82,7 +99,7 @@ function payoutBindingShapeOk(value: unknown): boolean {
 }
 
 /** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
-function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
+export function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
   const profile = agreementProfile(agreement);
   const terms = rec(agreement.terms);
   const pipeline = arr(listing.pipeline);
@@ -137,15 +154,21 @@ const AGREEMENT_PATTERNS: Record<string, string> = {
   "negotiate-sealed-envelope-procurement": "sealed-envelope",
 };
 
+/** Returned when every evaluated check passed but check 5 or 6 needs a committedAt that was not supplied. */
+export const COMMITTED_AT_INDETERMINATE = "committed-at-indeterminate";
+
 /**
- * DACS-3 §8.5.2 listing conformance, checks 1-4 and 7-9 in order; returns the first failed check.
+ * DACS-3 §8.5.2 listing conformance, checks 1-9 in order; returns the first failed check.
  * Checks 5 (deadline) and 6 (not expired) compare against the CommitmentRecord's anchored
- * committedAt, which a bundle does not reference, so they are not evaluated here.
+ * `committedAt`. Without it they are vacuous only when the listing sets neither bound; otherwise
+ * a later failure still wins, and if nothing fails the result is COMMITTED_AT_INDETERMINATE,
+ * which a caller must never read as conformance.
  */
 export function agreementListingConformance(
   agreement: Record<string, unknown>,
   listing: Record<string, unknown>,
   publisher: string,
+  committedAt: number | null = null,
 ): string | null {
   const terms = rec(agreement.terms);
   const pricing = rec(listing.pricing);
@@ -160,6 +183,18 @@ export function agreementListingConformance(
   const amount = decimal(price.amount);
   if (pricing.kind === "fixed" || (pricing.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price")) {
     if (!listed || compareDecimals(amount, decimal(listed.amount)) !== 0) return "price";
+    // The band still has to be a valid one: a listing whose lower bound is ≤ 0 is rejected (DACS-4).
+    if (pricing.kind === "negotiable") {
+      const lower = bandBound(listed.amount, pricing.minPct, -1n);
+      if (!lower || lower.units <= 0n) return "price";
+    }
+  } else if (pricing.kind === "auction") {
+    // DACS-4 PricingSpec: the reserve is an inclusive ceiling for lowest-price and an inclusive
+    // floor for every other selection rule (§8.4.3 step 5).
+    if (listed) {
+      const order = compareDecimals(amount, decimal(listed.amount));
+      if (pricing.selectionRule === "lowest-price" ? order > 0 : order < 0) return "price";
+    }
   } else if (pricing.kind === "negotiable") {
     const lower = listed ? bandBound(listed.amount, pricing.minPct, -1n) : null;
     const upper = listed ? bandBound(listed.amount, pricing.maxPct, 1n) : null;
@@ -172,7 +207,7 @@ export function agreementListingConformance(
     const total = { units: unitPrice.units * BigInt(metered.quantity), scale: unitPrice.scale };
     const minimum = rec(pricing.minTotal) ? decimal(rec(pricing.minTotal)!.amount) : null;
     if (compareDecimals(amount, minimum && compareDecimals(minimum, total) > 0 ? minimum : total) !== 0) return "price";
-  } else if (pricing.kind !== "auction") return "unrecognized-pricing-kind";
+  } else return "unrecognized-pricing-kind";
   // 3. Rail: present exactly when the pipeline pays, and one the listing accepts.
   const rail = rec(terms.rail);
   const pays = pipeline.some((phase) => typeof phase.kind === "string" && phase.kind.startsWith("pay-"));
@@ -184,6 +219,21 @@ export function agreementListingConformance(
   const offered = rec(rec(listing.offering)?.deliverable);
   if (!deliverable || !offered || deliverable.deliverableType !== offered.kind ||
       normalizedHash(deliverable.hash) !== contentHash(offered) || deliverable.schemaUrl !== offered.schemaUrl) return "deliverable";
+  // 5. Deadline: terms.deadline ≤ committedAt + deadlineSecAfterCommit (unix ms against seconds).
+  // 6. Not expired: validity.notAfter ≥ committedAt.
+  const window = rec(listing.terms)?.deadlineSecAfterCommit;
+  const notAfter = rec(listing.validity)?.notAfter;
+  let unresolved = false;
+  if (window !== undefined) {
+    if (typeof window !== "number" || typeof terms.deadline !== "number") return "deadline";
+    if (committedAt === null) unresolved = true;
+    else if (terms.deadline > committedAt + window * 1000) return "deadline";
+  }
+  if (notAfter !== undefined) {
+    if (typeof notAfter !== "number") return "not-expired";
+    if (committedAt === null) unresolved = true;
+    else if (notAfter < committedAt) return "not-expired";
+  }
   // 7. Pattern. An RFQ step declaring fixedPriceFallback also admits the fixed-price fallback,
   // whose price check 2 already held to the band centre.
   const negotiation = pipeline.find((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
@@ -196,7 +246,8 @@ export function agreementListingConformance(
     return "role-direction";
   }
   // 9. Artifact type and payout bindings match the commitment phase.
-  return agreementMatchesListing(agreement, listing) ? null : "commitment-artifact";
+  if (!agreementMatchesListing(agreement, listing)) return "commitment-artifact";
+  return unresolved ? COMMITTED_AT_INDETERMINATE : null;
 }
 
 export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): Record<string, unknown> {
@@ -261,7 +312,7 @@ async function verifyBundleSignature(
   ));
 }
 
-function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string, unknown>[]): boolean {
+export function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string, unknown>[]): boolean {
   if (bundleProfile(raw) !== "fault") return true;
   const anchored = raw.anchoredByRole;
   const faulted = raw.faultedParty;
@@ -288,7 +339,23 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
         ? terms.payoutBindings === undefined
         : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
   }
-  if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
+  if (kind === "evidence") {
+    const payment = PAYMENT_PHASES.has(String(raw.phase));
+    return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && settlesPhase(raw.phase) &&
+      (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" &&
+      (raw.paymentTxRefs === undefined || Array.isArray(raw.paymentTxRefs)) &&
+      (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef)) &&
+      // DACS-4 §9.7 and PC-6: a successful payment states its settled amount, its finality model and the
+      // transactions it cites; delivery evidence and a failed payment carry no finality record.
+      (payment && raw.outcome === "success"
+        ? priceTermOk(raw.paymentAmount) && FINALITY_MODELS.has(String(rec(raw.settlementFinality)?.model)) &&
+          Array.isArray(raw.paymentTxRefs) && raw.paymentTxRefs.length > 0
+        : raw.settlementFinality === undefined);
+  }
+  // DACS-4 §9.7.1 SettlementAmendment; AMEND-1..3 are evaluated against the amended evidence in the graph.
+  if (kind === "amendment") return raw.amendmentVersion === "1" && typeof raw.jobId === "string" && isCurrentRef(raw.amendsEvidenceRef) &&
+    AMENDMENT_TYPES.has(String(raw.amendmentType)) && (raw.refundAmount === undefined || priceTermOk(raw.refundAmount)) &&
+    (raw.refundTxRefs === undefined || Array.isArray(raw.refundTxRefs)) && typeof raw.reason === "string" && typeof raw.observedAt === "number";
   // DACS-2 §7.5 VerifyResult and §7.7 CompositeVerificationRecord required members.
   if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && Number.isSafeInteger(raw.recipeVersion) && typeof raw.method === "string" && typeof raw.reason === "string" && typeof raw.fetchedAt === "number" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
   if (kind === "composite") {
@@ -353,7 +420,7 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   const raw = await deps.read(bundleLocator);
   // A failed graph carries no content hash: a rejected bundle is never hashed again.
-  const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: "", signaturesVerified: false, refsVerified: false, artifacts: [], ratings: [] });
+  const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: "", signaturesVerified: false, signedParties: [], refsVerified: false, artifacts: [], settlement: [], ratings: [], flaggedAmendments: [] });
   try {
     return await verifyCurrentEvidenceGraph(raw, deps, fail);
   } catch {
@@ -370,7 +437,7 @@ async function verifyCurrentEvidenceGraph(
   const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
-  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && (!Array.isArray(raw.amendments) || raw.amendments.length > 0)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && !Array.isArray(raw.amendments)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
@@ -388,6 +455,9 @@ async function verifyCurrentEvidenceGraph(
   const signaturesVerified = bundleSignerPolicy(raw, validParties,
     signatureChecks.length > 0 && signatureChecks.every((check) => check.valid));
   if (!signaturesVerified) return fail("required current bundle signatures are missing or invalid");
+  const signedParties = [...new Set(validParties.map(canonicalSigningIdentity))];
+  // Every later failure keeps the verified signature facts, so a caller can tell the two apart.
+  const failSigned = (reason: string): EvidenceGraph => ({ ...fail(reason), signaturesVerified, signedParties });
 
   const abort = raw.outcome === "aborted-by-self" || raw.outcome === "aborted-by-other";
 
@@ -410,35 +480,37 @@ async function verifyCurrentEvidenceGraph(
   };
   let agreement: Record<string, unknown> | undefined;
   if (raw.agreementRef !== undefined) {
-    if (reserveTopLevelRef("agreement", raw.agreementRef) !== "new") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
-    const resolved = await resolveRef("agreement", raw.agreementRef, deps); if (!resolved) return { ...fail("agreement reference failed"), signaturesVerified };
-    if (resolved.raw.jobId !== raw.jobId) return { ...fail("agreement belongs to another job"), signaturesVerified };
+    if (reserveTopLevelRef("agreement", raw.agreementRef) !== "new") return failSigned("duplicate or invalid top-level reference");
+    const resolved = await resolveRef("agreement", raw.agreementRef, deps); if (!resolved) return failSigned("agreement reference failed");
+    if (resolved.raw.jobId !== raw.jobId) return failSigned("agreement belongs to another job");
     artifacts.push(resolved); agreement = resolved.raw;
-  } else if (!abort) return { ...fail("non-abort bundle has no agreement"), signaturesVerified };
-  for (const [kind, refs] of [["evidence", raw.settlementEvidence], ["composite", raw.vetRecords], ["rating", raw.ratingRefs]] as Array<[ArtifactKind, unknown]>) {
+  } else if (!abort) return failSigned("non-abort bundle has no agreement");
+  const topLevelEvidence: ResolvedEvidence[] = [];
+  for (const [kind, refs] of [["evidence", raw.settlementEvidence], ["composite", raw.vetRecords], ["rating", raw.ratingRefs], ["amendment", raw.amendments]] as Array<[ArtifactKind, unknown]>) {
     for (const ref of Array.isArray(refs) ? refs : []) {
-      if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
+      if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
       const reserved = reserveTopLevelRef(kind, ref);
-      if (reserved === "invalid") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
+      if (reserved === "invalid") return failSigned("duplicate or invalid top-level reference");
       if (reserved === "duplicate-rating") continue;
-      const resolved = await resolveRef(kind, ref, deps); if (!resolved) return { ...fail(`${kind} reference failed`), signaturesVerified };
-      if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
+      const resolved = await resolveRef(kind, ref, deps); if (!resolved) return failSigned(`${kind} reference failed`);
+      if (resolved.raw.jobId !== raw.jobId) return failSigned(`${kind} belongs to another job`);
       if (kind === "rating") {
         const target = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.target));
         if (!parties.some((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.rater)) ||
             !target || target.role !== resolved.raw.targetRole) {
-          return { ...fail("rating party binding failed"), signaturesVerified };
+          return failSigned("rating party binding failed");
         }
       }
-      if (kind === "evidence" && !parties.some((party) =>
+      if ((kind === "evidence" || kind === "amendment") && !parties.some((party) =>
         sameSigningIdentity(party.primaryClaim, rec(resolved.raw.signature)?.signer))) {
-        return { ...fail("evidence signer is not a session party"), signaturesVerified };
+        return failSigned(`${kind} signer is not a session party`);
       }
+      if (kind === "evidence") topLevelEvidence.push(resolved);
       if (kind === "composite") {
         // bundleHash and evaluatedParty bind the vet to one session party's IdentityBundle (DACS-2 §7.7).
         const evaluated = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.evaluatedParty));
         if (!evaluated || normalizedHash(evaluated.bundleHash) !== normalizedHash(resolved.raw.bundleHash)) {
-          return { ...fail("composite record is not bound to a session party's bundle"), signaturesVerified };
+          return failSigned("composite record is not bound to a session party's bundle");
         }
       }
       artifacts.push(resolved);
@@ -460,34 +532,47 @@ async function verifyCurrentEvidenceGraph(
     if (known) return known.contentHash === hash && recipeOk(known);
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
     const nested = await resolveRef(kind, value, deps); if (!nested || !recipeOk(nested)) return false;
-    if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
-    if (kind === "evidence" && !parties.some((party) =>
+    if ((kind === "evidence" || kind === "composite" || kind === "amendment") && nested.raw.jobId !== raw.jobId) return false;
+    if ((kind === "evidence" || kind === "amendment") && !parties.some((party) =>
       sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
     seen.set(key, nested); artifacts.push(nested); return true;
   };
+  const flaggedAmendments: EvidenceGraph["flaggedAmendments"] = [];
+  const amendedEvidence = new Map<ResolvedEvidence, ResolvedEvidence>();
   for (let index = 0; index < artifacts.length; index++) {
     const artifact = artifacts[index];
     if (artifact.kind === "composite") {
       for (const key of ["freshness", "dealSpecific"] as const) for (const value of Array.isArray(artifact.raw[key]) ? artifact.raw[key] as unknown[] : []) {
-        if (!(await addNested("verify-result", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "nested VerifyResult reference failed"), signaturesVerified };
+        if (!(await addNested("verify-result", value))) return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "nested VerifyResult reference failed");
       }
       for (const signal of arr(artifact.raw.supplementary)) if (signal.attestation !== undefined && !(await addNested("attestation", signal.attestation))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "supplementary attestation reference failed"), signaturesVerified };
+        return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "supplementary attestation reference failed");
       }
     }
     if (artifact.kind === "evidence") {
       if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "delivery attestation reference failed"), signaturesVerified };
+        return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "delivery attestation reference failed");
       }
+      // amendmentRefs name SettlementAmendment records (DACS-4 §9.7.1), never more evidence.
       for (const value of Array.isArray(artifact.raw.amendmentRefs) ? artifact.raw.amendmentRefs as unknown[] : []) {
-        if (!(await addNested("evidence", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement amendment reference failed"), signaturesVerified };
+        if (!(await addNested("amendment", value))) return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement amendment reference failed");
       }
-      for (const key of ["supersedesEvidenceRef", "amendsEvidenceRef"] as const) if (artifact.raw[key] !== undefined && !(await addNested("evidence", artifact.raw[key]))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement evidence chain failed"), signaturesVerified };
+      // An ST-8 supersession is a same-phase evidence chain, not an amendment.
+      if (artifact.raw.supersedesEvidenceRef !== undefined && !(await addNested("evidence", artifact.raw.supersedesEvidenceRef))) {
+        return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement evidence chain failed");
       }
     }
+    if (artifact.kind === "amendment") {
+      // AMEND-1: the amended record resolves to SettlementEvidence of this job. A failure flags the
+      // amendment (AMEND-4) rather than failing the session.
+      const target = artifact.raw.amendsEvidenceRef as CurrentRef;
+      if (await addNested("evidence", target)) {
+        amendedEvidence.set(artifact, seen.get(`evidence\n${target.anchor.locator}`)!);
+      } else if (graphLimitExceeded) return failSigned("evidence graph exceeds size limit");
+      else flaggedAmendments.push({ locator: artifact.locator, reason: "AMEND-1: the amended evidence does not resolve for this job" });
+    }
     if (artifact.kind === "verify-result" && !(await addNested("attestation", artifact.raw.attestation))) {
-      return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "VerifyResult attestation reference failed"), signaturesVerified };
+      return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "VerifyResult attestation reference failed");
     }
   }
   const verifiedPhaseRefs = new Set(artifacts.filter((artifact) => artifact.ref &&
@@ -501,49 +586,114 @@ async function verifyCurrentEvidenceGraph(
     if (phase.attestationRef === undefined) continue;
     if (!isCurrentRef(phase.attestationRef) ||
         !verifiedPhaseRefs.has(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`)) {
-      return { ...fail("phase attestation reference is outside the verified graph"), signaturesVerified };
+      return failSigned("phase attestation reference is outside the verified graph");
     }
     // DACS-2 VPC-4: a vet phase whose decision is not pass fails, so it cannot have succeeded.
     const decision = compositeDecisions.get(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`);
     if (phase.outcome === "ok" && decision !== undefined && decision !== "pass") {
-      return { ...fail("a successful vet phase rests on a composite record that did not pass"), signaturesVerified };
+      return failSigned("a successful vet phase rests on a composite record that did not pass");
     }
+  }
+  // DACS-5 §10.4.3: settlementEvidence holds one record per executed settle-phase invocation and
+  // nothing else, so a completed payment phase cannot stand on missing or borrowed evidence.
+  const refKey = (ref: CurrentRef) => `${ref.anchor.locator}\n${normalizedHash(ref.contentHash)}`;
+  const settlePhases = phases.filter((phase) => settlesPhase(phase.kind));
+  const tally = (kinds: unknown[]) => kinds.reduce<Map<string, number>>((counts, kind) =>
+    counts.set(String(kind), (counts.get(String(kind)) ?? 0) + 1), new Map());
+  const phaseCounts = tally(settlePhases.map((phase) => phase.kind));
+  const evidenceCounts = tally(topLevelEvidence.map((evidence) => evidence.raw.phase));
+  if (phaseCounts.size !== evidenceCounts.size || [...phaseCounts].some(([kind, count]) => evidenceCounts.get(kind) !== count)) {
+    return failSigned("settlement evidence does not match the executed settle phases");
+  }
+  // Pair each record with its phase entry: by the entry's attestationRef, else as the only entry of
+  // its kind. The phase outcome and the evidence outcome must agree. The pairing gives SB-1 its
+  // phaseIndex, which is never read from the evidence itself.
+  const outcomesAgree = (phase: Record<string, unknown>, evidence: ResolvedEvidence) =>
+    (phase.outcome === "ok") === (evidence.raw.outcome === "success");
+  const paired = new Map<ResolvedEvidence, number>();
+  for (const phase of settlePhases) {
+    if (phase.attestationRef === undefined) continue;
+    const evidence = topLevelEvidence.find((candidate) => refKey(candidate.ref!) === refKey(phase.attestationRef as CurrentRef));
+    if (!evidence || evidence.raw.phase !== phase.kind || paired.has(evidence) || !outcomesAgree(phase, evidence)) {
+      return failSigned("a settle phase's attestationRef does not name its own settlement evidence");
+    }
+    paired.set(evidence, Number(phase.index));
+  }
+  for (const evidence of topLevelEvidence) {
+    const same = settlePhases.filter((phase) => phase.kind === evidence.raw.phase);
+    if (!paired.has(evidence) && same.length === 1 && same[0].attestationRef === undefined) {
+      if (!outcomesAgree(same[0], evidence)) return failSigned("a settle phase's outcome contradicts its settlement evidence");
+      paired.set(evidence, Number(same[0].index));
+    }
+    evidence.phaseIndex = paired.get(evidence);
+  }
+  // AMEND-2 and AMEND-3, in observation order so the record that overdraws is the one flagged.
+  const refunded = new Map<ResolvedEvidence, Decimal>();
+  const amendments = artifacts.filter((artifact) => artifact.kind === "amendment" && amendedEvidence.has(artifact))
+    .sort((a, b) => Number(a.raw.observedAt) - Number(b.raw.observedAt) || (a.contentHash < b.contentHash ? -1 : a.contentHash > b.contentHash ? 1 : 0));
+  for (const amendment of amendments) {
+    const evidence = amendedEvidence.get(amendment)!;
+    const refund = rec(amendment.raw.refundAmount);
+    const paid = rec(evidence.raw.paymentAmount);
+    const flag = (reason: string) => flaggedAmendments.push({ locator: amendment.locator, reason });
+    if (amendment.raw.amendmentType === "correction") {
+      if (refund) flag("AMEND-2: a correction carries a refundAmount");
+      continue;
+    }
+    if (evidence.raw.outcome !== "success") { flag("AMEND-2: a refund amends evidence that did not succeed"); continue; }
+    if (!refund || !paid || refund.currency !== paid.currency) { flag("AMEND-3: the refund is not in the settled currency"); continue; }
+    const before = refunded.get(evidence) ?? { units: 0n, scale: 0 };
+    const total = decimal(refund.amount);
+    const scale = Math.max(before.scale, total.scale);
+    const sum = { units: before.units * 10n ** BigInt(scale - before.scale) + total.units * 10n ** BigInt(scale - total.scale), scale };
+    if (compareDecimals(sum, decimal(paid.amount)) > 0) { flag("AMEND-3: refunds exceed the settled amount"); continue; }
+    refunded.set(evidence, sum);
   }
   // A session that reached its agreement passed vet for every party it vetted (VPC-2, VPC-4);
   // a failed attempt may sit beside the passing one.
   const passed = new Set(composites.filter((artifact) => artifact.raw.overallDecision === "pass")
     .map((artifact) => canonicalSigningIdentity(String(artifact.raw.evaluatedParty))));
   if (agreement && composites.some((artifact) => !passed.has(canonicalSigningIdentity(String(artifact.raw.evaluatedParty))))) {
-    return { ...fail("a committed session has a vetted party with no passing composite record"), signaturesVerified };
+    return failSigned("a committed session has a vetted party with no passing composite record");
   }
-  if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
+  if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  const verifiedListing = listed && artifactHash(listed.raw, "listing") === listingHash
+  // DACS-1 LR-1: the session pins the whole (listingId, listingVersion, contentHash) tuple.
+  const pinnedVersion = listingRef.version ?? listingRef.listingVersion;
+  const tupleOk = listed && listed.raw.listingId === listingRef.listingId &&
+    Number.isSafeInteger(pinnedVersion) && listed.raw.listingVersion === pinnedVersion;
+  const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
     ? await verifyListing(listed.raw, resolveKey) : null;
-  if (!listed || !verifiedListing) return { ...fail("listing reference failed"), signaturesVerified };
+  if (!listed || !verifiedListing) return failSigned("listing reference failed");
   // DACS-2 §7.7: requirementHash binds a vet to the listing's BundleRequirement, which gates the
   // publisher's counterparty. The publisher itself is vetted against requirements the listing omits.
   const requirement = rec(listed.raw.buyerRequirement);
   if (requirement && composites.some((artifact) =>
     !sameSigningIdentity(artifact.raw.evaluatedParty, verifiedListing.sellerClaim) &&
     normalizedHash(artifact.raw.requirementHash) !== contentHash(requirement))) {
-    return { ...fail("composite record is not bound to the listing's requirement"), signaturesVerified };
+    return failSigned("composite record is not bound to the listing's requirement");
   }
-  if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
+  if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return failSigned("agreement listing binding failed");
   if (agreement) {
     const agreementParties = arr(agreement.parties);
     if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) =>
       candidate.role === role && parties.some((party) =>
         party.role === role && sameSigningIdentity(party.primaryClaim, candidate.primaryClaim))))) {
-      return { ...fail("agreement party binding failed"), signaturesVerified };
+      return failSigned("agreement party binding failed");
     }
-    const nonconforming = agreementListingConformance(agreement, listed.raw, verifiedListing.sellerClaim);
-    if (nonconforming) return { ...fail(`agreement fails listing conformance check: ${nonconforming}`), signaturesVerified };
+    // The bundle references no CommitmentRecord, so its anchored committedAt is not available here:
+    // checks 5 and 6 decide only when the listing sets neither bound, and otherwise leave the
+    // session indeterminate, which is never counted (DACS-3 §8.5.2 ordering note).
+    const nonconforming = agreementListingConformance(agreement, listed.raw, verifiedListing.sellerClaim, null);
+    if (nonconforming === COMMITTED_AT_INDETERMINATE) {
+      return failSigned("agreement listing conformance is indeterminate: checks 5 and 6 need the commitment's committedAt");
+    }
+    if (nonconforming) return failSigned(`agreement fails listing conformance check: ${nonconforming}`);
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
-  return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: true, artifacts, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw) };
+  return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }
 
 export function agreementPrice(agreement: Record<string, unknown> | undefined): { amount: string; currency: string } | null {

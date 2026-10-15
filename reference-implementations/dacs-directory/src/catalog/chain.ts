@@ -12,6 +12,7 @@
  */
 import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { gcrAuthHeaders } from "./gcr.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 export const LIVE_STORAGE_SALT = "";
@@ -63,7 +64,18 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   } catch {
     return { status: "unavailable" };
   }
-  if ([400, 401, 403, 404].includes(res.status)) return { status: "absent" };
+  // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
+  // or PERMISSION_DENIED on a 403 (kynesyslabs/node storageprogram routes). Any other 4xx, such as a
+  // proxy's or a wrong route's, leaves the read incomplete (RB-6).
+  if (res.status === 404 || res.status === 403) {
+    try {
+      const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
+      const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
+      return answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
   if (!res.ok) return { status: "unavailable" };
   let json: { success?: boolean; data?: unknown; owner?: string; programName?: string };
   try {
@@ -94,6 +106,37 @@ export type OwnedAnchorResolution =
 
 type ProgramCandidate = { storageAddress?: unknown; programName?: unknown };
 
+/** kynesyslabs/node manageNodeCall's answer to a message it does not know (ac8f45f, manageNodeCall.ts:996-1000). */
+export const UNKNOWN_NODE_CALL = '{ error: "Unknown message"}';
+
+type RpcCall =
+  | { status: "ok"; body: { result?: unknown; response?: unknown } }
+  | { status: "failed" }
+  | { status: "invalid-json" };
+
+/** One bounded JSON-RPC POST to the node, classified. */
+async function rpcCall(headers: Record<string, string>, payload: unknown): Promise<RpcCall> {
+  let response: Response;
+  try {
+    response = await fetch(RPC + "/", {
+      method: "POST",
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    return { status: "failed" };
+  }
+  if (!response.ok) return { status: "failed" };
+  try {
+    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown } | null;
+    return body && typeof body === "object" ? { status: "ok", body } : { status: "invalid-json" };
+  } catch {
+    return { status: "invalid-json" };
+  }
+}
+
 /**
  * Producer-side resume lookup for one exact StorageProgram name.
  *
@@ -112,44 +155,34 @@ export async function resolveOwnedAnchorByName(
   const owner = normalizedOwner(expectedOwner);
   if (!owner) return { status: "indeterminate", reason: "expected owner is invalid" };
 
-  let response: Response;
-  try {
-    response = await fetch(RPC + "/", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({
-        method: "nodeCall",
-        params: [{
-          type: "nodeCall",
-          message: "searchStoragePrograms",
-          sender: null,
-          receiver: null,
-          timestamp: null,
-          data: {
-            query: programName,
-            options: { exactMatch: true, limit: 32, offset: 0 },
-          },
-          extra: "",
-        }],
-      }),
+  const options = { exactMatch: true, limit: 32, offset: 0 };
+  let search = await rpcCall({ "content-type": "application/json" }, {
+    method: "nodeCall",
+    params: [{
+      type: "nodeCall",
+      message: "searchStoragePrograms",
+      sender: null,
+      receiver: null,
+      timestamp: null,
+      data: { query: programName, options },
+      extra: "",
+    }],
+  });
+  // The pinned node revision (README "Pinned upstreams") has no searchStoragePrograms nodeCall: it
+  // answers an unknown message with result 200 and this literal, and serves the same exact-name
+  // search as a read-authenticated gcr_routine. A deployment with the nodeCall answers it directly.
+  if (search.status === "ok" && search.body.result === 200 && search.body.response === UNKNOWN_NODE_CALL) {
+    search = await rpcCall(await gcrAuthHeaders(), {
+      method: "gcr_routine",
+      params: [{ method: "searchStoragePrograms", params: [programName, options] }],
     });
-  } catch {
-    return { status: "indeterminate", reason: "program-name lookup failed" };
   }
-  if (!response.ok) return { status: "indeterminate", reason: "program-name lookup failed" };
-
-  let candidates: ProgramCandidate[];
-  try {
-    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown };
-    if (body.result !== 200 || !Array.isArray(body.response)) {
-      return { status: "indeterminate", reason: "program-name lookup returned an invalid response" };
-    }
-    candidates = body.response as ProgramCandidate[];
-  } catch {
-    return { status: "indeterminate", reason: "program-name lookup returned invalid JSON" };
+  if (search.status === "failed") return { status: "indeterminate", reason: "program-name lookup failed" };
+  if (search.status === "invalid-json") return { status: "indeterminate", reason: "program-name lookup returned invalid JSON" };
+  if (search.body.result !== 200 || !Array.isArray(search.body.response)) {
+    return { status: "indeterminate", reason: "program-name lookup returned an invalid response" };
   }
+  const candidates = search.body.response as ProgramCandidate[];
   if (candidates.length >= 32) {
     return { status: "indeterminate", reason: "program-name lookup reached its candidate bound" };
   }

@@ -34,16 +34,53 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
   return false;
 }
 
+/** Callers pass verified copies: a current FaultAttestationBundle, or an AttestationBundle (current or SDK profile). */
+const bundleType = (bundle: Record<string, unknown>) => bundle.faultBundleVersion === "1" ? "fault" : "legacy";
+
+/** DACS-5 §10.4.3 outcome class: completed, failed-substrate, abort, or failure. */
+function outcomeClass(outcome: unknown): string {
+  return outcome === "aborted-by-self" || outcome === "aborted-by-other" ? "abort"
+    : outcome === "failed-perm" || outcome === "failed-counterparty" ? "failure" : String(outcome);
+}
+
+/**
+ * The §10.4.1 permissible-set mapping of a legacy copy's role-relative outcome to the parties it
+ * may fault: none for completed or failed-substrate, the anchoring role for its own fault, and
+ * every other session role for a counterparty fault (a singleton in a two-party session).
+ */
+function impliedFaultSet(legacy: Record<string, unknown>): Set<string> {
+  const anchored = String(legacy.anchoredByRole);
+  const roles = records(legacy.parties).map((party) => String(party.role));
+  const outcome = legacy.outcome;
+  if (outcome === "completed" || outcome === "failed-substrate") return new Set(["none"]);
+  if (outcome === "failed-perm" || outcome === "aborted-by-self") return new Set([anchored]);
+  if (outcome === "failed-counterparty" || outcome === "aborted-by-other") return new Set(roles.filter((role) => role !== anchored));
+  return new Set();
+}
+
+/**
+ * DACS-5 §10.4.3 "canonically diverge", applied by version: a FaultAttestationBundle pair compares
+ * the absolute faultedParty and outcome class; a legacy pair compares outcomes after the
+ * perspective flip; a mixed pair checks the fault bundle's faultedParty against the legacy copy's
+ * implied-fault set and the outcome classes. The shared-index phaseSummary limb applies to all.
+ */
 export function currentBundleCopiesDiverge(
   buyerBundle: Record<string, unknown>,
   sellerBundle: Record<string, unknown>,
 ): boolean {
-  const buyerType = buyerBundle.faultBundleVersion === "1" ? "fault" : buyerBundle.bundleVersion === "1" ? "legacy" : "unknown";
-  const sellerType = sellerBundle.faultBundleVersion === "1" ? "fault" : sellerBundle.bundleVersion === "1" ? "legacy" : "unknown";
-  return buyerType !== sellerType ||
-    (buyerType === "fault" && buyerBundle.faultedParty !== sellerBundle.faultedParty) ||
-    flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
-    phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary);
+  if (phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary)) return true;
+  const buyerType = bundleType(buyerBundle);
+  const sellerType = bundleType(sellerBundle);
+  if (buyerType === "fault" && sellerType === "fault") {
+    return buyerBundle.faultedParty !== sellerBundle.faultedParty ||
+      outcomeClass(buyerBundle.outcome) !== outcomeClass(sellerBundle.outcome);
+  }
+  if (buyerType === "legacy" && sellerType === "legacy") {
+    return flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome);
+  }
+  const [fault, legacy] = buyerType === "fault" ? [buyerBundle, sellerBundle] : [sellerBundle, buyerBundle];
+  return !impliedFaultSet(legacy).has(String(fault.faultedParty)) ||
+    outcomeClass(fault.outcome) !== outcomeClass(legacy.outcome);
 }
 
 function sellerRelativeOutcome(graph: EvidenceGraph, sellerClaim: string): string {
@@ -81,7 +118,12 @@ export function reconcileCurrentCopies(
   const divergent = Boolean(
     buyerOk && sellerOk && currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph!.bundle),
   );
-  const authoritative = sellerOk ? sellerGraph! : buyerGraph;
+  // The scored party's own copy is authoritative, except that in a non-divergent mixed-version pair
+  // the FaultAttestationBundle copy is (§10.4.3(c), §10.5.1).
+  const mixed = buyerOk && sellerOk && !divergent && bundleType(buyerGraph.bundle) !== bundleType(sellerGraph!.bundle);
+  const authoritative = mixed
+    ? bundleType(buyerGraph.bundle) === "fault" ? buyerGraph : sellerGraph!
+    : sellerOk ? sellerGraph! : buyerGraph;
   const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
   const sellerOutcome = sellerRelativeOutcome(authoritative, sellerClaim);
   const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;

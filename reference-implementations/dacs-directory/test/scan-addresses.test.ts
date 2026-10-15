@@ -48,7 +48,7 @@ async function scanFixture(transactions: unknown[], storage: Record<string, stri
     const path = new URL(String(input)).pathname;
     if (path.startsWith("/storage-program/")) {
       const data = storage[path.slice("/storage-program/".length)];
-      if (!data) return new Response(null, { status: 404 });
+      if (!data) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
       return new Response(
         `{"success":true,"owner":"${owner}","programName":"opaque","data":${data}}`,
         { headers: { "content-type": "application/json" } },
@@ -131,8 +131,13 @@ test("scanner requires a hex boundary after the native locator", () => {
 });
 
 test("storage failures are classified into public-safe operational causes", () => {
-  assert.equal(storageReadFailureCode(404), "STORAGE_NOT_FOUND");
-  assert.equal(storageReadFailureCode(403), "STORAGE_NOT_PUBLIC");
+  // Only the node's own errorCode on its own status is terminal; a proxy's bare 4xx stays retryable.
+  assert.equal(storageReadFailureCode(404, "NOT_FOUND"), "STORAGE_NOT_FOUND");
+  assert.equal(storageReadFailureCode(403, "PERMISSION_DENIED"), "STORAGE_NOT_PUBLIC");
+  assert.equal(storageReadFailureCode(404), "STORAGE_RPC_UNAVAILABLE");
+  assert.equal(storageReadFailureCode(404, "PERMISSION_DENIED"), "STORAGE_RPC_UNAVAILABLE");
+  assert.equal(storageReadFailureCode(403), "STORAGE_RPC_UNAVAILABLE");
+  assert.equal(storageReadFailureCode(401), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(200, "PERMISSION_DENIED"), "STORAGE_NOT_PUBLIC");
   assert.equal(storageReadFailureCode(503), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(503, "NOT_FOUND"), "STORAGE_RPC_UNAVAILABLE");
@@ -148,13 +153,25 @@ test("terminal storage failures skip retries while transient failures remain bou
   try {
     globalThis.fetch = async () => {
       calls++;
-      return new Response(null, { status: 404 });
+      return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     };
     assert.deepEqual(await readStorage(native, 3), {
       success: false,
       failureCode: "STORAGE_NOT_FOUND",
     });
     assert.equal(calls, 1);
+
+    // A bare 404 is not the node's answer (a proxy or a wrong route), so it is retried, never terminal.
+    calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(null, { status: 404 });
+    };
+    assert.deepEqual(await readStorage(native, 2), {
+      success: false,
+      failureCode: "STORAGE_RPC_UNAVAILABLE",
+    });
+    assert.equal(calls, 2);
 
     calls = 0;
     globalThis.fetch = async () => {

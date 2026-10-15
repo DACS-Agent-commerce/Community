@@ -89,7 +89,7 @@ globalThis.fetch = async (input, init) => {
   if (path.startsWith("/storage-program/")) {
     const at = path.slice("/storage-program/".length);
     const entry = storage[at];
-    if (!entry) return new Response(null, { status: 404 });
+    if (!entry) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     const count = (reads.get(at) ?? 0) + 1;
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));
@@ -329,7 +329,7 @@ test("current evidence graph fails closed on malformed bundles without hashing t
 });
 
 // Current-profile deal: listing, agreement, evidence and both bundle copies with BundleBindings.
-async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [`tx-${jobId}`]) {
+async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: contentHash({ settlement: jobId }) }]) {
   const at = (n: number) => locator(offset + n);
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
@@ -352,12 +352,13 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
       deliverable: { deliverableType: "attested-payload", hash: contentHash((listingRaw.offering as Obj).deliverable as Obj) } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs,
+    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
   const evidence = { ...evidenceScope, signature: await signArtifact(evidenceScope, "evidence", 1) };
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
+    phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];
@@ -377,8 +378,9 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   };
 }
 
-test("malformed bundles and a deal that cannot be summarized stay unverified while a later deal verifies", async () => {
-  // Signed evidence whose transaction id converts to no primitive: the graph verifies, the deal summary throws.
+test("malformed bundles stay unverified, and a settlement reference with no SB-1 key is never counted", async () => {
+  // Signed evidence citing a transaction reference SB-1 cannot key: the graph verifies, but the
+  // settlement is `error`, so the deal is listed and never counted (DACS-4 §9.5.8).
   const poisoned = await currentDeal("job-poisoned", 100, [{ txId: { toString: 1 } }]);
   const valid = await currentDeal("job-valid", 200);
   const legacyBundle = locator(61);
@@ -403,7 +405,10 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   const record = await indexRegistration(registration, undefined, offline);
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
-  for (const jobId of ["job-legacy-malformed", "job-current-malformed", "job-poisoned"]) {
+  assert.equal(byJob.get("job-poisoned")?.refsVerified, true);
+  assert.equal(byJob.get("job-poisoned")?.reputationEligible, false);
+  assert.deepEqual(byJob.get("job-poisoned")?.settlementTxIds, []);
+  for (const jobId of ["job-legacy-malformed", "job-current-malformed"]) {
     assert.equal(byJob.get(jobId)?.signatureVerified, false, jobId);
     assert.equal(byJob.get(jobId)?.refsVerified, false, jobId);
     assert.equal(byJob.get(jobId)?.reputationEligible, false, jobId);
@@ -418,7 +423,7 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
-    assert.equal(run.omitted_deals, 1, "the failed summary is counted in operator diagnostics");
+    assert.equal(run.omitted_deals, 0, "an unkeyed settlement is a verdict, not a failed summary");
   } finally { db.close(); }
 });
 
