@@ -71,9 +71,9 @@ building whatever the SDK checkout happens to contain. It builds only after
 
 Rerunning the block on a clean checkout is safe: it re-pins the checkout and
 reinstalls. If it prints `stopped: ...` or any command fails, fix that before
-continuing; do not run the checks below on a partial install. Access to the SDK
-repository may require your normal GitHub authentication; do not put a token in
-a remote URL or committed file.
+continuing; do not run the checks below on a partial install. The SDK repository
+is public, so the clone needs no GitHub authentication; never put a token in a
+remote URL or committed file.
 
 ## Run deterministic checks
 
