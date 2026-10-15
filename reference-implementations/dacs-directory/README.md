@@ -16,18 +16,22 @@ name and (when owner-signed) the "owner-registered" badge — it is never a gate
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
-The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
-checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
+Completion verification unavailable: TP-1 testnet catalog projections publish completion and
+fault rates and numeric reputation scores as `null`, with a reason. Counts are labelled
+as observed outcomes, not verified completion. Rate and score filters and ranking return
+400. Individual evidence inspection remains available. Full metrics return under
+a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
+while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Catalog API | DACS-1 §6.3.6 | Listing filters excluding TP-1 rate/score filters, plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
 | Seller publication | DACS-1 §6.3.4 | **`/register` does not publish pay-bearing listings at this pin.** DACS-1 requires LP-6 `verified` rail authority and an LP-1 verified `finalized` AnchorReceipt before a pay-bearing listing is published, and the Directory can establish neither. `/register` emits DACS-4 §9.4.2 registry rail IDs (`demos-native:DEM`, `x402:default`, `ap2:stripe-paymentintents`) and runs the SDK rail resolver over this release's disclosed PA-1 in-code table (`pa1-in-code`). LRR-6 accepts only a signed snapshot, and the pinned Standard publishes no signed v0.1 snapshot, so the table is unsigned and every rail resolves `indeterminate` (`pa1-definition-unverifiable`). `build-listing` therefore refuses with 409 before the seller signs anything; it publishes only on `verified`. Every `/register` listing has exactly one rail, so `/register` refuses every listing until a signed PA-1 snapshot or an authenticated PA-2/PA-3 registry exists. Behind that gate, `/register` refuses attested-payload methods whose seller-runtime production capability it cannot prove. It shows the exact server-built unsigned Listing before signature and checks that the configured node reports the pinned build and chain before it returns any transaction. It creates the StorageProgram with the current SDK name/next-nonce/empty-salt mapping and persists non-secret recovery coordinates before broadcast. After broadcast, `confirm-listing` independently verifies native address, owner, program name, tuple, identity, signature and content hash. It reads the write back by hash, in a block the pinned node reports as confirmed. It returns that report only as an unauthenticated `nodeObservation` with `confirmed:false` and state `finality-unverified`, never as an `AnchorReceipt`. The Directory checks the node's validator-signature shape but, like the pinned SDK adapter, does not verify the validator pool, signatures or quorum, and on Demos an `included` write is also `finalized`. The browser therefore stops there and does not register the listing. `POST /api/dacs/register` still accepts pointer sets from any client, and the indexer re-reads and re-authenticates every anchor on each pass |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Observed history | DACS-5 §10.4–§10.5 | Bundle references, labelled observed counts, individual evidence, exact-decimal volume and time windows are kept. Completion and fault rates and numeric reputation scores are unavailable on testnet |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -54,7 +58,7 @@ two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its li
 uses the early SDK's compact signature encoding; the verifier accepts that encoding
 only after checking the same Ed25519 signature, signed scope, agent key, and anchor owner
 as current structured signature envelopes. Historical deals are displayed, but only
-strictly party-bound bundles with verified references contribute to reputation.
+strictly party-bound bundles with verified references contribute to labelled observed counts.
 
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
@@ -95,8 +99,9 @@ secret variable for the operational indexing endpoints.
 
 For GitHub deployments from the Community monorepo, set the service root directory to
 `/reference-implementations/dacs-directory` and the Railway config file to
-`/reference-implementations/dacs-directory/railway.json`. Until the pinned SDK is
-published as a package, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
+`/reference-implementations/dacs-directory/railway.json`. The build clones the pinned
+SDK from its public repository, so it needs no credentials. To authenticate that
+clone anyway, add `DACS_SDK_GITHUB_TOKEN` as a Railway secret. It must be a
 fine-grained GitHub token scoped only to `DACS-Agent-commerce/dacs-sdk` with read-only
 Contents access. The build passes it to Git without writing it to the checkout or remote
 URL.
@@ -126,7 +131,7 @@ continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SD
 | `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 currently reports a dirty build, so **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until node2 is rebuilt clean or the operator pins that exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
-| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
+| `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
@@ -138,25 +143,69 @@ continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SD
 | `DACS_RECIPE_POLICIES` | For tier elevation | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy fails closed to `self-declared` |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
-| `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
 
 The data directory must be persistent and writable in deployments that accept
 registrations or run the indexer. Never commit `.indexer-seed`, `.indexer-mnemonic`,
 or an admin token.
 
-The project is pinned to Node 22 through `.nvmrc` and `package.json` engines. Before
-promoting a deployment, verify both gateway reachability and its explicit CORS allowlist:
+The exact Node release is pinned in `.nvmrc`, and `package.json` engines names the
+same release; `test/node-runtime.test.mjs` fails if they diverge or if any other
+file Railpack's mise reads could pick a release. CI installs Node from `.nvmrc`.
+Railway's Railpack builder takes engines first and then lets `.nvmrc` override it
+through mise's idiomatic version files (railpack `v0.41.0`,
+`core/providers/node/node.go:419-494`), so production builds on the same release
+either way. Leave `RAILPACK_NODE_VERSION` unset: `.nvmrc` overrides it. Railway does
+not pin which Railpack release builds the service, so the build and
+`start:railway` both run `npm run check:node-runtime` first, which fails unless the
+running Node is the `.nvmrc` release. Before promoting a deployment, validate the
+public canonical origin:
 
 ```bash
-NEXT_PUBLIC_DIRECTORY_URL=https://directory.example \
-NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.example \
-npm run check:butler
+NEXT_PUBLIC_DIRECTORY_URL=https://directory.your-domain.org \
+npm run check:deploy-config
 ```
 
-The probe fails unless the gateway returns at least one Butler agent, its
-`Access-Control-Allow-Origin` exactly matches the directory origin, and browser
-preflights for both execution routes allow `POST` with `content-type`. Configure
-the gateway's `BUTLER_ALLOWED_ORIGINS` with that directory origin before running it.
+The deployment check requires one credential-free HTTPS origin with no path, query,
+or fragment, written exactly as that origin (an optional trailing `/` is allowed),
+on a public host. Ports that browsers refuse to fetch (the Fetch Standard's bad
+ports, including 0) are rejected.
+
+- A host name needs at least two non-empty labels, must not end with a dot, and must
+  not be, or end in, an IANA special-use name (`localhost`, `local`, `test`,
+  `invalid`, `onion`, `alt`, or anything under `arpa`), the private-use `internal`,
+  or `localdomain`. The RFC 6761 documentation names (`example`, `example.com`,
+  `example.net`, `example.org`) are rejected too, unless the check runs with
+  `--allow-documentation-names`, as CI does for its placeholder origin. Production
+  builds (`railway.json`) run the check without it.
+  Other names that are merely undelegated (for example `lan` or `corp`) are not
+  rejected.
+- An IP literal must be global unicast and outside every block in the IANA IPv4 and
+  IPv6 Special-Purpose Address Registries. IPv4 rejects loopback, unspecified,
+  private, shared (CGNAT), link-local, documentation, benchmarking, protocol
+  assignments, AS112, AMT, reserved, and broadcast, plus multicast and the
+  deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
+  documentation, IETF-protocol (including Teredo), 6to4, Direct Delegation AS112,
+  and `3fff::/20` blocks, so IPv4-mapped, NAT64, and other forms that embed an IPv4
+  address are rejected.
+- The check fails closed: the registries' globally reachable rows (PCP and TURN
+  anycast inside `192.0.0.0/24`; AS112 and AMT; protocol anycast, ORCHIDv2, and
+  DRIP inside `2001::/23`) are protocol addresses, not hosting space, and are
+  rejected too.
+
+`test/fixtures/origin-policy-sources.json` records where these rules come from:
+every unexpired row of both IP registries (from Wireshark's IANA-generated tables,
+which drop terminated rows and record an N/A Globally Reachable as false; the two
+terminated blocks IANA still lists are rejected anyway), every special-use name
+(IANA's registry XML from a mirror, cross-checked with Unbound and Knot Resolver),
+and the Fetch Standard's bad ports. Each comes through a copy pinned to an upstream
+revision and sha256 (as of 2026-10-15), plus the deliberate deviations. The tests
+check the tables against it offline, and check the verifier against in-memory
+copies; `npm run verify:origin-sources` (needs network) re-fetches each pinned copy
+and checks the fixture against it. Node's `fetch` ignores `HTTPS_PROXY`, so behind
+a proxy run `node --use-env-proxy scripts/verify-origin-sources.mjs` instead.
+Generated canonical URLs and discovery documents therefore cannot silently point at
+localhost or a different base path. The check does not resolve DNS, so a public name
+that resolves to a private address still passes.
 
 ## Human and agent discovery
 
@@ -271,6 +320,9 @@ code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow 
 shim over JSON-owned values, WHATWG-subset `node:net` and `node:url` shims, and
 base64url-patched Buffer).
 
+The layout uses `next/font/local` with exact, integrity-pinned font packages.
+Production builds and served pages use those bundled fonts without a font-service request.
+
 ## Honest limitations (MVP)
 
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
@@ -321,9 +373,25 @@ pass the pinned SDK's normative shape and component-signature APIs and are expli
 labelled transaction-readiness-unassessed until a buyer runs the complete SDK reader; current-contract
 evidence graphs use directory-native validation, while the SDK bundle verifier is retained
 for labelled legacy artifacts. DACS-2 tier derivation fails closed on
-unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
-settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
-computations remain advisory and independently reproducible from their refs.
+unresolved recipe/evidence/freshness. Observed-history processing retains volume,
+settlement uniqueness, anchor-time windowing and evidence references. Completion and
+fault rates and numeric reputation scores remain unavailable during testnet.
+
+The Node no-rate regression tests use an isolated populated catalog, including
+aborted outcomes, old numeric metrics and missing listing hints. They check the API,
+rendered homepage, discovery, service detail and seller evidence, plus the discovery
+text and refusal of old filters, including bracketed query keys. Run `npm test`.
+
+TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commit:
+`minCompletionRate` and `minRating` return 400, and `completionRate` remains null
+even when `bundleCount` is positive. `metricsProfile: "TP-1"` and
+`metricsUnavailableReason` identify this restriction. A cached listing with no
+hint still has null metrics; its observed count is computed from retained eligible
+category records using the existing indexer rule, with the catalog snapshot window.
+The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
+`completed` and `totalAgreements` for compatibility, with explicit observed-count
+labels. Currency totals count observed priced completed outcomes and do not
+establish completion or settlement.
 
 ## License
 

@@ -336,7 +336,7 @@ test("verified reputation deals are unique by signed job and bundle reference", 
   assert.deepEqual(records.map((deal) => deal.jobId), ["j", "unverified"]);
 });
 
-test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", () => {
+test("testnet history keeps seller outcomes while rates remain unavailable", () => {
   const deal = (jobId: string, sellerOutcome: string): DealRecord => ({
     jobId, rail: "pay-dem", buyerBundleRef: `stor-${jobId.padEnd(40, "a")}`,
     owners: { buyer: "buyer", seller: "seller" }, signatureVerified: true, refsVerified: true,
@@ -349,9 +349,9 @@ test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", 
     deal("other", "aborted-by-other"),
   ], 0, 20);
   assert.equal(reputation.totalAgreements, 3);
-  assert.equal(reputation.completionRate, 0.5);
-  assert.equal(reputation.counterpartyAdjustedCompletionRate, 1);
-  assert.equal(reputation.counterpartyFaultRate, 0.5);
+  assert.equal(reputation.completionRate, null);
+  assert.equal(reputation.counterpartyAdjustedCompletionRate, null);
+  assert.equal(reputation.counterpartyFaultRate, null);
   assert.equal(flipOutcome("failed-perm"), "failed-counterparty");
 });
 

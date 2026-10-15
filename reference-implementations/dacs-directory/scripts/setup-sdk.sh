@@ -4,11 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 SDK_REV="3904d704fb540e6e1d7dd502a0be29f20569c92d"
 
-# Railway's GitHub integration can check out this repository, but it does not
-# pass its credentials through to nested private-repository clones. Supply a
-# narrowly scoped, read-only token as DACS_SDK_GITHUB_TOKEN for those builds.
-# The credential is passed through Git's environment-based configuration so it
-# is never written to the checkout or embedded in the remote URL.
+# The SDK repository is public, so the clone needs no credentials. When a
+# narrowly scoped, read-only token is set as DACS_SDK_GITHUB_TOKEN, it only
+# authenticates that clone. The credential is passed through Git's
+# environment-based configuration so it is never written to the checkout or
+# embedded in the remote URL.
 git_with_sdk_auth() {
   if [ -z "${DACS_SDK_GITHUB_TOKEN:-}" ]; then
     command git "$@"

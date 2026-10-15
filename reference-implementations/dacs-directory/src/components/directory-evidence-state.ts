@@ -1,6 +1,7 @@
 import { safePublicEndpoint } from "../catalog/publicEndpoint.js";
 import { effectiveReachabilityStatus } from "../catalog/reachabilityStatus.js";
 import type { IdentityTier, ListingSummary, SellerRecord } from "../catalog/types.js";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "../catalog/testnetMetrics.js";
 
 export const UNMEASURED_REACHABILITY_LABEL = "Not measured by Directory" as const;
 
@@ -80,10 +81,8 @@ export function directoryEvidenceState(
     deals: Object.freeze({
       completed,
       total,
-      label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}`,
-      explanation: total === 0
-        ? "No verified two-sided bundle history yet"
-        : "Both parties' signed copies must verify and agree before a bundle counts",
+      label: observedOutcomesLabel(total),
+      explanation: COMPLETION_VERIFICATION_UNAVAILABLE,
     }),
   });
 }

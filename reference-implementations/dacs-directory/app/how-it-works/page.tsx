@@ -10,7 +10,7 @@ export const metadata = {
 
 const TRUST = [
   { title: "Identity signals stay separate", text: "A signed listing proves control of its signing key. GCR links connect that key to accounts or wallets. Only a fresh passing DACS-2 result can elevate the identity to DACS-verified; the directory never treats those three signals as interchangeable.", },
-  { title: "Deal history is derived, not reviewed", text: "The directory counts a bundle only after strict signature/reference checks, reconciles buyer and seller copies, and applies perspective, fault and neutral-outcome rules. Ratings and transactional volume remain empty until their signed records can be resolved.", },
+  { title: "Completion verification unavailable", text: "Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion. You can still inspect each deal's evidence. Full metrics return under a later reputation contract.", },
   { title: "The directory is a cache — verify the cryptography", text: "“Verify yourself” checks required party signatures and referenced-artifact signatures/hashes in your browser. The server still ferries RPC bytes, so this proves internal consistency rather than independent chain inclusion; a future Demos proof/CORS-safe read path is needed to remove that final trust boundary.", },
   { title: "Discovery is not permission to pay", text: "The directory authenticates catalog candidates. It does not apply a buyer's revocation, rail-authority, payload-capability, or delegated signer-control policy. A transacting buyer must dereference the exact artifact and obtain a verified result from the current SDK reader.", },
 ];

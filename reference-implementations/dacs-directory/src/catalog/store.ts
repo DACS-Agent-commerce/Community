@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { deriveSellerReputation } from "./reputation.js";
+import { projectTestnetCatalog } from "./testnetMetrics.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import {
   LISTING_REJECTION_MESSAGES,
@@ -412,7 +413,7 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+export const loadCatalog = (): Catalog => projectTestnetCatalog(getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] }));
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
