@@ -376,7 +376,7 @@ test("only CI's placeholder check allows documentation names", () => {
   const ci = read("../../../.github/workflows/dacs-directory-ci.yml");
   assert.match(ci, /run: npm run check:deploy-config -- --allow-documentation-names$/m);
   const railway = JSON.parse(read("../railway.json"));
-  assert.match(railway.build.buildCommand, /^npm run check:deploy-config && /);
+  assert.match(railway.build.buildCommand, /^npm run check:node-runtime && npm run check:deploy-config && /);
   assert.doesNotMatch(railway.build.buildCommand, /allow-documentation-names/);
   const pkg = JSON.parse(read("../package.json"));
   assert.equal(pkg.scripts["check:deploy-config"], "node scripts/check-directory-origin.mjs");
