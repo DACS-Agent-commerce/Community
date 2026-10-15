@@ -203,18 +203,25 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    (`indeterminate`, RB-5), so the listing is withheld from the catalog rather than
    published `active`. Once a marker verifies, the listing stays `revoked` with its
    binding even if the marker later cannot be read (RB-3).
-   BB-4-valid BundleBindings are also classified and accumulated under a deterministic
-   ceiling of 32 per signer of each job and role; another signer's bindings never use
-   that budget (BB-6). Overflow is sticky and makes that signer's side `indeterminate`,
-   never absent. There is no total across signers, so stored bindings, and the work to
-   re-verify them each pass, grow with the number of signers for one job.
+   BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
+   requires a carrying catalog to serve every such record whoever signed it, and
+   `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
+   Directory's own BB-6 resolution works through at most 32 per signer of each job and
+   role; another signer's bindings never use that budget. Overflow is sticky and makes
+   that signer's side `indeterminate`, never absent. There is no total across signers,
+   so stored bindings, and the work to re-verify them each pass, grow with the number of
+   bindings published for one job.
 3. **Evidence graph and federation**: current bundle copies are reached only after
    deriving the role-specific logical address and resolving a signed BundleBinding.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
    Resolved bundles recursively validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
-   records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
-   compatibility path.
+   records, and ratings. Settlement evidence must cover each executed settle phase once,
+   and a successful payment must state its amount, finality and transactions. Settlements
+   are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
+   `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
+   leaves the deal listed but uncounted. Legacy SDK artifacts remain on an
+   explicitly-labelled compatibility path.
 
 ## Architecture note: the web app is chain-fetch-only
 
@@ -249,6 +256,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   binding signed through another ClaimReference/key-resolution method is not carried or
   used until that resolver is configured; it fails closed to `indeterminate` rather
   than being relabelled as verified.
+- **DACS-3 §8.5.2 checks 5 and 6 need the commitment's anchored `committedAt`**, and a
+  bundle does not reference the CommitmentRecord. A session whose listing sets
+  `terms.deadlineSecAfterCommit` or `validity.notAfter` is therefore `indeterminate` and
+  never counted; `SPEC_PIN` lists this and the other recorded deviations.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
@@ -267,18 +278,31 @@ computations remain advisory and independently reproducible from their refs.
 **Pinned upstreams.** Verdicts depend on three upstreams, each pinned:
 
 - **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
-  `4bb9e48`) and the conformance vector files vendored under `test/fixtures/dacs-standard/`,
-  whose hashes `test/sig6.test.ts` checks. The `did:demos:agent` primary-claim profile is
-  the one deliberate addition.
+  `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
+  with their hashes, and the recorded deviations. `test/standard-vectors.test.ts` checks
+  the hashes and runs each set through an adapter onto the Directory's own decisions. The
+  `did:demos:agent` primary-claim profile is the one deliberate addition; it comes from
+  DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
 - **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
   Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
-- **Demos node**: the storage-read contract was checked against `kynesyslabs/node`
-  `ac8f45f`. `GET /storage-program/<address>` answers 400 `INVALID_REQUEST` for an
-  address without the `stor-` prefix, 404 `NOT_FOUND`, 403 `PERMISSION_DENIED`, or
-  `{success, owner, programName, data, ...}`; a program holds at most 1 MiB
-  (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). `test/chain-storage.test.ts` pins how the indexer
-  classifies each answer. Only a transport or server failure leaves a revocation check
-  incomplete.
+- **Demos node**: the read contract is pinned to `kynesyslabs/node` `ac8f45f`.
+  `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
+  `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
+  `stor-` prefix), or `{success, owner, programName, data, ...}`; a program holds at most
+  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` or 403
+  `PERMISSION_DENIED` is a definitive absence; any other 4xx, such as a proxy's or a
+  wrong route's, leaves a revocation check incomplete and a scan read retryable.
+  `test/chain-storage.test.ts` pins each classification.
+
+**Node deployment contract.** At `ac8f45f` the exact-name program search used by the
+producer resume lookup exists only as the read-authenticated `gcr_routine
+searchStoragePrograms`; a deployed node may also answer it as a `nodeCall` (node2 did on
+2026-10-15). The Directory asks the `nodeCall` first and falls back to the `gcr_routine`
+only on the pinned revision's literal "Unknown message" answer, so either deployment
+resolves. `npm run check:node -- <exact program name>` is a read-only probe (no
+transactions) that reports the storage not-found answer and both search paths, and fails
+when they disagree; its output is dated runtime evidence, not a pin. Run it when the
+`DEMOS_RPC` deployment changes.
 
 ## License
 
