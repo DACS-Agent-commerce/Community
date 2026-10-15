@@ -8,7 +8,8 @@
 // usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export function distManifest(root) {
   const files = [];
@@ -31,7 +32,8 @@ export function distManifest(root) {
 
 export const distDigest = (root) => createHash("sha256").update(distManifest(root)).digest("hex");
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+// Compared as paths: a URL built from argv misreads `#`, `%` and spaces.
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const [root, flag, out] = process.argv.slice(2);
   if (!root || (flag !== undefined && (flag !== "--manifest" || !out))) {
     console.error("usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]");

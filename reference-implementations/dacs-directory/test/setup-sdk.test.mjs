@@ -45,7 +45,7 @@ fi
 
 /** Run setup in a scratch app root; never installs or fetches anything. */
 function setup({ source = false, marker, standardRevision = standardRev, dist = { "index.js": builtIndex }, head = sdkRev, status = "",
-  buildFail = false, buildOutput = builtIndex, link }) {
+  buildFail = false, buildOutput = builtIndex, link, stale }) {
   const root = mkdtempSync(join(tmpdir(), "dacs-setup-sdk-"));
   try {
     mkdirSync(join(root, "scripts"));
@@ -55,6 +55,10 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
     mkdirSync(join(sdk, source ? ".git" : "dist"), { recursive: true });
     if (!source) for (const [name, content] of Object.entries(dist)) writeFileSync(join(sdk, "dist", name), content);
     if (link) symlinkSync(join(root, "outside.js"), join(sdk, "dist", link));
+    if (stale) {
+      mkdirSync(join(sdk, "dist"), { recursive: true });
+      writeFileSync(join(sdk, "dist", stale), "export const removedSource = 1;\n");
+    }
     writeFileSync(join(sdk, "package.json"), JSON.stringify({ dacs: { standardRevision } }));
     if (marker !== undefined) {
       mkdirSync(join(sdk, "dist"), { recursive: true });
@@ -134,4 +138,26 @@ test("a source build is accepted only from a clean pinned checkout whose output 
   const divergent = setup({ source: true, marker: sdkRev, buildOutput: "export const other = 1;\n" });
   refused(divergent, "build output that is not the pinned build", /not the pinned build/);
   assert.equal(divergent.marker, undefined);
+
+  // Output an earlier SDK_REV left behind is not part of this build.
+  const rebuilt = setup({ source: true, stale: "removed.js" });
+  assert.equal(rebuilt.status, 0, rebuilt.stderr);
+  assert.match(rebuilt.manifest ?? "", /^[0-9a-f]{64} {2}index\.js\n$/);
+});
+
+test("the digest CLI prints the digest from an app path with spaces, # or %", () => {
+  for (const name of ["app 1", "app#1", "app%1", "app%23"]) {
+    const root = join(mkdtempSync(join(tmpdir(), "dacs-digest-cli-")), name);
+    try {
+      mkdirSync(join(root, "scripts"), { recursive: true });
+      mkdirSync(join(root, "dist"));
+      writeFileSync(join(root, "dist/index.js"), builtIndex);
+      copyFileSync(digestScript, join(root, "scripts/sdk-dist-digest.mjs"));
+      const run = spawnSync(process.execPath, [join(root, "scripts/sdk-dist-digest.mjs"), join(root, "dist")], { encoding: "utf8" });
+      assert.equal(run.status, 0, `${name}: ${run.stderr}`);
+      assert.equal(run.stdout, `${fixtureSha}\n`, name);
+    } finally {
+      rmSync(join(root, ".."), { recursive: true, force: true });
+    }
+  }
 });
