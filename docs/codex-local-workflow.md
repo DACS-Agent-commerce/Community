@@ -6,22 +6,24 @@ It uses the Node version and SDK revision already pinned by the repository.
 
 ## Keep the worktree isolated
 
-- Use Node 22, as required by
-  `reference-implementations/dacs-directory/.nvmrc` and `package.json`.
+- Use the exact Node release in `reference-implementations/dacs-directory/.nvmrc`,
+  as CI and Railway do. `package.json` engines names the same release.
 - Do not copy `.env` files, tokens, wallets, seeds, `data/`, `node_modules/`, or
   `vendor/` from another worktree.
 - Keep development catalog state under this worktree's
   `reference-implementations/dacs-directory/data/` directory. Verification uses
   a separate disposable directory, as shown below.
-- Do not run the indexer or live/paid browser tests as part of local static and
-  unit verification. They are separate, networked activities.
+- Do not run the indexer or browser tests as part of local static and unit
+  verification. The indexer is a separate, networked activity, and browser
+  tests need their own setup.
 
 ## Install the pinned dependencies
 
-From the Community repository root, use your normally initialized version
-manager to select an already-installed Node 22 (for example `nvm use 22`) and
-confirm that `node --version` prints `v22.x`. Then set paths from the current
-worktree rather than a fixed checkout location:
+Use your normally initialized version manager to select the `.nvmrc` release
+(with nvm, run `nvm install` from `reference-implementations/dacs-directory`, which
+reads `.nvmrc`) and confirm that `node --version` prints `v` followed by that
+file's content. Then, from the Community repository root, set paths from the
+current worktree rather than a fixed checkout location:
 
 ```bash
 repo_root=$(git rev-parse --show-toplevel)
@@ -30,7 +32,6 @@ cd "$app_dir"
 
 export DACS_DIRECTORY_DATA="$app_dir/data"
 export NEXT_TELEMETRY_DISABLED=1
-unset RUN_LIVE_PAID_E2E LIVE_BUTLER_ORIGIN
 ```
 
 Read the exact SDK commit from the committed setup script, then create or
@@ -101,9 +102,9 @@ stops at that check:
 
 Rerunning the block on a clean checkout is safe: it re-pins the checkout and
 reinstalls. If it prints `stopped: ...` or any command fails, fix that before
-continuing; do not run the checks below on a partial install. Access to the SDK
-repository may require your normal GitHub authentication; do not put a token in
-a remote URL or committed file.
+continuing; do not run the checks below on a partial install. The SDK repository
+is public, so the clone needs no GitHub authentication; never put a token in a
+remote URL or committed file.
 
 The existing clone's `origin` is used for fetching, but its checked-out `HEAD`
 must still match the exact SDK commit pinned by this repository.
@@ -113,10 +114,10 @@ must still match the exact SDK commit pinned by this repository.
 These are the same check commands as the Directory CI's typecheck, test,
 origin-validation, and production-build steps. CI's `npm run setup` and the
 installation above both use `npm ci` for the SDK and app. Use the same
-placeholder origins as the `env:` block of
-`.github/workflows/dacs-directory-ci.yml` (today
-`NEXT_PUBLIC_DIRECTORY_URL` and `NEXT_PUBLIC_BUTLER_ORIGIN`; drop any variable
-the workflow no longer sets):
+placeholder origin as the `env:` block of
+`.github/workflows/dacs-directory-ci.yml` (today only
+`NEXT_PUBLIC_DIRECTORY_URL`). That origin is a reserved documentation name, so,
+as in CI, the origin check runs with `--allow-documentation-names`.
 
 ```bash
 (
@@ -127,12 +128,8 @@ the workflow no longer sets):
 
   npm run typecheck
   npm test
-  NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.local \
-    NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.ci.local \
-    npm run check:deploy-config
-  NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.local \
-    NEXT_PUBLIC_BUTLER_ORIGIN=https://agents.ci.local \
-    npm run build
+  NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run check:deploy-config -- --allow-documentation-names
+  NEXT_PUBLIC_DIRECTORY_URL=https://directory.ci.example npm run build
 )
 ```
 
