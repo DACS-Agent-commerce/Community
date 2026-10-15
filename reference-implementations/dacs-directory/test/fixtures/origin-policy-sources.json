@@ -1,9 +1,9 @@
 {
-  "description": "Upstream tables behind scripts/check-directory-origin.mjs, as pinned copies. test/directory-origin.test.mjs checks the module against this file offline; `npm run verify:origin-sources` (needs network) checks this file against each pinned copy's sha256 and cited lines. iana.org itself was not fetchable when this snapshot was taken, so each registry is pinned through a public encoding of it at a fixed commit.",
-  "asOf": "2026-10-14",
+  "description": "Upstream tables behind scripts/check-directory-origin.mjs, as pinned copies. test/directory-origin.test.mjs checks the module against this file offline; `npm run verify:origin-sources` (needs network) checks this file against each pinned copy's sha256 and cited lines. iana.org itself was not fetchable when this snapshot was taken, so each registry is pinned through a copy of it at a fixed commit.",
+  "asOf": "2026-10-15",
   "pinnedCopies": {
     "wireshark": {
-      "about": "Wireshark generates epan/iana-info.c from the IANA IPv4 and IPv6 Special-Purpose Address Registry XML; these lines are both complete registries as of that commit.",
+      "about": "Wireshark generates epan/iana-info.c from the IANA IPv4 and IPv6 Special-Purpose Address Registry XML; these lines are every unexpired row of both registries as of that commit. The generator leaves out terminated rows (IANA lists 192.88.99.0/24 and 2001:10::/28; both are rejected below, through extraRejections and 2001::/23) and writes an N/A Globally Reachable as false (2001::/32, 2002::/16).",
       "url": "https://raw.githubusercontent.com/wireshark/wireshark/aae6da75c524dc8525373ae1a2bd634592e0e278/epan/iana-info.c",
       "sha256": "44279c37044fffe7162c144c9affc901a9a2181631d443ace417242441fc3b36",
       "lines": { "ipv4": [326, 352], "ipv6": [355, 404] }
@@ -12,6 +12,12 @@
       "url": "https://raw.githubusercontent.com/python/cpython/v3.15.0/Lib/ipaddress.py",
       "sha256": "8e3cbda946c87a10e0c7454613b8dcfdc29b320eac8b92e1b5067ece60285e9b",
       "lines": { "ipv4": [1575, 1597], "ipv6": [2376, 2402] }
+    },
+    "iana": {
+      "about": "IANA's Special-Use Domain Names registry XML, byte for byte, as mirrored from rsync.iana.org::assignments; this commit is the mirror's latest change to the file (registry updated 2026-05-22). These lines are every record.",
+      "url": "https://raw.githubusercontent.com/larseggert/iana-assignments/e97e0bf95a9c758560862e384f833142309b0cb1/special-use-domain-names/special-use-domain-names.xml",
+      "sha256": "2659dec6fdb0377ba1f12d7418eb34e38b312e5f739574aeb868e00e1bcdf1e4",
+      "lines": [14, 182]
     },
     "unbound": {
       "url": "https://raw.githubusercontent.com/NLnetLabs/unbound/d1ea227e94ff6ae10621a886deeea6834bcb3a18/services/localzone.c",
@@ -59,7 +65,7 @@
       ["240.0.0.0", 4, false, "Reserved"],
       ["255.255.255.255", 32, false, "Limited Broadcast"]
     ],
-    "pinnedCopy": "pinnedCopies.wireshark for registryRows (every row, with its Globally Reachable flag); pinnedCopies.cpython for the rows below without a note (100.64.0.0/10 from IPv4Address.is_global in the same file)",
+    "pinnedCopy": "pinnedCopies.wireshark for registryRows (every unexpired row, with its Globally Reachable flag); pinnedCopies.cpython for the rows below without a note (100.64.0.0/10 from IPv4Address.is_global in the same file)",
     "notGloballyReachable": [
       ["0.0.0.0", 8],
       ["10.0.0.0", 8],
@@ -118,7 +124,7 @@
       ["fc00::", 7, false, "Unique-Local"],
       ["fe80::", 10, false, "Link-Local Unicast"]
     ],
-    "pinnedCopy": "pinnedCopies.wireshark for registryRows (every row, with its Globally Reachable flag); pinnedCopies.cpython for the rows below without a note (the rows that copy lacks are marked)",
+    "pinnedCopy": "pinnedCopies.wireshark for registryRows (every unexpired row, with its Globally Reachable flag, N/A as false); pinnedCopies.cpython for the rows below without a note (the rows that copy lacks are marked)",
     "notGloballyReachable": [
       ["::1", 128],
       ["::", 128],
@@ -151,7 +157,7 @@
   },
   "names": {
     "registry": "https://www.iana.org/assignments/special-use-domain-names/special-use-domain-names.xhtml",
-    "pinnedCopy": "pinnedCopies.unbound and pinnedCopies.knot: every name either lists is a row below. The reverse-mapping rows come from their RFCs, and eap.arpa from the live registry as read on 2026-10-14 (no pinned copy lists it yet). Every row is rejected through its own suffix or through arpa.",
+    "pinnedCopy": "pinnedCopies.iana: specialUse plus documentation is exactly the registry's set of names. pinnedCopies.unbound and pinnedCopies.knot: every name either lists is a specialUse row. Every row is rejected through its own suffix or through arpa.",
     "specialUse": [
       ["localhost", "RFC 6761"],
       ["local", "RFC 6762"],
@@ -164,8 +170,8 @@
       ["service.arpa", "RFC 9665"],
       ["ipv4only.arpa", "RFC 8880"],
       ["6tisch.arpa", "RFC 9031"],
-      ["eap-noob.arpa", "RFC 9140"],
-      ["eap.arpa", "IANA registry as read on 2026-10-14; covered by arpa"],
+      ["eap-noob.arpa", "RFC 9140; deprecated by RFC 9965, still a registry row"],
+      ["eap.arpa", "RFC 9965; covered by arpa"],
       ["10.in-addr.arpa", "RFC 6761 §6.1; covered by arpa"],
       ["16.172.in-addr.arpa", "RFC 6761 §6.1; covered by arpa"],
       ["17.172.in-addr.arpa", "RFC 6761 §6.1; covered by arpa"],

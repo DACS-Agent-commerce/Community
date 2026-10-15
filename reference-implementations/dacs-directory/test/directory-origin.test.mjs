@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { isIP } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,7 +18,14 @@ import {
   checkDirectoryOrigin,
   httpsOrigin,
 } from "../scripts/check-directory-origin.mjs";
-import { cpythonRows, dnsNames, fetchBadPorts, wiresharkRows } from "../scripts/verify-origin-sources.mjs";
+import {
+  cpythonRows,
+  dnsNames,
+  fetchBadPorts,
+  ianaNames,
+  verifyOriginSources,
+  wiresharkRows,
+} from "../scripts/verify-origin-sources.mjs";
 
 const sources = JSON.parse(readFileSync(new URL("./fixtures/origin-policy-sources.json", import.meta.url), "utf8"));
 
@@ -457,7 +465,7 @@ test("the denylists match the pinned registry snapshot", () => {
   assert.deepEqual([...BAD_PORTS], sources.badPorts.ports);
 });
 
-// registryRows is every row of the pinned registry copy. Each is rejected at both
+// registryRows is every unexpired row of the pinned registry copy. Each is rejected at both
 // edges, and none is missing from the tables above: a not-globally-reachable row
 // sits inside a notGloballyReachable row, a globally reachable one inside a
 // row that is rejected anyway.
@@ -491,16 +499,21 @@ test("every pinned copy names a fixed revision, a sha256, and its lines", () => 
 test("the source verifier extracts rows the way the pinned copies write them", () => {
   assert.deepEqual(
     wiresharkRows([
+      '\t{ 4, { .ipv4 = { 0x0a000000, 0xff000000 } }, "Private-Use", true, true, true, false, false },',
       '\t{ 4, { .ipv4 = { 0xc01fc400, 0xffffff00 } }, "AS112-v4", true, true, true, true, false },',
       "\t{ 6, { .ipv6 = { { { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } }, 64 } },",
       '\t\t"Dummy IPv6 Prefix", true, false, false, false, false },',
       "\t{ 6, { .ipv6 = { { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } }, 128 } },",
       '\t\t"Loopback Address", false, false, false, false, true },',
+      "\t{ 6, { .ipv6 = { { { 0xfc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } }, 7 } },",
+      '\t\t"Unique-Local", true, true, true, false, false },',
     ].join("\n")),
     [
+      ["10.0.0.0", 8, false, "Private-Use"],
       ["192.31.196.0", 24, true, "AS112-v4"],
       ["100:0:0:1::", 64, false, "Dummy IPv6 Prefix"],
       ["::1", 128, false, "Loopback Address"],
+      ["fc00::", 7, false, "Unique-Local"],
     ],
   );
   assert.deepEqual(
@@ -512,6 +525,115 @@ test("the source verifier extracts rows the way the pinned copies write them", (
     "eap-noob.arpa",
   ]);
   assert.deepEqual(fetchBadPorts(" <tbody><tr><th>Port<th>Typical service\n <tr><td>0<td>—\n <tr><td>10080<td>amanda"), [0, 10080]);
+  assert.deepEqual(
+    ianaNames([
+      '    <record date="2025-10-06">',
+      "      <name>eap.arpa.</name>",
+      '      <xref type="rfc" data="rfc9965"/>',
+      "      <name>eap-noob.arpa. (DEPRECATED)</name>",
+      "      <name>example.</name>",
+    ].join("\n")),
+    ["eap.arpa", "eap-noob.arpa", "example"],
+  );
+});
+
+// Small in-memory copies in each upstream's format, with their real sha256. The
+// fixture built from them verifies; each tampering below must be reported.
+function verifierCopies() {
+  const texts = {
+    wireshark: [
+      '\t{ 4, { .ipv4 = { 0x0a000000, 0xff000000 } }, "Private-Use", true, true, true, false, false },',
+      '\t{ 4, { .ipv4 = { 0xc01fc400, 0xffffff00 } }, "AS112-v4", true, true, true, true, false },',
+      "\t{ 6, { .ipv6 = { { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } }, 128 } },",
+      '\t\t"Loopback Address", false, false, false, false, true },',
+      "\t{ 6, { .ipv6 = { { { 0x20, 0x01, 0x00, 0x04, 0x01, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } }, 48 } },",
+      '\t\t"AS112-v6", true, true, true, true, false },',
+    ].join("\n"),
+    cpython: "        IPv4Network('10.0.0.0/8'),\n        IPv6Network('::1/128'),",
+    iana: [
+      "      <name>home.arpa.</name>",
+      "      <name>eap.arpa.</name>",
+      "      <name>eap-noob.arpa. (DEPRECATED)</name>",
+      "      <name>example.</name>",
+    ].join("\n"),
+    unbound: '\t"home.arpa.",\t\t/* RFC 8375 */',
+    knot: '\t{ KR_RULE_SUB_NXDOMAIN, "eap-noob.arpa."},',
+    fetch: " <tr><td>0<td>—\n <tr><td>10080<td>amanda",
+  };
+  const lines = {
+    wireshark: { ipv4: [1, 2], ipv6: [3, 6] },
+    cpython: { ipv4: [1, 1], ipv6: [2, 2] },
+    iana: [1, 4],
+    unbound: [1, 1],
+    knot: [1, 1],
+    fetch: [1, 2],
+  };
+  const pinnedCopies = Object.fromEntries(Object.entries(texts).map(([id, text]) => [id, {
+    url: `https://raw.githubusercontent.com/example/${id}/${"0".repeat(40)}/copy`,
+    sha256: createHash("sha256").update(text).digest("hex"),
+    lines: lines[id],
+  }]));
+  const fixture = {
+    pinnedCopies,
+    ipv4: {
+      registryRows: [["10.0.0.0", 8, false, "Private-Use"], ["192.31.196.0", 24, true, "AS112-v4"]],
+      notGloballyReachable: [["10.0.0.0", 8]],
+      globallyReachableButRejected: [["192.31.196.0", 24, "AS112-v4"]],
+    },
+    ipv6: {
+      registryRows: [["::1", 128, false, "Loopback Address"], ["2001:4:112::", 48, true, "AS112-v6"]],
+      notGloballyReachable: [["::1", 128]],
+      globallyReachableButRejected: [["2001:4:112::", 48, "AS112-v6"]],
+    },
+    names: {
+      specialUse: [["home.arpa", "RFC 8375"], ["eap.arpa", "RFC 9965"], ["eap-noob.arpa", "RFC 9140"]],
+      documentation: [["example", "RFC 6761"]],
+    },
+    badPorts: { ports: [0, 10080] },
+  };
+  const served = new Map(Object.entries(texts).map(([id, text]) => [pinnedCopies[id].url, text]));
+  const fetchCopy = async (url) => (served.has(url) ? new Response(served.get(url)) : new Response("", { status: 404 }));
+  return { fixture, served, fetchCopy };
+}
+
+test("the source verifier reports every way the fixture can drift from its pinned copies", async () => {
+  const verify = async (tamper) => {
+    const { fixture, served, fetchCopy } = verifierCopies();
+    tamper(fixture, served);
+    return verifyOriginSources(fixture, { fetch: fetchCopy });
+  };
+  assert.deepEqual(await verify(() => {}), []);
+
+  const drifts = [
+    [(f) => { f.ipv4.registryRows[0][2] = true; }, /^ipv4\.registryRows differ from /],
+    [(f) => { f.ipv6.registryRows[1][2] = false; }, /^ipv6\.registryRows differ from /],
+    [(f) => { f.ipv6.registryRows.pop(); }, /^ipv6\.registryRows differ from /],
+    [(f) => { f.ipv4.notGloballyReachable = []; }, /^ipv4: CPython row 10\.0\.0\.0\/8 is not in the fixture$/],
+    [(f) => { f.ipv6.notGloballyReachable = []; }, /^ipv6: CPython row ::1\/128 is not in the fixture$/],
+    [(f) => { f.names.specialUse.splice(1, 1); }, /^names: the IANA registry lists eap\.arpa, which the fixture lacks$/],
+    [(f) => { f.names.documentation = []; }, /^names: the IANA registry lists example, which the fixture lacks$/],
+    [(f) => { f.names.specialUse.push(["lan", "not a registry row"]); }, /^names: the fixture lists lan, which the IANA registry lacks$/],
+    [(f) => { f.names.specialUse.splice(0, 1); }, /^names: unbound lists home\.arpa, which the fixture lacks$/],
+    [(f) => { f.names.specialUse.splice(2, 1); }, /^names: knot lists eap-noob\.arpa, which the fixture lacks$/],
+    [(f) => { f.badPorts.ports = [0]; }, /^badPorts differ from /],
+  ];
+  for (const [tamper, failure] of drifts) {
+    const failures = await verify(tamper);
+    assert.ok(failures.some((message) => failure.test(message)), `${failure}: ${JSON.stringify(failures)}`);
+  }
+
+  await assert.rejects(
+    verify((f) => { f.pinnedCopies.knot.sha256 = "0".repeat(64); }),
+    /\/knot\/0{40}\/copy: sha256 [0-9a-f]{64}, fixture pins 0{64}$/,
+  );
+  await assert.rejects(
+    verify((f, served) => { served.set(f.pinnedCopies.iana.url, `${served.get(f.pinnedCopies.iana.url)}\n`); }),
+    /\/iana\/0{40}\/copy: sha256 [0-9a-f]{64}, fixture pins /,
+  );
+  await assert.rejects(
+    verify((f, served) => { served.delete(f.pinnedCopies.fetch.url); }),
+    /\/fetch\/0{40}\/copy: HTTP 404$/,
+  );
 });
 
 const script = fileURLToPath(new URL("../scripts/check-directory-origin.mjs", import.meta.url));
