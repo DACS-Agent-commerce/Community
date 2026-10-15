@@ -3,12 +3,13 @@ import test from "node:test";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { PUBLISHABLE_RAIL_OPTIONS } from "../src/catalog/listingOptions.js";
+import { listingUpgradeReaderDeps, listingUpgradeRefusal } from "../src/catalog/listingUpgradeAcceptance.js";
 import {
   sdkIdentityPresentationVerifier,
   sdkListingSignatureVerifier,
 } from "../src/catalog/sdkReaderVerifiers.js";
-import { validateListingArtifact, type ListingValidationDeps } from "../src/sdkListingValidation.js";
+import { validateListingArtifact } from "../src/sdkListingValidation.js";
+import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const seed = Uint8Array.from(Buffer.alloc(32, 31));
 const privateKey = privateKeyFromSeed(seed);
@@ -58,30 +59,26 @@ const listing = {
 };
 const hexValue = Buffer.from(listing.signature.value, "base64url").toString("hex");
 
-function readerDeps(): ListingValidationDeps {
-  return {
-    nowMs: () => 2,
-    verifyListingSignature: sdkListingSignatureVerifier(),
-    revocation: {
-      surfaces: [{ kind: "catalog", status: "active", catalogObservedAt: 2 }],
-      readMarker: async () => null,
-      verifyMarkerSignature: () => false,
-    },
-    verifyIdentityPresentation: sdkIdentityPresentationVerifier(),
-    loadRailResolution: () => ({
-      trustPhase: "PA-1",
-      trustPolicyAcceptsPA1: true,
-      registry: { state: "not-used", entries: [], definitions: [] },
-      // A reader whose trust policy holds a verified, signed PA-1 snapshot (LRR-6).
-      inCodeDefinitions: PUBLISHABLE_RAIL_OPTIONS.map((rail) => ({
-        railId: rail.railId, railVersion: rail.railVersion, phaseHandler: rail.phaseKind,
-        governanceAnchoring: "in-code", signatureValid: true,
-      })),
-    }),
-    resolvePayloadVerificationCapability: () => ({ disposition: "unsupported", reason: "not configured" }),
-    verifySellerControl: ({ bundle, signer }) => signer === bundle.presentedBy,
-  } as ListingValidationDeps;
-}
+/** Exactly what `npm run check:listing-upgrade` passes to the SDK reader. */
+const readerDeps = () => listingUpgradeReaderDeps({
+  nowMs: () => 2,
+  catalogObservedAt: 2,
+  readMarker: async () => null,
+  supportedPayloadMethods: [],
+  signer: claim,
+});
+
+test("the acceptance check refuses a valid replacement while the PA-1 table is unsigned, as the publisher does", async () => {
+  const result = await validateListingArtifact(listing, readerDeps()) as { disposition: string; step?: number; reason?: string };
+  assert.equal(result.disposition, "indeterminate");
+  assert.equal(result.step, 8);
+  assert.equal(result.reason, "pa1-definition-unverifiable");
+  assert.match(listingUpgradeRefusal(result) ?? "accepted", /unsigned, so no pay-bearing replacement is LP-6 verified/);
+  assert.equal(listingUpgradeRefusal({ disposition: "verified" }), null);
+  for (const disposition of ["rejected", "revoked", "indeterminate"]) {
+    assert.match(listingUpgradeRefusal({ disposition, reason: "other" }) ?? "accepted", new RegExp(`returned ${disposition} \\(other\\)$`));
+  }
+});
 
 test("acceptance verifiers verify SIG-6 values against the signer key, never by self-comparison", async () => {
   const verifyListingSignature = sdkListingSignatureVerifier();
@@ -101,11 +98,21 @@ test("acceptance verifiers verify SIG-6 values against the signer key, never by 
   assert.equal(await verifyIdentityPresentation({ bundle, signedBytes }), false);
 });
 
-test("the SDK ordered reader with the acceptance verifiers accepts SIG-6 and rejects the same bytes as hex", async () => {
-  assert.equal((await validateListingArtifact(listing, readerDeps())).disposition, "verified");
-  const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
-  const rejected = await validateListingArtifact(hexListing, readerDeps());
-  assert.equal(rejected.disposition, "rejected");
+test("with a signed PA-1 snapshot the acceptance reader verifies SIG-6 and rejects the same bytes as hex", async () => {
+  const restore = modelSignedRailSnapshot();
+  try {
+    assert.equal((await validateListingArtifact(listing, readerDeps())).disposition, "verified");
+    const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
+    const rejected = await validateListingArtifact(hexListing, readerDeps());
+    assert.equal(rejected.disposition, "rejected");
+    // Seller control is bound to the authenticated signer the script passes.
+    const otherSigner = listingUpgradeReaderDeps({
+      nowMs: () => 2, catalogObservedAt: 2, readMarker: async () => null, supportedPayloadMethods: [], signer: otherClaim,
+    });
+    assert.notEqual((await validateListingArtifact(listing, otherSigner)).disposition, "verified");
+  } finally {
+    restore();
+  }
 });
 
 test("the identity presentation verifier accepts only per-claim presentations", async () => {

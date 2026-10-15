@@ -9,11 +9,7 @@
 import invalidLiveListings from "../test/fixtures/live-invalid-verification-methods.json";
 import { validateListingArtifact } from "../src/sdkListingValidation.js";
 import { verifyListingResult } from "../src/catalog/listingVerification.js";
-import {
-  sdkIdentityPresentationVerifier,
-  sdkListingSignatureVerifier,
-} from "../src/catalog/sdkReaderVerifiers.js";
-import { PUBLISHER_IN_CODE_RAIL_DEFINITIONS } from "../src/catalog/listingOptions.js";
+import { listingUpgradeReaderDeps, listingUpgradeRefusal } from "../src/catalog/listingUpgradeAcceptance.js";
 
 type Replacement = {
   listingId: string;
@@ -127,35 +123,14 @@ async function main() {
       (summary.transactionReadiness as Record<string, unknown> | undefined)?.disposition !== "unassessed"
     ) throw new Error(`${replacement.listingId} replacement is not exposed by the reindexed catalog`);
 
-    const validation = await validateListingArtifact(replacementRaw, {
-      nowMs: () => Date.now(),
-      verifyListingSignature: sdkListingSignatureVerifier(),
-      revocation: {
-        surfaces: [{
-          kind: "catalog",
-          status: "active",
-          catalogObservedAt: Number(summary.catalogObservedAt),
-        }],
-        readMarker: async (marker) => anchor(marker.locator),
-        verifyMarkerSignature: () => false,
-      },
-      verifyIdentityPresentation: sdkIdentityPresentationVerifier(),
-      loadRailResolution: () => ({
-        trustPhase: "PA-1",
-        trustPolicyAcceptsPA1: true,
-        registry: { state: "not-used", entries: [], definitions: [] },
-        inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
-      }),
-      resolvePayloadVerificationCapability: ({ verificationMethod }) =>
-        replacement.supportedPayloadMethods.includes(verificationMethod.kind)
-          ? { disposition: "supported", reason: "deployment acceptance verifier is configured for this method" }
-          : { disposition: "unsupported", reason: "method is not configured in this independent verifier" },
-      verifySellerControl: ({ bundle, signer }) =>
-        signer === bundle.presentedBy && signer === authenticated.value.signer,
-    });
-    if (validation.disposition !== "verified") {
-      throw new Error(`${replacement.listingId} complete SDK reader returned ${validation.disposition} (${validation.reason})`);
-    }
+    const validation = await validateListingArtifact(replacementRaw, listingUpgradeReaderDeps({
+      catalogObservedAt: Number(summary.catalogObservedAt),
+      readMarker: async (marker) => anchor(marker.locator),
+      supportedPayloadMethods: replacement.supportedPayloadMethods,
+      signer: authenticated.value.signer,
+    }));
+    const refusal = listingUpgradeRefusal(validation);
+    if (refusal) throw new Error(`${replacement.listingId} ${refusal}`);
 
     process.stdout.write(`ok ${old.listingId}@${old.listingVersion} rejected -> v${replacement.replacementVersion} SDK-verified and discoverable\n`);
   }
