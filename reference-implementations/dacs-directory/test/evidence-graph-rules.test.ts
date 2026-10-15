@@ -1,0 +1,628 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import {
+  agreementListingConformance,
+  agreementPrice,
+  artifactHash,
+  buildCurrentEvidenceGraph,
+  isCurrentRef,
+  verifiedDiscoveryAgreement,
+  type ArtifactKind,
+} from "../src/catalog/evidenceGraph.js";
+
+// Each DACS rule the current-profile evidence graph enforces, one case per rule. Every mutated
+// artifact is signed again, so only the rule under test can reject it.
+type Obj = Record<string, unknown>;
+const seeds = [51, 52, 53].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
+const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
+const [BUYER, SELLER, OUTSIDER] = [0, 1, 2];
+const at = (n: number) => `stor-${(0x9000 + n).toString(16).padStart(40, "0")}`;
+const JOB = "rules-job";
+const PREFIX: Record<string, string> = {
+  listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:",
+  "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:", bundle: "dacs-bundle:v1:",
+};
+const prefixFor = (raw: Obj, kind: ArtifactKind) => kind === "agreement" && raw.payeeBoundAgreementVersion !== undefined
+  ? "dacs-payee-bound-agreement:v1:" : kind === "bundle" && raw.faultBundleVersion !== undefined ? "dacs-fault-bundle:v1:" : PREFIX[kind];
+const signatureValue = async (message: string, signer: number) =>
+  Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[signer]))).toString("base64url");
+const envelope = async (raw: Obj, kind: ArtifactKind, signer: number, as = signer, field: "signer" | "party" = "signer") =>
+  ({ [field]: dids[as], algorithm: "ed25519", value: await signatureValue(prefixFor(raw, kind) + artifactHash(raw, kind), signer) });
+const refTo = (locator: string, raw: Obj, kind: ArtifactKind): Obj =>
+  ({ anchor: { kind: "storage-program", locator }, contentHash: artifactHash(raw, kind) });
+const clone = <T>(value: T): T => structuredClone(value);
+const offered = { kind: "attested-payload", payloadFormat: "application/json" };
+
+async function listingFor(commitment = "commit-agreement"): Promise<Obj> {
+  const identity: Obj = { bundleVersion: "1", presentedBy: dids[SELLER], presentedAt: 1, claims: [{ ref: dids[SELLER] }] };
+  const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`),
+    privateKeyFromSeed(seeds[SELLER]))).toString("hex");
+  const scope: Obj = {
+    dacsVersion: "1", listingVersion: 1, listingId: "rules", requiredCapabilities: ["SR-2"],
+    seller: { identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[SELLER], signature: presentation }] } }, displayName: "seller" },
+    offering: { title: "rules", description: "rules", category: "services.test", tags: [], deliverable: offered },
+    buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: commitment }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+  };
+  return { ...scope, signature: await envelope(scope, "listing", SELLER) };
+}
+const listing = await listingFor();
+const payeeBoundListing = await listingFor("commit-payee-bound-agreement");
+const listingRefOf = (raw: Obj) => ({ listingId: "rules", version: 1, contentHash: artifactHash(raw, "listing") });
+
+/** The scopes of one valid completed session; a case edits them before anything is signed. */
+function baseScopes(forListing = listing) {
+  const listingRef = listingRefOf(forListing);
+  return {
+    agreement: {
+      agreementVersion: "1", jobId: JOB, listingRef, derivedFromPattern: "fixed-price",
+      parties: [{ role: "buyer", primaryClaim: dids[BUYER] }, { role: "seller", primaryClaim: dids[SELLER] }],
+      terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: { deliverableType: "attested-payload", hash: contentHash(offered) } },
+    } as Obj,
+    evidence: { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: ["tx"], observedAt: 100 } as Obj,
+    rating: { ratingVersion: "1", jobId: JOB, rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 5, ratedAt: 110 } as Obj,
+    bundle: {
+      bundleVersion: "1", jobId: JOB, outcome: "completed", listingRef,
+      parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[BUYER] }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[SELLER] }],
+      phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
+      recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
+    } as Obj,
+  };
+}
+type Scopes = ReturnType<typeof baseScopes>;
+interface Session { store: Map<string, Obj>; scopes: Scopes; stored: Record<string, Obj>; refs: Record<string, Obj> }
+interface Case {
+  listing?: Obj;
+  scopes?: (scopes: Scopes) => void;
+  /** Signs and stores the artifacts; the defaults are the parties who produce each one. */
+  agreementSigners?: number[]; evidenceSigner?: number; ratingSigner?: number; bundleSigners?: number[];
+  artifacts?: (session: Session) => Promise<void> | void;
+  bundle?: (bundle: Obj, session: Session) => Promise<void> | void;
+  anchoredByRole?: unknown;
+  stored?: (bundle: Obj, session: Session) => void;
+}
+
+async function evaluate(c: Case = {}) {
+  const forListing = c.listing ?? listing;
+  const scopes = baseScopes(forListing);
+  c.scopes?.(scopes);
+  const store = new Map<string, Obj>([[at(1), forListing]]);
+  const session: Session = { store, scopes, stored: {}, refs: {} };
+  const agreement = { ...scopes.agreement, signatures: await Promise.all((c.agreementSigners ?? [BUYER, SELLER])
+    .map((signer) => envelope(scopes.agreement, "agreement", signer, signer, "party"))) };
+  const evidence = { ...scopes.evidence, signature: await envelope(scopes.evidence, "evidence", c.evidenceSigner ?? SELLER) };
+  const rating = { ...scopes.rating, signature: await envelope(scopes.rating, "rating", c.ratingSigner ?? BUYER) };
+  Object.assign(session.stored, { agreement, evidence, rating });
+  session.refs = { agreement: refTo(at(2), agreement, "agreement"), evidence: refTo(at(3), evidence, "evidence"), rating: refTo(at(4), rating, "rating") };
+  store.set(at(2), agreement).set(at(3), evidence).set(at(4), rating);
+  await c.artifacts?.(session);
+  const bundle: Obj = { ...scopes.bundle, agreementRef: session.refs.agreement, settlementEvidence: [session.refs.evidence], ratingRefs: [session.refs.rating] };
+  await c.bundle?.(bundle, session);
+  const signed: Obj = { ...bundle, signatures: await Promise.all((c.bundleSigners ?? [BUYER, SELLER])
+    .map((signer) => envelope(bundle, "bundle", signer, signer, "party"))), anchoredByRole: c.anchoredByRole ?? "buyer" };
+  c.stored?.(signed, session);
+  store.set(at(5), signed);
+  return buildCurrentEvidenceGraph(at(5), {
+    read: async (locator) => store.get(locator) ?? null,
+    resolveListing: async () => ({ locator: at(1), raw: forListing }),
+  });
+}
+
+/** Store a signed artifact at a fresh locator and return its reference. */
+async function publish(session: Session, n: number, scope: Obj, kind: ArtifactKind, signer: number): Promise<Obj> {
+  const raw = { ...scope, signature: await envelope(scope, kind, signer) };
+  session.store.set(at(n), raw);
+  return refTo(at(n), raw, kind);
+}
+const SHAPE = "invalid current DACS-5 bundle shape";
+
+async function verdicts(cases: Record<string, Case>): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const [name, c] of Object.entries(cases)) {
+    const graph = await evaluate(c);
+    out[name] = graph.ok ? "ok" : graph.reason ?? "failed without a reason";
+  }
+  return out;
+}
+
+test("the valid fixture session verifies, with every artifact in the graph", async () => {
+  const graph = await evaluate();
+  assert.equal(graph.ok, true, graph.reason);
+  assert.equal(graph.refsVerified, true);
+  assert.deepEqual(graph.artifacts.map((artifact) => artifact.kind).sort(), ["agreement", "evidence", "listing", "rating"]);
+  assert.deepEqual(agreementPrice(graph.agreement), { amount: "1.25", currency: "DEM" });
+});
+
+test("DACS-5 §10.4.1: the bundle's own shape, parties and signatures", async () => {
+  const phase = (change: Obj) => (bundle: Obj) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", ...change }]; };
+  assert.deepEqual(await verdicts({
+    "a singular signature member": { stored: (bundle) => { bundle.signature = bundle.signatures; } },
+    "both version discriminators": { bundle: (bundle) => { bundle.faultBundleVersion = "1"; } },
+    "another bundleVersion": { bundle: (bundle) => { bundle.bundleVersion = "2"; } },
+    "a legacy bundle naming a faulted party": { bundle: (bundle) => { bundle.faultedParty = "none"; } },
+    "a jobId that is not a string": { bundle: (bundle) => { bundle.jobId = 7; } },
+    "an unknown outcome": { bundle: (bundle) => { bundle.outcome = "won"; } },
+    "an unknown anchoredByRole": { anchoredByRole: "auditor" },
+    "no listingRef": { bundle: (bundle) => { delete bundle.listingRef; } },
+    "one party": { bundle: (bundle) => { bundle.parties = (bundle.parties as Obj[]).slice(0, 1); } },
+    "phaseSummary not an array": { bundle: (bundle) => { bundle.phaseSummary = {}; } },
+    "a phase entry that is not an object": { bundle: (bundle) => { bundle.phaseSummary = ["pay-dem"]; } },
+    "a negative phase index": { bundle: phase({ index: -1 }) },
+    "a phase index that is not an integer": { bundle: phase({ index: "2" }) },
+    "a phase kind that is not a string": { bundle: phase({ kind: 7 }) },
+    "an unknown phase outcome": { bundle: phase({ outcome: "maybe" }) },
+    "an unknown errorClass": { bundle: phase({ outcome: "fail", errorClass: "cosmic" }) },
+    "two phases with one index": { bundle: (bundle) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 2, kind: "rate", outcome: "ok" }]; } },
+    "vetRecords not an array": { bundle: (bundle) => { bundle.vetRecords = {}; } },
+    "settlementEvidence not an array": { bundle: (bundle) => { bundle.settlementEvidence = {}; } },
+    "ratingRefs not an array": { bundle: (bundle) => { bundle.ratingRefs = "none"; } },
+    "a nonempty amendments list": { bundle: (bundle, session) => { bundle.amendments = [session.refs.evidence]; } },
+    "a recipe registry version of 0": { bundle: (bundle) => { bundle.recipeRegistryVersion = 0; } },
+    "a rail registry version as a string": { bundle: (bundle) => { bundle.railRegistryVersion = "1"; } },
+    "finalisedAt as a string": { bundle: (bundle) => { bundle.finalisedAt = "120"; } },
+    "two buyers": { bundle: (bundle) => { bundle.parties = [...(bundle.parties as Obj[]), { role: "buyer", bundleHash: "c".repeat(64), primaryClaim: dids[OUTSIDER] }]; } },
+    "no seller": { bundle: (bundle) => { bundle.parties = [(bundle.parties as Obj[])[0], { role: "orchestrator", bundleHash: "c".repeat(64), primaryClaim: dids[SELLER] }]; } },
+    "a party with an unknown role": { bundle: (bundle) => { bundle.parties = [...(bundle.parties as Obj[]), { role: "auditor", bundleHash: "c".repeat(64), primaryClaim: dids[OUTSIDER] }]; } },
+    "a party without a primary claim": { bundle: (bundle) => { (bundle.parties as Obj[])[1] = { role: "seller", bundleHash: "b".repeat(64) }; } },
+    "a party bundleHash that is not a hash": { bundle: (bundle) => { (bundle.parties as Obj[])[1] = { ...(bundle.parties as Obj[])[1], bundleHash: "b" }; } },
+    "signatures not an array": { stored: (bundle) => { bundle.signatures = (bundle.signatures as Obj[])[0]; } },
+    "a signature entry that is not an object": { stored: (bundle) => { bundle.signatures = [...(bundle.signatures as Obj[]), null]; } },
+    "a seller signature made with another key": { stored: (bundle) => { (bundle.signatures as Obj[])[1] = { ...(bundle.signatures as Obj[])[1], value: (bundle.signatures as Obj[])[0].value }; } },
+    "a signature with another algorithm": { stored: (bundle) => { (bundle.signatures as Obj[])[1] = { ...(bundle.signatures as Obj[])[1], algorithm: "ecdsa-secp256k1" }; } },
+    "a signature without a party": { stored: (bundle) => { const { party: _, ...rest } = (bundle.signatures as Obj[])[1]; (bundle.signatures as Obj[])[1] = rest; } },
+    "a completed bundle signed by the buyer alone": { bundleSigners: [BUYER] },
+    "no agreementRef on a completed session": { bundle: (bundle) => { delete bundle.agreementRef; } },
+  }), {
+    "a singular signature member": SHAPE, "both version discriminators": SHAPE, "another bundleVersion": SHAPE,
+    "a legacy bundle naming a faulted party": SHAPE, "a jobId that is not a string": SHAPE, "an unknown outcome": SHAPE,
+    "an unknown anchoredByRole": SHAPE, "no listingRef": SHAPE, "one party": SHAPE, "phaseSummary not an array": SHAPE,
+    "a phase entry that is not an object": SHAPE, "a negative phase index": SHAPE, "a phase index that is not an integer": SHAPE,
+    "a phase kind that is not a string": SHAPE, "an unknown phase outcome": SHAPE, "an unknown errorClass": SHAPE,
+    "two phases with one index": SHAPE, "vetRecords not an array": SHAPE, "settlementEvidence not an array": SHAPE,
+    "ratingRefs not an array": SHAPE, "a nonempty amendments list": SHAPE, "a recipe registry version of 0": SHAPE,
+    "a rail registry version as a string": SHAPE, "finalisedAt as a string": SHAPE,
+    "two buyers": "invalid or duplicate bundle parties", "no seller": "invalid or duplicate bundle parties",
+    "a party with an unknown role": "invalid or duplicate bundle parties", "a party without a primary claim": "invalid or duplicate bundle parties",
+    "a party bundleHash that is not a hash": "invalid or duplicate bundle parties",
+    "signatures not an array": "bundle signatures contain malformed entries",
+    "a signature entry that is not an object": "bundle signatures contain malformed entries",
+    "a seller signature made with another key": "required current bundle signatures are missing or invalid",
+    "a signature with another algorithm": "required current bundle signatures are missing or invalid",
+    "a signature without a party": "required current bundle signatures are missing or invalid",
+    "a completed bundle signed by the buyer alone": "required current bundle signatures are missing or invalid",
+    "no agreementRef on a completed session": "non-abort bundle has no agreement",
+  });
+  // An empty amendments list and a self-aborted session signed by its anchor alone are valid.
+  assert.equal((await evaluate({ bundle: (bundle) => { bundle.amendments = []; } })).ok, true);
+  assert.equal((await evaluate({ bundleSigners: [BUYER], bundle: (bundle) => { bundle.outcome = "aborted-by-self"; delete bundle.agreementRef; } })).ok, true);
+});
+
+test("DACS-5 FaultAttributionBundle: faultedParty agrees with the outcome and the anchoring role", async () => {
+  const fault = (outcome: string, faultedParty: unknown, anchoredByRole = "buyer"): Case => ({
+    anchoredByRole,
+    bundle: (bundle) => {
+      delete bundle.bundleVersion;
+      Object.assign(bundle, { faultBundleVersion: "1", outcome, faultedParty });
+      if (outcome.startsWith("aborted")) delete bundle.agreementRef;
+    },
+  });
+  const ok = "ok"; const bad = "invalid fault attribution";
+  assert.deepEqual(await verdicts({
+    "completed, none": fault("completed", "none"),
+    "completed, seller": fault("completed", "seller"),
+    "failed-substrate, none": fault("failed-substrate", "none"),
+    "failed-substrate, buyer": fault("failed-substrate", "buyer"),
+    "failed-perm, the anchor": fault("failed-perm", "buyer"),
+    "failed-perm, the other party": fault("failed-perm", "seller"),
+    "aborted-by-self, the anchor": fault("aborted-by-self", "seller", "seller"),
+    "aborted-by-self, none": fault("aborted-by-self", "none", "seller"),
+    "failed-counterparty, the other party": fault("failed-counterparty", "seller"),
+    "failed-counterparty, the anchor": fault("failed-counterparty", "buyer"),
+    "failed-counterparty, a role not in the session": fault("failed-counterparty", "orchestrator"),
+    "failed-counterparty, not a string": fault("failed-counterparty", 7),
+    "aborted-by-other, the other party": fault("aborted-by-other", "buyer", "seller"),
+    "aborted-by-other, the anchor": fault("aborted-by-other", "seller", "seller"),
+  }), {
+    "completed, none": ok, "completed, seller": bad, "failed-substrate, none": ok, "failed-substrate, buyer": bad,
+    "failed-perm, the anchor": ok, "failed-perm, the other party": bad, "aborted-by-self, the anchor": ok, "aborted-by-self, none": bad,
+    "failed-counterparty, the other party": ok, "failed-counterparty, the anchor": bad,
+    "failed-counterparty, a role not in the session": bad, "failed-counterparty, not a string": bad,
+    "aborted-by-other, the other party": ok, "aborted-by-other, the anchor": bad,
+  });
+});
+
+test("DACS-5 §10.4.3: top-level references are current, unique, hash-bound and from this session", async () => {
+  const other = (n: number, scope: Obj, kind: ArtifactKind, signer: number) => async (session: Session) => {
+    const ref = await publish(session, n, scope, kind, signer);
+    session.refs[kind === "evidence" ? "evidence" : kind === "rating" ? "rating" : "agreement"] = ref;
+  };
+  assert.deepEqual(await verdicts({
+    "an agreementRef with another content hash": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), contentHash: "0".repeat(64) }; } },
+    "an agreementRef on another anchor kind": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), anchor: { kind: "ipfs", locator: at(2) } }; } },
+    "an agreementRef to a non-native locator": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), anchor: { kind: "storage-program", locator: at(2).toUpperCase() } }; } },
+    "an evidence ref with another content hash": { bundle: (bundle) => { bundle.settlementEvidence = [{ ...(bundle.settlementEvidence as Obj[])[0], contentHash: "0".repeat(64) }]; } },
+    "one evidence listed twice": { bundle: (bundle, session) => { bundle.settlementEvidence = [session.refs.evidence, session.refs.evidence]; } },
+    "evidence at the agreement's locator": { bundle: (bundle, session) => { bundle.settlementEvidence = [{ ...session.refs.evidence, anchor: (session.refs.agreement as Obj).anchor }]; } },
+    "evidence reusing the agreement's hash": { bundle: (bundle, session) => { bundle.settlementEvidence = [{ ...session.refs.evidence, contentHash: (session.refs.agreement as Obj).contentHash }]; } },
+    "an agreement for another job": { scopes: (scopes) => { scopes.agreement.jobId = "other-job"; } },
+    "evidence for another job": { scopes: (scopes) => { scopes.evidence.jobId = "other-job"; } },
+    "a rating for another job": { scopes: (scopes) => { scopes.rating.jobId = "other-job"; } },
+    "evidence signed by an outsider": { evidenceSigner: OUTSIDER },
+    "a rating by an outsider": { ratingSigner: OUTSIDER, scopes: (scopes) => { scopes.rating.rater = dids[OUTSIDER]; } },
+    "a rating of an outsider": { scopes: (scopes) => { scopes.rating.target = dids[OUTSIDER]; } },
+    "a rating naming the wrong target role": { scopes: (scopes) => { scopes.rating.targetRole = "buyer"; } },
+    "a second evidence at a fresh locator": { artifacts: other(6, { ...baseScopes().evidence, phaseIndex: 3, paymentTxRefs: ["tx-2"] }, "evidence", SELLER) },
+    "the agreement's sha256-prefixed hash": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), contentHash: `sha256:${(bundle.agreementRef as Obj).contentHash}` }; } },
+  }), {
+    "an agreementRef with another content hash": "agreement reference failed",
+    "an agreementRef on another anchor kind": "duplicate or invalid top-level reference",
+    "an agreementRef to a non-native locator": "duplicate or invalid top-level reference",
+    "an evidence ref with another content hash": "evidence reference failed",
+    "one evidence listed twice": "duplicate or invalid top-level reference",
+    "evidence at the agreement's locator": "duplicate or invalid top-level reference",
+    "evidence reusing the agreement's hash": "duplicate or invalid top-level reference",
+    "an agreement for another job": "agreement belongs to another job",
+    "evidence for another job": "evidence belongs to another job",
+    "a rating for another job": "rating belongs to another job",
+    "evidence signed by an outsider": "evidence signer is not a session party",
+    "a rating by an outsider": "rating party binding failed",
+    "a rating of an outsider": "rating party binding failed",
+    "a rating naming the wrong target role": "rating party binding failed",
+    "a second evidence at a fresh locator": "ok",
+    "the agreement's sha256-prefixed hash": "ok",
+  });
+  // A rating listed twice under one hash collapses; the same locator under another hash does not.
+  assert.equal((await evaluate({ bundle: (bundle, session) => { bundle.ratingRefs = [session.refs.rating, session.refs.rating]; } })).ok, true);
+  assert.equal((await evaluate({ bundle: (bundle, session) => { bundle.ratingRefs = [session.refs.rating, { ...session.refs.rating, contentHash: "0".repeat(64) }]; } })).reason,
+    "duplicate or invalid top-level reference");
+});
+
+test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly signed artifact fails its reference", async () => {
+  const agreement = (change: (scope: Obj) => void): Case => ({ scopes: (scopes) => change(scopes.agreement) });
+  const evidence = (change: (scope: Obj) => void): Case => ({ scopes: (scopes) => change(scopes.evidence) });
+  const rating = (change: (scope: Obj) => void): Case => ({ scopes: (scopes) => change(scopes.rating) });
+  const restore = (kind: "agreement" | "evidence" | "rating", change: (raw: Obj) => void) => (session: Session) => {
+    const raw = clone(session.stored[kind]); change(raw);
+    session.store.set((session.refs[kind].anchor as Obj).locator as string, raw);
+  };
+  const AGREEMENT = "agreement reference failed"; const EVIDENCE = "evidence reference failed"; const RATING = "rating reference failed";
+  assert.deepEqual(await verdicts({
+    "an agreement signed by the buyer alone": { agreementSigners: [BUYER] },
+    "an agreement with a forged seller signature": { artifacts: restore("agreement", (raw) => { (raw.signatures as Obj[])[1] = { ...(raw.signatures as Obj[])[1], value: (raw.signatures as Obj[])[0].value }; }) },
+    "an agreement carrying a singular signature too": { artifacts: restore("agreement", (raw) => { raw.signature = (raw.signatures as Obj[])[0]; }) },
+    "agreement signatures not an array": { artifacts: restore("agreement", (raw) => { raw.signatures = (raw.signatures as Obj[])[0]; }) },
+    "an agreement signature entry that is not an object": { artifacts: restore("agreement", (raw) => { raw.signatures = [...(raw.signatures as Obj[]), "sig"]; }) },
+    "an agreement with three role holders": agreement((scope) => { scope.parties = [...(scope.parties as Obj[]), { role: "buyer", primaryClaim: dids[OUTSIDER] }]; }),
+    "an agreement with one party": agreement((scope) => { scope.parties = (scope.parties as Obj[]).slice(0, 1); }),
+    "an agreement without a listingRef": agreement((scope) => { delete scope.listingRef; }),
+    "an agreement price with a leading zero": agreement((scope) => { (scope.terms as Obj).price = { amount: "01.25", currency: "DEM" }; }),
+    "an agreement price of zero": agreement((scope) => { (scope.terms as Obj).price = { amount: "0", currency: "DEM" }; }),
+    "an agreement price without a currency": agreement((scope) => { (scope.terms as Obj).price = { amount: "1.25", currency: "" }; }),
+    "an agreement with both discriminators": agreement((scope) => { scope.payeeBoundAgreementVersion = "1"; }),
+    "agreementVersion 2": agreement((scope) => { scope.agreementVersion = "2"; }),
+    "a plain agreement carrying payout bindings": agreement((scope) => { (scope.terms as Obj).payoutBindings = []; }),
+    "evidenceVersion 2": evidence((scope) => { scope.evidenceVersion = "2"; }),
+    "an evidence phase that is not a string": evidence((scope) => { scope.phase = 7; }),
+    "an unknown evidence outcome": evidence((scope) => { scope.outcome = "maybe"; }),
+    "evidence observedAt as a string": evidence((scope) => { scope.observedAt = "100"; }),
+    "evidence amendmentRefs not an array": evidence((scope) => { scope.amendmentRefs = {}; }),
+    "an evidence attestationRef that is not a reference": evidence((scope) => { scope.attestationRef = { anchor: { kind: "storage-program", locator: at(9) } }; }),
+    "evidence with a signatures list": { artifacts: restore("evidence", (raw) => { raw.signatures = [raw.signature]; }) },
+    "evidence signed with another algorithm": { artifacts: restore("evidence", (raw) => { raw.signature = { ...(raw.signature as Obj), algorithm: "ecdsa-secp256k1" }; }) },
+    "evidence whose signer is not a string": { artifacts: restore("evidence", (raw) => { raw.signature = { ...(raw.signature as Obj), signer: 7 }; }) },
+    "evidence without a signature": { artifacts: restore("evidence", (raw) => { delete raw.signature; }) },
+    "ratingVersion 2": rating((scope) => { scope.ratingVersion = "2"; }),
+    "a rating of 0": rating((scope) => { scope.value = 0; }),
+    "a rating of 6": rating((scope) => { scope.value = 6; }),
+    "a rating that is not an integer": rating((scope) => { scope.value = "5"; }),
+    "a rating of an orchestrator": rating((scope) => { scope.targetRole = "orchestrator"; }),
+    "ratedAt as a string": rating((scope) => { scope.ratedAt = "110"; }),
+    "free text over 1,000 characters": rating((scope) => { scope.freeText = "x".repeat(1001); }),
+    "a rating signed by the seller for the buyer": { ratingSigner: SELLER },
+    "a rating whose rater is not a string": { scopes: (scopes) => { scopes.rating.rater = 7; } },
+  }), {
+    "an agreement signed by the buyer alone": AGREEMENT, "an agreement with a forged seller signature": AGREEMENT,
+    "an agreement carrying a singular signature too": AGREEMENT, "agreement signatures not an array": AGREEMENT,
+    "an agreement signature entry that is not an object": AGREEMENT, "an agreement with three role holders": AGREEMENT,
+    "an agreement with one party": AGREEMENT, "an agreement without a listingRef": AGREEMENT,
+    "an agreement price with a leading zero": AGREEMENT, "an agreement price of zero": AGREEMENT,
+    "an agreement price without a currency": AGREEMENT, "an agreement with both discriminators": AGREEMENT,
+    "agreementVersion 2": AGREEMENT, "a plain agreement carrying payout bindings": AGREEMENT,
+    "evidenceVersion 2": EVIDENCE, "an evidence phase that is not a string": EVIDENCE, "an unknown evidence outcome": EVIDENCE,
+    "evidence observedAt as a string": EVIDENCE, "evidence amendmentRefs not an array": EVIDENCE,
+    "an evidence attestationRef that is not a reference": EVIDENCE, "evidence with a signatures list": EVIDENCE,
+    "evidence signed with another algorithm": EVIDENCE, "evidence whose signer is not a string": EVIDENCE,
+    "evidence without a signature": EVIDENCE,
+    "ratingVersion 2": RATING, "a rating of 0": RATING, "a rating of 6": RATING, "a rating that is not an integer": RATING,
+    "a rating of an orchestrator": RATING, "ratedAt as a string": RATING, "free text over 1,000 characters": RATING,
+    "a rating signed by the seller for the buyer": RATING, "a rating whose rater is not a string": RATING,
+  });
+  // Boundaries that stay valid: failure evidence, ratings of 1 and 5, and exactly 1,000 characters of free text.
+  for (const c of [evidence((scope) => { scope.outcome = "failure"; }), rating((scope) => { scope.value = 1; }),
+    rating((scope) => { scope.freeText = "x".repeat(1000); })]) {
+    const graph = await evaluate(c);
+    assert.equal(graph.ok, true, graph.reason);
+  }
+});
+
+test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked transitively", async () => {
+  const requirementHash = contentHash((listing.buyerRequirement as Obj));
+  const attestationRaw = { authority: "registry", body: "ok" };
+  const attest = (session: Session, n = 20) => {
+    session.store.set(at(n), attestationRaw);
+    return { anchor: { kind: "storage-program", locator: at(n) }, contentHash: contentHash(attestationRaw) };
+  };
+  const verifyResult = (session: Session, change: Obj = {}) => ({
+    resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1, method: "verifiable-credential", decision: "pass",
+    reason: "registry match", attestation: attest(session), fetchedAt: 10, verifiedAt: 20, ...change,
+  });
+  const composite = (change: Obj = {}) => ({
+    recordVersion: "1", jobId: JOB, evaluatedParty: dids[BUYER], bundleHash: "a".repeat(64), requirementHash,
+    freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...change,
+  });
+  const vetted = (build: (session: Session) => Promise<Obj>): Case => ({
+    bundle: async (bundle, session) => { bundle.vetRecords = [await publish(session, 30, await build(session), "composite", SELLER)]; },
+  });
+  const withResult = (change: Obj = {}, refChange: (ref: Obj) => Obj = (ref) => ref) => vetted(async (session) => {
+    const ref = await publish(session, 31, verifyResult(session, change), "verify-result", OUTSIDER);
+    return composite({ freshness: [refChange({ ...ref, recipeVersion: 1 })] });
+  });
+  const signal = (change: Obj) => vetted(async () => composite({ supplementary: [{ source: "dacs-5", signalType: "completion-rate", value: 90, observedAt: 5, ...change }] }));
+  const amended = (scope: (base: Obj) => Obj, signer = SELLER, key = "amendmentRefs"): Case => ({
+    artifacts: async (session) => {
+      const second = await publish(session, 40, scope({ ...baseScopes().evidence, paymentTxRefs: ["tx-2"] }), "evidence", signer);
+      const first = { ...session.scopes.evidence, [key]: key === "amendmentRefs" ? [second] : second };
+      session.refs.evidence = await publish(session, 41, first, "evidence", SELLER);
+    },
+  });
+  const COMPOSITE = "composite reference failed"; const NESTED = "nested VerifyResult reference failed";
+  assert.deepEqual(await verdicts({
+    "a verified result and its attestation": withResult(),
+    "a result whose decision is not in the enum": withResult({ decision: "maybe" }),
+    "a result whose attestation is not a reference": withResult({ attestation: { anchor: { kind: "storage-program", locator: at(20) } } }),
+    "a result reference with another content hash": withResult({}, (ref) => ({ ...ref, contentHash: "0".repeat(64) })),
+    "a result whose attestation hash does not match": vetted(async (session) => {
+      const result = verifyResult(session, { attestation: { ...attest(session), contentHash: "0".repeat(64) } });
+      return composite({ dealSpecific: [{ ...(await publish(session, 31, result, "verify-result", OUTSIDER)), recipeVersion: 1 }] });
+    }),
+    "a supplementary signal from dacs-5": signal({}),
+    "an external signal without an attestation": signal({ source: "external" }),
+    "an external signal with its attestation": vetted(async (session) => composite({ supplementary: [{ source: "external", signalType: "rating-avg", value: "4.5", observedAt: 5, attestation: attest(session) }] })),
+    "a signal value that is a boolean": signal({ value: true }),
+    "a signal source that is not a string": signal({ source: 7 }),
+    "a signal without a type": signal({ signalType: undefined }),
+    "a signal without observedAt": signal({ observedAt: undefined }),
+    "a signal that is not an object": vetted(async () => composite({ supplementary: ["signal"] })),
+    "a record for another job": vetted(async () => composite({ jobId: "other-job" })),
+    "a record with an unknown decision": vetted(async () => composite({ overallDecision: "maybe" })),
+    "freshness not an array": vetted(async () => composite({ freshness: {} })),
+    "an amendment from the seller": amended((scope) => scope),
+    "an amendment for another job": amended((scope) => ({ ...scope, jobId: "other-job" })),
+    "an amendment signed by an outsider": amended((scope) => scope, OUTSIDER),
+    "a superseded evidence reference": amended((scope) => scope, SELLER, "supersedesEvidenceRef"),
+    "a superseded reference with another hash": { artifacts: async (session) => {
+      const first = { ...session.scopes.evidence, supersedesEvidenceRef: { ...session.refs.evidence, contentHash: "0".repeat(64) } };
+      session.refs.evidence = await publish(session, 41, first, "evidence", SELLER);
+    } },
+    "a delivery attestation that matches": { artifacts: async (session) => {
+      session.refs.evidence = await publish(session, 41, { ...session.scopes.evidence, attestationRef: attest(session) }, "evidence", SELLER);
+    } },
+    "a delivery attestation with another hash": { artifacts: async (session) => {
+      session.refs.evidence = await publish(session, 41, { ...session.scopes.evidence, attestationRef: { ...attest(session), contentHash: "0".repeat(64) } }, "evidence", SELLER);
+    } },
+    "a phase attestationRef to the verified evidence": { bundle: (bundle, session) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", attestationRef: session.refs.evidence }]; } },
+    "a phase attestationRef outside the graph": { bundle: (bundle, session) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", attestationRef: { ...session.refs.evidence, contentHash: "0".repeat(64) } }]; } },
+    "a phase attestationRef that is not a reference": { bundle: (bundle) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", attestationRef: "evidence" }]; } },
+  }), {
+    "a verified result and its attestation": "ok", "a result whose decision is not in the enum": NESTED,
+    "a result whose attestation is not a reference": NESTED, "a result reference with another content hash": NESTED,
+    "a result whose attestation hash does not match": "VerifyResult attestation reference failed",
+    "a supplementary signal from dacs-5": "ok", "an external signal without an attestation": COMPOSITE,
+    "an external signal with its attestation": "ok", "a signal value that is a boolean": COMPOSITE,
+    "a signal source that is not a string": COMPOSITE, "a signal without a type": COMPOSITE, "a signal without observedAt": COMPOSITE,
+    "a signal that is not an object": COMPOSITE, "a record for another job": "composite belongs to another job",
+    "a record with an unknown decision": COMPOSITE, "freshness not an array": COMPOSITE,
+    "an amendment from the seller": "ok", "an amendment for another job": "settlement amendment reference failed",
+    "an amendment signed by an outsider": "settlement amendment reference failed", "a superseded evidence reference": "ok",
+    "a superseded reference with another hash": "settlement evidence chain failed",
+    "a delivery attestation that matches": "ok", "a delivery attestation with another hash": "delivery attestation reference failed",
+    "a phase attestationRef to the verified evidence": "ok",
+    "a phase attestationRef outside the graph": "phase attestation reference is outside the verified graph",
+    "a phase attestationRef that is not a reference": "phase attestation reference is outside the verified graph",
+  });
+});
+
+test("DACS-3 §8.5 and CA-7: the agreement binds the session's listing and parties, and payee-bound payouts cover the pipeline", async () => {
+  const payee = (bindings: unknown): Case => ({
+    listing: payeeBoundListing,
+    scopes: (scopes) => {
+      delete scopes.agreement.agreementVersion;
+      scopes.agreement.payeeBoundAgreementVersion = "1";
+      (scopes.agreement.terms as Obj).payoutBindings = bindings;
+    },
+  });
+  const binding = (change: Obj = {}) => ({ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[SELLER], ...change });
+  const COVERAGE = "agreement fails listing conformance check: commitment-artifact";
+  assert.deepEqual(await verdicts({
+    "the bundle pins another listing hash": { bundle: (bundle) => { bundle.listingRef = { ...(bundle.listingRef as Obj), contentHash: "0".repeat(64) }; } },
+    "the agreement pins another listing version": { scopes: (scopes) => { scopes.agreement.listingRef = { ...(scopes.agreement.listingRef as Obj), version: 2 }; } },
+    "the agreement's seller is not the bundle's": { agreementSigners: [BUYER, OUTSIDER], scopes: (scopes) => {
+      scopes.agreement.parties = [{ role: "buyer", primaryClaim: dids[BUYER] }, { role: "seller", primaryClaim: dids[OUTSIDER] }];
+    } },
+    "a plain agreement on a payee-bound listing": { listing: payeeBoundListing },
+    "exact payout coverage": payee([binding()]),
+    "no payout bindings": payee([]),
+    "an extra payout binding": payee([binding(), binding({ phaseIndex: 3 })]),
+    "a duplicated payout binding": payee([binding(), binding()]),
+    "a payout binding on another rail": payee([binding({ railId: "pay-x402" })]),
+    "a payout binding for another phase": payee([binding({ phaseIndex: 1 })]),
+    "a negative phase index": payee([binding({ phaseIndex: -1 })]),
+    "an empty payee address": payee([binding({ payeeAddress: "" })]),
+    "an empty rail id": payee([binding({ railId: "" })]),
+    "payout bindings not an array": payee(binding()),
+    "a payout binding that is not an object": payee(["pay-dem"]),
+  }), {
+    "the bundle pins another listing hash": "listing reference failed",
+    "the agreement pins another listing version": "agreement listing binding failed",
+    "the agreement's seller is not the bundle's": "agreement party binding failed",
+    "a plain agreement on a payee-bound listing": COVERAGE,
+    "exact payout coverage": "ok", "no payout bindings": COVERAGE, "an extra payout binding": COVERAGE,
+    "a duplicated payout binding": COVERAGE, "a payout binding on another rail": COVERAGE, "a payout binding for another phase": COVERAGE,
+    "a negative phase index": "agreement reference failed", "an empty payee address": "agreement reference failed",
+    "an empty rail id": "agreement reference failed", "payout bindings not an array": "agreement reference failed",
+    "a payout binding that is not an object": "agreement reference failed",
+  });
+});
+
+test("DACS-3 §8.5.2: terms, pricing kinds and the band's inputs are checked before any amount", () => {
+  const base = baseScopes().agreement;
+  const withListing = (pricing: unknown, pipeline: unknown = listing.pipeline, extra: Obj = {}) => ({ ...listing, pricing, pipeline, ...extra });
+  const check = (agreement: Obj, offer: Obj) => agreementListingConformance(agreement, offer, dids[SELLER]);
+  const price = (amount: string, currency = "DEM") => ({ ...base, terms: { ...(base.terms as Obj), price: { amount, currency } } });
+  assert.equal(check(base, listing), null);
+  assert.equal(check({ ...base, terms: undefined }, listing), "terms");
+  assert.equal(check(base, withListing(undefined)), "terms");
+  assert.equal(check({ ...base, terms: { ...(base.terms as Obj), price: undefined } }, listing), "terms");
+  assert.equal(check(price("0"), listing), "terms");
+  // Auction pricing: the reserve price's currency binds the agreement; no reserve leaves only the other checks.
+  const sealed = [{ kind: "negotiate-sealed-envelope" }, ...(listing.pipeline as Obj[]).slice(1)];
+  const auction = (reservePrice?: Obj) => withListing({ kind: "auction", selectionRule: "lowest-price", ...(reservePrice ? { reservePrice } : {}) }, sealed);
+  const won = { ...base, derivedFromPattern: "sealed-envelope" };
+  assert.equal(check(won, auction()), null);
+  assert.equal(check(won, auction({ amount: "1", currency: "DEM" })), null);
+  assert.equal(check(won, auction({ amount: "1", currency: "USD" })), "currency");
+  // Metered pricing without a minimum total is unitPrice × quantity exactly.
+  const metered = withListing({ kind: "metered", unitPrice: { amount: "0.25", currency: "DEM" }, unit: "call" });
+  const usage = (amount: string, quantity: string) => ({ ...price(amount), terms: { ...(price(amount).terms as Obj), meteredQuantity: { quantity, unit: "call" } } });
+  assert.equal(check(usage("1.25", "5"), metered), null);
+  assert.equal(check(usage("1.5", "5"), metered), "price");
+  assert.equal(check(usage("0", "0"), metered), "terms", "a zero total is not a positive price");
+  // A minimum total equal to the computed total is not "greater"; the total stands.
+  const floored = withListing({ kind: "metered", unitPrice: { amount: "0.25", currency: "DEM" }, unit: "call", minTotal: { amount: "1.25", currency: "DEM" } });
+  assert.equal(check(usage("1.25", "5"), floored), null);
+  // A band whose percentages are not plain non-negative numbers has no bounds.
+  const rfq = [{ kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60 } }, ...(listing.pipeline as Obj[]).slice(1)];
+  const quoted = { ...price("1.25"), derivedFromPattern: "rfq" };
+  const band = (minPct: unknown, maxPct: unknown) => withListing({ kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct, maxPct }, rfq);
+  assert.equal(check(quoted, band(10, 10)), null);
+  for (const [minPct, maxPct] of [["10", 10], [10, "10"], [-1, 10], [10, 1e-7], [10, Number.NaN]] as const) {
+    assert.equal(check(quoted, band(minPct, maxPct)), "price", `${String(minPct)} ${String(maxPct)}`);
+  }
+  // Rail versions bind only when both sides state one; another rail id never matches.
+  const railed = (rail: Obj, accepted: Obj[]) => check({ ...base, terms: { ...(base.terms as Obj), rail } }, withListing(listing.pricing, listing.pipeline, { acceptedRails: accepted }));
+  assert.equal(railed({ railId: "pay-dem", railVersion: 2 }, [{ railId: "pay-dem" }]), null);
+  assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-dem", railVersion: 2 }]), null);
+  assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-x402" }, { railId: "pay-dem" }]), null);
+  assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-x402" }]), "rail");
+  // A listing whose offering has no deliverable, or whose pipeline has no negotiation step, cannot conform.
+  assert.equal(check(base, { ...listing, offering: {} }), "deliverable");
+  assert.equal(check(base, withListing(listing.pricing, (listing.pipeline as Obj[]).slice(1))), "pattern");
+});
+
+test("a current reference names a native storage locator and a sha256 content hash", () => {
+  const hash = "a".repeat(64);
+  assert.equal(isCurrentRef({ anchor: { kind: "storage-program", locator: at(1) }, contentHash: hash }), true);
+  assert.equal(isCurrentRef({ anchor: { kind: "storage-program", locator: at(1) }, contentHash: `sha256:${hash}` }), true);
+  for (const value of [
+    null, "ref", { contentHash: hash }, { anchor: { kind: "ipfs", locator: at(1) }, contentHash: hash },
+    { anchor: { kind: "storage-program", locator: 7 }, contentHash: hash }, { anchor: { kind: "storage-program", locator: "stor-12" }, contentHash: hash },
+    { anchor: { kind: "storage-program", locator: at(1) }, contentHash: "a".repeat(63) }, { anchor: { kind: "storage-program", locator: at(1) } },
+  ]) assert.equal(isCurrentRef(value), false, JSON.stringify(value));
+});
+
+test("further graph rules: discriminators, profiles, bounds, external verifiers and phase back-pointers", async () => {
+  // CA-5: an agreement carrying both discriminators is rejected under either signing domain.
+  const bothDiscriminators = (prefix: string): Case => ({ artifacts: async (session) => {
+    const scope = { ...session.scopes.agreement, payeeBoundAgreementVersion: "1" };
+    const raw = { ...scope, signatures: await Promise.all([BUYER, SELLER].map(async (signer) =>
+      ({ party: dids[signer], algorithm: "ed25519", value: await signatureValue(prefix + artifactHash(scope, "agreement"), signer) }))) };
+    session.store.set(at(2), raw);
+    session.refs.agreement = refTo(at(2), raw, "agreement");
+  } });
+  const COVERAGE = "agreement fails listing conformance check: commitment-artifact";
+  const twoPays = await (async () => {
+    const scope = { ...signedScopeOf(payeeBoundListing), pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-payee-bound-agreement" },
+      { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }] };
+    return { ...scope, signature: await envelope(scope, "listing", SELLER) };
+  })();
+  const payee = (forListing: Obj, bindings: unknown): Case => ({
+    listing: forListing,
+    scopes: (scopes) => { delete scopes.agreement.agreementVersion; scopes.agreement.payeeBoundAgreementVersion = "1"; (scopes.agreement.terms as Obj).payoutBindings = bindings; },
+  });
+  const payout = (phaseIndex: number) => ({ railId: "pay-dem", phaseIndex, payeeAddress: dids[SELLER] });
+  const attestation = { authority: "registry" };
+  const big = "x".repeat(128 * 1024);
+  assert.deepEqual(await verdicts({
+    "both discriminators under the plain domain": bothDiscriminators("dacs-agreement:v1:"),
+    "both discriminators under the payee-bound domain": bothDiscriminators("dacs-payee-bound-agreement:v1:"),
+    "payeeBoundAgreementVersion 2": { listing: payeeBoundListing, scopes: (scopes) => {
+      payee(payeeBoundListing, [payout(2)]).scopes!(scopes);
+      scopes.agreement.payeeBoundAgreementVersion = "2";
+    } },
+    "faultBundleVersion 2": { bundle: (bundle) => { delete bundle.bundleVersion; Object.assign(bundle, { faultBundleVersion: "2", faultedParty: "none" }); } },
+    "amendments as an object": { bundle: (bundle) => { bundle.amendments = {}; } },
+    "a rail registry version of 0": { bundle: (bundle) => { bundle.railRegistryVersion = 0; } },
+    "no buyer": { bundle: (bundle) => { bundle.parties = [{ role: "orchestrator", bundleHash: "c".repeat(64), primaryClaim: dids[BUYER] }, (bundle.parties as Obj[])[1]]; } },
+    "evidence over the 128 KB cap": { scopes: (scopes) => { scopes.evidence.note = big; } },
+    "a vet record signed by an external verifier": { bundle: async (bundle, session) => {
+      bundle.vetRecords = [await publish(session, 30, { recordVersion: "1", jobId: JOB, evaluatedParty: dids[BUYER], bundleHash: "a".repeat(64),
+        requirementHash: contentHash(listing.buyerRequirement as Obj), freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30 }, "composite", OUTSIDER)];
+    } },
+    "an external signal whose attestation hash differs": { bundle: async (bundle, session) => {
+      session.store.set(at(20), attestation);
+      bundle.vetRecords = [await publish(session, 30, { recordVersion: "1", jobId: JOB, evaluatedParty: dids[BUYER], bundleHash: "a".repeat(64),
+        requirementHash: contentHash(listing.buyerRequirement as Obj), freshness: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30,
+        supplementary: [{ source: "external", signalType: "rating-avg", value: 4, observedAt: 5, attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: "0".repeat(64) } }] }, "composite", SELLER)];
+    } },
+    "a phase attestationRef to the agreement": { bundle: (bundle, session) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", attestationRef: session.refs.agreement }]; } },
+    "a phase attestationRef to a rating": { bundle: (bundle, session) => { bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok", attestationRef: session.refs.rating }]; } },
+    "agreement roles swapped against the bundle": { scopes: (scopes) => { scopes.agreement.parties = [{ role: "buyer", primaryClaim: dids[SELLER] }, { role: "seller", primaryClaim: dids[BUYER] }]; } },
+    "payouts for both pay phases": payee(twoPays, [payout(2), payout(3)]),
+    "a payout for one pay phase twice": payee(twoPays, [payout(2), { ...payout(2), payeeAddress: dids[BUYER] }]),
+  }), {
+    "both discriminators under the plain domain": "agreement reference failed",
+    "both discriminators under the payee-bound domain": "agreement reference failed",
+    "payeeBoundAgreementVersion 2": "agreement reference failed",
+    "faultBundleVersion 2": SHAPE, "amendments as an object": SHAPE, "a rail registry version of 0": SHAPE,
+    "no buyer": "invalid or duplicate bundle parties",
+    "evidence over the 128 KB cap": "evidence reference failed",
+    "a vet record signed by an external verifier": "ok",
+    "an external signal whose attestation hash differs": "supplementary attestation reference failed",
+    "a phase attestationRef to the agreement": "phase attestation reference is outside the verified graph",
+    "a phase attestationRef to a rating": "phase attestation reference is outside the verified graph",
+    "agreement roles swapped against the bundle": "agreement party binding failed",
+    "payouts for both pay phases": "ok",
+    "a payout for one pay phase twice": COVERAGE,
+  });
+  // A graph that fails before its signatures verify never reports them verified.
+  const shapeFailure = await evaluate({ bundle: (bundle) => { bundle.outcome = "won"; } });
+  assert.equal(shapeFailure.signaturesVerified, false);
+  const refFailure = await evaluate({ scopes: (scopes) => { scopes.evidence.jobId = "other-job"; } });
+  assert.equal(refFailure.signaturesVerified, true);
+});
+
+test("discovery accepts an agreement only with its shape and both parties' signatures", async () => {
+  const scopes = baseScopes();
+  const signedBy = async (scope: Obj, signers: number[]) => ({ ...scope, signatures: await Promise.all(signers.map((signer) => envelope(scope, "agreement", signer, signer, "party"))) });
+  assert.equal(await verifiedDiscoveryAgreement(await signedBy(scopes.agreement, [BUYER, SELLER])), true);
+  assert.equal(await verifiedDiscoveryAgreement(await signedBy(scopes.agreement, [BUYER])), false);
+  assert.equal(await verifiedDiscoveryAgreement(await signedBy({ ...scopes.agreement, parties: [] }, [BUYER, SELLER])), false);
+  assert.equal(await verifiedDiscoveryAgreement({ ...(await signedBy(scopes.agreement, [BUYER, SELLER])), extra: JSON.parse("1e400") }), false);
+});
+
+test("§8.5.2 pattern: the first negotiation step names the pattern, and the RFQ fallback admits only fixed-price", () => {
+  const base = baseScopes().agreement;
+  const check = (agreement: Obj, pipeline: Obj[], pricing: Obj = listing.pricing as Obj) =>
+    agreementListingConformance(agreement, { ...listing, pipeline, pricing }, dids[SELLER]);
+  const tail = (listing.pipeline as Obj[]).slice(1);
+  assert.equal(check(base, [{ kind: "vet-credentials" }, { kind: "negotiate-fixed-price" }, ...tail]), null);
+  const band = { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 10, maxPct: 10 };
+  const rfq = [{ kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60, fixedPriceFallback: true } }, ...tail];
+  assert.equal(check(base, rfq, band), null);
+  assert.equal(check({ ...base, derivedFromPattern: "sealed-envelope" }, rfq, band), "pattern");
+});
+
+function signedScopeOf(raw: Obj): Obj { const { signature: _, ...scope } = raw; return scope; }
