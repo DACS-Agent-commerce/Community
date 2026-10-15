@@ -41,19 +41,56 @@ async function nodeCall(message: string, data: Record<string, unknown>): Promise
   return body.response;
 }
 
+/**
+ * Mirrors the pinned SDK's DemosAdapter.resolveChainIdentity: deployed nodes
+ * (node2 0.9.8 among them) answer block zero with `result: 400` / `"error"`,
+ * so a failed or hashless genesis read falls back to block one's predecessor.
+ */
 async function chainIdentity(): Promise<string> {
-  const genesis = record(await nodeCall("getBlockByNumber", { blockNumber: 0 }));
+  const genesis = record(await nodeCall("getBlockByNumber", { blockNumber: 0 }).catch(() => null));
   const genesisHash = typeof genesis?.hash === "string" ? genesis.hash.trim().toLowerCase() : "";
-  if (genesisHash && (genesis?.number === undefined || genesis.number === 0)) return genesisHash;
+  const genesisNumber = genesis?.number ?? genesis?.id;
+  if (genesisHash && (genesisNumber === undefined || genesisNumber === 0)) return genesisHash;
   const first = record(await nodeCall("getBlockByNumber", { blockNumber: 1 }));
   const firstContent = parsedRecord(first?.content);
   const previousHash = typeof firstContent?.previousHash === "string"
     ? firstContent.previousHash.trim().toLowerCase()
     : "";
-  if (!first || first.status !== "confirmed" || first.number !== 1 || !previousHash) {
+  if (
+    !first || first.status !== "confirmed" || first.number !== 1 ||
+    typeof first.hash !== "string" || !first.hash.trim() || !previousHash
+  ) {
     throw new Error("Demos genesis block has no stable chain identity");
   }
   return previousHash;
+}
+
+/** node2's getTransactions rows carry `content` and `signature` as JSON strings; getTxByHash carries objects. */
+function normalizedTransaction(tx: Record<string, unknown>): Record<string, unknown> {
+  const signature = typeof tx.signature === "string" ? parsedRecord(tx.signature) : null;
+  return {
+    ...tx,
+    content: parsedRecord(tx.content) ?? tx.content,
+    ...(signature ? { signature } : {}),
+  };
+}
+
+/** The SDK re-reads a known write by hash; the newest-history scan is only a fallback. */
+async function writeByHash(
+  anchorAddress: string,
+  listingContentHash: string,
+  expectedTxRef: string,
+): Promise<Record<string, unknown> | null> {
+  const txRef = expectedTxRef.toLowerCase();
+  const tx = record(await nodeCall("getTxByHash", { hash: txRef }).catch(() => null));
+  const content = parsedRecord(tx?.content);
+  if (!tx || !content) return null;
+  const candidate = storageWriteCandidate({ ...tx, type: tx.type ?? content.type, to: tx.to ?? content.to, content });
+  return candidate?.locator === anchorAddress &&
+    candidate.contentHash === listingContentHash &&
+    candidate.transactionHash === txRef
+    ? normalizedTransaction(tx)
+    : null;
 }
 
 async function findCanonicalWrite(
@@ -61,6 +98,10 @@ async function findCanonicalWrite(
   listingContentHash: string,
   expectedTxRef?: string,
 ): Promise<Record<string, unknown> | null> {
+  if (expectedTxRef) {
+    const known = await writeByHash(anchorAddress, listingContentHash, expectedTxRef);
+    if (known) return known;
+  }
   let cursor: number | "latest" = "latest";
   let scanned = 0;
   while (scanned < MAX_TRANSACTIONS) {
@@ -77,7 +118,7 @@ async function findCanonicalWrite(
         candidate.contentHash === listingContentHash &&
         (!expectedTxRef || candidate.transactionHash === expectedTxRef.toLowerCase())
       ) {
-        return { ...tx, content: parsedRecord(tx.content) ?? tx.content };
+        return normalizedTransaction(tx);
       }
     }
     scanned += page.length;
@@ -128,9 +169,10 @@ export function listingAnchorReceiptRejection(
 }
 
 /**
- * Establish a portable finalized Demos AnchorReceipt from canonical transaction,
- * BFT-confirmed block, and exact native readback. Read visibility alone never
- * returns `finalized`.
+ * Establish a finalized Demos AnchorReceipt from the canonical transaction,
+ * the block the configured node reports as BFT-confirmed, and exact native
+ * readback. Read visibility alone never returns `finalized`. Consensus
+ * signatures are not independently verified (see validatorSignatureShape).
  */
 export async function finalizedListingAnchorReceipt(input: {
   anchorAddress: string;
@@ -170,9 +212,9 @@ export async function finalizedListingAnchorReceipt(input: {
       : NaN;
     if (
       !block || block.status !== "confirmed" || block.number !== blockNumber ||
-      typeof block.hash !== "string" || !block.hash ||
+      typeof block.hash !== "string" || !/^[0-9a-f]{64}$/.test(block.hash) ||
       !Number.isSafeInteger(blockTimestamp) || !orderedTransactions.includes(txRef) ||
-      block.validation_data === undefined
+      !validatorSignatureShape(block.validation_data)
     ) return { status: "pending", reason: "canonical block is not BFT-confirmed" };
 
     const payload = Array.isArray(txContent.data) ? record(txContent.data[1]) : null;
@@ -228,6 +270,21 @@ export async function finalizedListingAnchorReceipt(input: {
       reason: error instanceof Error ? error.message : "finality observation failed",
     };
   }
+}
+
+/**
+ * The node's `validation_data` shape: a non-empty map from validator public
+ * key to Ed25519 block signature. This refuses placeholder or arbitrary
+ * objects, but it is a shape check only. The signatures, the eligible
+ * validator pool and the 2/3+1 quorum are not verified here, nor by the
+ * pinned SDK's own Demos adapter, so a `finalized` receipt rests on the
+ * configured Demos node's report.
+ */
+function validatorSignatureShape(value: unknown): boolean {
+  const signatures = record(record(value)?.signatures);
+  const entries = signatures ? Object.entries(signatures) : [];
+  return entries.length > 0 && entries.every(([key, signature]) =>
+    /^0x[0-9a-f]{64}$/i.test(key) && typeof signature === "string" && /^0x[0-9a-f]{128}$/i.test(signature));
 }
 
 function sameCanonical(left: Record<string, unknown>, right: Record<string, unknown>): boolean {

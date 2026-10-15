@@ -4,8 +4,16 @@ import test from "node:test";
 
 import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { identityBundleHash } from "@kynesyslabs/dacs/identity";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { verifyListing, verifyListingResult } from "../src/catalog/listingVerification.js";
+import {
+  findValidListingRevocation,
+  revocationLogicalAddress,
+  verifyListing,
+  verifyListingResult,
+} from "../src/catalog/listingVerification.js";
+import { sdkListingSignatureVerifier } from "../src/catalog/sdkReaderVerifiers.js";
+import { checkListingRevocation } from "../vendor/dacs-sdk/dist/agent/listingValidation.js";
 
 const seed = Uint8Array.from(Buffer.from("11".repeat(32), "hex"));
 const privateKey = privateKeyFromSeed(seed);
@@ -291,4 +299,49 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
     pipeline: [{ kind: "negotiate-sealed-envelope" }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })), null);
+});
+
+test("RB-2: a published revocation binding carries the exact presentedBy bytes an SDK reader compares", async () => {
+  const presentedBy = `${claim}?channel=directory`;
+  const listing = signedCurrentListing({}, presentedBy);
+  const verified = await verifyListing(listing);
+  assert.ok(verified);
+  const scope = { listingId: "sig5-preserve-unknown", listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  // RB-1: the marker signer repeats the listing signer exactly.
+  const marker = { ...scope, signature: { algorithm: "ed25519", signer: presentedBy, value: signMessage(`dacs-revocation:v1:${contentHash(scope)}`) } };
+  const binding = await findValidListingRevocation(["marker"], verified, 1, async () => marker);
+  assert.ok(binding);
+  assert.equal(binding.sellerPrimaryClaim, presentedBy);
+  assert.equal(binding.logicalAddress, revocationLogicalAddress(presentedBy, "sig5-preserve-unknown", 1));
+  const sdk = await checkListingRevocation(listing as never, verified.contentHash, {
+    nowMs: () => 2,
+    surfaces: [{ kind: "catalog", status: "revoked", catalogObservedAt: 2, binding }],
+    readMarker: async () => marker,
+    verifyMarkerSignature: sdkListingSignatureVerifier(),
+  });
+  assert.equal(sdk.disposition, "revoked", JSON.stringify(sdk));
+});
+
+test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top-level signature member", async () => {
+  const listingWith = (presentationHash: (bundle: Record<string, unknown>) => string) => {
+    const identity: Record<string, unknown> = {
+      bundleVersion: "1",
+      presentedBy: claim,
+      presentedAt: 1,
+      claims: [{ ref: claim, kind: "signing-key" }],
+      signature: "bundle content, not a signature envelope",
+    };
+    identity.presentation = {
+      kind: "per-claim",
+      signatures: [{ ref: claim, signature: signMessage(`dacs-bundle-presentation:v1:${presentationHash(identity)}`) }],
+    };
+    const { signature: _signature, ...scope } = signedCurrentListing();
+    const signedScope = { ...scope, seller: { ...(scope.seller as Record<string, unknown>), identity } };
+    return {
+      ...signedScope,
+      signature: { algorithm: "ed25519", signer: claim, value: signMessage(`dacs-listing:v1:${contentHash(signedScope)}`) },
+    };
+  };
+  assert.ok(await verifyListing(listingWith(identityBundleHash as never)), "SDK identityBundleHash");
+  assert.equal(await verifyListing(listingWith(contentHash)), null, "contentHash strips the signature member");
 });

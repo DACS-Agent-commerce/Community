@@ -12,10 +12,11 @@ export function isIPv4(value: string): boolean {
 
 export function isIPv6(value: string): boolean {
   if (typeof value !== "string" || !value.includes(":")) return false;
-  // Node accepts a scope zone suffix; the WHATWG host parser does not.
+  // Node accepts a scope zone suffix (`%[0-9a-zA-Z-.:]+` in lib/internal/net.js);
+  // the WHATWG host parser does not.
   const zone = value.indexOf("%");
   const address = zone < 0 ? value : value.slice(0, zone);
-  if (zone >= 0 && !/^%[^%\s]+$/.test(value.slice(zone))) return false;
+  if (zone >= 0 && !/^%[0-9a-zA-Z.:-]+$/.test(value.slice(zone))) return false;
   if (/[^0-9A-Fa-f:.]/.test(address)) return false;
   try {
     new URL(`http://[${address}]/`);

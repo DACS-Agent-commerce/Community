@@ -7,6 +7,9 @@ import { canonicalize, contentHash, listingAddress, sha256Hex } from "@kynesysla
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 const { POST } = await import("../app/api/dacs/confirm-listing/route.js");
+const { decodeDemosAnchorReceiptProof, demosSignedTransactionProofHash } = await import(
+  "../vendor/dacs-sdk/dist/substrate/demosWriteEvidence.js"
+);
 
 const privateKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21)));
 const keyHex = Buffer.from(rawPublicKey(publicKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21))))).toString("hex");
@@ -102,8 +105,19 @@ const transaction = {
     timestamp: 1_786_360_000_000,
     transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
   },
-  signature: "signed-envelope",
+  signature: { type: "ed25519", data: `0x${"11".repeat(64)}` },
 };
+// node2 0.9.8 shapes: getTransactions rows carry `content` and `signature` as
+// JSON strings; getTxByHash carries objects and no top-level type/to.
+type NodeTransaction = Record<string, unknown> & { content: unknown; signature: unknown };
+const historyRow = (tx: NodeTransaction) => ({
+  ...tx,
+  content: JSON.stringify(tx.content),
+  signature: JSON.stringify(tx.signature),
+});
+const byHashRow = ({ id: _id, type: _type, to: _to, ...tx }: NodeTransaction) => ({ ...tx, ed25519_signature: null });
+const blockHash = "ef".repeat(32);
+const chainId = "83".repeat(32);
 const coordinates = {
   anchorAddress,
   programName,
@@ -122,11 +136,13 @@ function stubChain(overrides: {
   nativeMetadata?: Record<string, unknown>;
   transactionMetadata?: Record<string, unknown>;
   block?: Record<string, unknown>;
-} = {}): void {
+  history?: boolean;
+} = {}): string[] {
   const write = transaction.content.data[1] as Record<string, unknown>;
   const written = overrides.transactionMetadata
     ? { ...transaction, content: { ...transaction.content, data: ["storageProgram", { ...write, metadata: overrides.transactionMetadata }] } }
     : transaction;
+  const calls: string[] = [];
   globalThis.fetch = async (_input, init) => {
     if (init?.method !== "POST") {
       return Response.json({
@@ -136,31 +152,44 @@ function stubChain(overrides: {
         programName,
         storageAddress: anchorAddress,
         metadata: overrides.nativeMetadata ?? metadata,
-        createdByTx: transactionHash,
-        interactionTxs: [],
       });
     }
     const rpc = JSON.parse(String(init.body)) as { params: Array<{ message: string; data: Record<string, unknown> }> };
     const call = rpc.params[0]!;
-    if (call.message === "getTransactions") return Response.json({ result: 200, response: [written] });
+    calls.push(call.message);
+    if (call.message === "getTransactions") {
+      return Response.json({ result: 200, response: overrides.history === false ? [] : [historyRow(written)] });
+    }
+    if (call.message === "getTxByHash") {
+      return call.data.hash === transactionHash
+        ? Response.json({ result: 200, response: byHashRow(written) })
+        : Response.json({ result: 404, response: "error" });
+    }
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 5) {
       return Response.json({
         result: 200,
         response: {
           status: "confirmed",
           number: 5,
-          hash: "block-5",
+          hash: blockHash,
           content: { timestamp: 1_786_360_000, ordered_transactions: [transactionHash] },
-          validation_data: { validators: ["fixture-validator"], quorum: 1 },
+          validation_data: { signatures: { [`0x${"aa".repeat(32)}`]: `0x${"bb".repeat(64)}` } },
           ...overrides.block,
         },
       });
     }
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 0) {
-      return Response.json({ result: 200, response: { number: 0, hash: "fixture-genesis" } });
+      return Response.json({ result: 400, response: "error", extra: "Block number not provided" });
+    }
+    if (call.message === "getBlockByNumber" && call.data.blockNumber === 1) {
+      return Response.json({
+        result: 200,
+        response: { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32), content: { previousHash: chainId, timestamp: 1 } },
+      });
     }
     return Response.json({ result: 500, response: null });
   };
+  return calls;
 }
 
 test("listing confirmation verifies coordinates, owner, identity, signature, hash, and tuple", async () => {
@@ -185,6 +214,42 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     assert.equal(receipt.nativeAddress, anchorAddress);
     assert.equal(receipt.contentHash, listingHash);
     assert.deepEqual(receipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
+    // node2 serves block timestamps in seconds; the receipt carries milliseconds.
+    assert.deepEqual(receipt.blockRef, { id: blockHash, height: "5", timestamp: 1_786_360_000_000 });
+    const proof = decodeDemosAnchorReceiptProof(receipt as never);
+    assert.equal(proof.chainIdentity, chainId, "block zero answers `error`, so block one's predecessor names the chain");
+    // Portable: the SDK verifier re-reads getTxByHash, whose signature is an object.
+    assert.equal(proof.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
+    assert.equal(proof.nativeRead.metadataHash, sha256Hex(canonicalize(metadata)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("listing confirmation reads a browser-supplied transactionRef by hash", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const transactionRef of [transactionHash, transactionHash.toUpperCase()]) {
+      // The write is outside the newest-history window; only the by-hash read finds it.
+      const calls = stubChain({ history: false });
+      const response = await POST(request({ ...coordinates, transactionRef }));
+      assert.equal(response.status, 200, transactionRef);
+      const body = await response.json() as { state: string; anchorReceipt: Record<string, unknown> };
+      assert.equal(body.state, "finalized-and-verified");
+      assert.deepEqual(body.anchorReceipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
+      assert.equal(
+        decodeDemosAnchorReceiptProof(body.anchorReceipt as never).signedTransactionHash,
+        demosSignedTransactionProofHash(byHashRow(transaction)),
+      );
+      assert.ok(calls.includes("getTxByHash"));
+    }
+    // Another transaction never stands in for the browser's own write.
+    stubChain();
+    const other = await POST(request({ ...coordinates, transactionRef: "ef".repeat(32) }));
+    assert.equal(other.status, 202);
+    assert.equal((await other.json() as { state: string }).state, "finality-pending");
+    const malformed = await POST(request({ ...coordinates, transactionRef: "not-a-hash" }));
+    assert.equal(malformed.status, 400);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -197,6 +262,12 @@ test("listing confirmation never registers before the write is BFT-final", async
       { status: "pending" },
       { content: { timestamp: 1_786_360_000, ordered_transactions: [] } },
       { validation_data: undefined },
+      // Placeholder proofs and block references that the node never serves.
+      { validation_data: { validators: ["fixture-validator"], quorum: 1 } },
+      { validation_data: { signatures: {} } },
+      { validation_data: { signatures: { "fixture-validator": "signed" } } },
+      { hash: "block-5" },
+      { hash: "" },
     ]) {
       stubChain({ block });
       const response = await POST(request(coordinates));

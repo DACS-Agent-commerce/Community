@@ -44,11 +44,11 @@ const scope = {
   pipeline: [
     { kind: "negotiate-fixed-price" },
     { kind: "commit-agreement" },
-    { kind: "pay-dem", parameters: { rail: "pay-dem" } },
+    { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } },
     { kind: "deliver-storage-program" },
   ],
   pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } },
-  acceptedRails: [{ railId: "pay-dem" }],
+  acceptedRails: [{ railId: "demos-native:DEM" }],
   terms: {},
   validity: { notBefore: 1 },
 };
@@ -102,4 +102,17 @@ test("the SDK ordered reader with the acceptance verifiers accepts SIG-6 and rej
   const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
   const rejected = await validateListingArtifact(hexListing, readerDeps());
   assert.equal(rejected.disposition, "rejected");
+});
+
+test("the identity presentation verifier accepts only per-claim presentations", async () => {
+  const verifyIdentityPresentation = sdkIdentityPresentationVerifier();
+  type Bundle = Parameters<typeof verifyIdentityPresentation>[0]["bundle"];
+  const perClaim = scope.seller.identity as unknown as Bundle;
+  const signedBytes = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8");
+  assert.equal(await verifyIdentityPresentation({ bundle: perClaim, signedBytes }), true);
+  // The same valid per-claim signature carried under every other presentation kind.
+  for (const kind of ["siwd", "session-key", "sr1-root"]) {
+    const bundle = { ...perClaim, presentation: { ...perClaim.presentation, kind } } as unknown as Bundle;
+    assert.equal(await verifyIdentityPresentation({ bundle, signedBytes }), false, kind);
+  }
 });

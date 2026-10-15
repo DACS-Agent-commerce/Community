@@ -13,7 +13,7 @@ const HOSTS = [
   "example.com", "agent.example.com", "xn--bcher-kva.example", "xn--zz.example", "xn--a.example",
   "a-b.example", "-a.example", "a..b", "localhost", "123.example", "1.2.3.4", "1.2.3", "01.2.3.4",
   "0x7f.1", "4294967295", "256.1.1.1", "1.2.3.4.5", "example.com.", "EXAMPLE.com", "a".repeat(64) + ".example",
-  "a_b.example", "", "fe80::1", "::1", "1:2:3:4:5:6:7:8", "::ffff:1.2.3.4", "fe80::1%eth0", "1::2::3", ":::", "g::1",
+  "a_b.example", "", "fe80::1", "::1", "1:2:3:4:5:6:7:8", "::ffff:1.2.3.4", "fe80::1%eth0", "fe80::1%en0/1", "fe80::1%a_b", "fe80::1%en0.5:x-y", "1::2::3", ":::", "g::1",
 ];
 
 test("the browser isIP shim agrees with node:net", () => {

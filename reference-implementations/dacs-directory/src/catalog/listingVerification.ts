@@ -6,9 +6,11 @@ import {
   isVerificationMethod,
   readListingArtifact,
   verifyComponentSignature,
+  type IdentityBundle,
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
+import { identityBundleHash } from "@kynesyslabs/dacs/identity";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
@@ -118,9 +120,12 @@ async function verifyIdentityPresentation(
   const signature = presentation.signatures.map(record).find((item) =>
     typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === sellerIdentity);
   if (!signature) return null;
-  const bundleScope = { ...identity };
-  delete bundleScope.presentation;
-  const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
+  // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
+  // member is bundle content, unlike in contentHash.
+  const message = Buffer.from(
+    `dacs-bundle-presentation:v1:${identityBundleHash(identity as unknown as IdentityBundle)}`,
+    "utf8",
+  );
   return verifyEd25519(message, sellerClaim, signature.signature, resolveKey);
 }
 
@@ -333,12 +338,17 @@ export async function findValidListingRevocation(
       continue;
     }
     const scope = stripSignature(candidate);
+    // RB-2: SDK readers require the exact `presentedBy` bytes, including any
+    // CF-3 advisory parameters, and the CF-4 address derived from them.
+    const sellerPrimaryClaim = listing.profile === "dacs-v0.1"
+      ? listing.listing.seller.identity.presentedBy
+      : listing.sellerClaim;
     return {
-      sellerPrimaryClaim: listing.sellerClaim,
+      sellerPrimaryClaim,
       listingId: String(scope.listingId),
       listingVersion: expectedVersion,
       listingContentHash: listing.contentHash,
-      logicalAddress: revocationLogicalAddress(listing.sellerClaim, String(scope.listingId), expectedVersion),
+      logicalAddress: revocationLogicalAddress(sellerPrimaryClaim, String(scope.listingId), expectedVersion),
       markerAnchor: { kind: "storage-program", locator: ref },
       markerContentHash: contentHash(scope),
     };
