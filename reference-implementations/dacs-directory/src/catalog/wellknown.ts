@@ -87,15 +87,16 @@ export function projectActiveListingIndexEntries(
       }
     } else {
       const revocation = entry.revocation;
-      const expectedLogicalAddress =
-        `dacs1-revoked:${encodeAddressSegment(seller)}:${entry.listingId}:v${entry.version}`;
+      // RB-2: the binding carries the Listing's exact `presentedBy` bytes,
+      // which may hold CF-3 advisory parameters; identity is the canonical claim.
       if (
         !isRevocationBinding(revocation) ||
-        revocation.sellerPrimaryClaim !== seller ||
+        canonicalDemosAgentClaim(revocation.sellerPrimaryClaim) !== seller ||
+        revocation.logicalAddress !==
+          `dacs1-revoked:${encodeAddressSegment(revocation.sellerPrimaryClaim)}:${entry.listingId}:v${entry.version}` ||
         revocation.listingId !== entry.listingId ||
         revocation.listingVersion !== entry.version ||
-        revocation.listingContentHash !== entry.contentHash ||
-        revocation.logicalAddress !== expectedLogicalAddress
+        revocation.listingContentHash !== entry.contentHash
       ) {
         return { ok: false, error: "a revoked listing entry has no matching revocation binding" };
       }
@@ -118,9 +119,15 @@ export function normalizeSubmittedDomain(domain: string): string {
   return url.origin;
 }
 
-async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | null> {
+/** The bounded public-HTTPS GET the crawler uses; tests inject a stub. */
+export type WellKnownRequest = (
+  url: string,
+  options: { method: "GET"; accept: string },
+) => Promise<{ status: number; body: Buffer }>;
+
+async function fetchJson(url: string, request: WellKnownRequest): Promise<{ body: unknown; raw: string } | null> {
   try {
-    const response = await boundedPublicHttpsRequest(url, { method: "GET", accept: "application/json" });
+    const response = await request(url, { method: "GET", accept: "application/json" });
     if (response.status < 200 || response.status >= 300) return null;
     const raw = response.body.toString("utf8");
     return { body: JSON.parse(raw), raw };
@@ -129,7 +136,10 @@ async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | 
   }
 }
 
-export async function crawlDomain(domain: string): Promise<WellKnownAgent | { domain: string; error: string }> {
+export async function crawlDomain(
+  domain: string,
+  request: WellKnownRequest = boundedPublicHttpsRequest,
+): Promise<WellKnownAgent | { domain: string; error: string }> {
   let base: string;
   try {
     base = normalizeSubmittedDomain(domain);
@@ -137,13 +147,13 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   } catch (e) {
     return { domain, error: e instanceof Error ? e.message : "invalid domain" };
   }
-  const card = await fetchJson(`${base}/.well-known/agent.json`);
+  const card = await fetchJson(`${base}/.well-known/agent.json`, request);
   if (!card) return { domain, error: "no .well-known/agent.json" };
 
   const dacs = (card.body as { dacs?: DacsBlock })?.dacs;
   if (dacs?.dacsVersion !== "1" || !dacs.listings?.indexUrl) return { domain, error: "agent.json has no supported dacs.listings block" };
 
-  const index = await fetchJson(dacs.listings.indexUrl);
+  const index = await fetchJson(dacs.listings.indexUrl, request);
   if (!index) return { domain, error: `listings index unreachable (${dacs.listings.indexUrl})` };
 
   // The hash IS the binding (§6.3.5): "sha256-<hex>" over the index bytes.
@@ -168,7 +178,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
   if (dacs.bundleBindings?.indexUrl) {
-    const bindingIndex = await fetchJson(dacs.bundleBindings.indexUrl);
+    const bindingIndex = await fetchJson(dacs.bundleBindings.indexUrl, request);
     if (!bindingIndex) return { domain, error: `bundle-binding index unreachable (${dacs.bundleBindings.indexUrl})` };
     const expectedBindingHash = (dacs.bundleBindings.indexHash ?? "").replace(/^sha256-/, "").toLowerCase();
     const actualBindingHash = sha256Hex(bindingIndex.raw);
@@ -192,7 +202,7 @@ export async function crawlDomains(domains: string[]): Promise<{
   const agents: WellKnownAgent[] = [];
   const errors: Array<{ domain: string; error: string }> = [];
   for (let i = 0; i < domains.length; i += 5) {
-    const batch = await Promise.all(domains.slice(i, i + 5).map(crawlDomain));
+    const batch = await Promise.all(domains.slice(i, i + 5).map((domain) => crawlDomain(domain)));
     for (const r of batch) {
       if ("error" in r) errors.push(r);
       else agents.push(r);

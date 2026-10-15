@@ -704,20 +704,30 @@ test("an unavailable or not-found candidate anchored by the listing owner withho
   for (const [writer, after, expected] of [
     [outsider, "unavailable", "active"],
     [outsider, "gone", "active"],
+    [outsider, "rejects", "active"],
     [seller, "gone", undefined],
     [seller, "unavailable", undefined],
+    [seller, "rejects", undefined],
   ] as const) {
     resetIndex([sellerRegistration, later], 32);
     const programs: Record<string, StoredProgram> = { [locator(1)]: { data: JSON.stringify(listing) } };
     const candidate = { data: JSON.stringify(marker), owner: ownerOf(writer) };
     let served = false;
-    // The scan reads the candidate once; afterwards the node answers 503 or 404.
+    // The scan reads the candidate once; afterwards the node answers 503 or 404, or fetch rejects.
     Object.defineProperty(programs, locator(61), {
       enumerable: true,
-      get: () => after === "unavailable" || !served ? (served = true, candidate) : undefined,
+      get: () => after !== "gone" || !served ? (served = true, candidate) : undefined,
     });
     chain(programs, [locator(1), locator(61)]);
     if (after === "unavailable") scanOnly.add(locator(61));
+    if (after === "rejects") {
+      let answered = false;
+      answers.set(locator(61), () => {
+        if (answered) throw new TypeError("fetch failed");
+        answered = true;
+        return Response.json({ success: true, owner: candidate.owner, programName: "opaque", data: marker });
+      });
+    }
     await reindex();
     assert.deepEqual(pending(listingHash), [locator(61)], "the candidate was discovered but not read");
     assert.equal(listingStatus(), expected, `${writer} ${after}`);
@@ -769,6 +779,8 @@ test("a known verified marker that answers without a readable artifact withholds
     ["malformed JSON", (at) => answers.set(at, () => new Response('{"success":true,"data":', { status: 200 }))],
     ["success false", (at) => answers.set(at, () => Response.json({ success: false }))],
     ["non-object data", (at) => answers.set(at, () => Response.json({ success: true, data: [1] }))],
+    // The node never answers: fetch rejects, as on a timeout, refused connection or DNS failure.
+    ["fetch rejects", (at) => answers.set(at, () => { throw new TypeError("fetch failed"); })],
   ];
   const summary = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
   for (const [name, outage] of cases) {
