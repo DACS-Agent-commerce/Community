@@ -33,7 +33,8 @@ import {
 import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
-import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import type { BundleVerification } from "@kynesyslabs/dacs";
+import type { LegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 
 const seed = Uint8Array.from(Buffer.alloc(32, 7));
 const did = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
@@ -53,17 +54,12 @@ const listing = {
   supportedDelivery: ["deliver-attested-payload"],
 };
 
-test("listing verification requires a valid signer-bound envelope", async () => {
+test("legacy listing reads do not invent a structured signature profile outside the SDK boundary", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
-  assert.ok(await verifyListing(signed));
-  assert.equal((await verifyListing({
-    ...listing,
-    signature: { ...signed.signature, signer: `DID:demos:agent:${did.slice(-64)}` },
-  }))?.signer, did, "scheme casing is canonicalized when comparing envelope and scope identities");
+  assert.equal(await verifyListing(signed), null);
   assert.equal(await verifyListing({ ...signed, name: "tampered" }), null);
-  assert.equal(await verifyListing({ ...listing, signature: "deadbeef" }), null);
   assert.equal(await verifyListing({ ...signed, signatures: [null] }), null);
   assert.equal(ownerClaim(`0x${did.slice(-64)}`), did);
 });
@@ -104,7 +100,11 @@ test("listing verification accepts a current structured listing and verifies its
       description: "Description",
       category: "services.test",
       tags: ["test"],
-      deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+      deliverable: {
+        kind: "attested-payload",
+        payloadFormat: "application/json",
+        verificationMethod: { kind: "self-signed" },
+      },
     },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
@@ -121,7 +121,7 @@ test("listing verification accepts a current structured listing and verifies its
   const value = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(currentScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const signed = { ...currentScope, signature: { algorithm: "ed25519", signer: did, value } };
   const verified = await verifyListing(signed);
   assert.equal(verified?.profile, "dacs-v0.1");
@@ -131,11 +131,18 @@ test("listing verification accepts a current structured listing and verifies its
   const unsafeValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(unsafeScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
-function result(outcome: string, signatures: BundleVerification["signatures"]): BundleVerification {
+type LegacyBundleVerification = Omit<BundleVerification, "bundle"> & {
+  bundle: LegacyMvpAttestationBundle;
+};
+
+function result(
+  outcome: string,
+  signatures: BundleVerification["signatures"],
+): LegacyBundleVerification {
   return {
     ok: true,
     fullyVerified: signatures.every((s) => s.verdict === "valid"),
@@ -370,10 +377,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     ...evidenceScope,
     signature: await signature("dacs-evidence:v1:", evidenceScope, did, seed),
   };
-  const signedListing = {
-    ...listing,
-    signature: await signature("dacs-listing:v1:", listing, did, seed),
-  };
+  const listingSignature = await signature("dacs-listing:v1:", listing, did, seed);
+  const signedListing = { ...listing, signature: listingSignature.value };
   const verification = result("completed", [
     { party: buyerDid, verdict: "valid" },
     { party: did, verdict: "valid" },
@@ -408,7 +413,7 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
   assert.equal(await refsPassStrictPolicy(verification, artifacts), true);
 
   const substituted = structuredClone(verification);
-  substituted.bundle!.agreementRef.kind = "dacs-2-verifyresult";
+  substituted.bundle.agreementRef!.kind = "dacs-2-verifyresult";
   substituted.refs[0].kind = "dacs-2-verifyresult";
   assert.equal(await refsPassStrictPolicy(substituted, [
     { ...artifacts[0], kind: "dacs-2-verifyresult" },
@@ -424,8 +429,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     artifacts[0], artifacts[1], artifacts[1], artifacts[2],
   ]), false);
 
-  const unsupported = structuredClone(verification) as BundleVerification & {
-    bundle: NonNullable<BundleVerification["bundle"]> & { ratingRefs: unknown[] };
+  const unsupported = structuredClone(verification) as LegacyBundleVerification & {
+    bundle: LegacyMvpAttestationBundle & { ratingRefs: unknown[] };
   };
   unsupported.bundle.ratingRefs = [{ kind: "dacs-5-rating", id: "rating-j", contentHash: "f".repeat(64) }];
   assert.equal(await refsPassStrictPolicy(unsupported, artifacts), false);
@@ -543,7 +548,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   ).toString("hex");
   const verified = await verifyListing({
     ...listing,
-    signature: { algorithm: "ed25519", signer: did, value: listingSignature },
+    signature: listingSignature,
   });
   assert.ok(verified);
   if (!verified) return;
@@ -589,6 +594,66 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
 });
 
+test("RB-1/RB-4: only the listing signer's marker over the exact listing tuple revokes it", async () => {
+  const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
+  const listingSignature = Buffer.from(await ed25519Sign(listingMessage, privateKeyFromSeed(seed))).toString("hex");
+  const verified = await verifyListing({ ...listing, signature: listingSignature });
+  assert.ok(verified);
+  if (!verified) return;
+  const scopeFor = (overrides: Record<string, unknown> = {}) => ({
+    listingId: listing.listingId,
+    listingVersion: listing.listingVersion,
+    listingContentHash: verified.contentHash,
+    revokedAt: 1,
+    ...overrides,
+  });
+  const signed = async (scope: Record<string, unknown>, signerSeed = seed, encoding: "hex" | "base64url" = "base64url") =>
+    Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(signerSeed)))
+      .toString(encoding);
+  const markerOf = async (scope: Record<string, unknown>, signature: Record<string, unknown> = {}) =>
+    ({ ...scope, signature: { algorithm: "ed25519", signer: did, value: await signed(scope), ...signature } });
+  const verdict = async (marker: Record<string, unknown>) => ({
+    verified: await verifyListingRevocation(marker, verified, 1),
+    published: Boolean(await findValidListingRevocation(["marker"], verified, 1, async () => marker)),
+  });
+  const revokes = { verified: true, published: true };
+  const ignored = { verified: false, published: false };
+
+  const valid = await markerOf(scopeFor());
+  assert.deepEqual(await verdict(valid), revokes);
+  // The optional `reason` is part of the signed scope; it neither blocks discovery nor revocation.
+  const withReason = await markerOf(scopeFor({ reason: "retired" }));
+  assert.equal(isListingRevocationCandidate(withReason), true);
+  assert.deepEqual(await verdict(withReason), revokes);
+
+  const scope = scopeFor();
+  const cases: Record<string, Record<string, unknown>> = {
+    "no signature": { ...scope },
+    "null signature": { ...scope, signature: null },
+    "string signature": { ...scope, signature: valid.signature.value },
+    "array signature": { ...scope, signature: [valid.signature] },
+    "sr1-aggregate envelope": { ...valid, signature: { ...valid.signature, algorithm: "sr1-aggregate" } },
+    "ecdsa-secp256k1 envelope": { ...valid, signature: { ...valid.signature, algorithm: "ecdsa-secp256k1" } },
+    "missing signer": { ...valid, signature: { algorithm: "ed25519", value: valid.signature.value } },
+    "non-string value": { ...valid, signature: { ...valid.signature, value: 7 } },
+    "undecodable value": { ...valid, signature: { ...valid.signature, value: "AAAA" } },
+    "64 zero bytes": { ...valid, signature: { ...valid.signature, value: Buffer.alloc(64).toString("base64url") } },
+    // The listing key signed each of these, but the tuple names another listing or version.
+    "other listingId": await markerOf(scopeFor({ listingId: "other" })),
+    "other listingVersion": await markerOf(scopeFor({ listingVersion: 2 })),
+    "other listingContentHash": await markerOf(scopeFor({ listingContentHash: "0".repeat(64) })),
+    // The listing key signed it, but the envelope names another claim as signer.
+    "envelope names another signer": await markerOf(scope, { signer: buyerDid }),
+    // Another claim signed it and names itself.
+    "signed by another claim": await markerOf(scope, { signer: buyerDid, value: await signed(scope, buyerSeed) }),
+    // Another claim signed it but the envelope names the listing signer.
+    "another key under the listing signer": await markerOf(scope, { value: await signed(scope, buyerSeed) }),
+  };
+  for (const [name, marker] of Object.entries(cases)) {
+    assert.deepEqual(await verdict(marker), ignored, name);
+  }
+});
+
 test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
   const markerSeed = Uint8Array.from(randomBytes(32));
   const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
@@ -597,10 +662,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
   const listingSignature = Buffer.from(
     await ed25519Sign(listingMessage, privateKeyFromSeed(markerSeed)),
   ).toString("hex");
-  const verified = await verifyListing({
-    ...markerListing,
-    signature: { algorithm: "ed25519", signer: markerDid, value: listingSignature },
-  });
+  const verified = await verifyListing({ ...markerListing, signature: listingSignature });
   assert.ok(verified);
   if (!verified) return;
 
@@ -663,10 +725,7 @@ test("a revocation candidate with no canonical form never stops the candidate lo
   const listingSignature = Buffer.from(
     await ed25519Sign(listingMessage, privateKeyFromSeed(seed)),
   ).toString("hex");
-  const verified = await verifyListing({
-    ...listing,
-    signature: { algorithm: "ed25519", signer: did, value: listingSignature },
-  });
+  const verified = await verifyListing({ ...listing, signature: listingSignature });
   assert.ok(verified);
   if (!verified) return;
 
@@ -712,7 +771,7 @@ test("revocation verification work per call is bounded and reports what it exami
   const perPass = 16;
   const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const listingSignature = Buffer.from(await ed25519Sign(listingMessage, privateKeyFromSeed(seed))).toString("hex");
-  const verified = await verifyListing({ ...listing, signature: { algorithm: "ed25519", signer: did, value: listingSignature } });
+  const verified = await verifyListing({ ...listing, signature: listingSignature });
   assert.ok(verified);
   if (!verified) return;
   const scope = { listingId: listing.listingId, listingVersion: listing.listingVersion, listingContentHash: verified.contentHash, revokedAt: 1 };
@@ -791,7 +850,7 @@ test("indexer rejects a shape-valid listing with a fake signature", async () => 
 test("indexer skips a listing with no canonical form and still indexes the next listing", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
-  const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
+  const signed = { ...listing, signature: value };
   const malformedAnchor = `stor-${"d".repeat(40)}`;
   const validAnchor = `stor-${"e".repeat(40)}`;
   // JSON `1e400` parses to Infinity, which has no canonical (CF-1) number form.
@@ -833,7 +892,7 @@ test("listing verification is open-world: an unknown additive top-level field is
       identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySignature }] } },
       displayName: "Service agent", publicEndpoint: "https://agent.example/a2a",
     },
-    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
       { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
@@ -850,7 +909,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // top-level allowlist would (wrongly) reject this.
   const acceptValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(forwardScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const accepted = await verifyListing({ ...forwardScope, signature: { algorithm: "ed25519", signer: did, value: acceptValue } });
   assert.ok(accepted, "unknown additive top-level field must be tolerated (open-world)");
   assert.equal(accepted?.profile, "dacs-v0.1");
@@ -860,7 +919,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // open-world relaxation did NOT weaken signature binding.
   const baseValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(baseScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const injected = { ...baseScope, futureListingField: { evil: true }, signature: { algorithm: "ed25519", signer: did, value: baseValue } };
   assert.equal(await verifyListing(injected), null, "field injected after signing must fail the whole-scope hash");
 });

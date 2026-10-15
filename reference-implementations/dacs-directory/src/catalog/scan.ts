@@ -17,7 +17,7 @@
  */
 import { boundedJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
 import { verifiedDiscoveryAgreement } from "./evidenceGraph.js";
-import { isAgreementDocument } from "@kynesyslabs/dacs/artifacts";
+import { isLegacyMvpAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
@@ -269,7 +269,7 @@ export async function validAgreementForDiscovery(data: Record<string, unknown>, 
         parties.some((p) => p && p.role === "seller" && canonicalDemosAgentClaim(p.primaryClaim) !== null) &&
         await verifiedDiscoveryAgreement(data);
     }
-    return isAgreementDocument(data) && canonicalDemosAgentClaim(data.buyer) === canonicalDemosAgentClaim(buyer) &&
+    return isLegacyMvpAgreementDocument(data) && canonicalDemosAgentClaim(data.buyer) === canonicalDemosAgentClaim(buyer) &&
       canonicalDemosAgentClaim(data.seller) !== null && await verifyReferencedArtifactSignature({
         kind: "dacs-3-agreement", raw: data,
       });

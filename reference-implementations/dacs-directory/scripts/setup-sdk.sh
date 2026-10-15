@@ -2,7 +2,7 @@
 # Vendors + builds the dacs-sdk (not yet on npm) and installs the app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SDK_REV="44d8ff2a07df8c951b94619d20b957b4bb5ce140"
+SDK_REV="3904d704fb540e6e1d7dd502a0be29f20569c92d"
 
 # Railway's GitHub integration can check out this repository, but it does not
 # pass its credentials through to nested private-repository clones. Supply a
@@ -23,18 +23,63 @@ git_with_sdk_auth() {
     command git "$@"
 }
 
+# The DACS Standard revision the pinned SDK declares (package.json
+# dacs.standardRevision); the Directory conforms to the same revision.
+STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
+SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
+SDK_MANIFEST="vendor/dacs-sdk/dist/.dacs-sdk-manifest"
+# scripts/sdk-dist-digest.mjs over the dist that SDK_REV builds to (`npm ci`
+# then `npm run build`; the build is reproducible). A packaged or freshly built
+# dist is accepted only with exactly these bytes.
+SDK_DIST_SHA256="eda8a1f62194e8e8d0b4815770a7af4056d6934a0fd82150b207daa0e3ace2d2"
+
+require_standard_revision() {
+  local declared
+  declared="$(node -e 'process.stdout.write(String(require(process.argv[1]).dacs?.standardRevision ?? ""))' "$PWD/vendor/dacs-sdk/package.json")"
+  if [ "$declared" != "$STANDARD_REV" ]; then
+    echo "dacs-sdk declares Standard revision '${declared}', expected ${STANDARD_REV}" >&2
+    exit 1
+  fi
+}
+
+require_pinned_dist() {
+  local digest
+  digest="$(node scripts/sdk-dist-digest.mjs vendor/dacs-sdk/dist "$@")"
+  if [ "$digest" != "$SDK_DIST_SHA256" ]; then
+    echo "vendor/dacs-sdk/dist has digest ${digest}, not the pinned build ${SDK_DIST_SHA256}" >&2
+    exit 1
+  fi
+}
+
 if [ -d vendor/dacs-sdk/dist ] && [ ! -d vendor/dacs-sdk/.git ]; then
-  echo "using packaged dacs-sdk build"
+  # A packaged build is accepted only when its bytes are the pinned build of
+  # the pinned commit; the marker alone is not evidence.
+  if [ "$(cat "$SDK_REV_MARKER" 2>/dev/null)" != "$SDK_REV" ]; then
+    echo "packaged dacs-sdk build is not marked as built from ${SDK_REV}; refusing it" >&2
+    exit 1
+  fi
+  require_standard_revision
+  require_pinned_dist
+  echo "using packaged dacs-sdk build of ${SDK_REV}"
 else
   if [ ! -d vendor/dacs-sdk ]; then
     mkdir -p vendor
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
   (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
-  (cd vendor/dacs-sdk && npm install --no-audit --no-fund && npm run build)
+  if [ "$(git -C vendor/dacs-sdk rev-parse HEAD)" != "$SDK_REV" ] ||
+    [ -n "$(git -C vendor/dacs-sdk status --porcelain --untracked-files=no)" ]; then
+    echo "vendor/dacs-sdk is not a clean checkout of ${SDK_REV}" >&2
+    exit 1
+  fi
+  require_standard_revision
+  rm -f "$SDK_REV_MARKER" "$SDK_MANIFEST"
+  (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
+  require_pinned_dist --manifest "$SDK_MANIFEST"
+  printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.

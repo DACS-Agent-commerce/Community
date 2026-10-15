@@ -1,8 +1,14 @@
 import type {
   DirectoryInspectionAffordance,
   DirectoryServiceMaturity,
+  DirectoryTransactionReadiness,
   ListingSummary,
 } from "./types.js";
+
+export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
+  disposition: "unassessed",
+  reason: "The Directory authenticated this catalog candidate but did not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. Run the current SDK Listing reader before starting a session.",
+});
 
 export type DirectoryServiceProfile = {
   profileKind: "directory-service-profile";
@@ -22,6 +28,7 @@ export type DirectoryServiceProfile = {
     noLivePaymentClaim: true;
     reason: string;
   };
+  transactionReadiness: DirectoryTransactionReadiness;
   service: {
     title: string;
     category: string;
@@ -85,9 +92,19 @@ export function directoryInspectionAffordance(listing: ListingSummary): Director
   };
 }
 
+/**
+ * The SDK establishes transaction readiness only through its ordered Listing
+ * reader (`isVerifiedListingAdmission`), which this Directory never runs. Every
+ * public projection carries the Directory's own disposition and never
+ * republishes a stored one.
+ */
+export function withDirectoryTransactionReadiness<T extends ListingSummary>(listing: T): T {
+  return { ...listing, transactionReadiness: DIRECTORY_TRANSACTION_READINESS };
+}
+
 export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T): T {
   return {
-    ...listing,
+    ...withDirectoryTransactionReadiness(listing),
     inspection: directoryInspectionAffordance(listing),
   };
 }
@@ -109,8 +126,9 @@ export function buildDirectoryServiceProfile(origin: string, listing: ListingSum
       maturity: "listed",
       noReputationClaim: true,
       noLivePaymentClaim: true,
-      reason: "Directory observed a listing contract; sample receipts, strict bundle history, and live payment evidence require separate verifier adapters.",
+      reason: "Directory authenticated a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
     },
+    transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     service: {
       title: listing.offering.title,
       category: listing.offering.category,

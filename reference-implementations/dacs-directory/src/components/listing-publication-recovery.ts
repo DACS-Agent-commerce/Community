@@ -12,6 +12,8 @@ export type PendingListingPublication = {
   contentHash: string;
   signedListing: Record<string, unknown>;
   transaction: Record<string, unknown> | null;
+  transactionRef?: string;
+  anchorReceipt?: Record<string, unknown>;
   registration: Record<string, unknown>;
   stage: PendingPublicationStage;
   createdAt: number;
@@ -25,6 +27,7 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
   const signedListing = record(pending?.signedListing);
   const registration = record(pending?.registration);
   const transaction = pending?.transaction === null ? null : record(pending?.transaction);
+  const anchorReceipt = pending?.anchorReceipt === undefined ? undefined : record(pending.anchorReceipt);
   if (
     pending?.version !== 1 ||
     typeof pending.claim !== "string" || !/^did:demos:agent:[0-9a-f]{64}$/.test(pending.claim) ||
@@ -37,6 +40,10 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
     !registration || registration.primaryClaim !== pending.claim ||
     !Array.isArray(registration.listingAnchors) || !registration.listingAnchors.includes(pending.anchorAddress) ||
     (pending.transaction !== null && !transaction) ||
+    (pending.transactionRef !== undefined && (
+      typeof pending.transactionRef !== "string" || !/^[0-9a-f]{64}$/.test(pending.transactionRef)
+    )) ||
+    (pending.anchorReceipt !== undefined && !anchorReceipt) ||
     (pending.stage !== "broadcast-uncertain" && pending.stage !== "confirming" && pending.stage !== "registering") ||
     !Number.isSafeInteger(pending.createdAt) || Number(pending.createdAt) <= 0
   ) return null;
@@ -51,6 +58,8 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
     contentHash: pending.contentHash,
     signedListing,
     transaction,
+    ...(typeof pending.transactionRef === "string" ? { transactionRef: pending.transactionRef } : {}),
+    ...(anchorReceipt ? { anchorReceipt } : {}),
     registration,
     stage: pending.stage,
     createdAt: Number(pending.createdAt),

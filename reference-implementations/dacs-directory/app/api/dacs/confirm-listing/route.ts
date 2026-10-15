@@ -2,12 +2,18 @@
  * POST /api/dacs/confirm-listing — independently read and verify a listing
  * after the wallet broadcasts its StorageProgram transaction.
  *
- * Visibility alone is insufficient: the native address, owner, producer-held
- * program name, listing tuple, content hash, seller, identity presentation and
- * listing signature must all bind before the browser may register the pointer.
+ * Visibility alone is insufficient: the canonical transaction and the block
+ * the configured node reports as confirmed first produce a portable
+ * `included` AnchorReceipt. Demos finality is not verified (validator
+ * signatures and quorum need SDK support), so nothing here is labelled final. The
+ * native address, owner, producer-held program name, listing tuple, content
+ * hash, seller, identity presentation and listing signature must then all bind
+ * before the browser may register the pointer.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { listingAddress } from "@kynesyslabs/dacs/canonical";
 import { readAnchorRecord } from "@/src/catalog/chain";
+import { includedListingAnchorReceipt } from "@/src/catalog/listingFinality";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 
@@ -26,6 +32,7 @@ export async function POST(req: NextRequest) {
     sellerClaim?: unknown;
     listingId?: unknown;
     listingVersion?: unknown;
+    transactionRef?: unknown;
   } | null;
   if (
     !body ||
@@ -34,7 +41,10 @@ export async function POST(req: NextRequest) {
     typeof body.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(body.contentHash) ||
     typeof body.sellerClaim !== "string" || canonicalOwner(body.sellerClaim) === null ||
     typeof body.listingId !== "string" || !/^[a-z0-9-]{1,64}$/.test(body.listingId) ||
-    !Number.isSafeInteger(body.listingVersion) || Number(body.listingVersion) < 1
+    !Number.isSafeInteger(body.listingVersion) || Number(body.listingVersion) < 1 ||
+    (body.transactionRef !== undefined && (
+      typeof body.transactionRef !== "string" || !/^[0-9a-fA-F]{64}$/.test(body.transactionRef)
+    ))
   ) {
     return NextResponse.json({ error: "invalid listing confirmation coordinates" }, { status: 400 });
   }
@@ -68,13 +78,43 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const logicalAddress = listingAddress(
+    body.sellerClaim,
+    body.listingId,
+    Number(body.listingVersion),
+  );
+  const inclusion = await includedListingAnchorReceipt({
+    anchorAddress: body.anchorAddress,
+    logicalAddress,
+    programName: body.programName,
+    listingContentHash: body.contentHash,
+    sellerClaim: body.sellerClaim,
+    transactionRef: typeof body.transactionRef === "string"
+      ? body.transactionRef.toLowerCase()
+      : undefined,
+  });
+  if (inclusion.status === "pending") {
+    return NextResponse.json(
+      { confirmed: false, state: "inclusion-pending", reason: inclusion.reason },
+      { status: 202 },
+    );
+  }
+  if (inclusion.status === "rejected") {
+    return NextResponse.json(
+      { confirmed: false, state: "inclusion-failed", error: inclusion.reason },
+      { status: 409 },
+    );
+  }
+
   return NextResponse.json({
     confirmed: true,
-    state: "verified",
+    state: "included-and-verified",
+    finality: inclusion.finality,
     anchorAddress: body.anchorAddress,
     contentHash: verified.contentHash,
     sellerClaim: verified.sellerClaim,
     listingId: body.listingId,
     listingVersion: body.listingVersion,
+    anchorReceipt: inclusion.receipt,
   });
 }

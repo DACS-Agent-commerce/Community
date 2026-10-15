@@ -39,24 +39,70 @@ export interface AnchorRecord {
   data: Record<string, unknown>;
   owner?: string;
   programName?: string;
+  storageAddress?: string;
+  metadata?: Record<string, unknown>;
+  createdByTx?: string;
+  lastModifiedByTx?: string;
+  interactionTxs?: string[];
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
-  if (!/^stor-[0-9a-f]{40}$/.test(address)) return null;
+  const outcome = await readAnchorOutcome(address);
+  return outcome.status === "found" ? outcome.record : null;
+}
+
+/**
+ * Like readAnchorRecord, but for reads whose absence would decide a verdict.
+ *
+ * DEMOS-MAPPING §A.2 gives an ordinary storage API `not found` the CORE SR-2
+ * disposition `indeterminate`, and DACS-1 RB-6 makes a transport failure or
+ * integrity mismatch `indeterminate` as well. Every read that does not yield a
+ * readable artifact is therefore `unavailable`: a 404, any other non-2xx, a
+ * failed or oversized body, or a response that holds no artifact object. Only
+ * an address that can never name a StorageProgram is `absent`.
+ */
+export async function readAnchorOutcome(
+  address: string,
+): Promise<{ status: "found"; record: AnchorRecord } | { status: "absent" | "unavailable" }> {
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
+  let res: Response;
   try {
-    const res = await fetch(`${RPC}/storage-program/${address}`, {
+    res = await fetch(`${RPC}/storage-program/${address}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
+  } catch {
+    return { status: "unavailable" };
+  }
+  const record = await anchorRecordFromResponse(res);
+  return record ? { status: "found", record } : { status: "unavailable" };
+}
+
+async function anchorRecordFromResponse(res: Response): Promise<AnchorRecord | null> {
+  try {
     if (!res.ok) return null;
     const json = (await storageResponseJson(res)) as {
       success?: boolean;
       data?: Record<string, unknown>;
       owner?: string;
       programName?: string;
+      storageAddress?: string;
+      metadata?: Record<string, unknown>;
+      createdByTx?: string;
+      lastModifiedByTx?: string;
+      interactionTxs?: string[];
     };
     return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data) && boundedJson(json.data) !== null
-      ? { data: json.data, owner: json.owner, programName: json.programName }
+      ? {
+          data: json.data,
+          owner: json.owner,
+          programName: json.programName,
+          storageAddress: json.storageAddress,
+          metadata: json.metadata,
+          createdByTx: json.createdByTx,
+          lastModifiedByTx: json.lastModifiedByTx,
+          interactionTxs: json.interactionTxs,
+        }
       : null;
   } catch {
     return null;
@@ -159,12 +205,26 @@ export async function resolveOwnedAnchorByName(
         data?: Record<string, unknown>;
         owner?: string;
         programName?: string;
+        storageAddress?: string;
+        metadata?: Record<string, unknown>;
+        createdByTx?: string;
+        lastModifiedByTx?: string;
+        interactionTxs?: string[];
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
         boundedJson(body.data) !== null && body.programName === programName
       ) {
-        record = { data: body.data, owner: body.owner, programName: body.programName };
+        record = {
+          data: body.data,
+          owner: body.owner,
+          programName: body.programName,
+          storageAddress: body.storageAddress,
+          metadata: body.metadata,
+          createdByTx: body.createdByTx,
+          lastModifiedByTx: body.lastModifiedByTx,
+          interactionTxs: body.interactionTxs,
+        };
       }
     } catch { /* classified below */ }
     if (!record) {

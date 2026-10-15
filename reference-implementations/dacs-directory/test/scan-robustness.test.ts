@@ -55,7 +55,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(listingScope), PREFIXES.listing, 1) } };
+// The SDK legacy-MVP read profile carries a bare Ed25519 value; agentId is the signer.
+const listing = { ...listingScope, signature: await signature(contentHash(listingScope), PREFIXES.listing, 1) };
 const verifiedListing = await verifyListing(listing);
 assert.ok(verifiedListing);
 const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: verifiedListing.contentHash, revokedAt: 1 };
@@ -179,7 +180,10 @@ test("signature depth sweep bounds whole values and normalizes persisted envelop
   delete scope.signature;
   const extended = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } };
-  for (const depth of [124, 125, 126, 127, 128, 129, 4096, 4098, 4100]) {
+  // CORE CF-5 admits 128 container levels (dacs-sdk b819b32, in the pin), the signature
+  // envelope included, so a member nested deeper than 126 has no canonical form. 61-64
+  // stay in the sweep: the previous pin (f68fed1) refused everything deeper than 62.
+  for (const depth of [61, 62, 63, 64, 124, 125, 126, 127, 128, 129, 4096, 4098, 4100]) {
     resetIndex([later], 6);
     chain({ [locator(4)]: { data: withSignatureMember(extended, nested(depth)) } }, [locator(4)]);
     await reindex();

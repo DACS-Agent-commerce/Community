@@ -4,7 +4,7 @@ import { useState } from "react";
 import "@/src/shims/buffer";
 import { ed25519Verify, publicKeyFromRaw, dacsXSeparator } from "@kynesyslabs/dacs/crypto";
 // Pure module — safe for client bundles (no substrate/demosdk in its chain).
-import { verifySignedArtifact } from "@/vendor/dacs-sdk/dist/agent/signedArtifact.js";
+import { verifySignedArtifact } from "@kynesyslabs/dacs";
 
 const keyFromDid = (did: string): Uint8Array | null => {
   const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];

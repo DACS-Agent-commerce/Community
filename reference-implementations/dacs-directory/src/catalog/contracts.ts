@@ -1,4 +1,5 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
@@ -7,7 +8,7 @@ export const listingSummarySchema = {
   $id: "/schemas/listing-summary.schema.json",
   title: "DACS Directory ListingSummary",
   type: "object",
-  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt"],
+  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt", "transactionReadiness"],
   properties: {
     listingId: { type: "string", minLength: 1 },
     version: { type: "integer", minimum: 1 },
@@ -49,7 +50,7 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationBinding: {
+    revocation: {
       type: "object",
       required: [
         "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
@@ -70,6 +71,16 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
+    transactionReadiness: {
+      type: "object",
+      required: ["disposition", "reason"],
+      additionalProperties: false,
+      properties: {
+        disposition: { const: "unassessed" },
+        reason: { type: "string", minLength: 1 },
+      },
+      description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
+    },
     reputationHint: { type: "object" },
     inspection: {
       type: "object",
@@ -84,8 +95,8 @@ export const listingSummarySchema = {
   },
   allOf: [{
     if: { properties: { status: { const: "revoked" } }, required: ["status"] },
-    then: { required: ["revocationBinding"] },
-    else: { not: { required: ["revocationBinding"] } },
+    then: { required: ["revocation"] },
+    else: { not: { required: ["revocation"] } },
   }],
 } as const;
 
@@ -112,8 +123,10 @@ export const listingRejectionDiagnosticSchema = {
   required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
-    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    listingId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" },
+    listingVersion: { type: "integer", minimum: 1 },
+    code: { enum: LISTING_REJECTION_CODES },
+    message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
     occurrences: { type: "integer", minimum: 1 },
     firstSeenAt: { type: "integer", minimum: 0 },
     lastSeenAt: { type: "integer", minimum: 0 },
@@ -190,7 +203,7 @@ export const catalogStatusSchema = {
           type: "object",
           required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
           properties: {
-            scope: { const: "listing-registration-binding" },
+            scope: { const: "listing-admission" },
             total: { type: "integer", minimum: 0 },
             byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
             query: {

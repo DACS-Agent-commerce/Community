@@ -6,12 +6,17 @@ import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/cat
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
+import {
+  indexRegistration,
+  listingBindingRejection,
+  listingIsCurrentlyEffective,
+} from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { loadScanState, saveScanState } from "../src/catalog/store.js";
-import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
+import { registrationMessage } from "../src/catalog/registrationSig.js";
+import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -26,7 +31,9 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
+  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer])))
+    .toString(kind === "listing" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
@@ -39,7 +46,7 @@ async function vector(jobId = "job-1", offset = 0) {
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1, claims: [{ ref: dids[1] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
@@ -215,6 +222,15 @@ test("listing binding compares canonical §6.3.1 forms, not lowercased strings",
   );
   // A registration stored in a legacy non-canonical form never binds.
   assert.equal(listingBindingRejection(dids[1], owner, `0x${hexTail}`), "SELLER_CLAIM_BINDING");
+});
+
+test("listing discovery enforces both edges of the signed validity window", () => {
+  const now = 1_000;
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now + 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now - 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({}, now), true, "explicit legacy Listings have no validity field");
 });
 
 function dealRecord(
@@ -1038,4 +1054,88 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+});
+
+/** Index the seller's registration over the fixture's stubbed storage. */
+async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Partial<Registration> = {}) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  try {
+    return await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], ...extra },
+      undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("a verified two-copy deal publishes exactly the evidence its authoritative copy signs", async () => {
+  const fixture = await vector("projection-job", 130);
+  const deal = registeredDeal("projection-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  const [published] = record.deals;
+  assert.deepEqual({
+    signatureVerified: published.signatureVerified, refsVerified: published.refsVerified,
+    reputationEligible: published.reputationEligible, rail: published.rail, outcome: published.outcome,
+    sellerOutcome: published.sellerOutcome, anchoredByRole: published.anchoredByRole,
+    bundleContentHash: published.bundleContentHash, cancellationNeutral: published.cancellationNeutral,
+    finalisedAt: published.finalisedAt, agreementPrice: published.agreementPrice, category: published.category,
+    ratings: published.ratings, settlementTxIds: published.settlementTxIds,
+  }, {
+    signatureVerified: true, refsVerified: true, reputationEligible: true, rail: "pay-dem", outcome: "completed",
+    sellerOutcome: "completed", anchoredByRole: "seller", bundleContentHash: artifactHash(fixture.sellerBundle, "bundle"),
+    cancellationNeutral: false, finalisedAt: 120, agreementPrice: { amount: "1.25", currency: "DEM" }, category: "services.test",
+    ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110, contentHash: artifactHash(fixture.rating, "rating") }],
+    settlementTxIds: [{ id: "tx-projection-job", observedAt: 100, phaseIndex: 2 }],
+  });
+  const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
+  assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
+    { categoryScope: "services.test", completionRate: 1, averageSellerRating: 5, bundleCount: 1 });
+  assert.equal(record.reputation.bundleCount, 1);
+});
+
+test("a BundleBinding resolves only to the copy anchored by the role it names", async () => {
+  // Both copies share one bundle hash; only the unhashed anchoredByRole tells them apart (BB-5).
+  const fixture = await vector("misrole-job", 150);
+  const deal = registeredDeal("misrole-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.buyer, fixture.buyerBundle, 1),
+  ] });
+  const [published] = record.deals;
+  assert.equal(published.signatureVerified, false, "the seller side is indeterminate, so nothing is published as verified");
+  assert.equal(published.refsVerified, false);
+  assert.equal(published.outcome, undefined);
+  assert.equal(published.anchoredByRole, undefined);
+  assert.equal(record.reputation.bundleCount, 0);
+});
+
+test("seller labels come only from a verifiable owner signature and verified identity claims", async () => {
+  const fixture = await vector("labels-job", 170);
+  const base = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing] };
+  const signed = async (signedAt: number, extra: Partial<Registration> = {}) => {
+    const message = registrationMessage({ ...base, ...extra }, signedAt);
+    const value = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+    return { ...extra, ownerSignature: { message, signature: value, signedAt } };
+  };
+  const unsigned = await indexFixture(fixture);
+  assert.equal(unsigned.ownerRegistered, false);
+  // A v0.1 IdentityBundle with only its signing key is self-declared, never verified or institutional.
+  assert.equal(unsigned.identityTier, "self-declared");
+  assert.ok(unsigned.identityBundle);
+  assert.equal((await indexFixture(fixture, await signed(Date.now()))).ownerRegistered, true);
+  // Freshness gates submission only; a stored signature still binds on every reindex.
+  assert.equal((await indexFixture(fixture, await signed(1))).ownerRegistered, true);
+  const { ownerSignature: other } = await signed(Date.now(), { displayName: "someone else" });
+  assert.equal((await indexFixture(fixture, { ownerSignature: other })).ownerRegistered, false, "a signature over other content");
+  // A verifier that throws on a malformed stored signature never grants the badge.
+  const malformed = await signed(Date.now());
+  (malformed.ownerSignature as { signature: unknown }).signature = 42;
+  assert.equal((await indexFixture(fixture, malformed)).ownerRegistered, false);
 });

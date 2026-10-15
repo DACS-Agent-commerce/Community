@@ -39,7 +39,8 @@ const PREFIXES: Record<string, string> = {
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
-  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
+  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
+  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer, kind === "listing" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: ArtifactKind, extra: Obj = {}) => ({
@@ -52,7 +53,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(listingScope), PREFIXES.listing, 1) } };
+// The SDK legacy-MVP read profile carries a bare Ed25519 value; agentId is the signer.
+const listing = { ...listingScope, signature: await signature(contentHash(listingScope), PREFIXES.listing, 1) };
 const verifiedListing = await verifyListing(listing);
 assert.ok(verifiedListing);
 const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: verifiedListing.contentHash, revokedAt: 1 };
@@ -119,6 +121,14 @@ function resetIndex(registrations: Registration[], generatedAt: number) {
     schemaVersion: 8, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
     verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
   });
+  // Queued candidates from an earlier test would name programs this test's node
+  // never serves, and a storage `not found` for an owner's candidate withholds.
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    if (db.prepare("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").get()) {
+      db.prepare("DELETE FROM revocation_candidates").run();
+    }
+  } finally { db.close(); }
 }
 const artifactRow = (at: string) => {
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
@@ -150,7 +160,7 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   assert.ok(catalog.generatedAt > 42);
   const [indexed] = catalog.sellers[0].listings;
   assert.equal(indexed.status, "revoked");
-  assert.equal(indexed.revocationBinding?.markerAnchor.locator, validMarker);
+  assert.equal(indexed.revocation?.markerAnchor.locator, validMarker);
   const queue = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     assert.deepEqual(queue.prepare("SELECT locator FROM revocation_candidates WHERE listing_hash = ? AND state = 'pending'")
@@ -333,7 +343,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
@@ -452,7 +462,8 @@ test("reindex drops malformed carried bindings and still indexes every later sel
   chain({ [listingAnchor]: { data: JSON.stringify(listing) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
-  assert.throws(() => contentHash(carried), RangeError);
+  // No canonical form: the pinned SDK refuses its nesting before recursing (DacsError, not RangeError).
+  assert.throws(() => contentHash(carried));
   resetIndex([
     { primaryClaim: buyer, displayName: "Carrier", listingAnchors: [], bundleBindings: [carried, binding] },
     { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] },

@@ -2,18 +2,30 @@
  * POST /api/dacs/build-listing — everything the wallet flow needs to publish
  * a listing, precomputed server-side:
  *   { claim, serviceId, name, description, rails[], delivery[] }
- * →  { listing, message, anchorAddress, exists, tx }
+ * →  identity preimage, then the exact unsigned Listing, then (only after its
+ *    wallet signature is verified) a broadcastable anchor transaction.
  *
- * For a new version the client wallet-signs `message`, inserts the signed
- * listing into `tx`, and broadcasts it. When the same owner/name already holds
+ * For a new version the client wallet-signs `message`; the server verifies the
+ * signature and binds that exact artifact plus its hashes into `tx`. When the same owner/name already holds
  * a verified immutable version, the response carries `exists:true` and no
  * transaction so the client can resume registration without another write.
  * Ownership is intrinsic: the native address uses the seller's next account
  * nonce plus the live empty salt, and readback re-binds owner/name/content.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash, listingAddress } from "@kynesyslabs/dacs/canonical";
+import {
+  canonicalize,
+  contentHash,
+  listingAddress,
+  logicalToStorageProgramName,
+  sha256Hex,
+} from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
+import { isListing, type ListingDraft } from "@kynesyslabs/dacs/artifacts";
+import {
+  resolveListingPayloadVerificationCapability,
+  resolveListingRails,
+} from "@/src/sdkListingValidation";
 import {
   deriveStorageAddress,
   LIVE_STORAGE_SALT,
@@ -28,12 +40,17 @@ import {
   negotiationPhaseForPricing,
   publishableRail,
   PUBLISHABLE_PRICING_KINDS,
+  PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  railAuthorityPermitsPublication,
+  RAIL_ID_PATTERN,
   type PublishablePricingKind,
 } from "@/src/catalog/listingOptions";
 
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
+/** Owner-held versions that no longer authenticate and may be stepped past per request. */
+const MAX_OCCUPIED_VERSIONS = 4;
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
 async function accountNonce(addressHex: string): Promise<number> {
@@ -61,6 +78,7 @@ export async function POST(req: NextRequest) {
     claim?: string; serviceId?: string; name?: string; description?: string;
     rails?: string[]; delivery?: string[]; category?: string; tags?: string[];
     publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string;
+    listingSignature?: string;
     pricing?: {
       kind?: PublishablePricingKind; amount?: string; currency?: string; unit?: string; minTotal?: string;
       minPct?: number; maxPct?: number; selectionRule?: "lowest-price" | "highest-price" | "first-acceptable";
@@ -78,7 +96,7 @@ export async function POST(req: NextRequest) {
   }
   if (
     !Array.isArray(body.rails) || body.rails.length > 16 ||
-    !body.rails.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v)) ||
+    !body.rails.every((v) => typeof v === "string" && v.length <= 128 && RAIL_ID_PATTERN.test(v)) ||
     !Array.isArray(body.delivery) || body.delivery.length > 16 ||
     !body.delivery.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v))
   ) {
@@ -104,7 +122,7 @@ export async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  const listingVersion = Math.max(0, ...priorVersions) + 1;
+  let listingVersion = Math.max(0, ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -147,7 +165,8 @@ export async function POST(req: NextRequest) {
 
   // A current Listing embeds a separately signed IdentityBundle. The first
   // request returns that preimage; the second includes the wallet signature
-  // and receives the final listing preimage + anchor transaction.
+  // and receives the exact Listing preimage. Only a third request carrying the
+  // Listing signature receives a broadcastable anchor transaction.
   const serverNow = Date.now();
   const identityPresentedAt = body.identitySignature ? Number(body.identityPresentedAt) : serverNow;
   if (body.identitySignature && (
@@ -203,7 +222,11 @@ export async function POST(req: NextRequest) {
     ? { kind: "storage-program", accessModel: "public" }
     : deliverableKind === "entitlement"
       ? { kind: "entitlement", durationSec: 2_592_000, renewable: false }
-      : { kind: "attested-payload", payloadFormat: "application/json" };
+      : {
+          kind: "attested-payload",
+          payloadFormat: "application/json",
+          verificationMethod: { kind: "self-signed" },
+        };
   const auctionDeadline = identityPresentedAt + 7 * 24 * 60 * 60 * 1000;
   const negotiationKind = negotiationPhaseForPricing(pricingKind);
   const negotiationStep = negotiationKind === "negotiate-rfq"
@@ -225,7 +248,10 @@ export async function POST(req: NextRequest) {
     seller: {
       identity: {
         ...identityScope,
-        presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySigHex }] },
+        presentation: {
+          kind: "per-claim",
+          signatures: [{ ref: did, signature: Buffer.from(identitySigHex, "hex").toString("base64url") }],
+        },
       },
       displayName: knownSeller?.displayName ?? body.name.trim(),
       ...(publicEndpoint ? { publicEndpoint } : {}),
@@ -238,16 +264,95 @@ export async function POST(req: NextRequest) {
     terms: {},
     validity: { notBefore: identityPresentedAt, ...(pricingKind === "auction" ? { notAfter: auctionDeadline } : {}) },
   };
-  const hash = contentHash(listing as Record<string, unknown>);
-  const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
+  const railResolution = resolveListingRails({
+    trustPhase: "PA-1",
+    trustPolicyAcceptsPA1: true,
+    payPhases: listing.pipeline
+      .filter((phase) => phase.kind.startsWith("pay-"))
+      .map((phase) => ({
+        kind: phase.kind,
+        rail: (phase.parameters as Record<string, unknown> | undefined)?.rail,
+      })),
+    acceptedRails: listing.acceptedRails,
+    registry: { state: "not-used", entries: [], definitions: [] },
+    inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  });
+  if (!railAuthorityPermitsPublication(railResolution)) {
+    return NextResponse.json(
+      { error: `listing rail authority is ${railResolution.disposition} (${railResolution.reason}); publication refused` },
+      { status: 409 },
+    );
+  }
+  const payloadCapability = await resolveListingPayloadVerificationCapability(
+    listing as unknown as ListingDraft,
+    "produce",
+  );
+  if (
+    payloadCapability.disposition !== "not-applicable" &&
+    payloadCapability.disposition !== "supported"
+  ) {
+    return NextResponse.json(
+      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
+      { status: 409 },
+    );
+  }
 
-  const logicalAddress = listingAddress(did, serviceId, listingVersion);
   // StorageProgram names are producer-held write inputs, not public resolution
   // keys. This deterministic colon-free encoding lets THIS producer recover a
   // broadcast whose response was lost without pretending consumers can derive
   // the native address from the logical one.
-  const programName = `dacs1-${Buffer.from(logicalAddress, "utf8").toString("base64url")}`;
-  const resolution = await resolveOwnedAnchorByName(programName, owner);
+  const programNameFor = (version: number) =>
+    logicalToStorageProgramName(listingAddress(did, serviceId, version));
+  const recoverable = (verified: Awaited<ReturnType<typeof verifyListing>>) => Boolean(
+    verified &&
+    verified.profile === "dacs-v0.1" &&
+    verified.sellerClaim === did &&
+    verified.scope.listingId === serviceId &&
+    verified.scope.listingVersion === listingVersion,
+  );
+  // Versions are immutable. A program at this owner's name whose artifact no
+  // longer authenticates (for example a Listing an earlier publisher signed
+  // with raw hex) occupies that version permanently and leaves the catalog, so
+  // step past a bounded number of them instead of refusing republication.
+  let resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
+  for (let skipped = 0; skipped < MAX_OCCUPIED_VERSIONS && resolution.status === "present"; skipped += 1) {
+    if (recoverable(await verifyListing(resolution.record.data))) break;
+    listingVersion += 1;
+    listing.listingVersion = listingVersion;
+    resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
+  }
+  const hash = contentHash(listing as Record<string, unknown>);
+  const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
+  let signedCandidate: Record<string, unknown> | undefined;
+  if (body.listingSignature !== undefined) {
+    const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
+    if (!/^[0-9a-fA-F]{128}$/.test(listingSigHex)) {
+      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+    }
+    let listingSignatureValid = false;
+    try {
+      listingSignatureValid = ed25519Verify(
+        Buffer.from(message, "utf8"),
+        Uint8Array.from(Buffer.from(listingSigHex, "hex")),
+        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
+      );
+    } catch { /* malformed signatures fail closed */ }
+    // Wallets return hex; CORE §B.7 SIG-6 stores canonical unpadded base64url.
+    signedCandidate = {
+      ...listing,
+      signature: {
+        algorithm: "ed25519",
+        signer: did,
+        value: Buffer.from(listingSigHex, "hex").toString("base64url"),
+      },
+    };
+    if (!listingSignatureValid || !isListing(signedCandidate)) {
+      return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
+    }
+  }
+
+  const logicalAddress = listingAddress(did, serviceId, listingVersion);
+  const programName = programNameFor(listingVersion);
   if (resolution.status === "indeterminate") {
     return NextResponse.json(
       { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
@@ -262,24 +367,35 @@ export async function POST(req: NextRequest) {
   const exists = resolution.status === "present";
   if (resolution.status === "present") {
     const verified = await verifyListing(resolution.record.data);
-    if (
-      !verified ||
-      verified.profile !== "dacs-v0.1" ||
-      verified.sellerClaim !== did ||
-      verified.scope.listingId !== serviceId ||
-      verified.scope.listingVersion !== listingVersion
-    ) {
+    if (!verified || !recoverable(verified)) {
       return NextResponse.json(
-        { error: "the existing owner-bound program does not contain the expected verified listing version" },
+        { error: "the existing owner-bound program does not contain the expected authenticated listing candidate" },
         { status: 409 },
       );
     }
     // Listing versions are immutable. Recover the already-signed artifact and
     // continue registration; never overwrite it with newly generated bytes.
     anchorAddress = resolution.address;
-    publishedListing = verified.listing as Record<string, unknown>;
+    publishedListing = verified.listing as unknown as Record<string, unknown>;
     publishedHash = verified.contentHash;
   } else {
+    // Do not prepare a broadcastable transaction until the wallet has signed
+    // the exact artifact returned by the preview response.
+    if (!signedCandidate) {
+      return NextResponse.json({
+        listing,
+        message,
+        contentHash: hash,
+        artifactProfile: "dacs-v0.1",
+        logicalAddress,
+        programName,
+        exists: false,
+        tx: null,
+        publicationReady: false,
+        railResolution,
+        payloadCapability,
+      });
+    }
     const nonce = await accountNonce(hex);
     const txNonce = nonce + 1;
     anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
@@ -288,8 +404,12 @@ export async function POST(req: NextRequest) {
       storageAddress: anchorAddress,
       programName,
       encoding: "json",
-      data: "__SIGNED_LISTING__",
-      metadata: { logicalAddress },
+      data: signedCandidate,
+      metadata: {
+        logicalAddress,
+        contentHash: hash,
+        envelopeHash: sha256Hex(canonicalize(signedCandidate)),
+      },
       acl: { mode: "public" },
       salt: LIVE_STORAGE_SALT,
       storageLocation: "onchain",
@@ -310,6 +430,7 @@ export async function POST(req: NextRequest) {
       status: "",
       blockNumber: null,
     };
+    publishedListing = signedCandidate;
   }
 
   const priorRegistration = loadRegistrations().find((r) => r.primaryClaim === did);
@@ -342,6 +463,9 @@ export async function POST(req: NextRequest) {
     anchorAddress,
     exists,
     tx,
+    publicationReady: true,
+    railResolution,
+    payloadCapability,
     registration: {
       ...registration,
       ownerSignature: {

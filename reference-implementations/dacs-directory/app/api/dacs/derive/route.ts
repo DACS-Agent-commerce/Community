@@ -32,6 +32,8 @@ export async function GET(req: NextRequest) {
     found: !!anchored,
     valid,
     ownedByClaim: valid,
-    title: verified?.listing.name ?? null,
+    title: verified?.profile === "dacs-v0.1"
+      ? verified.listing.offering.title
+      : verified?.listing.name ?? null,
   });
 }
