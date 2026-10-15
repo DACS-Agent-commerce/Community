@@ -69,6 +69,8 @@ let transactions: Obj[] = [];
 let reads = new Map<string, number>();
 const unavailable = new Set<string>();
 const scanOnly = new Set<string>();
+/** Locators the node answers with a fixed response once they exist. */
+const answers = new Map<string, () => Response>();
 let nodeDown = false;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
@@ -79,6 +81,8 @@ globalThis.fetch = async (input, init) => {
     const entry = storage[at];
     if (!entry) return new Response(null, { status: 404 });
     if (unavailable.has(at) || (scanOnly.has(at) && count > 1)) return new Response(null, { status: 503 });
+    const answer = answers.get(at);
+    if (answer) return answer();
     return new Response(`{"success":true,"owner":${JSON.stringify(entry.owner ?? ownerOf(seller))},` +
       `"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${entry.data}}`, { headers: { "content-type": "application/json" } });
   }
@@ -94,6 +98,7 @@ function chain(programs: Record<string, StoredProgram>, written: string[], first
   reads = new Map();
   unavailable.clear();
   scanOnly.clear();
+  answers.clear();
   transactions = written.map((at, index) => memo(firstId + index, at)).reverse();
 }
 const readsOf = (locators: string[]) => locators.reduce((total, at) => total + (reads.get(at) ?? 0), 0);
@@ -694,10 +699,12 @@ test("an unreadable verified revocation marker never republishes its listing as 
   assert.equal(summary()?.status, "revoked");
 });
 
-test("an unavailable candidate anchored by the listing owner withholds the listing; another writer's or a vanished one does not", async () => {
+test("an unavailable or not-found candidate anchored by the listing owner withholds the listing; another writer's does not", async () => {
+  // DEMOS-MAPPING §A.2: a storage API `not found` is SR-2 indeterminate, never absence.
   for (const [writer, after, expected] of [
     [outsider, "unavailable", "active"],
-    [seller, "gone", "active"],
+    [outsider, "gone", "active"],
+    [seller, "gone", undefined],
     [seller, "unavailable", undefined],
   ] as const) {
     resetIndex([sellerRegistration, later], 32);
@@ -714,6 +721,67 @@ test("an unavailable candidate anchored by the listing owner withholds the listi
     await reindex();
     assert.deepEqual(pending(listingHash), [locator(61)], "the candidate was discovered but not read");
     assert.equal(listingStatus(), expected, `${writer} ${after}`);
+  }
+});
+
+test("a published binding carried through an outage stays with the listing it revoked", async () => {
+  const otherScope = { ...listingScope, listingId: "svc2", serviceId: "svc2" };
+  const other = { ...otherScope, signature: await signature(contentHash(otherScope), "dacs-listing:v1:", 1) };
+  const otherHash = (await verifyListing(other))!.contentHash;
+  resetIndex([{ ...sellerRegistration, listingAnchors: [locator(1), locator(2)] }, later], 34);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(2)]: { data: JSON.stringify(other) },
+    [locator(60)]: { data: JSON.stringify(marker) },
+  }, [locator(1), locator(2), locator(60)]);
+  await reindex();
+  const byId = (id: string) => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)
+    ?.listings.find((entry) => entry.listingId === id);
+  const revoked = byId("svc");
+  assert.equal(revoked?.status, "revoked");
+  assert.equal(byId("svc2")?.status, "active");
+
+  // The marker now also stands as a known marker for the other listing, and is unreadable.
+  const state = store.loadScanState();
+  store.saveScanState({ ...state, verifiedRevocations: { ...state.verifiedRevocations, [otherHash]: [locator(60)] } });
+  transactions = [];
+  unavailable.add(locator(60));
+  await reindex();
+  assert.deepEqual(byId("svc")?.revocation, revoked?.revocation, "the revoked listing keeps its own binding");
+  assert.equal(byId("svc2"), undefined, "the other listing never inherits that binding");
+});
+
+test("a known verified marker that answers without a readable artifact withholds its listing", async () => {
+  // DEMOS-MAPPING §A.2 and DACS-1 RB-6: none of these answers is authoritative absence.
+  const truncated = () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"success":true,'));
+      controller.error(new Error("connection reset"));
+    },
+  }), { headers: { "content-type": "application/json" } });
+  const cases: Array<[string, (at: string) => void]> = [
+    ["503", (at) => unavailable.add(at)],
+    ["404", (at) => answers.set(at, () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }))],
+    ["deleted", (at) => { delete storage[at]; }],
+    ["500", (at) => answers.set(at, () => new Response(null, { status: 500 }))],
+    ["400", (at) => answers.set(at, () => new Response(null, { status: 400 }))],
+    ["truncated body", (at) => answers.set(at, truncated)],
+    ["malformed JSON", (at) => answers.set(at, () => new Response('{"success":true,"data":', { status: 200 }))],
+    ["success false", (at) => answers.set(at, () => Response.json({ success: false }))],
+    ["non-object data", (at) => answers.set(at, () => Response.json({ success: true, data: [1] }))],
+  ];
+  const summary = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
+  for (const [name, outage] of cases) {
+    resetIndex([sellerRegistration, later], 40);
+    chain({ [locator(1)]: { data: JSON.stringify(listing) }, [locator(60)]: { data: JSON.stringify(marker) } }, [locator(1), locator(60)]);
+    await reindex();
+    assert.equal(summary()?.status, "revoked", `${name}: the marker was verified`);
+    // The published binding is gone; only the verified marker is still known.
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 41, sellers: [] });
+    transactions = [];
+    outage(locator(60));
+    await reindex();
+    assert.equal(summary(), undefined, `${name}: the listing is withheld, not republished active`);
   }
 });
 

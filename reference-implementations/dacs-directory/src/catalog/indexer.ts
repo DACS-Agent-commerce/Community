@@ -253,8 +253,9 @@ export async function indexRegistration(
     ) ?? priorUnreadRevocation(prior, verified.contentHash, progress.unread);
     recordRevocationProgress(verified.contentHash, progress);
     // SDK readers take a fresh `active` summary without a binding as established
-    // revocation absence, so a marker the node could not serve must never
-    // produce one. A published binding stays revoked (above); a verified marker
+    // revocation absence, so a marker the node could not serve (including a
+    // storage `not found`, which DEMOS-MAPPING §A.2 makes indeterminate) must
+    // never produce one. A published binding stays revoked (above); a verified marker
     // without one, or a candidate the listing owner anchored, withholds the
     // listing until it can be read. Anyone can anchor other candidates, so an
     // outage on those cannot withhold it.

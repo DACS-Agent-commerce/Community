@@ -52,8 +52,14 @@ export async function readAnchorRecord(address: string): Promise<AnchorRecord | 
 }
 
 /**
- * Like readAnchorRecord, but separates a node that could not answer (network
- * failure, timeout, 5xx, 429) from an answer that holds no readable artifact.
+ * Like readAnchorRecord, but for reads whose absence would decide a verdict.
+ *
+ * DEMOS-MAPPING §A.2 gives an ordinary storage API `not found` the CORE SR-2
+ * disposition `indeterminate`, and DACS-1 RB-6 makes a transport failure or
+ * integrity mismatch `indeterminate` as well. Every read that does not yield a
+ * readable artifact is therefore `unavailable`: a 404, any other non-2xx, a
+ * failed or oversized body, or a response that holds no artifact object. Only
+ * an address that can never name a StorageProgram is `absent`.
  */
 export async function readAnchorOutcome(
   address: string,
@@ -68,9 +74,8 @@ export async function readAnchorOutcome(
   } catch {
     return { status: "unavailable" };
   }
-  if (res.status >= 500 || res.status === 429) return { status: "unavailable" };
   const record = await anchorRecordFromResponse(res);
-  return record ? { status: "found", record } : { status: "absent" };
+  return record ? { status: "found", record } : { status: "unavailable" };
 }
 
 async function anchorRecordFromResponse(res: Response): Promise<AnchorRecord | null> {

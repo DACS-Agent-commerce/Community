@@ -121,6 +121,14 @@ function resetIndex(registrations: Registration[], generatedAt: number) {
     schemaVersion: 8, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
     verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
   });
+  // Queued candidates from an earlier test would name programs this test's node
+  // never serves, and a storage `not found` for an owner's candidate withholds.
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    if (db.prepare("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").get()) {
+      db.prepare("DELETE FROM revocation_candidates").run();
+    }
+  } finally { db.close(); }
 }
 const artifactRow = (at: string) => {
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
