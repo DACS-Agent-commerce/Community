@@ -161,22 +161,28 @@ ports, including 0) are rejected.
   `example.net`, `example.org`) are rejected too, unless the check runs with
   `--allow-documentation-names`, as CI does for its placeholder origin. Production
   builds (`railway.json`) run the check without it.
-- An IP literal must be global unicast and not special-purpose. IPv4 rejects every
-  block the IANA IPv4 Special-Purpose Address Registry marks not globally reachable
-  (loopback, unspecified, private, shared (CGNAT), link-local, documentation,
-  benchmarking, protocol assignments, reserved, and broadcast), plus multicast and
-  the deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
-  documentation, IETF-protocol (including Teredo), 6to4, and `3fff::/20` blocks, so
-  IPv4-mapped, NAT64, and other forms that embed an IPv4 address are rejected.
-- The check fails closed: the globally reachable exceptions inside `192.0.0.0/24`
-  (PCP and TURN anycast) and `2001::/23` (protocol anycast, AMT, AS112, ORCHIDv2,
-  and DRIP) are protocol addresses, not hosting space, and are rejected with their
-  blocks.
+  Other names that are merely undelegated (for example `lan` or `corp`) are not
+  rejected.
+- An IP literal must be global unicast and outside every block in the IANA IPv4 and
+  IPv6 Special-Purpose Address Registries. IPv4 rejects loopback, unspecified,
+  private, shared (CGNAT), link-local, documentation, benchmarking, protocol
+  assignments, AS112, AMT, reserved, and broadcast, plus multicast and the
+  deprecated 6to4 relay block. IPv6 must be in `2000::/3`, outside the
+  documentation, IETF-protocol (including Teredo), 6to4, Direct Delegation AS112,
+  and `3fff::/20` blocks, so IPv4-mapped, NAT64, and other forms that embed an IPv4
+  address are rejected.
+- The check fails closed: the registries' globally reachable rows (PCP and TURN
+  anycast inside `192.0.0.0/24`; AS112 and AMT; protocol anycast, ORCHIDv2, and
+  DRIP inside `2001::/23`) are protocol addresses, not hosting space, and are
+  rejected too.
 
-`test/fixtures/origin-policy-sources.json` records where these rules come from: the
-pinned copies of the IANA registries (CPython v3.15.0 and Unbound at a fixed commit)
-and of the Fetch Standard, the registry rows those copies lack (as of 2026-10-14),
-and the deliberate deviations. The tests check the tables against it.
+`test/fixtures/origin-policy-sources.json` records where these rules come from:
+every row of both IP registries (from Wireshark's IANA-generated tables), the
+special-use names (Unbound, Knot Resolver, and their RFCs), and the Fetch Standard's
+bad ports, each through a copy pinned to an upstream revision and sha256 (as of
+2026-10-14), plus the deliberate deviations. The tests check the tables against it
+offline; `npm run verify:origin-sources` (needs network) re-fetches each pinned copy
+and checks the fixture against it.
 Generated canonical URLs and discovery documents therefore cannot silently point at
 localhost or a different base path. The check does not resolve DNS, so a public name
 that resolves to a private address still passes.
