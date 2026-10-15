@@ -14,6 +14,7 @@ import {
   railAuthorityPermitsPublication,
 } from "../src/catalog/listingOptions.js";
 import { resolveListingRails } from "../src/sdkListingValidation.js";
+import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-rail-registry-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
@@ -59,7 +60,7 @@ test("every publishable rail is a DACS-4 §9.4.2 registry ID with its registered
   }
 });
 
-test("a /register-built Listing passes every LRR check a reader using the Standard registry can verify", async () => {
+test("/register refuses an unverified rail before any signature; a signed-snapshot Listing passes every LRR check the Standard registry can verify", async () => {
   const seed = Uint8Array.from(Buffer.alloc(32, 31));
   const privateKey = privateKeyFromSeed(seed);
   const claim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
@@ -69,9 +70,13 @@ test("a /register-built Listing passes every LRR check a reader using the Standa
     body: JSON.stringify(body),
   });
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_input, init) => init?.method === "POST"
-    ? Response.json({ result: 200, response: JSON.parse(String(init.body)).params?.[0]?.message === "searchStoragePrograms" ? [] : 0 })
-    : new Response(null, { status: 404 });
+  let rpcCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    rpcCalls += 1;
+    return init?.method === "POST"
+      ? Response.json({ result: 200, response: JSON.parse(String(init.body)).params?.[0]?.message === "searchStoragePrograms" ? [] : 0 })
+      : new Response(null, { status: 404 });
+  };
   try {
     for (const option of PUBLISHABLE_RAIL_OPTIONS) {
       const base = {
@@ -83,22 +88,41 @@ test("a /register-built Listing passes every LRR check a reader using the Standa
         delivery: ["deliver-storage-program"],
         pricing: { kind: "fixed", amount: "0.01", currency: option.phaseKind === "pay-dem" ? "DEM" : "USD" },
       };
-      const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
-      const response = await POST(request({
-        ...base,
-        identityPresentedAt: identity.identityPresentedAt,
-        identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
-      }));
-      assert.equal(response.status, 200, option.railId);
-      const preview = await response.json() as {
+      // LP-6: the shipped table is unsigned, so publication is refused before
+      // the seller signs anything or the node is asked for anything.
+      rpcCalls = 0;
+      const refused = await POST(request(base));
+      assert.equal(refused.status, 409, option.railId);
+      const refusal = await refused.json() as Record<string, unknown>;
+      assert.match(String(refusal.error), /indeterminate \(pa1-definition-unverifiable\), not verified \(DACS-1 LP-6\)/);
+      assert.deepEqual(refusal.railResolution, {
+        disposition: "indeterminate", reason: "pa1-definition-unverifiable", authorityBasis: "pa1-in-code",
+      }, option.railId);
+      assert.equal(refusal.identityMessage, undefined, option.railId);
+      assert.equal(refusal.tx, undefined, option.railId);
+      assert.equal(rpcCalls, 0, option.railId);
+
+      const restore = modelSignedRailSnapshot();
+      let preview: {
         listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
         railResolution: { disposition: string; reason: string; authorityBasis: string };
       };
+      try {
+        const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+        const response = await POST(request({
+          ...base,
+          identityPresentedAt: identity.identityPresentedAt,
+          identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
+        }));
+        assert.equal(response.status, 200, option.railId);
+        preview = await response.json() as typeof preview;
+      } finally {
+        restore();
+      }
       assert.deepEqual(preview.listing.acceptedRails, [{ railId: option.railId }]);
       assert.deepEqual(preview.listing.pipeline.find((phase) => phase.kind === option.phaseKind)?.parameters, { rail: option.railId });
-      assert.deepEqual(preview.railResolution, {
-        disposition: "indeterminate", reason: "pa1-definition-unverifiable", authorityBasis: "pa1-in-code",
-      }, option.railId);
+      assert.equal(preview.railResolution.disposition, "verified", option.railId);
+      assert.equal(preview.railResolution.authorityBasis, "pa1-in-code", option.railId);
       // Every LRR check passes against the Standard's own table except the missing snapshot signature.
       const independent = resolveAgainstStandard(preview.listing);
       assert.equal(independent.disposition, "indeterminate", `${option.railId}: ${independent.reason}`);
@@ -124,11 +148,11 @@ test("the catalog projection keeps every registry rail ID for the §6.3.6 rail f
   assert.deepEqual(presentation.rails, registry.rails.map((rail) => rail.railId));
 });
 
-test("the publisher never asserts a PA-1 signature it did not verify, and refuses every other rail result", () => {
+test("the publisher never asserts a PA-1 signature it did not verify, and publishes only on LP-6 verified", () => {
   for (const definition of PUBLISHER_IN_CODE_RAIL_DEFINITIONS) assert.equal(definition.signatureValid, false, definition.railId);
-  assert.equal(railAuthorityPermitsPublication({ disposition: "indeterminate", reason: "pa1-definition-unverifiable" }), true);
-  assert.equal(railAuthorityPermitsPublication({ disposition: "verified", reason: "verified-pa1" }), true);
+  assert.equal(railAuthorityPermitsPublication({ disposition: "verified" }), true);
   for (const result of [
+    { disposition: "indeterminate", reason: "pa1-definition-unverifiable" },
     { disposition: "rejected", reason: "unknown-rail" },
     { disposition: "rejected", reason: "phase-handler-mismatch" },
     { disposition: "indeterminate", reason: "pa1-not-accepted" },

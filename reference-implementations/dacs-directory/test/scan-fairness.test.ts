@@ -36,6 +36,8 @@ const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => locator(from + index));
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+/** The stubbed node stands for the pinned deployment that reindexAll checks first. */
+const pinnedDeployment = async () => ({ ok: true as const });
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 
@@ -146,7 +148,7 @@ const sqlWork = { enabled: false, calls: 0, rows: 0 };
 }
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
 const sellerRegistration: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)] };
-const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 const listingStatus = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0]?.status;
 const lastRun = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")[0];
 

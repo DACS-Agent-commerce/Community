@@ -35,14 +35,13 @@ export const PUBLISHER_IN_CODE_RAIL_DEFINITIONS = PUBLISHABLE_RAIL_OPTIONS.map((
 }));
 
 /**
- * Publication needs LP-6 `verified`, or the one `indeterminate` result in
- * which every LRR check passed except the unsigned PA-1 table. The latter is
- * surfaced as such and never described as `verified`; any `rejected` result,
- * or another indeterminate reason, refuses publication.
+ * A pay-bearing listing is published only on DACS-1 LP-6 `verified`. With the
+ * unsigned table above every rail resolves `indeterminate`, so the browser
+ * publisher refuses until a signed PA-1 snapshot or an authenticated PA-2/PA-3
+ * registry exists.
  */
-export function railAuthorityPermitsPublication(result: { disposition: string; reason?: string }): boolean {
-  return result.disposition === "verified" ||
-    (result.disposition === "indeterminate" && result.reason === "pa1-definition-unverifiable");
+export function railAuthorityPermitsPublication(result: { disposition: string }): boolean {
+  return result.disposition === "verified";
 }
 
 export const PUBLISHABLE_PRICING_KINDS = ["fixed", "negotiable", "auction", "metered"] as const;

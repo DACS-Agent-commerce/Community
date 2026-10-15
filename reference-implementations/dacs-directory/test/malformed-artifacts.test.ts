@@ -31,6 +31,8 @@ const ownerOf = (did: string) => `0x${did.slice(-64)}`;
 const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+/** The stubbed node stands for the pinned deployment that reindexAll checks first. */
+const pinnedDeployment = async () => ({ ok: true as const });
 
 const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
@@ -154,7 +156,7 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   }, [deepMarker, validMarker, listingAnchor]);
   resetIndex([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 42);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 42);
@@ -421,7 +423,7 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   assert.equal(byJob.get("job-valid")?.refsVerified, true);
   assert.equal(record.reputation.bundleCount, 1);
   resetIndex([registration], 45);
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
@@ -469,7 +471,7 @@ test("reindex drops malformed carried bindings and still indexes every later sel
     { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] },
   ], 43);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 43);
@@ -486,7 +488,7 @@ test("a seller whose record cannot be indexed is logged and omitted while later 
   resetIndex([broken, { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 44);
   const lines: string[] = [];
 
-  await reindexAll({ log: (line) => lines.push(line), resolveIdentities: offline });
+  await reindexAll({ log: (line) => lines.push(line), resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 44);

@@ -36,6 +36,7 @@ import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 import { verifyListing } from "@/src/catalog/listingVerification";
+import { pinnedNodeDeployment } from "@/src/catalog/listingFinality";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -163,6 +164,27 @@ export async function POST(req: NextRequest) {
     !decimal.test(minTotal) || !Number.isFinite(Number(minTotal)) || Number(minTotal) <= 0
   )) return NextResponse.json({ error: "metered minimum must be a positive canonical amount" }, { status: 400 });
 
+  // LP-6: resolve rail authority before the seller signs anything.
+  const payPhase = { kind: selectedRail.phaseKind, parameters: { rail: selectedRail.railId } };
+  const acceptedRails = [{ railId: selectedRail.railId }];
+  const railResolution = resolveListingRails({
+    trustPhase: "PA-1",
+    trustPolicyAcceptsPA1: true,
+    payPhases: [{ kind: payPhase.kind, rail: payPhase.parameters.rail }],
+    acceptedRails,
+    registry: { state: "not-used", entries: [], definitions: [] },
+    inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  });
+  if (!railAuthorityPermitsPublication(railResolution)) {
+    return NextResponse.json(
+      {
+        error: `listing rail authority is ${railResolution.disposition} (${railResolution.reason}), not verified (DACS-1 LP-6); publication refused`,
+        railResolution,
+      },
+      { status: 409 },
+    );
+  }
+
   // A current Listing embeds a separately signed IdentityBundle. The first
   // request returns that preimage; the second includes the wallet signature
   // and receives the exact Listing preimage. Only a third request carrying the
@@ -237,7 +259,7 @@ export async function POST(req: NextRequest) {
   const pipeline = [
     negotiationStep,
     { kind: "commit-agreement" },
-    { kind: selectedRail.phaseKind, parameters: { rail: selectedRail.railId } },
+    payPhase,
     { kind: delivery[0] },
   ];
   const listing = {
@@ -260,29 +282,10 @@ export async function POST(req: NextRequest) {
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline,
     pricing,
-    acceptedRails: [{ railId: selectedRail.railId }],
+    acceptedRails,
     terms: {},
     validity: { notBefore: identityPresentedAt, ...(pricingKind === "auction" ? { notAfter: auctionDeadline } : {}) },
   };
-  const railResolution = resolveListingRails({
-    trustPhase: "PA-1",
-    trustPolicyAcceptsPA1: true,
-    payPhases: listing.pipeline
-      .filter((phase) => phase.kind.startsWith("pay-"))
-      .map((phase) => ({
-        kind: phase.kind,
-        rail: (phase.parameters as Record<string, unknown> | undefined)?.rail,
-      })),
-    acceptedRails: listing.acceptedRails,
-    registry: { state: "not-used", entries: [], definitions: [] },
-    inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
-  });
-  if (!railAuthorityPermitsPublication(railResolution)) {
-    return NextResponse.json(
-      { error: `listing rail authority is ${railResolution.disposition} (${railResolution.reason}); publication refused` },
-      { status: 409 },
-    );
-  }
   const payloadCapability = await resolveListingPayloadVerificationCapability(
     listing as unknown as ListingDraft,
     "produce",
@@ -395,6 +398,15 @@ export async function POST(req: NextRequest) {
         railResolution,
         payloadCapability,
       });
+    }
+    // Broadcasting is the seller's irreversible step, so refuse a node outside
+    // the pin here rather than after the write (confirm-listing checks again).
+    const deployment = await pinnedNodeDeployment().catch(() => null);
+    if (!deployment) {
+      return NextResponse.json({ error: "could not read the Demos node's build and chain; no transaction was prepared" }, { status: 503 });
+    }
+    if (!deployment.ok) {
+      return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
     }
     const nonce = await accountNonce(hex);
     const txNonce = nonce + 1;

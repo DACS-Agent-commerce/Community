@@ -34,6 +34,8 @@ const dealKey = (jobId: string) => `${ownerOf(buyer)}\n${jobId}`;
 const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+/** The stubbed node stands for the pinned deployment that reindexAll checks first. */
+const pinnedDeployment = async () => ({ ok: true as const });
 
 const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
@@ -137,7 +139,7 @@ const artifactRow = (at: string) => {
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
-const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 function sql(query: string) {
   const db = new Database(join(dataDirectory, "directory.sqlite"));
   try { return db.prepare(query).all() as Record<string, unknown>[]; } finally { db.close(); }
@@ -348,6 +350,26 @@ test("omitted binding counts are persisted in scan diagnostics", async () => {
   chain({}); await reindex();
   assert.equal(scanCounts().omitted_bindings, 1);
   assert.equal(scanCounts().omitted_deals, 0);
+});
+
+test("a node outside the pinned deployment fails the pass before the catalog or scan state changes", async () => {
+  resetIndex([later], 13);
+  chain({ [locator(91)]: { data: JSON.stringify(listing) } }, [locator(91)]);
+  const before = store.loadScanState();
+  await assert.rejects(
+    reindexAll({
+      log: () => {},
+      resolveIdentities: offline,
+      nodeDeployment: async () => ({ ok: false, reason: "Demos node build 61b8e75+dirty@x is not pinned" }),
+    }),
+    /catalog not updated: Demos node build 61b8e75\+dirty@x is not pinned/,
+  );
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
+  // Without an injected preflight the pass asks the node itself; this stub reports no build.
+  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }));
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
 });
 
 test("a SQLite failure during seller indexing fails the pass and records its status", async () => {

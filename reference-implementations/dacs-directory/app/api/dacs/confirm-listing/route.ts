@@ -2,18 +2,18 @@
  * POST /api/dacs/confirm-listing — independently read and verify a listing
  * after the wallet broadcasts its StorageProgram transaction.
  *
- * Visibility alone is insufficient: the canonical transaction and the block
- * the configured node reports as confirmed first produce a portable
- * `included` AnchorReceipt. Demos finality is not verified (validator
- * signatures and quorum need SDK support), so nothing here is labelled final. The
- * native address, owner, producer-held program name, listing tuple, content
- * hash, seller, identity presentation and listing signature must then all bind
- * before the browser may register the pointer.
+ * The native address, owner, producer-held program name, listing tuple,
+ * content hash, seller, identity presentation and listing signature must all
+ * bind, and the pinned node must report the canonical transaction in a
+ * confirmed block. That report is returned as an unauthenticated
+ * `nodeObservation`, never as an AnchorReceipt: Demos consensus is not
+ * verified, so DACS-1 LP-1 is not met and the response never confirms the
+ * publication for registration.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { listingAddress } from "@kynesyslabs/dacs/canonical";
 import { readAnchorRecord } from "@/src/catalog/chain";
-import { includedListingAnchorReceipt } from "@/src/catalog/listingFinality";
+import { observeListingAnchorInclusion } from "@/src/catalog/listingFinality";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     body.listingId,
     Number(body.listingVersion),
   );
-  const inclusion = await includedListingAnchorReceipt({
+  const inclusion = await observeListingAnchorInclusion({
     anchorAddress: body.anchorAddress,
     logicalAddress,
     programName: body.programName,
@@ -107,14 +107,15 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({
-    confirmed: true,
-    state: "included-and-verified",
-    finality: inclusion.finality,
+    confirmed: false,
+    state: "finality-unverified",
+    error: "the configured Demos node reports this write as included, but the Directory cannot verify Demos finality (DACS-1 LP-1), so it does not register the listing",
+    authenticated: inclusion.authenticated,
     anchorAddress: body.anchorAddress,
     contentHash: verified.contentHash,
     sellerClaim: verified.sellerClaim,
     listingId: body.listingId,
     listingVersion: body.listingVersion,
-    anchorReceipt: inclusion.receipt,
+    nodeObservation: inclusion.observation,
   });
 }

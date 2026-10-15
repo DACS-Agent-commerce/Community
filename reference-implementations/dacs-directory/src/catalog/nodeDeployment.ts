@@ -32,13 +32,17 @@ const record = (value: unknown): Record<string, unknown> | null =>
     ? value as Record<string, unknown>
     : null;
 
-/** Return why the node's reported build is not pinned, or null when it is. */
-export function nodeBuildRejection(networkInfo: unknown, builds = pinnedNodeBuilds()): string | null {
+/** The build getNetworkInfo reports, in pin form, or null when it reports none. */
+export function reportedNodeBuild(networkInfo: unknown): string | null {
   const version = record(record(networkInfo)?.nodeVersion);
   const commit = typeof version?.commit === "string" ? version.commit : "";
-  if (!/^[0-9a-f]{40}$/.test(commit) || typeof version?.dirty !== "boolean") {
-    return "Demos node reports no build identity";
-  }
-  const build = version.dirty ? `${commit}+dirty@${String(version.builtAt ?? "")}` : commit;
+  if (!/^[0-9a-f]{40}$/.test(commit) || typeof version?.dirty !== "boolean") return null;
+  return version.dirty ? `${commit}+dirty@${String(version.builtAt ?? "")}` : commit;
+}
+
+/** Return why the node's reported build is not pinned, or null when it is. */
+export function nodeBuildRejection(networkInfo: unknown, builds = pinnedNodeBuilds()): string | null {
+  const build = reportedNodeBuild(networkInfo);
+  if (build === null) return "Demos node reports no build identity";
   return builds.includes(build) ? null : `Demos node build ${build} is not pinned`;
 }

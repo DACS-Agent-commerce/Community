@@ -1,14 +1,8 @@
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
-import {
-  assertDemosWriteEvidence,
-  demosSignedTransactionProofHash,
-  demosWriteEvidenceToAnchorReceipt,
-  type DemosWriteEvidence,
-} from "../sdkDemosWriteEvidence.js";
-import { isAnchorReceipt, type AnchorReceipt } from "@kynesyslabs/dacs/artifacts";
+import { demosSignedTransactionProofHash } from "../sdkDemosWriteEvidence.js";
 
 import { readAnchorRecord } from "./chain.js";
-import { nodeBuildRejection, pinnedChainIdentity } from "./nodeDeployment.js";
+import { nodeBuildRejection, pinnedChainIdentity, reportedNodeBuild } from "./nodeDeployment.js";
 import { storageWriteCandidate } from "./scan.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -134,56 +128,60 @@ async function findCanonicalWrite(
 }
 
 /**
- * Inclusion is all the Directory can establish: it does not verify Demos
- * consensus (validator signatures, eligible pool, quorum), so it never labels
- * a write final. Verified Demos finality needs SDK support.
+ * The configured node's deployment against this release's pin: its reported
+ * build, then the chain it serves. The node reports both itself, so this
+ * detects drift; it does not authenticate the node. Throws when the node
+ * cannot be read.
  */
+export async function pinnedNodeDeployment(): Promise<
+  | { ok: true; build: string; chainIdentity: string }
+  | { ok: false; reason: string }
+> {
+  const networkInfo = await nodeCall("getNetworkInfo", {});
+  const buildRejection = nodeBuildRejection(networkInfo);
+  if (buildRejection) return { ok: false, reason: buildRejection };
+  const servedChain = await chainIdentity();
+  if (servedChain !== pinnedChainIdentity()) {
+    return { ok: false, reason: `Demos node serves chain ${servedChain}, not the pinned chain` };
+  }
+  return { ok: true, build: reportedNodeBuild(networkInfo) ?? "", chainIdentity: servedChain };
+}
+
+/**
+ * What the configured, pinned node reports about one listing write. None of it
+ * is authenticated: Demos consensus (validator signatures, eligible pool,
+ * quorum) is not verified, and on Demos a valid `included` write is also
+ * `finalized` (DEMOS-MAPPING SR-2). So this is never issued as a CORE §5.1
+ * AnchorReceipt and never satisfies DACS-1 LP-1.
+ */
+export interface ListingAnchorNodeObservation {
+  chainIdentity: string;
+  nodeBuild: string;
+  logicalAddress: string;
+  nativeAddress: string;
+  contentHash: string;
+  writer: string;
+  transactionRef: string;
+  signedTransactionHash: string;
+  blockNumber: number;
+  blockHash: string;
+  blockTimestamp: number;
+  validationDataHash: string;
+  nativeRead: { owner: string; programName: string; valueHash: string; metadataHash: string };
+}
+
 export type ListingAnchorInclusionResult =
   | { status: "pending"; reason: string }
   | { status: "rejected"; reason: string }
-  | { status: "included"; finality: "not-verified"; receipt: AnchorReceipt };
-
-export interface ExpectedListingAnchorWrite {
-  anchorAddress: string;
-  logicalAddress: string;
-  listingContentHash: string;
-  sellerClaim: string;
-  transactionRef: string;
-}
+  | { status: "included"; authenticated: false; observation: ListingAnchorNodeObservation };
 
 /**
- * Registration admits a Listing only on a receipt that passes the SDK's CORE
- * §5.1 AnchorReceipt gate, records an established included write, and binds
- * this exact listing write. A `finalized` receipt is refused: this flow cannot
- * verify Demos finality, so such a claim would be unverified. Returns the
- * rejection reason, or null to admit.
+ * Observe a listing write through the canonical transaction, the block the
+ * configured node reports as confirmed, and exact native readback. Read
+ * visibility alone never returns `included`, and the result is an
+ * unauthenticated node observation, not a receipt (see validatorSignatureShape).
  */
-export function listingAnchorReceiptRejection(
-  receipt: unknown,
-  expected: ExpectedListingAnchorWrite,
-): string | null {
-  if (!isAnchorReceipt(receipt)) return "anchor receipt is not a CORE §5.1 AnchorReceipt";
-  if (receipt.state !== "included" || receipt.observationDisposition !== "established") {
-    return "anchor receipt does not establish an included write";
-  }
-  if (
-    receipt.logicalAddress !== expected.logicalAddress ||
-    receipt.nativeAddress !== expected.anchorAddress ||
-    receipt.contentHash !== expected.listingContentHash ||
-    receipt.writer !== expected.sellerClaim ||
-    receipt.transactionRef.value !== expected.transactionRef
-  ) return "anchor receipt does not bind this listing write";
-  return null;
-}
-
-/**
- * Establish an `included` Demos AnchorReceipt from the canonical transaction,
- * the block the configured node reports as confirmed, and exact native
- * readback. Read visibility alone never returns `included`, and nothing here
- * returns `finalized`: consensus signatures are not verified (see
- * validatorSignatureShape).
- */
-export async function includedListingAnchorReceipt(input: {
+export async function observeListingAnchorInclusion(input: {
   anchorAddress: string;
   logicalAddress: string;
   programName: string;
@@ -226,45 +224,15 @@ export async function includedListingAnchorReceipt(input: {
       !validatorSignatureShape(block.validation_data)
     ) return { status: "pending", reason: "canonical block is not confirmed by the configured node" };
 
-    // Only the pinned deployment's report becomes a portable receipt.
-    const buildRejection = nodeBuildRejection(await nodeCall("getNetworkInfo", {}));
-    if (buildRejection) return { status: "rejected", reason: buildRejection };
-    const servedChain = await chainIdentity();
-    if (servedChain !== pinnedChainIdentity()) {
-      return { status: "rejected", reason: `Demos node serves chain ${servedChain}, not the pinned chain` };
-    }
+    // Only the pinned deployment's report is passed on.
+    const deployment = await pinnedNodeDeployment();
+    if (!deployment.ok) return { status: "rejected", reason: deployment.reason };
 
     const payload = Array.isArray(txContent.data) ? record(txContent.data[1]) : null;
     const transactionMetadata = record(payload?.metadata);
     const metadata = anchored.metadata;
     const owner = typeof anchored.owner === "string" ? anchored.owner : "";
-    const nonce = Number(txContent.nonce);
     const nativeValueHash = sha256Hex(canonicalize(anchored.data));
-    const finalityProof = canonicalize(block.validation_data);
-    const evidence: DemosWriteEvidence = {
-      evidenceVersion: "1",
-      chainIdentity: servedChain,
-      writer: owner,
-      logicalName: input.logicalAddress,
-      nativeAddress: input.anchorAddress,
-      operation: payload?.operation === "WRITE_STORAGE" ? "update" : "create",
-      nonce,
-      transactionRef: txRef,
-      signedTransaction: canonicalize(tx),
-      signedTransactionHash: demosSignedTransactionProofHash(tx),
-      blockNumber,
-      blockHash: block.hash,
-      blockTimestamp,
-      finalityProof,
-      finalityProofHash: sha256Hex(finalityProof),
-      nativeRead: {
-        owner,
-        programName: input.programName,
-        valueHash: nativeValueHash,
-        ...(metadata ? { metadataHash: sha256Hex(canonicalize(metadata)) } : {}),
-        observedAt: Date.now(),
-      },
-    };
     if (
       contentHash(anchored.data) !== input.listingContentHash ||
       !metadata || !transactionMetadata || !sameCanonical(metadata, transactionMetadata) ||
@@ -272,22 +240,30 @@ export async function includedListingAnchorReceipt(input: {
       metadata.contentHash !== input.listingContentHash ||
       metadata.envelopeHash !== nativeValueHash
     ) return { status: "rejected", reason: "native listing metadata does not bind the signed artifact" };
-    assertDemosWriteEvidence(evidence);
-    // The SDK's portable form always states `finalized`; without consensus
-    // verification the Directory can establish only inclusion (CORE §5.1).
-    const receipt: AnchorReceipt = {
-      ...demosWriteEvidenceToAnchorReceipt({
+    return {
+      status: "included",
+      authenticated: false,
+      observation: {
+        chainIdentity: deployment.chainIdentity,
+        nodeBuild: deployment.build,
         logicalAddress: input.logicalAddress,
+        nativeAddress: input.anchorAddress,
         contentHash: input.listingContentHash,
         writer: input.sellerClaim,
-        evidence,
-      }),
-      state: "included",
+        transactionRef: txRef,
+        signedTransactionHash: demosSignedTransactionProofHash(tx),
+        blockNumber,
+        blockHash: block.hash,
+        blockTimestamp,
+        validationDataHash: sha256Hex(canonicalize(block.validation_data)),
+        nativeRead: {
+          owner,
+          programName: input.programName,
+          valueHash: nativeValueHash,
+          metadataHash: sha256Hex(canonicalize(metadata)),
+        },
+      },
     };
-    const rejection = listingAnchorReceiptRejection(receipt, { ...input, transactionRef: txRef });
-    return rejection
-      ? { status: "rejected", reason: rejection }
-      : { status: "included", finality: "not-verified", receipt };
   } catch (error) {
     return {
       status: "pending",
@@ -301,7 +277,7 @@ export async function includedListingAnchorReceipt(input: {
  * key to Ed25519 block signature. This refuses placeholder or arbitrary
  * objects, but it is a shape check only. The signatures, the eligible
  * validator pool and the 2/3+1 quorum are not verified here, nor by the
- * pinned SDK's own Demos adapter, which is why receipts state `included`.
+ * pinned SDK's own Demos adapter, which is why no receipt is issued.
  */
 function validatorSignatureShape(value: unknown): boolean {
   const signatures = record(record(value)?.signatures);

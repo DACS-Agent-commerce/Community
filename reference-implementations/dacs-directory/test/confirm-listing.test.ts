@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { isAnchorReceipt } from "@kynesyslabs/dacs/artifacts";
 import { canonicalize, contentHash, listingAddress, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
@@ -10,15 +9,10 @@ const { POST } = await import("../app/api/dacs/confirm-listing/route.js");
 const { PINNED_DEMOS_CHAIN_IDENTITY, nodeBuildRejection, pinnedChainIdentity, pinnedNodeBuilds } = await import(
   "../src/catalog/nodeDeployment.js"
 );
-const { decodeDemosAnchorReceiptProof, demosSignedTransactionProofHash } = await import(
+const { demosSignedTransactionProofHash } = await import(
   "../vendor/dacs-sdk/dist/substrate/demosWriteEvidence.js"
 );
-/**
- * The receipt carries the SDK's portable Demos proof, restated as `included`.
- * The SDK decoder reads only `finalized` receipts, so decode the same proof.
- */
-const proofOf = (receipt: unknown) =>
-  decodeDemosAnchorReceiptProof({ ...(receipt as Record<string, unknown>), state: "finalized" } as never);
+type Observation = Record<string, unknown> & { chainIdentity: string; signedTransactionHash: string; nativeRead: Record<string, unknown> };
 
 const privateKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21)));
 const keyHex = Buffer.from(rawPublicKey(publicKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21))))).toString("hex");
@@ -219,36 +213,44 @@ function stubChain(overrides: {
   return calls;
 }
 
-test("listing confirmation verifies coordinates, owner, identity, signature, hash, and tuple", async () => {
+test("a node-reported inclusion is an unauthenticated observation, never a receipt or a confirmation", async () => {
   const originalFetch = globalThis.fetch;
   stubChain();
   try {
     const response = await POST(request(coordinates));
     assert.equal(response.status, 200);
     const body = await response.json() as Record<string, unknown>;
-    assert.equal(body.confirmed, true);
-    assert.equal(body.state, "included-and-verified");
-    assert.equal(body.finality, "not-verified", "inclusion is never labelled final");
+    // DEMOS-MAPPING SR-2: an `included` Demos write is also final, and neither is
+    // verified here, so LP-1 is unmet and the browser must not register.
+    assert.equal(body.confirmed, false);
+    assert.equal(body.state, "finality-unverified");
+    assert.match(String(body.error), /cannot verify Demos finality \(DACS-1 LP-1\)/);
+    assert.equal(body.authenticated, false);
+    assert.equal(body.anchorReceipt, undefined, "no CORE §5.1 AnchorReceipt is issued");
     assert.equal(body.anchorAddress, anchorAddress);
     assert.equal(body.contentHash, listingHash);
     assert.equal(body.sellerClaim, sellerClaim);
     assert.equal(body.listingId, scope.listingId);
     assert.equal(body.listingVersion, 1);
-    const receipt = body.anchorReceipt as Record<string, unknown>;
-    assert.equal(isAnchorReceipt(receipt), true);
-    assert.equal(receipt.state, "included");
-    assert.equal(receipt.observationDisposition, "established");
-    assert.equal(receipt.logicalAddress, logicalAddress);
-    assert.equal(receipt.nativeAddress, anchorAddress);
-    assert.equal(receipt.contentHash, listingHash);
-    assert.deepEqual(receipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
-    // node2 serves block timestamps in seconds; the receipt carries milliseconds.
-    assert.deepEqual(receipt.blockRef, { id: blockHash, height: "5", timestamp: 1_786_360_000_000 });
-    const proof = proofOf(receipt);
-    assert.equal(proof.chainIdentity, chainId, "block zero answers `error`, so block one's predecessor names the chain");
-    // Portable: the SDK verifier re-reads getTxByHash, whose signature is an object.
-    assert.equal(proof.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
-    assert.equal(proof.nativeRead.metadataHash, sha256Hex(canonicalize(metadata)));
+    const observation = body.nodeObservation as Observation;
+    assert.equal(observation.logicalAddress, logicalAddress);
+    assert.equal(observation.nativeAddress, anchorAddress);
+    assert.equal(observation.contentHash, listingHash);
+    assert.equal(observation.writer, sellerClaim);
+    assert.equal(observation.transactionRef, transactionHash);
+    assert.equal(observation.nodeBuild, pinnedCommit);
+    assert.equal(observation.blockNumber, 5);
+    assert.equal(observation.blockHash, blockHash);
+    // node2 serves block timestamps in seconds; the observation carries milliseconds.
+    assert.equal(observation.blockTimestamp, 1_786_360_000_000);
+    assert.equal(
+      observation.validationDataHash,
+      sha256Hex(canonicalize({ signatures: { [`0x${"aa".repeat(32)}`]: `0x${"bb".repeat(64)}` } })),
+    );
+    assert.equal(observation.chainIdentity, chainId, "block zero answers `error`, so block one's predecessor names the chain");
+    // The SDK's proof hash of the getTxByHash form, whose signature is an object.
+    assert.equal(observation.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
+    assert.equal(observation.nativeRead.metadataHash, sha256Hex(canonicalize(metadata)));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -262,11 +264,11 @@ test("listing confirmation reads a browser-supplied transactionRef by hash", asy
       const calls = stubChain({ history: false });
       const response = await POST(request({ ...coordinates, transactionRef }));
       assert.equal(response.status, 200, transactionRef);
-      const body = await response.json() as { state: string; anchorReceipt: Record<string, unknown> };
-      assert.equal(body.state, "included-and-verified");
-      assert.deepEqual(body.anchorReceipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
+      const body = await response.json() as { state: string; nodeObservation: Observation };
+      assert.equal(body.state, "finality-unverified");
+      assert.equal(body.nodeObservation.transactionRef, transactionHash);
       assert.equal(
-        proofOf(body.anchorReceipt).signedTransactionHash,
+        body.nodeObservation.signedTransactionHash,
         demosSignedTransactionProofHash(byHashRow(transaction)),
       );
       assert.ok(calls.includes("getTxByHash"));
@@ -275,7 +277,9 @@ test("listing confirmation reads a browser-supplied transactionRef by hash", asy
     stubChain();
     const other = await POST(request({ ...coordinates, transactionRef: "ef".repeat(32) }));
     assert.equal(other.status, 202);
-    assert.equal((await other.json() as { state: string }).state, "inclusion-pending");
+    const otherBody = await other.json() as { state: string; confirmed: unknown };
+    assert.equal(otherBody.state, "inclusion-pending");
+    assert.equal(otherBody.confirmed, false);
     const malformed = await POST(request({ ...coordinates, transactionRef: "not-a-hash" }));
     assert.equal(malformed.status, 400);
   } finally {
@@ -303,7 +307,7 @@ test("listing confirmation never registers before the write is in a node-confirm
       const body = await response.json() as Record<string, unknown>;
       assert.equal(body.confirmed, false);
       assert.equal(body.state, "inclusion-pending");
-      assert.equal(body.anchorReceipt, undefined);
+      assert.equal(body.nodeObservation, undefined);
     }
   } finally {
     globalThis.fetch = originalFetch;
@@ -323,8 +327,9 @@ test("listing confirmation rejects native metadata that does not bind the signed
       const response = await POST(request(coordinates));
       assert.equal(response.status, 409, Object.keys(overrides).join("+"));
       const body = await response.json() as Record<string, unknown>;
+      assert.equal(body.confirmed, false);
       assert.equal(body.state, "inclusion-failed");
-      assert.equal(body.anchorReceipt, undefined);
+      assert.equal(body.nodeObservation, undefined);
     }
   } finally {
     globalThis.fetch = originalFetch;
@@ -337,7 +342,7 @@ test("listing confirmation distinguishes pending visibility from binding failure
     globalThis.fetch = async () => new Response("not found", { status: 404 });
     const pending = await POST(request(coordinates));
     assert.equal(pending.status, 202);
-    assert.equal((await pending.json()).state, "not-visible");
+    assert.deepEqual(await pending.json(), { confirmed: false, state: "not-visible" });
 
     globalThis.fetch = async () => Response.json({
       success: true,
@@ -347,7 +352,9 @@ test("listing confirmation distinguishes pending visibility from binding failure
     });
     const mismatch = await POST(request(coordinates));
     assert.equal(mismatch.status, 409);
-    assert.equal((await mismatch.json()).state, "binding-mismatch");
+    const mismatchBody = await mismatch.json();
+    assert.equal(mismatchBody.confirmed, false);
+    assert.equal(mismatchBody.state, "binding-mismatch");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -359,20 +366,22 @@ test("listing confirmation rejects valid bytes under the wrong expected content 
   try {
     const response = await POST(request({ ...coordinates, contentHash: "ef".repeat(32) }));
     assert.equal(response.status, 409);
-    assert.equal((await response.json()).state, "verification-failed");
+    const body = await response.json();
+    assert.equal(body.confirmed, false);
+    assert.equal(body.state, "verification-failed");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-/** The receipt's chain identity when `pinned` is the pinned chain, or the confirmation state. */
+/** The observation's chain identity when `pinned` is the pinned chain, or the confirmation state. */
 async function chainIdentityFor(overrides: Parameters<typeof stubChain>[0], pinned = chainId): Promise<string> {
   stubChain(overrides);
   process.env.DEMOS_CHAIN_IDENTITY = pinned;
   try {
     const response = await POST(request(coordinates));
-    const body = await response.json() as { state: string; anchorReceipt?: unknown };
-    return response.status === 200 ? proofOf(body.anchorReceipt).chainIdentity : body.state;
+    const body = await response.json() as { state: string; nodeObservation?: Observation };
+    return response.status === 200 ? body.nodeObservation!.chainIdentity : body.state;
   } finally {
     process.env.DEMOS_CHAIN_IDENTITY = chainId;
   }
@@ -469,20 +478,25 @@ test("a by-hash write at another locator or with other content never stands in f
       stubChain({ history: false, byHash: { content } });
       const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
       assert.equal(response.status, 202, name);
-      assert.equal((await response.json() as { state: string }).state, "inclusion-pending", name);
+      const body = await response.json() as { state: string; confirmed: unknown };
+      assert.equal(body.state, "inclusion-pending", name);
+      assert.equal(body.confirmed, false, name);
     }
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("only the pinned Demos deployment's report becomes a receipt", async () => {
+test("only the pinned Demos deployment's report becomes an observation", async () => {
   const originalFetch = globalThis.fetch;
   const node2 = { ...cleanBuild, dirty: true, builtAt: "2026-10-14T16:45:24Z" };
   const confirm = async (overrides: Parameters<typeof stubChain>[0]) => {
     stubChain(overrides);
     const response = await POST(request(coordinates));
-    return { status: response.status, body: await response.json() as { state: string; error?: string } };
+    return {
+      status: response.status,
+      body: await response.json() as { state: string; error?: string; confirmed?: unknown; nodeObservation?: Observation },
+    };
   };
   try {
     for (const [name, nodeVersion, reason] of [
@@ -493,16 +507,19 @@ test("only the pinned Demos deployment's report becomes a receipt", async () => 
     ] as const) {
       const { status, body } = await confirm({ nodeVersion });
       assert.equal(status, 409, name);
+      assert.equal(body.confirmed, false, name);
       assert.equal(body.state, "inclusion-failed", name);
       assert.match(body.error ?? "", reason, name);
     }
     // An operator may pin exactly one observed dirty build, never dirty builds in general.
     process.env.DEMOS_NODE_BUILDS = `${pinnedCommit}+dirty@2026-10-14T16:45:24Z`;
-    assert.equal((await confirm({ nodeVersion: node2 })).status, 200);
+    const pinnedDirty = await confirm({ nodeVersion: node2 });
+    assert.equal(pinnedDirty.status, 200);
+    assert.equal(pinnedDirty.body.nodeObservation?.nodeBuild, `${pinnedCommit}+dirty@2026-10-14T16:45:24Z`);
     assert.equal((await confirm({ nodeVersion: { ...node2, builtAt: "2026-10-15T00:00:00Z" } })).status, 409);
     assert.equal((await confirm({})).status, 409, "the clean build is not in an explicit list that omits it");
     delete process.env.DEMOS_NODE_BUILDS;
-    // A node on another chain never issues a receipt for the pinned one.
+    // A node on another chain is never reported as the pinned one.
     process.env.DEMOS_CHAIN_IDENTITY = "aa".repeat(32);
     const otherChain = await confirm({});
     assert.equal(otherChain.status, 409);

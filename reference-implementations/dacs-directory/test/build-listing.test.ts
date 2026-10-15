@@ -16,12 +16,44 @@ import {
 import { deriveStorageAddress, LIVE_STORAGE_SALT } from "../src/catalog/chain.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { authenticateReadableListingArtifact } from "../vendor/dacs-sdk/dist/agent/discover.js";
+import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
+import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
 const { POST } = await import("../app/api/dacs/build-listing/route.js");
 
-test.after(() => rmSync(dataDir, { recursive: true, force: true }));
+// The shipped PA-1 table is unsigned, so the route refuses every rail before
+// these steps (rail-registry.test.ts); here a signed snapshot is modelled.
+const restoreRailSnapshot = modelSignedRailSnapshot();
+test.after(() => {
+  restoreRailSnapshot();
+  rmSync(dataDir, { recursive: true, force: true });
+});
+
+/** node2's getNetworkInfo `nodeVersion` for the pinned commit. */
+const cleanBuild = { commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false, builtAt: "2026-10-14T16:45:24Z" };
+/**
+ * Answer the deployment preflight (getNetworkInfo, then block zero's error and
+ * block one's predecessor) as the pinned build and chain; null for other calls.
+ */
+function deploymentReply(
+  init: RequestInit | undefined,
+  nodeVersion: Record<string, unknown> = cleanBuild,
+  chain = PINNED_DEMOS_CHAIN_IDENTITY,
+): Response | null {
+  if (init?.method !== "POST") return null;
+  const call = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { blockNumber?: number } }> }).params?.[0];
+  if (call?.message === "getNetworkInfo") return Response.json({ result: 200, response: { nodeVersion } });
+  if (call?.message === "getBlockByNumber" && call.data?.blockNumber === 0) return Response.json({ result: 400, response: "error" });
+  if (call?.message === "getBlockByNumber" && call.data?.blockNumber === 1) {
+    return Response.json({
+      result: 200,
+      response: { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32), content: { previousHash: chain, timestamp: 1 } },
+    });
+  }
+  return null;
+}
 
 const seed = Uint8Array.from(Buffer.alloc(32, 12));
 const privateKey = privateKeyFromSeed(seed);
@@ -65,6 +97,8 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
     if (init?.method === "POST") {
       const rpc = JSON.parse(String(init.body)) as { params?: Array<{ message?: string }> };
       if (rpc.params?.[0]?.message === "searchStoragePrograms") {
@@ -101,10 +135,8 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
     };
     assert.equal(preview.publicationReady, false);
     assert.equal(preview.tx, null, "an unsigned preview must not contain a broadcastable transaction");
-    // LRR-6 accepts only a signed PA-1 snapshot; this release's table is unsigned, so
-    // the publisher surfaces that result and never claims LP-6 `verified`.
-    assert.equal(preview.railResolution.disposition, "indeterminate");
-    assert.equal(preview.railResolution.reason, "pa1-definition-unverifiable");
+    // LP-6: publication proceeds only on `verified`, here from the modelled signed snapshot.
+    assert.equal(preview.railResolution.disposition, "verified");
     assert.equal(preview.railResolution.authorityBasis, "pa1-in-code");
     assert.equal(preview.payloadCapability.disposition, "not-applicable");
     assert.deepEqual(preview.listing.pricing, {
@@ -186,6 +218,8 @@ test("publisher steps past an owner-held version whose artifact no longer authen
   let occupied: { address: string; name: string; data: Record<string, unknown> } | undefined;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
     if (init?.method === "POST") {
       const rpc = JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> };
       if (rpc.params?.[0]?.message === "searchStoragePrograms") {
@@ -249,6 +283,8 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
     if (init?.method === "POST") {
       const rpc = JSON.parse(String(init.body)) as { params?: Array<{ message?: string }> };
       return rpc.params?.[0]?.message === "searchStoragePrograms"
@@ -309,6 +345,66 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     assert.equal(recovered.contentHash, built.contentHash);
     assert.deepEqual(recovered.listing, signedListing);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("publisher prepares no transaction unless the node is the pinned deployment", async () => {
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const hexSig = (message: string) =>
+    Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
+  const finalInput = {
+    ...base,
+    serviceId: "deployment-pin",
+    identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: hexSig(identity.identityMessage),
+  };
+  const dirty = { ...cleanBuild, dirty: true };
+  let node: { nodeVersion: Record<string, unknown>; chain: string; down?: boolean } = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  let calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method !== "POST") return new Response(null, { status: 404 });
+    const message = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string }> }).params?.[0]?.message ?? "";
+    calls.push(message);
+    if (node.down && message === "getNetworkInfo") return new Response("unavailable", { status: 503 });
+    const deployment = deploymentReply(init, node.nodeVersion, node.chain);
+    if (deployment) return deployment;
+    return Response.json({ result: 200, response: message === "searchStoragePrograms" ? [] : 0 });
+  };
+  const listingSignature = async () => {
+    const preview = await (await POST(request(finalInput))).json() as { message: string; tx: unknown };
+    assert.equal(preview.tx, null);
+    return hexSig(preview.message);
+  };
+  try {
+    for (const [name, state, status, error] of [
+      // node2 today: the pinned commit with uncommitted changes.
+      ["dirty build", { nodeVersion: dirty, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /\+dirty@2026-10-14T16:45:24Z is not pinned; no transaction was prepared/],
+      ["another commit", { nodeVersion: { ...cleanBuild, commit: "f".repeat(40) }, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /is not pinned/],
+      ["no build identity", { nodeVersion: {}, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /reports no build identity/],
+      ["another chain", { nodeVersion: cleanBuild, chain: "aa".repeat(32) }, 409, /not the pinned chain/],
+      ["unreadable node", { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY, down: true }, 503, /could not read the Demos node/],
+    ] as const) {
+      node = state;
+      const signature = await listingSignature();
+      calls = [];
+      const response = await POST(request({ ...finalInput, listingSignature: signature }));
+      assert.equal(response.status, status, name);
+      const body = await response.json() as { error?: string; tx?: unknown };
+      assert.match(String(body.error), error, name);
+      assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
+      assert.ok(calls.includes("getNetworkInfo"), name);
+      assert.ok(!calls.includes("getAddressNonce"), `${name}: no write nonce is requested`);
+    }
+    // An operator who pins that exact dirty build gets the transaction.
+    process.env.DEMOS_NODE_BUILDS = `${cleanBuild.commit}+dirty@${cleanBuild.builtAt}`;
+    node = { nodeVersion: dirty, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+    const pinned = await POST(request({ ...finalInput, listingSignature: await listingSignature() }));
+    assert.equal(pinned.status, 200);
+    assert.ok((await pinned.json() as { tx?: unknown }).tx);
+  } finally {
+    delete process.env.DEMOS_NODE_BUILDS;
     globalThis.fetch = originalFetch;
   }
 });

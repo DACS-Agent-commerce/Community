@@ -5,21 +5,20 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { isAnchorReceipt, isListing } from "@kynesyslabs/dacs/artifacts";
-import { contentHash, listingAddress } from "@kynesyslabs/dacs/canonical";
+import { isListing } from "@kynesyslabs/dacs/artifacts";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { ListingSummary, SellerRecord } from "../src/catalog/types.js";
 
 // Directory listing admission against what the pinned SDK defines for a
 // Listing: DPA-1 verification methods, transaction readiness (only the SDK's
-// ordered reader grants it), and CORE §5.1 anchor receipts.
+// ordered reader grants it) and catalog projection.
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-listing-admission-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
 const store = await import("../src/catalog/store.js");
 const { verifyListingResult } = await import("../src/catalog/listingVerification.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { DIRECTORY_TRANSACTION_READINESS, buildDirectoryServiceProfile } = await import("../src/catalog/inspection.js");
-const { listingAnchorReceiptRejection } = await import("../src/catalog/listingFinality.js");
 const { GET: listingsGet } = await import("../app/api/dacs/listings/route.js");
 const { GET: sellerGet } = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
 
@@ -200,58 +199,6 @@ test("published summaries never claim transaction readiness the Directory did no
     buildDirectoryServiceProfile("https://directory.example", forged).transactionReadiness,
     DIRECTORY_TRANSACTION_READINESS,
   );
-});
-
-test("registration admits only an SDK-shaped, established, included receipt for this exact write", () => {
-  const listingContentHash = "d".repeat(64);
-  const expected = {
-    anchorAddress: `stor-${"5".repeat(40)}`,
-    logicalAddress: listingAddress(seller, "receipt-listing", 1),
-    listingContentHash,
-    sellerClaim: seller,
-    transactionRef: "e".repeat(64),
-  };
-  const receipt: Obj = {
-    receiptVersion: "1",
-    substrate: "demos",
-    finalityProfile: "demos-bft-confirmed-native-read",
-    logicalAddress: expected.logicalAddress,
-    nativeAddress: expected.anchorAddress,
-    contentHash: listingContentHash,
-    transactionRef: { kind: "demos-storage-program", value: expected.transactionRef },
-    writer: seller,
-    nonce: "7",
-    state: "included",
-    observationDisposition: "established",
-    observedAt: 1_786_360_000_000,
-    blockRef: { id: "block-5", height: "5", timestamp: 1_786_360_000_000 },
-    evidence: { kind: "demos-bft-write-proof-v1", value: "proof" },
-  };
-  assert.equal(isAnchorReceipt(receipt), true);
-  assert.equal(listingAnchorReceiptRejection(receipt, expected), null);
-
-  const { blockRef: _blockRef, ...withoutBlock } = receipt;
-  const { evidence: _evidence, ...withoutEvidence } = receipt;
-  const rejections: Record<string, [Obj, RegExp]> = {
-    "missing evidence": [withoutEvidence, /not a CORE §5\.1 AnchorReceipt/],
-    "unknown member": [{ ...receipt, trustLevel: "high" }, /not a CORE §5\.1 AnchorReceipt/],
-    "included without a block": [withoutBlock, /not a CORE §5\.1 AnchorReceipt/],
-    // Demos finality is not verified, so a receipt claiming it is never admitted.
-    "finalized claim": [{ ...receipt, state: "finalized" }, /does not establish an included write/],
-    "only accepted": [{ ...receipt, state: "accepted" }, /does not establish an included write/],
-    "indeterminate observation": [
-      { ...receipt, observationDisposition: "indeterminate", preservedReceiptHash: "f".repeat(64) },
-      /does not establish an included write/,
-    ],
-    "another logical address": [{ ...receipt, logicalAddress: listingAddress(seller, "receipt-listing", 2) }, /does not bind/],
-    "another native address": [{ ...receipt, nativeAddress: `stor-${"6".repeat(40)}` }, /does not bind/],
-    "another content hash": [{ ...receipt, contentHash: "0".repeat(64) }, /does not bind/],
-    "another writer": [{ ...receipt, writer: `did:demos:agent:${"7".repeat(64)}` }, /does not bind/],
-    "another transaction": [{ ...receipt, transactionRef: { kind: "demos-storage-program", value: "1".repeat(64) } }, /does not bind/],
-  };
-  for (const [label, [candidate, reason]] of Object.entries(rejections)) {
-    assert.match(listingAnchorReceiptRejection(candidate, expected) ?? "admitted", reason, label);
-  }
 });
 
 // Conforming Listings that the previous SDK pin (f68fed1) refused: APR-1

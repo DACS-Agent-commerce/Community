@@ -15,6 +15,7 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
+import { pinnedNodeDeployment } from "./listingFinality";
 import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
@@ -55,6 +56,11 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /**
+   * Deployment preflight injected by tests. Production checks the configured
+   * node's reported build and chain against the pin (pinnedNodeDeployment).
+   */
+  nodeDeployment?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
@@ -88,6 +94,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
   }
   const prior = loadCatalog();
+
+  // Nothing from a node outside the pinned build and chain reaches the public
+  // catalog or the scan state; a node that cannot be read fails the pass too.
+  const deployment = await (opts.nodeDeployment ?? pinnedNodeDeployment)();
+  if (!deployment.ok) throw new Error(`catalog not updated: ${deployment.reason}`);
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
