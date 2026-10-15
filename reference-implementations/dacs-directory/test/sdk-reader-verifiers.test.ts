@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { PUBLISHER_IN_CODE_RAIL_DEFINITIONS } from "../src/catalog/listingOptions.js";
+import { PUBLISHABLE_RAIL_OPTIONS } from "../src/catalog/listingOptions.js";
 import {
   sdkIdentityPresentationVerifier,
   sdkListingSignatureVerifier,
@@ -72,7 +72,11 @@ function readerDeps(): ListingValidationDeps {
       trustPhase: "PA-1",
       trustPolicyAcceptsPA1: true,
       registry: { state: "not-used", entries: [], definitions: [] },
-      inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+      // A reader whose trust policy holds a verified, signed PA-1 snapshot (LRR-6).
+      inCodeDefinitions: PUBLISHABLE_RAIL_OPTIONS.map((rail) => ({
+        railId: rail.railId, railVersion: rail.railVersion, phaseHandler: rail.phaseKind,
+        governanceAnchoring: "in-code", signatureValid: true,
+      })),
     }),
     resolvePayloadVerificationCapability: () => ({ disposition: "unsupported", reason: "not configured" }),
     verifySellerControl: ({ bundle, signer }) => signer === bundle.presentedBy,

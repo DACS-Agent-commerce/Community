@@ -95,13 +95,16 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
       programName: string;
       exists: boolean;
       publicationReady: boolean;
-      railResolution: { disposition: string; authorityBasis: string };
+      railResolution: { disposition: string; reason: string; authorityBasis: string };
       payloadCapability: { disposition: string };
       tx: null;
     };
     assert.equal(preview.publicationReady, false);
     assert.equal(preview.tx, null, "an unsigned preview must not contain a broadcastable transaction");
-    assert.equal(preview.railResolution.disposition, "verified");
+    // LRR-6 accepts only a signed PA-1 snapshot; this release's table is unsigned, so
+    // the publisher surfaces that result and never claims LP-6 `verified`.
+    assert.equal(preview.railResolution.disposition, "indeterminate");
+    assert.equal(preview.railResolution.reason, "pa1-definition-unverifiable");
     assert.equal(preview.railResolution.authorityBasis, "pa1-in-code");
     assert.equal(preview.payloadCapability.disposition, "not-applicable");
     assert.deepEqual(preview.listing.pricing, {

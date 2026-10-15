@@ -7,7 +7,12 @@ import { NextRequest } from "next/server";
 
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { listingPresentation } from "../src/catalog/listingMetadata.js";
-import { PUBLISHABLE_RAIL_OPTIONS, RAIL_ID_PATTERN } from "../src/catalog/listingOptions.js";
+import {
+  PUBLISHABLE_RAIL_OPTIONS,
+  PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  RAIL_ID_PATTERN,
+  railAuthorityPermitsPublication,
+} from "../src/catalog/listingOptions.js";
 import { resolveListingRails } from "../src/sdkListingValidation.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-rail-registry-"));
@@ -21,12 +26,13 @@ const registry = JSON.parse(readFileSync(new URL("./fixtures/dacs4-v0.1-rail-reg
   standardRevision: string;
   rails: Array<{ railId: string; phaseHandler: string }>;
 };
+// The pinned Standard publishes this table unsigned, so a PA-1 reader cannot verify it (LRR-6).
 const standardDefinitions = registry.rails.map((rail) => ({
   railId: rail.railId,
   railVersion: 1,
   phaseHandler: rail.phaseHandler,
   governanceAnchoring: "in-code",
-  signatureValid: true,
+  signatureValid: false,
 }));
 const resolveAgainstStandard = (listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: unknown[] }) =>
   resolveListingRails({
@@ -53,7 +59,7 @@ test("every publishable rail is a DACS-4 §9.4.2 registry ID with its registered
   }
 });
 
-test("a /register-built Listing verifies under a reader using the Standard registry", async () => {
+test("a /register-built Listing passes every LRR check a reader using the Standard registry can verify", async () => {
   const seed = Uint8Array.from(Buffer.alloc(32, 31));
   const privateKey = privateKeyFromSeed(seed);
   const claim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
@@ -86,13 +92,17 @@ test("a /register-built Listing verifies under a reader using the Standard regis
       assert.equal(response.status, 200, option.railId);
       const preview = await response.json() as {
         listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
-        railResolution: { disposition: string; authorityBasis: string };
+        railResolution: { disposition: string; reason: string; authorityBasis: string };
       };
       assert.deepEqual(preview.listing.acceptedRails, [{ railId: option.railId }]);
       assert.deepEqual(preview.listing.pipeline.find((phase) => phase.kind === option.phaseKind)?.parameters, { rail: option.railId });
-      assert.equal(preview.railResolution.authorityBasis, "pa1-in-code");
+      assert.deepEqual(preview.railResolution, {
+        disposition: "indeterminate", reason: "pa1-definition-unverifiable", authorityBasis: "pa1-in-code",
+      }, option.railId);
+      // Every LRR check passes against the Standard's own table except the missing snapshot signature.
       const independent = resolveAgainstStandard(preview.listing);
-      assert.equal(independent.disposition, "verified", `${option.railId}: ${independent.reason}`);
+      assert.equal(independent.disposition, "indeterminate", `${option.railId}: ${independent.reason}`);
+      assert.equal(independent.reason, "pa1-definition-unverifiable", option.railId);
       // The handler name the Directory used to emit as a rail ID is not in the registry.
       const handlerAsRail = resolveAgainstStandard({
         pipeline: [{ kind: option.phaseKind, parameters: { rail: option.phaseKind } }],
@@ -112,4 +122,19 @@ test("the catalog projection keeps every registry rail ID for the §6.3.6 rail f
     acceptedRails: registry.rails.map((rail) => ({ railId: rail.railId })),
   });
   assert.deepEqual(presentation.rails, registry.rails.map((rail) => rail.railId));
+});
+
+test("the publisher never asserts a PA-1 signature it did not verify, and refuses every other rail result", () => {
+  for (const definition of PUBLISHER_IN_CODE_RAIL_DEFINITIONS) assert.equal(definition.signatureValid, false, definition.railId);
+  assert.equal(railAuthorityPermitsPublication({ disposition: "indeterminate", reason: "pa1-definition-unverifiable" }), true);
+  assert.equal(railAuthorityPermitsPublication({ disposition: "verified", reason: "verified-pa1" }), true);
+  for (const result of [
+    { disposition: "rejected", reason: "unknown-rail" },
+    { disposition: "rejected", reason: "phase-handler-mismatch" },
+    { disposition: "indeterminate", reason: "pa1-not-accepted" },
+    { disposition: "indeterminate", reason: "registry-unavailable" },
+    { disposition: "indeterminate" },
+  ]) {
+    assert.equal(railAuthorityPermitsPublication(result), false, JSON.stringify(result));
+  }
 });

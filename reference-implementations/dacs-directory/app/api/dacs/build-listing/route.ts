@@ -41,6 +41,7 @@ import {
   publishableRail,
   PUBLISHABLE_PRICING_KINDS,
   PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  railAuthorityPermitsPublication,
   RAIL_ID_PATTERN,
   type PublishablePricingKind,
 } from "@/src/catalog/listingOptions";
@@ -276,7 +277,7 @@ export async function POST(req: NextRequest) {
     registry: { state: "not-used", entries: [], definitions: [] },
     inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
   });
-  if (railResolution.disposition !== "verified") {
+  if (!railAuthorityPermitsPublication(railResolution)) {
     return NextResponse.json(
       { error: `listing rail authority is ${railResolution.disposition} (${railResolution.reason}); publication refused` },
       { status: 409 },

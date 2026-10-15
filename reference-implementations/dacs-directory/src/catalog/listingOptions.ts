@@ -20,18 +20,30 @@ export const PUBLISHABLE_RAIL_OPTIONS = [
 /**
  * DACS-4 PA-1 definitions carried in this exact reviewed app release.
  *
- * The pinned Standard publishes the v0.1 registry as a table, not as
- * dacs-rail:v1-signed definitions, so `signatureValid` here records that the
- * release itself is the in-code authority (LRR-6 `pa1-in-code`). It is not a
- * signature check and never a canonically anchored result.
+ * LRR-6 lets a PA-1 reader resolve only against a disclosed, signed in-code
+ * snapshot. The pinned Standard publishes the v0.1 registry as an unsigned
+ * table and no steward key exists, so no definition signature is verified:
+ * `signatureValid` is false, and the SDK resolver answers `indeterminate`
+ * (`pa1-definition-unverifiable`) once every other LRR check passes.
  */
 export const PUBLISHER_IN_CODE_RAIL_DEFINITIONS = PUBLISHABLE_RAIL_OPTIONS.map((rail) => ({
   railId: rail.railId,
   railVersion: rail.railVersion,
   phaseHandler: rail.phaseKind,
   governanceAnchoring: "in-code",
-  signatureValid: true,
+  signatureValid: false,
 }));
+
+/**
+ * Publication needs LP-6 `verified`, or the one `indeterminate` result in
+ * which every LRR check passed except the unsigned PA-1 table. The latter is
+ * surfaced as such and never described as `verified`; any `rejected` result,
+ * or another indeterminate reason, refuses publication.
+ */
+export function railAuthorityPermitsPublication(result: { disposition: string; reason?: string }): boolean {
+  return result.disposition === "verified" ||
+    (result.disposition === "indeterminate" && result.reason === "pa1-definition-unverifiable");
+}
 
 export const PUBLISHABLE_PRICING_KINDS = ["fixed", "negotiable", "auction", "metered"] as const;
 export type PublishablePricingKind = (typeof PUBLISHABLE_PRICING_KINDS)[number];
