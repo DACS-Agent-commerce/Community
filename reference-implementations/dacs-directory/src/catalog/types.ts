@@ -199,6 +199,8 @@ export interface DealRecord extends RegisteredDeal {
   sellerOutcome?: string;
   anchoredByRole?: "buyer" | "seller" | "orchestrator";
   bundleContentHash?: string;
+  /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
+  fullSignatureStanding?: boolean;
   /** True only when the outcome belongs to the current DACS-5 closed set. */
   reputationEligible?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
@@ -209,8 +211,8 @@ export interface DealRecord extends RegisteredDeal {
   agreementPrice?: { amount: string; currency: string };
   /** Signature/hash/session-bound DACS-5 ratings. */
   ratings?: VerifiedRating[];
-  /** Settlement ids used for the SB-2 cross-job uniqueness gate. */
-  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number }>;
+  /** Settlement ids used for the SB-2 cross-job uniqueness gate, with the content hash of the evidence citing each. */
+  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number; evidenceHash?: string }>;
 }
 
 export interface SellerRecord {

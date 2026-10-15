@@ -39,7 +39,7 @@ const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
   bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:",
 };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
   const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);

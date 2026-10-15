@@ -36,7 +36,7 @@ const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
   bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:",
 };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
   const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
@@ -263,7 +263,8 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const otherAgreement = locator(43);
   const unhashable = locator(44);
   const name = "dacs3:agreement:job-attribution";
-  const buyerBundle = { data: JSON.stringify({ bundleVersion: "1", jobId: "job-attribution", parties: [], anchoredByRole: "buyer" }), owner: ownerOf(buyer) };
+  // Only the legacy SDK profile resolves its agreement by owner and program name.
+  const buyerBundle = { data: '{"any":1}', name: "dacs5:bundle:job-attribution", owner: ownerOf(buyer) };
   const scope = { agreementVersion: "1", jobId: "job-attribution", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
@@ -345,8 +346,10 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
-    agreementVersion: "1", jobId, listingRef, parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
+    parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" },
+      deliverable: { deliverableType: "attested-payload", hash: contentHash((listingRaw.offering as Obj).deliverable as Obj) } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };

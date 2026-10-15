@@ -6,6 +6,7 @@
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
+import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
@@ -13,6 +14,7 @@ import {
   readChainTip,
   scanChain,
   scanConsensusAnchorBackfill,
+  type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains } from "./wellknown";
@@ -188,23 +190,30 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     state.programs ??= Object.create(null);
     for (const [key, address] of scan.programs) state.programs[key] = address;
-    // A later duplicate invalidates prior automatic attribution too.
-    for (const deal of Object.values(state.deals)) {
+    // A later duplicate invalidates prior name-based (legacy SDK) attribution too. A deal attributed
+    // through its bundle's signed agreementRef never depended on a program name.
+    for (const deal of Object.values(state.deals) as DiscoveredDeal[]) {
       const key = `0x${deal.owners.buyer.slice(-64)}\ndacs3:agreement:${deal.jobId}`;
       const bundleKey = `0x${deal.owners.buyer.slice(-64)}\ndacs5:bundle:${deal.jobId}`;
-      if (state.programs[key] === null || state.programs[bundleKey] === null) {
+      if (!deal.agreementLocator && (state.programs[key] === null || state.programs[bundleKey] === null)) {
         deal.owners.seller = "";
-        delete (deal as { sellerFromAgreement?: string }).sellerFromAgreement;
+        delete deal.sellerFromAgreement;
       }
       // A deal without an attributed seller has no seller copy.
       if (!deal.owners.seller) delete deal.sellerBundleRef;
     }
     omitted.omittedBindings += scan.omittedBindings;
-    // Every candidate is queued once, in arrival order, with the owner and content it was read with.
+    // Every candidate is queued once, in arrival order, with the owner and stored value it was read
+    // with. The value hash covers the signature envelope, which the content hash omits, so a marker
+    // re-published with a corrected signature is examined again.
     const observed = new Map(scan.observations.map((observation) => [observation.locator, observation]));
+    const storedValueHash = (data: Record<string, unknown> | undefined) => {
+      const json = data ? boundedJson(data) : null;
+      return json === null ? null : createHash("sha256").update(json, "utf8").digest("hex");
+    };
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
-        ({ locator, owner: observed.get(locator)?.owner, contentHash: observed.get(locator)?.contentHash })));
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);

@@ -115,7 +115,7 @@ test("publisher builds a verifiable metered listing with the AP2 rail/phase bind
 
     const listingSignature = Buffer.from(
       ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
+    ).toString("base64url");
     assert.ok(await verifyListing({
       ...built.listing,
       signature: { algorithm: "ed25519", signer: claim, value: listingSignature },
@@ -155,7 +155,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     };
     const listingSignature = Buffer.from(
       ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
+    ).toString("base64url");
     const signedListing = {
       ...built.listing,
       signature: { algorithm: "ed25519", signer: claim, value: listingSignature },

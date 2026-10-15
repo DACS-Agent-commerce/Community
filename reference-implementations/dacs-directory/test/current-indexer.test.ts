@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
+import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
@@ -26,9 +26,11 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("hex");
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("base64url");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
+// §8.5.2 check 4: the agreement names the canonical DeliverableRef of the listed DeliverableSpec.
+const deliverableRef = { deliverableType: "attested-payload", hash: contentHash({ kind: "attested-payload", payloadFormat: "application/json" }) };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
@@ -51,11 +53,12 @@ async function vector(jobId = "job-1", offset = 0) {
   (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
-  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
+  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
+      deliverable: deliverableRef,
     } };
   const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [`tx-${jobId}`], observedAt: 100 };
@@ -112,7 +115,7 @@ async function installAgreement(
     const value = Buffer.from(await ed25519Sign(
       Buffer.from(signaturePrefix + artifactHash(agreementScope, "agreement")),
       privateKeyFromSeed(seeds[signer]),
-    )).toString("hex");
+    )).toString("base64url");
     return { party: dids[signer], algorithm: "ed25519", value };
   }));
   const agreement = { ...agreementScope, signatures: agreementSignatures };
@@ -145,10 +148,12 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     payeeBoundAgreementVersion: "1",
     jobId,
     listingRef,
+    derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
+      deliverable: deliverableRef,
       payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
     },
   };
@@ -557,16 +562,126 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
   assert.equal(mismatchedGraph.ok, false, "agreement artifact type must match the listing commitment phase");
 });
 
+test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, rail, deliverable, pattern and role direction", () => {
+  const offered = { kind: "attested-payload", payloadFormat: "application/json" };
+  const pays = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }];
+  const listing = (pricing: Obj, negotiation: Obj = { kind: "negotiate-fixed-price" }, pipeline: Obj[] = pays): Obj => ({
+    offering: { deliverable: offered }, pricing, pipeline: [negotiation, ...pipeline], acceptedRails: [{ railId: "pay-dem", railVersion: 1 }],
+  });
+  const agreement = (terms: Obj = {}, extra: Obj = {}): Obj => ({
+    agreementVersion: "1", derivedFromPattern: "fixed-price",
+    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    terms: { price: { amount: "10", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: deliverableRef, ...terms }, ...extra,
+  });
+  const check = (deal: Obj, offer: Obj) => agreementListingConformance(deal, offer, dids[1]);
+  const price = (amount: string, currency = "DEM") => ({ price: { amount, currency } });
+  const fixed = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } });
+  assert.equal(check(agreement(), fixed), null);
+  // 1. Currency, before any amount.
+  assert.equal(check(agreement(price("10", "USD")), fixed), "currency");
+  // 2. Fixed: equal to the listed price.
+  assert.equal(check(agreement(price("10.5")), fixed), "price");
+  // 2. Negotiable: the inclusive band, bounds rounded half-up to the centre's digits.
+  const rfq = { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60 } };
+  const band = (amount: string, minPct: number, maxPct: number) =>
+    listing({ kind: "negotiable", bandCenter: { amount, currency: "DEM" }, minPct, maxPct }, rfq);
+  const quoted = (amount: string) => agreement(price(amount), { derivedFromPattern: "rfq" });
+  for (const [amount, ok] of [["190", true], ["210", true], ["200", true], ["189.99", false], ["210.01", false]] as const) {
+    assert.equal(check(quoted(amount), band("200", 5, 5)), ok ? null : "price", amount);
+  }
+  assert.equal(check(quoted("1.35"), band("1.5", 10, 0)), "price", "1.35 rounds half-up to a 1.4 lower bound");
+  assert.equal(check(quoted("1.4"), band("1.5", 10, 0)), null);
+  assert.equal(check(quoted("0.6"), band("1", 50, 0)), "price", "0.5 rounds half-up to 1");
+  assert.equal(check(quoted("1"), band("1", 60, 0)), "price", "a lower bound that rounds to 0 rejects the listing");
+  // 2. Fixed-price over negotiable pricing takes the band centre exactly.
+  const fixedOverBand = listing({ kind: "negotiable", bandCenter: { amount: "200", currency: "DEM" }, minPct: 5, maxPct: 5 });
+  assert.equal(check(agreement(price("200")), fixedOverBand), null);
+  assert.equal(check(agreement(price("195")), fixedOverBand), "price");
+  // 2. Metered: max(minTotal, unitPrice × quantity) for the declared unit and a canonical quantity.
+  const metered = listing({ kind: "metered", unitPrice: { amount: "0.02", currency: "DEM" }, unit: "call", minTotal: { amount: "1", currency: "DEM" } });
+  const usage = (amount: string, quantity: unknown, unit = "call") => agreement({ ...price(amount), meteredQuantity: { quantity, unit } });
+  assert.equal(check(usage("2", "100"), metered), null);
+  assert.equal(check(usage("1", "10"), metered), null, "the minimum total applies");
+  for (const [deal, name] of [[usage("0.2", "10"), "below the minimum"], [usage("2", "100", "token"), "another unit"],
+    [usage("2", "0100"), "non-canonical quantity"], [usage("2", 100), "numeric quantity"], [agreement(price("2")), "no quantity"]] as const) {
+    assert.equal(check(deal, metered), "price", name);
+  }
+  assert.equal(check(agreement(), listing({ kind: "subscription", price: { amount: "10", currency: "DEM" } })), "unrecognized-pricing-kind");
+  // 3. Rail: present exactly when the pipeline pays, and accepted by the listing.
+  assert.equal(check(agreement({ rail: undefined }), fixed), "rail");
+  assert.equal(check(agreement({ rail: "pay-dem" }), fixed), "rail");
+  assert.equal(check(agreement({ rail: { railId: "pay-x402" } }), fixed), "rail");
+  assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 2 } }), fixed), "rail");
+  assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 1 } }), fixed), null);
+  const intakeOnly = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } }, undefined, [{ kind: "commit-agreement" }, { kind: "deliver-attested-payload" }]);
+  assert.equal(check(agreement({ rail: undefined }), intakeOnly), null);
+  assert.equal(check(agreement(), intakeOnly), "rail");
+  // 4. Deliverable.
+  for (const deliverable of [undefined, { ...deliverableRef, hash: "0".repeat(64) }, { ...deliverableRef, deliverableType: "storage-program" },
+    { ...deliverableRef, schemaUrl: "https://schema.example" }]) {
+    assert.equal(check(agreement({ deliverable }), fixed), "deliverable", JSON.stringify(deliverable));
+  }
+  // 7. Pattern.
+  assert.equal(check(agreement({}, { derivedFromPattern: "rfq" }), fixed), "pattern");
+  assert.equal(check(agreement({}, { derivedFromPattern: undefined }), fixed), "pattern");
+  // An RFQ step declaring fixedPriceFallback also admits a fixed-price agreement at the band centre (DACS-3 §8.5.2, PS-3).
+  const fallback = (fixedPriceFallback: unknown) => listing({ kind: "negotiable", bandCenter: { amount: "200", currency: "DEM" }, minPct: 5, maxPct: 5 },
+    { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60, fixedPriceFallback } });
+  assert.equal(check(agreement(price("200")), fallback(true)), null);
+  assert.equal(check(agreement(price("205")), fallback(true)), "price", "the fallback takes the band centre exactly");
+  assert.equal(check(agreement(price("200")), fallback(false)), "pattern");
+  assert.equal(check(agreement(price("200")), fallback("true")), "pattern");
+  assert.equal(check(agreement(price("205"), { derivedFromPattern: "rfq" }), fallback(true)), null);
+  // 8. Role direction: the publisher sells, except in a procurement, where it buys (SE-8).
+  const swapped = { parties: [{ role: "buyer", primaryClaim: dids[1] }, { role: "seller", primaryClaim: dids[0] }] };
+  assert.equal(check(agreement({}, swapped), fixed), "role-direction");
+  const procurement = listing({ kind: "auction", selectionRule: "lowest-price" }, { kind: "negotiate-sealed-envelope-procurement" });
+  assert.equal(check(agreement({}, { derivedFromPattern: "sealed-envelope" }), procurement), "role-direction");
+  assert.equal(check(agreement({}, { derivedFromPattern: "sealed-envelope", ...swapped }), procurement), null);
+  // 9. Artifact type matches the commitment phase.
+  const payeeBound = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } }, undefined, [{ kind: "commit-payee-bound-agreement" }, ...pays.slice(1)]);
+  assert.equal(check(agreement(), payeeBound), "commitment-artifact");
+});
+
+test("a bundle within the 128 KB DACS-5 storage soft cap verifies, and one above it does not", async () => {
+  const { listing, buyerBundle } = await vector("sized-job", 720);
+  const sized = async (bytes: number) => {
+    const scope = signedScope(buyerBundle, "bundle");
+    scope.producerNote = "";
+    const base = Buffer.byteLength(JSON.stringify(await resignBundle(scope)), "utf8");
+    scope.producerNote = "x".repeat(bytes - base);
+    const bundle = await resignBundle(scope);
+    assert.equal(Buffer.byteLength(JSON.stringify(bundle), "utf8"), bytes);
+    maps.set(locator(725), bundle);
+    return graphAt(locator(725), listing, locator(721));
+  };
+  const within = await sized(128 * 1024);
+  assert.equal(within.ok, true, within.reason);
+  assert.equal((await sized(100_000)).ok, true);
+  assert.equal((await sized(128 * 1024 + 1)).reason, "invalid current DACS-5 bundle shape");
+});
+
+test("the evidence graph rejects an agreement that does not conform to its listing", async () => {
+  const fixture = await vector("nonconforming-job", 700);
+  const scope = signedScope(fixture.agreement, "agreement");
+  await installAgreement(fixture, { ...scope, terms: { ...(scope.terms as Obj), price: { amount: "1.3", currency: "DEM" } } });
+  const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+  assert.equal(graph.reason, "agreement fails listing conformance check: price");
+});
+
 test("current evidence graph accepts a verified vet record as its phase attestation", async () => {
   const { listing, buyerBundle: bundle } = await vector();
   const compositeScope: Obj = {
     recordVersion: "1",
     jobId: "job-1",
     evaluatedParty: dids[1],
+    bundleHash: "b".repeat(64),
+    requirementHash: "c".repeat(64),
     freshness: [],
     supplementary: [],
     dealSpecific: [],
     overallDecision: "pass",
+    generatedAt: 30,
   };
   const composite = {
     ...compositeScope,
@@ -587,6 +702,57 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(graph.ok, true, graph.reason);
+});
+
+test("a vet record binds the listing's requirement and must pass for a vet phase or agreement to rest on it (DACS-2 §7.7, VPC-4)", async () => {
+  const { listing, buyerBundle: bundle } = await vector();
+  const requirementHash = contentHash((listing as Obj).buyerRequirement as Obj);
+  const record = (party: number, extra: Obj = {}): Obj => ({
+    recordVersion: "1", jobId: "job-1", evaluatedParty: dids[party], bundleHash: (party === 0 ? "a" : "b").repeat(64),
+    requirementHash: party === 0 ? requirementHash : "c".repeat(64),
+    freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...extra,
+  });
+  const graphWith = async (records: Obj[], vetPhase: number | null) => {
+    const refs = [];
+    for (const [index, scope] of records.entries()) {
+      const signed = { ...scope, signature: await sign(scope, "composite", 1) };
+      maps.set(locator(20 + index), signed);
+      refs.push(ref(locator(20 + index), signed, "composite"));
+    }
+    const scope = signedScope(bundle, "bundle");
+    scope.vetRecords = refs;
+    if (vetPhase !== null) scope.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }];
+    maps.set(locator(5), await resignBundle(scope));
+    return buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+      resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  };
+  // The buyer is vetted against the listing's buyerRequirement; the publisher against requirements the listing omits.
+  assert.equal((await graphWith([record(0), record(1)], 0)).ok, true);
+  assert.equal((await graphWith([record(0, { requirementHash: "c".repeat(64) })], null)).reason,
+    "composite record is not bound to the listing's requirement");
+  for (const overallDecision of ["fail", "indeterminate", "error"]) {
+    assert.equal((await graphWith([record(0, { overallDecision })], 0)).reason,
+      "a successful vet phase rests on a composite record that did not pass", overallDecision);
+    assert.equal((await graphWith([record(0, { overallDecision })], null)).reason,
+      "a committed session has a vetted party with no passing composite record", overallDecision);
+  }
+  // A failed attempt beside the passing record for the same party is consistent with the session.
+  assert.equal((await graphWith([record(0, { overallDecision: "fail", generatedAt: 20 }), record(0)], 1)).ok, true);
+  // A failed vet on a session that never reached its agreement is ordinary evidence of that failure.
+  const aborted = signedScope(bundle, "bundle");
+  delete aborted.agreementRef;
+  aborted.outcome = "aborted-by-self";
+  const failing = { ...record(0, { overallDecision: "fail" }) };
+  const signedFailing = { ...failing, signature: await sign(failing, "composite", 1) };
+  maps.set(locator(20), signedFailing);
+  aborted.vetRecords = [ref(locator(20), signedFailing, "composite")];
+  aborted.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "fail", errorClass: "counterparty", attestationRef: (aborted.vetRecords as unknown[])[0] }];
+  aborted.settlementEvidence = [];
+  aborted.ratingRefs = [];
+  maps.set(locator(5), await resignBundle(aborted));
+  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
 
 test("current evidence graph resolves VerifyResult authority attestations", async () => {
@@ -614,24 +780,53 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
     recordVersion: "1",
     jobId: "job-1",
     evaluatedParty: dids[1],
+    bundleHash: "b".repeat(64),
+    requirementHash: "c".repeat(64),
     freshness: [ref(locator(8), verifyResult, "verify-result", { recipeVersion: 1 })],
     supplementary: [],
     dealSpecific: [],
     overallDecision: "pass",
+    generatedAt: 30,
   };
-  const composite = {
-    ...compositeScope,
-    signature: await sign(compositeScope, "composite", 0),
+  const graphWith = async (composite: Obj) => {
+    const signed = { ...composite, signature: await sign(composite, "composite", 0) };
+    maps.set(locator(6), signed);
+    const scope = signedScope(bundle, "bundle");
+    scope.vetRecords = [ref(locator(6), signed, "composite")];
+    maps.set(locator(5), await resignBundle(scope));
+    return buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+      resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
-  maps.set(locator(6), composite);
-  const scope = signedScope(bundle, "bundle");
-  scope.vetRecords = [ref(locator(6), composite, "composite")];
-  maps.set(locator(5), await resignBundle(scope));
 
-  const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
-    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  const graph = await graphWith(compositeScope);
   assert.equal(graph.ok, true, graph.reason);
   assert.equal(graph.artifacts.some((artifact) => artifact.kind === "attestation"), true);
+
+  // DACS-2 §7.7: the record's required members, and its binding to one session party's IdentityBundle.
+  for (const member of ["bundleHash", "requirementHash", "generatedAt"]) {
+    const missing = { ...compositeScope };
+    delete missing[member];
+    assert.equal((await graphWith(missing)).reason, "composite reference failed", member);
+  }
+  assert.equal((await graphWith({ ...compositeScope, evaluatedParty: `did:demos:agent:${"9".repeat(64)}` })).reason,
+    "composite record is not bound to a session party's bundle");
+  assert.equal((await graphWith({ ...compositeScope, bundleHash: "a".repeat(64) })).reason,
+    "composite record is not bound to a session party's bundle", "the seller was vetted against the buyer's bundle hash");
+  // A VerifyResultRef's recipeVersion must equal the resolved result's; it is load-bearing (CORE §B.3).
+  for (const recipeVersion of [2, undefined]) {
+    const freshness = [ref(locator(8), verifyResult, "verify-result", recipeVersion === undefined ? {} : { recipeVersion })];
+    assert.equal((await graphWith({ ...compositeScope, freshness })).reason, "nested VerifyResult reference failed", String(recipeVersion));
+  }
+  // DACS-2 §7.5: a VerifyResult without its method, reason or fetchedAt is not one.
+  for (const member of ["method", "reason", "fetchedAt", "recipeVersion"]) {
+    const missing = { ...verifyResultScope };
+    delete missing[member];
+    const partial = { ...missing, signature: await sign(missing, "verify-result", 0) };
+    maps.set(locator(9), partial);
+    const freshness = [ref(locator(9), partial, "verify-result", { recipeVersion: 1 })];
+    assert.equal((await graphWith({ ...compositeScope, freshness })).reason, "nested VerifyResult reference failed", member);
+  }
+  await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
   const tampered = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
@@ -803,6 +998,9 @@ test("indexer resolves current copies through BundleBindings rather than submitt
       bundleBindings,
     }, undefined, async () => { throw new Error("identity unavailable"); });
     assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].fullSignatureStanding, true, "both parties signed the authoritative copy");
+    assert.deepEqual(record.deals[0].settlementTxIds, [{ id: `tx-${deal.jobId}`, observedAt: 100, phaseIndex: 2,
+      evidenceHash: artifactHash(fixture.evidence, "evidence") }], "SB-2 carries the citing evidence hash");
     assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
@@ -988,6 +1186,21 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
   assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+});
+
+test("SB-2: a settlement id cited at the same time by two jobs counts for the lower evidence hash", () => {
+  const deal = (jobId: string, evidenceHash: string, amount: string): DealRecord => ({
+    jobId, rail: "pay-dem", buyerBundleRef: locator(jobId === "a" ? 160 : 161), owners: { buyer: dids[0], seller: dids[1] },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
+    verifiedAt: 1, bundleContentHash: jobId.repeat(64), agreementPrice: { amount, currency: "DEM" },
+    settlementTxIds: [{ id: "demos:tx", observedAt: 10, phaseIndex: 2, evidenceHash }],
+  });
+  const volume = (deals: DealRecord[]) => deriveSellerReputation(deals, 0, 200).observedTransactionalVolume;
+  // Job "z" sorts after "a", but its evidence hash is lower, so it keeps the settlement.
+  assert.deepEqual(volume([deal("a", "f".repeat(64), "1"), deal("z", "0".repeat(64), "2")]), [{ currency: "DEM", amount: "2" }]);
+  assert.deepEqual(volume([deal("z", "0".repeat(64), "2"), deal("a", "f".repeat(64), "1")]), [{ currency: "DEM", amount: "2" }]);
+  // Equal evidence hashes fall back to the jobId.
+  assert.deepEqual(volume([deal("z", "0".repeat(64), "2"), deal("a", "0".repeat(64), "1")]), [{ currency: "DEM", amount: "1" }]);
 });
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {

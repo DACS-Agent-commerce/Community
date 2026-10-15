@@ -238,7 +238,8 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 /**
  * Revocation candidates, per listing content hash. Each locator is admitted
  * once and stays pending until it is read and fails RB-4; a rejected locator
- * is admitted again only when the chain shows it with different content.
+ * is admitted again only when the chain shows it with a different stored
+ * value (`content_hash` hashes the whole value, signature envelope included).
  * `seq` is arrival order; an unreadable candidate is given a new one, so it
  * moves behind the others and is retried later.
  */
@@ -295,6 +296,11 @@ export function nextRevocationCandidates(listingHash: string, listingOwner: stri
   const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
   return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
 }
+const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND state = 'pending' LIMIT 1`);
+/** True while any candidate for a listing is unread or not yet examined, so its RB-4 check is incomplete. */
+export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
+  anyPendingCandidate.get(listingHash) !== undefined;
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);

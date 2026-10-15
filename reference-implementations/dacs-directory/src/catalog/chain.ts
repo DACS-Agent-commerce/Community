@@ -10,7 +10,7 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson } from "./artifactLimits.js";
+import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -41,26 +41,46 @@ export interface AnchorRecord {
   programName?: string;
 }
 
-export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
-  if (!/^stor-[0-9a-f]{40}$/.test(address)) return null;
+/**
+ * One storage read, classified. `absent` is a definitive answer that no
+ * readable artifact object is at the locator (missing, non-public, or content
+ * that cannot be one); `unavailable` is a transport or node failure, which
+ * callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ */
+export type AnchorRead =
+  | { status: "present"; record: AnchorRecord }
+  | { status: "absent" }
+  | { status: "unavailable" };
+
+export async function readAnchorResult(address: string): Promise<AnchorRead> {
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
+  let res: Response;
   try {
-    const res = await fetch(`${RPC}/storage-program/${address}`, {
+    res = await fetch(`${RPC}/storage-program/${address}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return null;
-    const json = (await storageResponseJson(res)) as {
-      success?: boolean;
-      data?: Record<string, unknown>;
-      owner?: string;
-      programName?: string;
-    };
-    return json?.success && json.data != null && typeof json.data === "object" && !Array.isArray(json.data) && boundedJson(json.data) !== null
-      ? { data: json.data, owner: json.owner, programName: json.programName }
-      : null;
   } catch {
-    return null;
+    return { status: "unavailable" };
   }
+  if ([400, 401, 403, 404].includes(res.status)) return { status: "absent" };
+  if (!res.ok) return { status: "unavailable" };
+  let json: { success?: boolean; data?: unknown; owner?: string; programName?: string };
+  try {
+    json = (await storageResponseJson(res)) as typeof json;
+  } catch (error) {
+    return { status: error instanceof StorageResponseTooLarge ? "absent" : "unavailable" };
+  }
+  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
+  const data = json.data;
+  return data != null && typeof data === "object" && !Array.isArray(data) && boundedJson(data) !== null
+    ? { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName } }
+    : { status: "absent" };
+}
+
+export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
+  const read = await readAnchorResult(address);
+  return read.status === "present" ? read.record : null;
 }
 
 export async function readAnchor(address: string): Promise<Record<string, unknown> | null> {

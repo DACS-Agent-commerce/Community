@@ -36,7 +36,7 @@ const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => locator(from + index));
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 
 const listingScope = {
@@ -61,13 +61,15 @@ async function agreementFor(jobId: string, buyerIndex: number, sellerIndex: numb
   return { ...scope, signatures: [await sign(buyerIndex), await sign(sellerIndex)] };
 }
 
-// Stubbed node. `unavailable` locators answer 503; `scanOnly` locators answer only their first read.
+// Stubbed node. `unavailable` locators answer 503; `scanOnly` locators answer only their first read;
+// `vanishing` locators answer 404 after their first read.
 interface StoredProgram { data: string; name?: string; owner?: string }
 let storage: Record<string, StoredProgram> = {};
 let transactions: Obj[] = [];
 let reads = new Map<string, number>();
 const unavailable = new Set<string>();
 const scanOnly = new Set<string>();
+const vanishing = new Set<string>();
 let nodeDown = false;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
@@ -78,6 +80,7 @@ globalThis.fetch = async (input, init) => {
     const entry = storage[at];
     if (!entry) return new Response(null, { status: 404 });
     if (unavailable.has(at) || (scanOnly.has(at) && count > 1)) return new Response(null, { status: 503 });
+    if (vanishing.has(at) && count > 1) return new Response(null, { status: 404 });
     return new Response(`{"success":true,"owner":${JSON.stringify(entry.owner ?? ownerOf(seller))},` +
       `"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${entry.data}}`, { headers: { "content-type": "application/json" } });
   }
@@ -93,6 +96,7 @@ function chain(programs: Record<string, StoredProgram>, written: string[], first
   reads = new Map();
   unavailable.clear();
   scanOnly.clear();
+  vanishing.clear();
   transactions = written.map((at, index) => memo(firstId + index, at)).reverse();
 }
 const readsOf = (locators: string[]) => locators.reduce((total, at) => total + (reads.get(at) ?? 0), 0);
@@ -246,6 +250,25 @@ test("a rejected candidate is verified again only when its content changes", asy
   assert.equal(listingStatus(), "revoked");
 });
 
+test("a rejected marker re-published in place with a corrected signature envelope is examined again", async () => {
+  resetIndex([sellerRegistration, later], 35);
+  // The signed scope is the seller's, but the value is spelled in hex, which SIG-6 rejects.
+  const hexMarker = { ...marker, signature: { ...marker.signature, value: Buffer.from(marker.signature.value, "base64url").toString("hex") } };
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(9)]: { data: JSON.stringify(hexMarker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(9)]);
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  // Re-encoding the signature leaves the content hash unchanged, but not the stored value.
+  assert.equal(contentHash(hexMarker), contentHash(marker));
+  storage[locator(9)] = { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) };
+  transactions = [memo(50, locator(9)), ...transactions];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.equal(publishedListing()?.revocationBinding?.markerAnchor.locator, locator(9));
+});
+
 test("a verified marker missing from the candidate queue is still checked first", async () => {
   resetIndex([sellerRegistration, later], 15);
   const others = range(400, 20);
@@ -261,16 +284,99 @@ test("a verified marker missing from the candidate queue is still checked first"
   assert.ok(readsOf(others) === 0, "the verified marker is checked before any other candidate");
 });
 
+const publishedListing = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
+
+test("a verified revocation stays revoked while its marker cannot be read or no longer verifies (RB-3)", async () => {
+  resetIndex([sellerRegistration, later], 30);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(5)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(5)]);
+  await reindex();
+  const binding = publishedListing()?.revocationBinding;
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.equal(binding?.markerAnchor.locator, locator(5));
+  transactions = [];
+  // A transport failure is indeterminate, never absent: the record stays revoked with its binding.
+  unavailable.add(locator(5));
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+  // Later content at the marker's locator does not withdraw the revocation either.
+  unavailable.clear();
+  storage[locator(5)] = { data: JSON.stringify(unsigned(1)), owner: ownerOf(otherBuyer) };
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+});
+
+test("an unread or unexamined revocation candidate withholds the listing rather than publishing it active (RB-5)", async () => {
+  // Unread: the third-party marker answers the scanner, then the node fails its verification read.
+  resetIndex([sellerRegistration, later], 31);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(6)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+  }, [locator(1), locator(6)]);
+  scanOnly.add(locator(6));
+  await reindex();
+  assert.equal(publishedListing(), undefined, "an incomplete check publishes no active record");
+  scanOnly.clear();
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+
+  // Unexamined: the valid marker queues behind more bogus candidates than one pass verifies.
+  resetIndex([sellerRegistration, later], 32);
+  const bogus = range(500, 20);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(7)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
+    ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+  }, [locator(1), ...bogus, locator(7)]);
+  await reindex();
+  assert.equal(publishedListing(), undefined, "16 of 21 candidates examined");
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "revoked");
+
+  // A candidate deleted after discovery holds no marker: it is rejected, so it cannot keep the check open.
+  resetIndex([sellerRegistration, later], 34);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    [locator(8)]: { data: JSON.stringify(unsigned(1)), owner: ownerOf(outsider) },
+  }, [locator(1), locator(8)]);
+  vanishing.add(locator(8));
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  assert.deepEqual(pending(listingHash), []);
+
+  // Every candidate examined and rejected: absent, and an active record carries no binding.
+  resetIndex([sellerRegistration, later], 33);
+  chain({
+    [locator(1)]: { data: JSON.stringify(listing) },
+    ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
+  }, [locator(1), ...bogus]);
+  await reindex();
+  assert.equal(publishedListing(), undefined);
+  transactions = [];
+  await reindex();
+  assert.equal(publishedListing()?.status, "active");
+  assert.equal(Object.hasOwn(publishedListing()!, "revocationBinding"), false);
+});
+
 for (const route of ["unsigned bundle-named program", "bundle and agreement signed by its own parties"]) {
   test(`deals are keyed by their owner: another owner's ${route} with the same jobId leaves the deal in place`, async () => {
     const jobId = "shared-job";
     const signedRoute = !route.startsWith("unsigned");
-    // The signed route uses current-format bundles; the unsigned route uses name-only programs.
-    const currentBundle = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer" });
+    // The signed route uses current-format bundles that sign their agreementRef; the unsigned route uses name-only programs.
+    const currentBundle = (at: string, agreement: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer",
+      agreementRef: { anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") } });
+    const firstAgreement = await agreementFor(jobId, 0, 1);
+    const secondAgreement = await agreementFor(jobId, 2, 3);
     resetIndex([later], 7);
     chain({
-      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle : '{"any":1}', owner: ownerOf(buyer) },
-      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle(locator(41), firstAgreement) : '{"any":1}', owner: ownerOf(buyer) },
+      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(firstAgreement), owner: ownerOf(buyer) },
     }, [locator(40), locator(41)]);
     transactions.unshift(memo(10));
     await reindex();
@@ -281,11 +387,11 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
     // The established writes are outside the next pass's replay overlap.
     const writer = signedRoute ? otherBuyer : outsider;
     storage[locator(42)] = signedRoute
-      ? { data: currentBundle, owner: ownerOf(writer) }
+      ? { data: currentBundle(locator(43), secondAgreement), owner: ownerOf(writer) }
       : { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(writer) };
     const second = [locator(42)];
     if (signedRoute) {
-      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 2, 3)), owner: ownerOf(otherBuyer) };
+      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(secondAgreement), owner: ownerOf(otherBuyer) };
       second.push(locator(43));
     }
     transactions = [...second.map((at, index) => memo(20 + index, at)).reverse(), ...transactions];
@@ -309,6 +415,47 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
   });
 }
 
+test("a discovered current-profile deal is attributed through the agreementRef its bundle signs, never a program name (§10.4.2)", async () => {
+  const jobId = "01M4BD45XYXPF95E24JYPKNM2Y";
+  const agreement = await agreementFor(jobId, 0, 1);
+  const agreementRef = (at: string) => ({ anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") });
+  const bundle = (ref: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer", agreementRef: ref });
+  const sellerCopy = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "seller" });
+  const scannedDeal = async () => [...(await scanChain(null, { maxTxs: 100, sinceTxId: 0 })).deals.values()].find((deal) => deal.jobId === jobId);
+  // Conforming producers percent-encode the colons, which is how node2 stores these names.
+  chain({
+    [locator(980)]: { name: `dacs5%3Abundle%3A${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3%3Aagreement%3A${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(982)]: { name: "opaque-seller-copy", data: sellerCopy, owner: ownerOf(seller) },
+  }, [locator(980), locator(981), locator(982)]);
+  let deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, seller);
+  assert.equal(deal?.sellerBundleRef, locator(982));
+  assert.equal(deal?.agreementLocator, locator(981));
+
+  // A reference whose hash does not match attributes nothing, and a conventionally named
+  // agreement for the same job is not consulted in its place.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle({ ...agreementRef(locator(981)), contentHash: "0".repeat(64) }), owner: ownerOf(buyer) },
+    [locator(981)]: { name: "opaque", data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, "");
+
+  // Two programs sharing the conventional name do not void a deal its signed reference attributes.
+  resetIndex([later], 36);
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  assert.equal(store.loadScanState().programs[`${ownerOf(buyer)}\ndacs3:agreement:${jobId}`], null);
+  assert.equal(store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`]?.owners.seller, seller);
+});
+
 test("two buyers' attributed deals with the same jobId both reach the seller's record", async () => {
   const jobId = "two-buyers";
   resetIndex([later], 19);
@@ -322,11 +469,12 @@ test("two buyers' attributed deals with the same jobId both reach the seller's r
   const deals = store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals ?? [];
   assert.deepEqual(deals.map((deal) => `${deal.owners.buyer} ${deal.buyerBundleRef}`).sort(),
     [`${buyer} ${locator(70)}`, `${otherBuyer} ${locator(72)}`].sort());
-  // Verified-deal deduplication keeps one record per buyer and jobId, and per bundle ref.
+  // Both are listed, but §10.5.1 reconciles per jobId: equal-standing divergent copies count for neither.
   const verifiedDeal = (who: string, at: number) => ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at),
-    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, verifiedAt: 1 });
-  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(buyer, 74), verifiedDeal(outsider, 70)])
-    .map((deal) => deal.buyerBundleRef), [locator(70), locator(72)]);
+    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+    bundleContentHash: at.toString(16).padStart(64, "0"), fullSignatureStanding: true, verifiedAt: 1 });
+  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(outsider, 70)])
+    .map((deal) => [deal.buyerBundleRef, deal.reputationEligible]), [[locator(70), false], [locator(72), false]]);
 });
 
 test("v9 scan state is completed by a full deal-history replay before it is marked migrated", async () => {

@@ -21,9 +21,8 @@ import {
   type BundleVerification,
 } from "@/vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 import {
-  bundleMatchesRegisteredAnchor,
+  browserDealVerdict,
   hasRequiredBundleSignatures,
-  registeredAnchorRole,
   refsPassStrictPolicy,
   type ResolvedArtifact,
 } from "@/src/catalog/bundlePolicy";
@@ -33,7 +32,8 @@ const keyFromDid = (did: string): Uint8Array | null => {
   return hex ? Uint8Array.from(Buffer.from(hex, "hex")) : null;
 };
 
-// Mirrors the SDK's sessionAnchorName (not exported publicly — dacs-sdk#14).
+// Mirrors the SDK's sessionAnchorName, which the pinned SDK_REV does not export
+// publicly (fixed upstream after the pin: dacs-sdk#14).
 const anchorName: Record<string, (jobId: string) => string> = {
   "dacs-3-agreement": (j) => `dacs3:agreement:${j}`,
   "dacs-4-evidence": (j) => `dacs4:evidence:${j}`,
@@ -126,50 +126,16 @@ export default function VerifyDeal({
       resolvePublicKey: async (did) => keyFromDid(did),
       verify: async (b, s, p) => ed25519Verify(b, s, publicKeyFromRaw(p)),
       });
-      const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
-      const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
       const registered = verification.bundle?.jobId
         ? await registeredBundleRefs(verification.bundle.jobId, bundleRef) : null;
-      const anchorBindingAvailable = registeredAnchorRole(
-        bundleRef,
-        registered?.buyerBundleRef,
-        registered?.sellerBundleRef,
-      ) !== null;
-      const owners = registered?.owners && typeof registered.owners === "object" &&
-        !Array.isArray(registered.owners) ? registered.owners as Record<string, unknown> : null;
-      const registeredPartiesMatch = typeof owners?.buyer === "string" && typeof owners.seller === "string" &&
-        buyer === owners.buyer && seller === owners.seller;
-      const expectedPartiesMatch = buyer === buyerOwner && (!expectedSeller || seller === expectedSeller) &&
-        (!anchorBindingAvailable || registeredPartiesMatch);
-      const anchorRoleMatches = bundleMatchesRegisteredAnchor(
-        verification.bundle,
-        bundleRef,
-        registered?.buyerBundleRef,
-        registered?.sellerBundleRef,
-      );
       const signaturesOk = hasRequiredBundleSignatures(
         verification,
         rawBundle,
       );
       const refsOk = signaturesOk ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      const internallyConsistent = verification.ok && expectedPartiesMatch && signaturesOk && refsOk;
-      const strict: BundleVerification = {
-        ...verification,
-        ok: internallyConsistent && anchorRoleMatches,
-        reason: !expectedPartiesMatch
-          ? "bundle parties do not match the expected buyer/seller"
-          : !signaturesOk
-            ? "required buyer/seller signatures are missing or invalid"
-            : !refsOk
-              ? "one or more referenced artifact signatures are missing or invalid"
-              : !anchorBindingAvailable
-                ? "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"
-                : !anchorRoleMatches
-                  ? "bundle anchoredByRole does not match its registered buyer/seller address"
-                  : verification.reason,
-      };
-      setResult(strict);
-      setVerdict(strict.ok ? "strict-pass" : internallyConsistent && !anchorBindingAvailable ? "limited" : "fail");
+      const outcome = browserDealVerdict({ verification, bundleRef, buyerOwner, expectedSeller, registered, signaturesOk, refsOk });
+      setResult({ ...verification, ok: outcome.verdict === "strict-pass", reason: outcome.reason });
+      setVerdict(outcome.verdict);
       setState("done");
     } catch (cause) {
       const message = cause instanceof TypeError

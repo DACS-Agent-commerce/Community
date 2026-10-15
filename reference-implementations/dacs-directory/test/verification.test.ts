@@ -11,10 +11,12 @@ import {
 } from "@kynesyslabs/dacs/crypto";
 
 import {
+  browserDealVerdict,
   bundleMatchesRegisteredAnchor,
   bundleMatchesRegisteredDeal,
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
+  legacyFullSignatureStanding,
   registeredAnchorRole,
   refsPassStrictPolicy,
   verifyReferencedArtifactSignature,
@@ -121,7 +123,7 @@ test("listing verification accepts a current structured listing and verifies its
   const value = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(currentScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const signed = { ...currentScope, signature: { algorithm: "ed25519", signer: did, value } };
   const verified = await verifyListing(signed);
   assert.equal(verified?.profile, "dacs-v0.1");
@@ -131,7 +133,7 @@ test("listing verification accepts a current structured listing and verifies its
   const unsafeValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(unsafeScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
@@ -309,24 +311,63 @@ test("unhashed anchor role must match the registered copy address", () => {
   assert.equal(registeredAnchorRole("stor-seller", "stor-buyer", undefined), null);
 });
 
-test("verified reputation deals are unique by signed job and bundle reference", () => {
+test("the browser deal verdict is strict only with matching parties, signatures, refs and a registered copy role", () => {
+  const verification = result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "valid" }]);
+  const registered = { owners: { buyer: "buyer", seller: "seller" }, buyerBundleRef: "stor-buyer", sellerBundleRef: "stor-seller" };
+  type Input = Parameters<typeof browserDealVerdict>[0];
+  const base: Input = { verification, bundleRef: "stor-buyer", buyerOwner: "buyer", expectedSeller: "seller", registered, signaturesOk: true, refsOk: true };
+  const verdict = (change: Partial<Input>) => browserDealVerdict({ ...base, ...change });
+  assert.deepEqual(verdict({}), { verdict: "strict-pass", reason: undefined });
+  const cases: Array<[string, Partial<Input>, string, string | undefined]> = [
+    ["another buyer expected", { buyerOwner: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["another seller expected", { expectedSeller: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["registered owners differ", { registered: { ...registered, owners: { buyer: "buyer", seller: "someone" } } }, "fail",
+      "bundle parties do not match the expected buyer/seller"],
+    ["registered owners missing", { registered: { ...registered, owners: null } }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["signatures missing", { signaturesOk: false }, "fail", "required buyer/seller signatures are missing or invalid"],
+    ["refs not strict", { refsOk: false }, "fail", "one or more referenced artifact signatures are missing or invalid"],
+    ["SDK verification failed", { verification: { ...verification, ok: false, reason: "sdk" } }, "fail", "sdk"],
+    ["no registered copy address", { registered: null }, "limited",
+      "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"],
+    ["copy registered for the other role", { bundleRef: "stor-seller" }, "fail", "bundle anchoredByRole does not match its registered buyer/seller address"],
+  ];
+  for (const [name, change, expected, reason] of cases) assert.deepEqual(verdict(change), { verdict: expected, reason }, name);
+  // Without a registered binding only internal consistency is reported, and a failed check still fails.
+  assert.equal(verdict({ registered: null, signaturesOk: false }).verdict, "fail");
+  assert.equal(verdict({ registered: null, expectedSeller: undefined }).verdict, "limited");
+});
+
+test("verified reputation deals collapse to one authoritative copy per jobId, whoever the buyers are (§10.5.1, BB-6)", () => {
+  const ref = (character: string) => `stor-${character.repeat(40)}`;
   const base: DealRecord = {
-    jobId: "j",
-    rail: "pay-dem",
-    buyerBundleRef: `stor-${"a".repeat(40)}`,
-    owners: { buyer: "buyer", seller: "seller" },
-    signatureVerified: true,
-    refsVerified: true,
-    verifiedAt: 1,
+    jobId: "j", rail: "pay-dem", buyerBundleRef: ref("a"), owners: { buyer: "buyer", seller: "seller" },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed",
+    bundleContentHash: "1".repeat(64), fullSignatureStanding: true, finalisedAt: 10, verifiedAt: 1,
   };
-  const records = dedupeVerifiedDeals([
-    base,
-    { ...base },
-    { ...base, buyerBundleRef: `stor-${"b".repeat(40)}` },
-    { ...base, jobId: "other" },
-    { ...base, jobId: "unverified", refsVerified: false },
-  ]);
-  assert.deepEqual(records.map((deal) => deal.jobId), ["j", "unverified"]);
+  const listed = (deals: DealRecord[]) => dedupeVerifiedDeals(deals)
+    .map((deal) => `${deal.jobId} ${deal.buyerBundleRef.slice(-1)} ${deal.reputationEligible ? "eligible" : "excluded"}`);
+  // One record per bundle ref, and canonically equal copies of a jobId collapse to the first.
+  assert.deepEqual(listed([base, { ...base }, { ...base, jobId: "other" }, { ...base, buyerBundleRef: ref("b") }]), ["j a eligible"]);
+  // Divergent fully signed copies void the jobId even when their buyers differ.
+  const otherBuyer = { ...base, buyerBundleRef: ref("b"), owners: { buyer: "other-buyer", seller: "seller" }, bundleContentHash: "2".repeat(64) };
+  assert.deepEqual(listed([base, otherBuyer]), ["j a excluded", "j b excluded"]);
+  // A lone fully signed copy takes precedence over a lesser-signed divergent one.
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, otherBuyer]), ["j a excluded", "j b eligible"]);
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, { ...otherBuyer, fullSignatureStanding: false }]), ["j a excluded", "j b excluded"]);
+  // Other jobIds and unverified records are untouched.
+  assert.deepEqual(listed([base, { ...base, jobId: "k", buyerBundleRef: ref("c") }, { ...base, jobId: "u", buyerBundleRef: ref("d"), refsVerified: false }]),
+    ["j a eligible", "k c eligible", "u d eligible"]);
+  const reputation = deriveSellerReputation(dedupeVerifiedDeals([base, otherBuyer]), 0, 20);
+  assert.equal(reputation.completed, 0);
+  assert.deepEqual(reputation.bundleRefs, []);
+});
+
+test("legacy full signature standing needs a valid signature from every bundle party", () => {
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "valid" }])), true);
+  assert.equal(legacyFullSignatureStanding(result("aborted-by-self", [{ party: "buyer", verdict: "valid" }])), false);
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "invalid" }])), false);
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "stranger", verdict: "valid" }])), false);
+  assert.equal(legacyFullSignatureStanding(null), false);
 });
 
 test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", () => {
@@ -555,7 +596,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
     revokedAt: Date.now(),
   };
   const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
-  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
   const bogus = { ...valid, revokedAt: scope.revokedAt + 1 };
   const records = new Map<string, Record<string, unknown>>([["bogus", bogus], ["valid", valid]]);
@@ -589,7 +630,7 @@ test("any valid revocation candidate wins and scanner candidates deduplicate", a
   assert.equal(isListingRevocationCandidate({ ...valid, listingContentHash: "not-a-hash" }), false);
 });
 
-test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
+test("standalone revocation verifier bounds a signed revokedAt to the CORE numeric profile, not to non-negative integers", async () => {
   const markerSeed = Uint8Array.from(randomBytes(32));
   const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
   const markerListing = { ...listing, agentId: markerDid };
@@ -627,7 +668,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     if (sdkHash) assert.equal(lenientHash(scope), sdkHash);
     const hash = sdkHash ?? lenientHash(scope);
     const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
-    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("hex");
+    const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(markerSeed))).toString("base64url");
     return { ...scope, signature: { algorithm: "ed25519", signer: markerDid, value } };
   };
   const outcome = async (revokedAt: unknown) => {
@@ -639,21 +680,25 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
 
   assert.deepEqual(await outcome(Date.now()), { candidate: true, verified: true });
   assert.deepEqual(await outcome(0), { candidate: true, verified: true });
+  // DACS-1 types revokedAt as a number and CORE §B.2 bounds only its magnitude.
+  assert.deepEqual(await outcome(-1), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(-Number.MAX_SAFE_INTEGER), { candidate: true, verified: true });
   const rejected = { candidate: false, verified: false };
   assert.deepEqual({
+    // A valid marker, but the pinned SDK canonicalizer has no form for a fraction (SIG-3).
     fraction: await outcome(1791480684902.5),
-    negative: await outcome(-1),
     nan: await outcome(Number.NaN),
     infinity: await outcome(Number.POSITIVE_INFINITY),
     aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
-    // Canonicalizable, so only the safe-integer check rejects it.
+    belowMinSafeInteger: await outcome(-Number.MAX_SAFE_INTEGER - 1),
+    // Canonicalizable, so only the type check rejects it.
     numericString: await outcome("1791480684902"),
   }, {
-    fraction: rejected,
-    negative: rejected,
+    fraction: { candidate: true, verified: false },
     nan: rejected,
     infinity: rejected,
     aboveMaxSafeInteger: rejected,
+    belowMinSafeInteger: rejected,
     numericString: rejected,
   });
 });
@@ -677,7 +722,7 @@ test("a revocation candidate with no canonical form never stops the candidate lo
     revokedAt: Date.now(),
   };
   const message = Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8");
-  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+  const signature = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value: signature } };
   // Valid required fields; the extension member has no canonical (CF-1) number form.
   const infinite = { ...valid, futureField: JSON.parse("1e400") };
@@ -716,7 +761,7 @@ test("revocation verification work per call is bounded and reports what it exami
   assert.ok(verified);
   if (!verified) return;
   const scope = { listingId: listing.listingId, listingVersion: listing.listingVersion, listingContentHash: verified.contentHash, revokedAt: 1 };
-  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("hex");
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(seed))).toString("base64url");
   const valid = { ...scope, signature: { algorithm: "ed25519", signer: did, value } };
   const refs = Array.from({ length: 20 }, (_, index) => `bogus-${index}`);
   const reads: string[] = [];
@@ -850,7 +895,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // top-level allowlist would (wrongly) reject this.
   const acceptValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(forwardScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const accepted = await verifyListing({ ...forwardScope, signature: { algorithm: "ed25519", signer: did, value: acceptValue } });
   assert.ok(accepted, "unknown additive top-level field must be tolerated (open-world)");
   assert.equal(accepted?.profile, "dacs-v0.1");
@@ -860,7 +905,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   // open-world relaxation did NOT weaken signature binding.
   const baseValue = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-listing:v1:${contentHash(baseScope)}`, "utf8"), privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const injected = { ...baseScope, futureListingField: { evil: true }, signature: { algorithm: "ed25519", signer: did, value: baseValue } };
   assert.equal(await verifyListing(injected), null, "field injected after signing must fail the whole-scope hash");
 });

@@ -1,6 +1,8 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -41,7 +43,7 @@ const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "fa
 const PHASE_OUTCOMES = new Set(["ok", "fail"]);
 const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
 const MAX_GRAPH_ARTIFACTS = 64;
-const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= 65_536;
+const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= MAX_DACS_ARTIFACT_BYTES;
 const priceTermOk = (value: unknown): boolean => {
   const price = rec(value); const amount = String(price?.amount ?? "");
   return Boolean(price && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
@@ -107,6 +109,96 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
     expected.every((key) => actual.includes(key));
 }
 
+/** A CD-1 decimal as an integer count of 10^-scale units. */
+interface Decimal { units: bigint; scale: number }
+const decimal = (amount: unknown): Decimal => {
+  const [whole, fraction = ""] = String(amount).split(".");
+  return { units: BigInt(whole + fraction), scale: fraction.length };
+};
+const compareDecimals = (left: Decimal, right: Decimal): number => {
+  const scale = Math.max(left.scale, right.scale);
+  const a = left.units * 10n ** BigInt(scale - left.scale);
+  const b = right.units * 10n ** BigInt(scale - right.scale);
+  return a < b ? -1 : a > b ? 1 : 0;
+};
+/** bandCenter × (100 ± pct) / 100, rounded half-up to the centre's fractional digits (§8.5.2 check 2). */
+function bandBound(center: unknown, pct: unknown, direction: 1n | -1n): Decimal | null {
+  if (typeof pct !== "number" || !/^\d+(?:\.\d+)?$/.test(String(pct))) return null;
+  const centre = decimal(center);
+  const percent = decimal(pct);
+  const denominator = 100n * 10n ** BigInt(percent.scale);
+  const numerator = centre.units * (denominator + direction * percent.units);
+  return numerator < 0n ? null : { units: (2n * numerator + denominator) / (2n * denominator), scale: centre.scale };
+}
+const AGREEMENT_PATTERNS: Record<string, string> = {
+  "negotiate-fixed-price": "fixed-price",
+  "negotiate-rfq": "rfq",
+  "negotiate-sealed-envelope": "sealed-envelope",
+  "negotiate-sealed-envelope-procurement": "sealed-envelope",
+};
+
+/**
+ * DACS-3 §8.5.2 listing conformance, checks 1-4 and 7-9 in order; returns the first failed check.
+ * Checks 5 (deadline) and 6 (not expired) compare against the CommitmentRecord's anchored
+ * committedAt, which a bundle does not reference, so they are not evaluated here.
+ */
+export function agreementListingConformance(
+  agreement: Record<string, unknown>,
+  listing: Record<string, unknown>,
+  publisher: string,
+): string | null {
+  const terms = rec(agreement.terms);
+  const pricing = rec(listing.pricing);
+  const price = rec(terms?.price);
+  const pipeline = arr(listing.pipeline);
+  if (!terms || !pricing || !price || !priceTermOk(price)) return "terms";
+  const listed = pricing.kind === "fixed" ? rec(pricing.price) : pricing.kind === "negotiable" ? rec(pricing.bandCenter)
+    : pricing.kind === "metered" ? rec(pricing.unitPrice) : pricing.kind === "auction" ? rec(pricing.reservePrice) : null;
+  // 1. Currency, before any amount comparison.
+  if (listed && price.currency !== listed.currency) return "currency";
+  // 2. Price, by the recognised pricing kind (MTR-5 rejects any other).
+  const amount = decimal(price.amount);
+  if (pricing.kind === "fixed" || (pricing.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price")) {
+    if (!listed || compareDecimals(amount, decimal(listed.amount)) !== 0) return "price";
+  } else if (pricing.kind === "negotiable") {
+    const lower = listed ? bandBound(listed.amount, pricing.minPct, -1n) : null;
+    const upper = listed ? bandBound(listed.amount, pricing.maxPct, 1n) : null;
+    if (!lower || !upper || lower.units <= 0n || compareDecimals(amount, lower) < 0 || compareDecimals(amount, upper) > 0) return "price";
+  } else if (pricing.kind === "metered") {
+    const metered = rec(terms.meteredQuantity);
+    if (!listed || !metered || metered.unit !== pricing.unit ||
+        typeof metered.quantity !== "string" || !/^(?:0|[1-9]\d*)$/.test(metered.quantity)) return "price";
+    const unitPrice = decimal(listed.amount);
+    const total = { units: unitPrice.units * BigInt(metered.quantity), scale: unitPrice.scale };
+    const minimum = rec(pricing.minTotal) ? decimal(rec(pricing.minTotal)!.amount) : null;
+    if (compareDecimals(amount, minimum && compareDecimals(minimum, total) > 0 ? minimum : total) !== 0) return "price";
+  } else if (pricing.kind !== "auction") return "unrecognized-pricing-kind";
+  // 3. Rail: present exactly when the pipeline pays, and one the listing accepts.
+  const rail = rec(terms.rail);
+  const pays = pipeline.some((phase) => typeof phase.kind === "string" && phase.kind.startsWith("pay-"));
+  if (pays ? !rail : terms.rail !== undefined) return "rail";
+  if (rail && !arr(listing.acceptedRails).some((accepted) => accepted.railId === rail.railId &&
+      (accepted.railVersion === undefined || rail.railVersion === undefined || accepted.railVersion === rail.railVersion))) return "rail";
+  // 4. Deliverable: the canonical DeliverableRef of the listed DeliverableSpec.
+  const deliverable = rec(terms.deliverable);
+  const offered = rec(rec(listing.offering)?.deliverable);
+  if (!deliverable || !offered || deliverable.deliverableType !== offered.kind ||
+      normalizedHash(deliverable.hash) !== contentHash(offered) || deliverable.schemaUrl !== offered.schemaUrl) return "deliverable";
+  // 7. Pattern. An RFQ step declaring fixedPriceFallback also admits the fixed-price fallback,
+  // whose price check 2 already held to the band centre.
+  const negotiation = pipeline.find((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
+  const fallback = negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true &&
+    agreement.derivedFromPattern === "fixed-price";
+  if (!negotiation || (!fallback && agreement.derivedFromPattern !== AGREEMENT_PATTERNS[String(negotiation.kind)])) return "pattern";
+  // 8. Role direction: the publisher is the agreement seller, or the buyer of a procurement (SE-8).
+  const publisherRole = negotiation.kind === "negotiate-sealed-envelope-procurement" ? "buyer" : "seller";
+  if (!arr(agreement.parties).some((party) => party.role === publisherRole && sameSigningIdentity(party.primaryClaim, publisher))) {
+    return "role-direction";
+  }
+  // 9. Artifact type and payout bindings match the commitment phase.
+  return agreementMatchesListing(agreement, listing) ? null : "commitment-artifact";
+}
+
 export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): Record<string, unknown> {
   if (kind === "attestation") return { ...raw };
   const scope = { ...raw };
@@ -118,14 +210,8 @@ export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): R
   return scope;
 }
 export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => contentHash(signedScope(raw, kind));
-const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
+export const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 
-function decodeSignature(value: unknown): Uint8Array | null {
-  if (typeof value !== "string") return null;
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try { const bytes = Buffer.from(value, "base64url"); return bytes.length === 64 ? Uint8Array.from(bytes) : null; } catch { return null; }
-}
 export async function verifyComponentSignature(
   raw: Record<string, unknown>,
   kind: ArtifactKind,
@@ -134,7 +220,7 @@ export async function verifyComponentSignature(
 ): Promise<boolean> {
   if (kind === "attestation") return false;
   if (signature.algorithm !== "ed25519" || typeof signature.signer !== "string") return false;
-  const value = decodeSignature(signature.value);
+  const value = canonicalSignatureBytes(signature.value);
   const separator = separatorFor(raw, kind);
   if (!value || !separator) return false;
   return Boolean(await verifyPrimaryClaimSignature(
@@ -162,7 +248,7 @@ async function verifyBundleSignature(
 ): Promise<boolean> {
   const party = signature.party;
   if (signature.algorithm !== "ed25519" || typeof party !== "string") return false;
-  const value = decodeSignature(signature.value);
+  const value = canonicalSignatureBytes(signature.value);
   const profile = bundleProfile(raw);
   if (!value || !profile) return false;
   const separator = profile === "fault" ? FAULT_BUNDLE_SEPARATOR : SEPARATORS.bundle;
@@ -203,10 +289,11 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
         : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
   }
   if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
-  if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
+  // DACS-2 §7.5 VerifyResult and §7.7 CompositeVerificationRecord required members.
+  if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && Number.isSafeInteger(raw.recipeVersion) && typeof raw.method === "string" && typeof raw.reason === "string" && typeof raw.fetchedAt === "number" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
   if (kind === "composite") {
     const supplementary = arr(raw.supplementary);
-    return raw.recordVersion === "1" && typeof raw.jobId === "string" && typeof raw.evaluatedParty === "string" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.overallDecision)) && Array.isArray(raw.freshness) && Array.isArray(raw.dealSpecific) && Array.isArray(raw.supplementary) && supplementary.length === raw.supplementary.length && supplementary.every((signal) => typeof signal.source === "string" && typeof signal.signalType === "string" && (typeof signal.value === "number" || typeof signal.value === "string") && typeof signal.observedAt === "number" && (signal.attestation === undefined ? signal.source !== "external" : isCurrentRef(signal.attestation)));
+    return raw.recordVersion === "1" && typeof raw.jobId === "string" && typeof raw.evaluatedParty === "string" && /^[0-9a-f]{64}$/.test(normalizedHash(raw.bundleHash)) && /^[0-9a-f]{64}$/.test(normalizedHash(raw.requirementHash)) && typeof raw.generatedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.overallDecision)) && Array.isArray(raw.freshness) && Array.isArray(raw.dealSpecific) && Array.isArray(raw.supplementary) && supplementary.length === raw.supplementary.length && supplementary.every((signal) => typeof signal.source === "string" && typeof signal.signalType === "string" && (typeof signal.value === "number" || typeof signal.value === "string") && typeof signal.observedAt === "number" && (signal.attestation === undefined ? signal.source !== "external" : isCurrentRef(signal.attestation)));
   }
   if (kind === "rating") return raw.ratingVersion === "1" && typeof raw.jobId === "string" && typeof raw.rater === "string" && typeof raw.target === "string" && (raw.targetRole === "buyer" || raw.targetRole === "seller") && Number.isInteger(raw.value) && Number(raw.value) >= 1 && Number(raw.value) <= 5 && typeof raw.ratedAt === "number" && (typeof raw.freeText !== "string" || raw.freeText.length <= 1000);
   return true;
@@ -347,27 +434,36 @@ async function verifyCurrentEvidenceGraph(
         sameSigningIdentity(party.primaryClaim, rec(resolved.raw.signature)?.signer))) {
         return { ...fail("evidence signer is not a session party"), signaturesVerified };
       }
+      if (kind === "composite") {
+        // bundleHash and evaluatedParty bind the vet to one session party's IdentityBundle (DACS-2 §7.7).
+        const evaluated = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.evaluatedParty));
+        if (!evaluated || normalizedHash(evaluated.bundleHash) !== normalizedHash(resolved.raw.bundleHash)) {
+          return { ...fail("composite record is not bound to a session party's bundle"), signaturesVerified };
+        }
+      }
       artifacts.push(resolved);
     }
   }
   // Resolve the transitive evidence graph, not only the bundle's first-level
   // pointers. Cycles and repeated refs collapse only when kind, locator, and
   // content hash all agree.
-  const seen = new Map(artifacts.map((artifact) => [
-    `${artifact.kind}\n${artifact.locator}`, artifact.contentHash,
-  ]));
+  const seen = new Map(artifacts.map((artifact) => [`${artifact.kind}\n${artifact.locator}`, artifact]));
   let graphLimitExceeded = false;
   const addNested = async (kind: ArtifactKind, value: unknown): Promise<boolean> => {
     if (!isCurrentRef(value)) return false;
+    // A VerifyResultRef's recipeVersion is load-bearing (CORE §B.3) and must equal the resolved result's.
+    const recipeOk = (artifact: ResolvedEvidence) => kind !== "verify-result" ||
+      (Number.isSafeInteger(value.recipeVersion) && artifact.raw.recipeVersion === value.recipeVersion);
     const key = `${kind}\n${value.anchor.locator}`;
     const hash = normalizedHash(value.contentHash);
-    if (seen.has(key)) return seen.get(key) === hash;
+    const known = seen.get(key);
+    if (known) return known.contentHash === hash && recipeOk(known);
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
-    const nested = await resolveRef(kind, value, deps); if (!nested) return false;
+    const nested = await resolveRef(kind, value, deps); if (!nested || !recipeOk(nested)) return false;
     if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
     if (kind === "evidence" && !parties.some((party) =>
       sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
-    seen.set(key, nested.contentHash); artifacts.push(nested); return true;
+    seen.set(key, nested); artifacts.push(nested); return true;
   };
   for (let index = 0; index < artifacts.length; index++) {
     const artifact = artifacts[index];
@@ -397,19 +493,44 @@ async function verifyCurrentEvidenceGraph(
   const verifiedPhaseRefs = new Set(artifacts.filter((artifact) => artifact.ref &&
     (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
+  const composites = artifacts.filter((artifact) => artifact.kind === "composite");
+  const compositeDecisions = new Map(composites.map((artifact) => [
+    `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`, artifact.raw.overallDecision,
+  ]));
   for (const phase of arr(raw.phaseSummary)) {
     if (phase.attestationRef === undefined) continue;
     if (!isCurrentRef(phase.attestationRef) ||
         !verifiedPhaseRefs.has(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`)) {
       return { ...fail("phase attestation reference is outside the verified graph"), signaturesVerified };
     }
+    // DACS-2 VPC-4: a vet phase whose decision is not pass fails, so it cannot have succeeded.
+    const decision = compositeDecisions.get(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`);
+    if (phase.outcome === "ok" && decision !== undefined && decision !== "pass") {
+      return { ...fail("a successful vet phase rests on a composite record that did not pass"), signaturesVerified };
+    }
+  }
+  // A session that reached its agreement passed vet for every party it vetted (VPC-2, VPC-4);
+  // a failed attempt may sit beside the passing one.
+  const passed = new Set(composites.filter((artifact) => artifact.raw.overallDecision === "pass")
+    .map((artifact) => canonicalSigningIdentity(String(artifact.raw.evaluatedParty))));
+  if (agreement && composites.some((artifact) => !passed.has(canonicalSigningIdentity(String(artifact.raw.evaluatedParty))))) {
+    return { ...fail("a committed session has a vetted party with no passing composite record"), signaturesVerified };
   }
   if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
-      !(await verifyListing(listed.raw, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+  const verifiedListing = listed && artifactHash(listed.raw, "listing") === listingHash
+    ? await verifyListing(listed.raw, resolveKey) : null;
+  if (!listed || !verifiedListing) return { ...fail("listing reference failed"), signaturesVerified };
+  // DACS-2 §7.7: requirementHash binds a vet to the listing's BundleRequirement, which gates the
+  // publisher's counterparty. The publisher itself is vetted against requirements the listing omits.
+  const requirement = rec(listed.raw.buyerRequirement);
+  if (requirement && composites.some((artifact) =>
+    !sameSigningIdentity(artifact.raw.evaluatedParty, verifiedListing.sellerClaim) &&
+    normalizedHash(artifact.raw.requirementHash) !== contentHash(requirement))) {
+    return { ...fail("composite record is not bound to the listing's requirement"), signaturesVerified };
+  }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
@@ -418,9 +539,8 @@ async function verifyCurrentEvidenceGraph(
         party.role === role && sameSigningIdentity(party.primaryClaim, candidate.primaryClaim))))) {
       return { ...fail("agreement party binding failed"), signaturesVerified };
     }
-    if (!agreementMatchesListing(agreement, listed.raw)) {
-      return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
-    }
+    const nonconforming = agreementListingConformance(agreement, listed.raw, verifiedListing.sellerClaim);
+    if (nonconforming) return { ...fail(`agreement fails listing conformance check: ${nonconforming}`), signaturesVerified };
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: true, artifacts, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw) };

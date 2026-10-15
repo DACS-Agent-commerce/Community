@@ -114,7 +114,7 @@ vendor directory.
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
-| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
+| `DACS_SDK_GITHUB_TOKEN` | No | Fine-grained, read-only token for cloning the pinned SDK from a private mirror during the build; the upstream SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
@@ -171,9 +171,13 @@ DACS artifact; it does not attribute a publishing failure to an agent. Raw excep
 payloads, internal URLs and stack traces are never returned.
 
 Storage-read diagnostics distinguish `STORAGE_NOT_FOUND`, `STORAGE_NOT_PUBLIC`,
-`STORAGE_RPC_UNAVAILABLE`, and `STORAGE_INVALID_RESPONSE`. Missing and non-public
+`STORAGE_RPC_UNAVAILABLE`, `STORAGE_INVALID_RESPONSE`, and `ARTIFACT_REJECTED`. Missing and non-public
 locators are terminal until a later chain replay observes them again; transient node
-and response failures retain bounded retries. `STORAGE_NOT_FOUND` is operational
+and response failures retain bounded retries. `ARTIFACT_REJECTED` means the content was
+read but fails the artifact policy (oversized, a DACS-named program without object data,
+or no canonical JSON form). It has its own retry class: it is never dead-lettered, it is
+retried with backoff while at most 1,000 rejected locators are active, and the
+longest-waiting one takes the next free slot. `STORAGE_NOT_FOUND` is operational
 diagnostic evidence only: under the current Demos mapping it is never authoritative
 DACS-5 absence evidence and cannot satisfy BB-8.
 
@@ -185,20 +189,25 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    registration.
 2. **Chain scanning** (passive): the reindex pass walks the node's transaction history
    (`nodeCall getTransactions`, plain fetch), spots storage-program writes, classifies
-   anchored DACS artifacts by their self-describing program names, and attributes deals
-   to sellers via the buyer-anchored agreement. Agents nobody registered appear as
+   current-profile DACS artifacts by their signed content, and attributes a deal to its
+   seller through the agreement its buyer bundle references by locator and content hash.
+   Program names are never resolution keys, except on the legacy SDK compatibility path
+   (`dacs5:bundle:<jobId>`, `dacs3:agreement:<jobId>`). Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   Revocation discovery retains at most 16 candidates per listing hash, except for
-   locators that already passed RB-4 verification; truncation is recorded in reindex logs.
-   New scan observations precede prior unverified state in that window; within each
-   group, the first distinct locators in scan iteration order survive. A valid marker
-   outside the retained window is not evaluated. Its publisher can anchor a fresh
-   marker to re-enter discovery, but continued overflow can exclude that marker again.
-   After one marker verifies, later pruning cannot make it disappear.
+   Revocation markers are recognised by their signed content, never by program name.
+   Every candidate locator is queued once per listing hash; each pass fully verifies
+   at most 16 per listing — markers that already passed RB-4 first, then those
+   anchored by the listing owner, then arrival order. The queue itself has no cap.
+   While any candidate is unread or not yet examined the RB-4 check is incomplete
+   (`indeterminate`, RB-5), so the listing is withheld from the catalog rather than
+   published `active`. Once a marker verifies, the listing stays `revoked` with its
+   binding even if the marker later cannot be read (RB-3).
    BB-4-valid BundleBindings are also classified and accumulated under a deterministic
-   per-job/role total-work ceiling; any overflow is sticky and makes that side
-   `indeterminate`, never absent.
+   ceiling of 32 per signer of each job and role; another signer's bindings never use
+   that budget (BB-6). Overflow is sticky and makes that signer's side `indeterminate`,
+   never absent. There is no total across signers, so stored bindings, and the work to
+   re-verify them each pass, grow with the number of signers for one job.
 3. **Evidence graph and federation**: current bundle copies are reached only after
    deriving the role-specific logical address and resolving a signed BundleBinding.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
@@ -254,6 +263,22 @@ is retained only for labelled legacy artifacts. DACS-2 tier derivation fails clo
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
+
+**Pinned upstreams.** Verdicts depend on three upstreams, each pinned:
+
+- **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
+  `4bb9e48`) and the conformance vector files vendored under `test/fixtures/dacs-standard/`,
+  whose hashes `test/sig6.test.ts` checks. The `did:demos:agent` primary-claim profile is
+  the one deliberate addition.
+- **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
+  Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
+- **Demos node**: the storage-read contract was checked against `kynesyslabs/node`
+  `ac8f45f`. `GET /storage-program/<address>` answers 400 `INVALID_REQUEST` for an
+  address without the `stor-` prefix, 404 `NOT_FOUND`, 403 `PERMISSION_DENIED`, or
+  `{success, owner, programName, data, ...}`; a program holds at most 1 MiB
+  (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). `test/chain-storage.test.ts` pins how the indexer
+  classifies each answer. Only a transport or server failure leaves a revocation check
+  incomplete.
 
 ## License
 

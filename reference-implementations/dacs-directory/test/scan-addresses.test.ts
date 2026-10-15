@@ -137,6 +137,9 @@ test("storage failures are classified into public-safe operational causes", () =
   assert.equal(storageReadFailureCode(503), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(503, "NOT_FOUND"), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(200), "STORAGE_INVALID_RESPONSE");
+  // The node's 400 INVALID_REQUEST is terminal; an unexplained 400 stays retryable.
+  assert.equal(storageReadFailureCode(400, "INVALID_REQUEST"), "STORAGE_NOT_FOUND");
+  assert.equal(storageReadFailureCode(400), "STORAGE_RPC_UNAVAILABLE");
 });
 
 test("terminal storage failures skip retries while transient failures remain bounded", async () => {
