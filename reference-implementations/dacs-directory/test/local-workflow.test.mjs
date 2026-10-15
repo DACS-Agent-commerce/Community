@@ -61,6 +61,8 @@ if (args[0] === 'test' || (args[1] === 'build' && process.env.WORKFLOW_CHECKS)) 
     'await import("./src/catalog/indexer.ts")'], {cwd:process.env.WORKFLOW_APP, env:process.env, stdio:'inherit'});
   if (run.status !== 0) process.exit(run.status ?? 1);
 }
+// A real build emits dist/, where the documented install records the SDK revision.
+if (args[0] === 'run' && args[1] === 'build') require('node:fs').mkdirSync('dist', { recursive: true });
 if (args[0] === 'test' && process.env.WORKFLOW_FAIL_TEST) process.exit(23);
 `, { mode: 0o755 });
   const run = (block) => spawnSync("bash", ["-c", block], { cwd, env, encoding: "utf8", timeout: 30_000 });

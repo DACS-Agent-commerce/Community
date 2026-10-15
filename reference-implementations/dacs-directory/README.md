@@ -24,7 +24,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Surface | Spec | How |
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
-| Seller publication | DACS-1 §6.3.4 | `/register` uses the SDK rail resolver over release-authenticated PA-1 definitions, refuses attested-payload methods whose seller-runtime production capability it cannot prove, shows the exact server-built unsigned Listing before signature, creates its StorageProgram with the current SDK name/next-nonce/empty-salt mapping, persists non-secret recovery coordinates before broadcast, obtains a portable BFT-finalized `AnchorReceipt`, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before the browser submits its catalog registration. The receipt gates only this cooperative flow: `POST /api/dacs/register` accepts pointer sets without one, and the indexer re-reads and re-authenticates every anchor on each pass |
+| Seller publication | DACS-1 §6.3.4 | `/register` emits DACS-4 §9.4.2 registry rail IDs (`demos-native:DEM`, `x402:default`, `ap2:stripe-paymentintents`) and runs the SDK rail resolver over this release's disclosed PA-1 in-code table (`pa1-in-code`; the pinned Standard publishes no signed v0.1 snapshot, so this is not a canonically anchored result), refuses attested-payload methods whose seller-runtime production capability it cannot prove, shows the exact server-built unsigned Listing before signature, creates its StorageProgram with the current SDK name/next-nonce/empty-salt mapping, persists non-secret recovery coordinates before broadcast, obtains a finalized `AnchorReceipt` in the pinned SDK's portable Demos form (the write is read back by hash, and finality is the BFT confirmation the configured Demos node reports; the Directory checks the node's validator-signature shape but, like the pinned SDK adapter, does not verify the validator pool, signatures or quorum), and independently verifies native address, owner, program name, tuple, identity, signature and content hash before the browser submits its catalog registration. The receipt gates only this cooperative flow: `POST /api/dacs/register` accepts pointer sets without one, and the indexer re-reads and re-authenticates every anchor on each pass |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
 | Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
@@ -109,7 +109,10 @@ railway up . --no-gitignore
 ```
 
 `.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
-vendor directory.
+vendor directory. `scripts/setup-sdk.sh` accepts that packaged build only when
+`dist/.dacs-sdk-revision` names the pinned `SDK_REV` (written by the source build after it
+checks a clean checkout of that commit) and the SDK's `package.json` declares the pinned
+`dacs.standardRevision`; otherwise it refuses to continue.
 
 ### Configuration
 

@@ -23,15 +23,44 @@ git_with_sdk_auth() {
     command git "$@"
 }
 
+# The DACS Standard revision the pinned SDK declares (package.json
+# dacs.standardRevision); the Directory conforms to the same revision.
+STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
+SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
+
+require_standard_revision() {
+  local declared
+  declared="$(node -e 'process.stdout.write(String(require(process.argv[1]).dacs?.standardRevision ?? ""))' "$PWD/vendor/dacs-sdk/package.json")"
+  if [ "$declared" != "$STANDARD_REV" ]; then
+    echo "dacs-sdk declares Standard revision '${declared}', expected ${STANDARD_REV}" >&2
+    exit 1
+  fi
+}
+
 if [ -d vendor/dacs-sdk/dist ] && [ ! -d vendor/dacs-sdk/.git ]; then
-  echo "using packaged dacs-sdk build"
+  # A packaged build is accepted only when the source build below produced it
+  # from the pinned commit.
+  if [ "$(cat "$SDK_REV_MARKER" 2>/dev/null)" != "$SDK_REV" ]; then
+    echo "packaged dacs-sdk build is not marked as built from ${SDK_REV}; refusing it" >&2
+    exit 1
+  fi
+  require_standard_revision
+  echo "using packaged dacs-sdk build of ${SDK_REV}"
 else
   if [ ! -d vendor/dacs-sdk ]; then
     mkdir -p vendor
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
   (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
+  if [ "$(git -C vendor/dacs-sdk rev-parse HEAD)" != "$SDK_REV" ] ||
+    [ -n "$(git -C vendor/dacs-sdk status --porcelain --untracked-files=no)" ]; then
+    echo "vendor/dacs-sdk is not a clean checkout of ${SDK_REV}" >&2
+    exit 1
+  fi
+  require_standard_revision
+  rm -f "$SDK_REV_MARKER"
   (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
+  printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
   npm ci --no-audit --no-fund

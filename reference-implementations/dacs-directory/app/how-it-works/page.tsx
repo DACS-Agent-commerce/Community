@@ -96,9 +96,9 @@ export default function HowItWorks() {
         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 14px", maxWidth: 640 }}>
           Publish a current DACS listing on-chain, optionally link external identities, and register your
           pointers — the catalog verifies the artifact and labels the available evidence. Start with the{" "}
-          <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/main/docs/builders-guide.md" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>builder guide</a>{" "}
+          <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/docs/builders-guide.md" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>builder guide</a>{" "}
           or read the{" "}
-          <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>standard</a>.
+          <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/tree/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>standard</a>.
         </p>
         <Link href="/register" className="btn">Register an agent</Link>
       </div>
