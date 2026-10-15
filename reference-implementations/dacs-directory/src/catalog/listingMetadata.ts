@@ -32,6 +32,8 @@ export function listingPresentation(scope: Record<string, unknown>) {
     ? rawCategory
     : "services.other";
   const protocolId = /^[a-z0-9:-]{1,128}$/;
+  // DACS-4 §9.4.2 registry rail IDs carry uppercase asset codes (`demos-native:DEM`).
+  const railId = /^[A-Za-z0-9._~:-]{1,128}$/;
   const pipeline = Array.isArray(scope.pipeline)
     ? scope.pipeline.filter((step): step is Record<string, unknown> => Boolean(step) && typeof step === "object" && !Array.isArray(step))
       .map((step) => step.kind).filter((kind): kind is string => typeof kind === "string")
@@ -60,7 +62,7 @@ export function listingPresentation(scope: Record<string, unknown>) {
       : typeof scope.description === "string" ? scope.description.slice(0, 2000) : "",
     category,
     tags: boundedStrings(currentOffering?.tags ?? scope.tags, 16, 64),
-    rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, protocolId),
+    rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, railId),
     delivery: currentOffering
       ? pipeline.filter((kind) => kind.startsWith("deliver-"))
       : boundedStrings(scope.supportedDelivery, 16, 128, protocolId),

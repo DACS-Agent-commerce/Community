@@ -41,6 +41,7 @@ import {
   publishableRail,
   PUBLISHABLE_PRICING_KINDS,
   PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  RAIL_ID_PATTERN,
   type PublishablePricingKind,
 } from "@/src/catalog/listingOptions";
 
@@ -94,7 +95,7 @@ export async function POST(req: NextRequest) {
   }
   if (
     !Array.isArray(body.rails) || body.rails.length > 16 ||
-    !body.rails.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v)) ||
+    !body.rails.every((v) => typeof v === "string" && v.length <= 128 && RAIL_ID_PATTERN.test(v)) ||
     !Array.isArray(body.delivery) || body.delivery.length > 16 ||
     !body.delivery.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v))
   ) {

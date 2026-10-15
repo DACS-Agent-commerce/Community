@@ -361,3 +361,67 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
     globalThis.fetch = originalFetch;
   }
 });
+
+test("publisher returns no transaction for a listing signature that does not verify", async () => {
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 13)));
+  const hexSig = (message: string, key = privateKey) =>
+    Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), key)).toString("hex");
+  const finalInput = {
+    ...base,
+    identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: hexSig(identity.identityMessage),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => init?.method === "POST"
+    ? Response.json({ result: 200, response: JSON.parse(String(init.body)).params?.[0]?.message === "searchStoragePrograms" ? [] : 0 })
+    : new Response(null, { status: 404 });
+  try {
+    const preview = await (await POST(request(finalInput))).json() as { message: string; tx: unknown };
+    assert.equal(preview.tx, null);
+    for (const [name, listingSignature] of Object.entries({
+      "garbage 64 bytes": "ab".repeat(64),
+      "signature over another message": hexSig(`${preview.message}0`),
+      "signature by another key": hexSig(preview.message, otherKey),
+    })) {
+      const response = await POST(request({ ...finalInput, listingSignature }));
+      assert.equal(response.status, 400, name);
+      const body = await response.json() as { tx?: unknown };
+      assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("LP-3 listing versions are allocated per listingId", async () => {
+  const store = await import("../src/catalog/store.js");
+  const summary = (listingId: string, version: number) => ({
+    listingId, version, contentHash: "0".repeat(64), anchor: { kind: "storage-program", locator: `stor-${"0".repeat(40)}` },
+    seller: { primaryClaim: claim }, offering: { title: "", description: "", category: "services.other", tags: [] },
+    pricing: {}, status: "active",
+  });
+  store.saveCatalog({
+    catalogVersion: "1",
+    generatedAt: 1,
+    sellers: [{ primaryClaim: claim, listings: [summary("another-listing", 5), summary(base.serviceId, 2)] }],
+  } as never);
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => init?.method === "POST"
+    ? Response.json({ result: 200, response: JSON.parse(String(init.body)).params?.[0]?.message === "searchStoragePrograms" ? [] : 0 })
+    : new Response(null, { status: 404 });
+  try {
+    const preview = async (serviceId: string) => (await (await POST(request({
+      ...base,
+      serviceId,
+      identityPresentedAt: identity.identityPresentedAt,
+      identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
+    }))).json() as { listing: { listingVersion: number } }).listing.listingVersion;
+    assert.equal(await preview(base.serviceId), 3, "the next version of this listingId");
+    assert.equal(await preview("fresh-listing"), 1, "another listingId's versions are not inherited");
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
+  }
+});

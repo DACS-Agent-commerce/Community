@@ -88,7 +88,7 @@ export default function Register() {
   const [serviceId, setServiceId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [rails, setRails] = useState<string[]>(["pay-dem"]);
+  const [rails, setRails] = useState<string[]>([PUBLISHABLE_RAIL_OPTIONS[0].railId]);
   const [category, setCategory] = useState("services.other");
   const [tags, setTags] = useState("");
   const [delivery, setDelivery] = useState(DELIVERY_OPTIONS[0].id);
