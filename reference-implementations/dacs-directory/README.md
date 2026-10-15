@@ -177,12 +177,16 @@ ports, including 0) are rejected.
   rejected too.
 
 `test/fixtures/origin-policy-sources.json` records where these rules come from:
-every row of both IP registries (from Wireshark's IANA-generated tables), the
-special-use names (Unbound, Knot Resolver, and their RFCs), and the Fetch Standard's
-bad ports, each through a copy pinned to an upstream revision and sha256 (as of
-2026-10-14), plus the deliberate deviations. The tests check the tables against it
-offline; `npm run verify:origin-sources` (needs network) re-fetches each pinned copy
-and checks the fixture against it.
+every unexpired row of both IP registries (from Wireshark's IANA-generated tables,
+which drop terminated rows and record an N/A Globally Reachable as false; the two
+terminated blocks IANA still lists are rejected anyway), every special-use name
+(IANA's registry XML from a mirror, cross-checked with Unbound and Knot Resolver),
+and the Fetch Standard's bad ports. Each comes through a copy pinned to an upstream
+revision and sha256 (as of 2026-10-15), plus the deliberate deviations. The tests
+check the tables against it offline, and check the verifier against in-memory
+copies; `npm run verify:origin-sources` (needs network) re-fetches each pinned copy
+and checks the fixture against it. Node's `fetch` ignores `HTTPS_PROXY`, so behind
+a proxy run `node --use-env-proxy scripts/verify-origin-sources.mjs` instead.
 Generated canonical URLs and discovery documents therefore cannot silently point at
 localhost or a different base path. The check does not resolve DNS, so a public name
 that resolves to a private address still passes.

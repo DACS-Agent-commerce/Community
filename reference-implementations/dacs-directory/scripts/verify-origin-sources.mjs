@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 // copy that test/fixtures/origin-policy-sources.json cites, checks its sha256,
 // re-extracts the cited rows, and compares them with the fixture. The unit tests
 // check the module against the fixture offline; this checks the fixture against
-// upstream.
+// upstream. Node's fetch ignores HTTPS_PROXY: behind a proxy, run
+// `node --use-env-proxy scripts/verify-origin-sources.mjs`.
 
 // One registry row per array entry of Wireshark's generated epan/iana-info.c:
 // family, network/mask, name, then the source, destination, forwardable,
-// globally reachable and reserved-by-protocol flags.
+// globally reachable and reserved-by-protocol flags. The generator leaves out
+// rows with a termination date and writes an N/A Globally Reachable as false.
 export function wiresharkRows(text) {
   const rows = [];
   const v4 = /\{ 4, \{ \.ipv4 = \{ 0x([0-9a-f]{8}), 0x([0-9a-f]{8}) \} \}, "([^"]+)", (\w+), (\w+), (\w+), (\w+), (\w+) \}/g;
@@ -53,6 +55,12 @@ export function dnsNames(text) {
   return [...text.matchAll(/"([a-z0-9.-]+)\."/g)].map(([, name]) => name);
 }
 
+// Every name in IANA's Special-Use Domain Names registry XML, without the root dot
+// or a "(DEPRECATED)" note.
+export function ianaNames(text) {
+  return [...text.matchAll(/<name>([a-z0-9.-]+)\.(?: \([A-Z]+\))?<\/name>/g)].map(([, name]) => name);
+}
+
 // The first column of the Fetch Standard's bad-port table.
 export function fetchBadPorts(text) {
   return [...text.matchAll(/^ <tr><td>(\d+)<td>/gm)].map(([, port]) => Number(port));
@@ -62,8 +70,8 @@ function slice(text, [first, last]) {
   return text.split("\n").slice(first - 1, last).join("\n");
 }
 
-async function pinned(copy) {
-  const response = await fetch(copy.url);
+async function pinned(copy, fetchCopy) {
+  const response = await fetchCopy(copy.url);
   if (!response.ok) throw new Error(`${copy.url}: HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -73,12 +81,13 @@ async function pinned(copy) {
 
 const key = ([network, prefix]) => `${network}/${prefix}`;
 
-export async function verifyOriginSources(sources) {
+// `fetchCopy` defaults to the global fetch; the tests pass in-memory copies.
+export async function verifyOriginSources(sources, { fetch: fetchCopy = fetch } = {}) {
   const failures = [];
   const expect = (ok, message) => { if (!ok) failures.push(message); };
   const copies = sources.pinnedCopies;
 
-  const wireshark = await pinned(copies.wireshark);
+  const wireshark = await pinned(copies.wireshark, fetchCopy);
   for (const family of ["ipv4", "ipv6"]) {
     const upstream = wiresharkRows(slice(wireshark, copies.wireshark.lines[family]));
     expect(
@@ -87,7 +96,7 @@ export async function verifyOriginSources(sources) {
     );
   }
 
-  const cpython = await pinned(copies.cpython);
+  const cpython = await pinned(copies.cpython, fetchCopy);
   for (const family of ["ipv4", "ipv6"]) {
     const listed = new Set([...sources[family].notGloballyReachable, ...sources[family].globallyReachableButRejected].map(key));
     for (const row of cpythonRows(slice(cpython, copies.cpython.lines[family]))) {
@@ -95,15 +104,21 @@ export async function verifyOriginSources(sources) {
     }
   }
 
+  // The registry's names are exactly the fixture's special-use and documentation rows.
+  const registry = new Set(ianaNames(slice(await pinned(copies.iana, fetchCopy), copies.iana.lines)));
+  const listed = new Set([...sources.names.specialUse, ...sources.names.documentation].map(([name]) => name));
+  for (const name of registry) expect(listed.has(name), `names: the IANA registry lists ${name}, which the fixture lacks`);
+  for (const name of listed) expect(registry.has(name), `names: the fixture lists ${name}, which the IANA registry lacks`);
+
   const names = new Set(sources.names.specialUse.map(([name]) => name));
   for (const id of ["unbound", "knot"]) {
-    const text = await pinned(copies[id]);
+    const text = await pinned(copies[id], fetchCopy);
     for (const name of dnsNames(slice(text, copies[id].lines))) {
       expect(names.has(name), `names: ${id} lists ${name}, which the fixture lacks`);
     }
   }
 
-  const fetchSpec = await pinned(copies.fetch);
+  const fetchSpec = await pinned(copies.fetch, fetchCopy);
   const ports = fetchBadPorts(slice(fetchSpec, copies.fetch.lines));
   expect(JSON.stringify(ports) === JSON.stringify(sources.badPorts.ports), `badPorts differ from ${copies.fetch.url}`);
   return failures;
