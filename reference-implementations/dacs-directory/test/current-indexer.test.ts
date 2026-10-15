@@ -15,7 +15,8 @@ import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/re
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { loadScanState, saveScanState } from "../src/catalog/store.js";
-import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
+import { registrationMessage } from "../src/catalog/registrationSig.js";
+import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -1053,4 +1054,88 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+});
+
+/** Index the seller's registration over the fixture's stubbed storage. */
+async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Partial<Registration> = {}) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  try {
+    return await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], ...extra },
+      undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("a verified two-copy deal publishes exactly the evidence its authoritative copy signs", async () => {
+  const fixture = await vector("projection-job", 130);
+  const deal = registeredDeal("projection-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  const [published] = record.deals;
+  assert.deepEqual({
+    signatureVerified: published.signatureVerified, refsVerified: published.refsVerified,
+    reputationEligible: published.reputationEligible, rail: published.rail, outcome: published.outcome,
+    sellerOutcome: published.sellerOutcome, anchoredByRole: published.anchoredByRole,
+    bundleContentHash: published.bundleContentHash, cancellationNeutral: published.cancellationNeutral,
+    finalisedAt: published.finalisedAt, agreementPrice: published.agreementPrice, category: published.category,
+    ratings: published.ratings, settlementTxIds: published.settlementTxIds,
+  }, {
+    signatureVerified: true, refsVerified: true, reputationEligible: true, rail: "pay-dem", outcome: "completed",
+    sellerOutcome: "completed", anchoredByRole: "seller", bundleContentHash: artifactHash(fixture.sellerBundle, "bundle"),
+    cancellationNeutral: false, finalisedAt: 120, agreementPrice: { amount: "1.25", currency: "DEM" }, category: "services.test",
+    ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110, contentHash: artifactHash(fixture.rating, "rating") }],
+    settlementTxIds: [{ id: "tx-projection-job", observedAt: 100, phaseIndex: 2 }],
+  });
+  const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
+  assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
+    { categoryScope: "services.test", completionRate: 1, averageSellerRating: 5, bundleCount: 1 });
+  assert.equal(record.reputation.bundleCount, 1);
+});
+
+test("a BundleBinding resolves only to the copy anchored by the role it names", async () => {
+  // Both copies share one bundle hash; only the unhashed anchoredByRole tells them apart (BB-5).
+  const fixture = await vector("misrole-job", 150);
+  const deal = registeredDeal("misrole-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.buyer, fixture.buyerBundle, 1),
+  ] });
+  const [published] = record.deals;
+  assert.equal(published.signatureVerified, false, "the seller side is indeterminate, so nothing is published as verified");
+  assert.equal(published.refsVerified, false);
+  assert.equal(published.outcome, undefined);
+  assert.equal(published.anchoredByRole, undefined);
+  assert.equal(record.reputation.bundleCount, 0);
+});
+
+test("seller labels come only from a verifiable owner signature and verified identity claims", async () => {
+  const fixture = await vector("labels-job", 170);
+  const base = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing] };
+  const signed = async (signedAt: number, extra: Partial<Registration> = {}) => {
+    const message = registrationMessage({ ...base, ...extra }, signedAt);
+    const value = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+    return { ...extra, ownerSignature: { message, signature: value, signedAt } };
+  };
+  const unsigned = await indexFixture(fixture);
+  assert.equal(unsigned.ownerRegistered, false);
+  // A v0.1 IdentityBundle with only its signing key is self-declared, never verified or institutional.
+  assert.equal(unsigned.identityTier, "self-declared");
+  assert.ok(unsigned.identityBundle);
+  assert.equal((await indexFixture(fixture, await signed(Date.now()))).ownerRegistered, true);
+  // Freshness gates submission only; a stored signature still binds on every reindex.
+  assert.equal((await indexFixture(fixture, await signed(1))).ownerRegistered, true);
+  const { ownerSignature: other } = await signed(Date.now(), { displayName: "someone else" });
+  assert.equal((await indexFixture(fixture, { ownerSignature: other })).ownerRegistered, false, "a signature over other content");
+  // A verifier that throws on a malformed stored signature never grants the badge.
+  const malformed = await signed(Date.now());
+  (malformed.ownerSignature as { signature: unknown }).signature = 42;
+  assert.equal((await indexFixture(fixture, malformed)).ownerRegistered, false);
 });
