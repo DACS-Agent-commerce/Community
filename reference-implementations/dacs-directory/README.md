@@ -320,6 +320,9 @@ code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow 
 shim over JSON-owned values, WHATWG-subset `node:net` and `node:url` shims, and
 base64url-patched Buffer).
 
+The layout uses `next/font/local` with exact, integrity-pinned font packages.
+Production builds and served pages use those bundled fonts without a font-service request.
+
 ## Honest limitations (MVP)
 
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly

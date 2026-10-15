@@ -13,3 +13,6 @@ export {
 export {
   verifySignedArtifact,
 } from "../vendor/dacs-sdk/dist/agent/signedArtifact.js";
+export {
+  identityBundleHash,
+} from "../vendor/dacs-sdk/dist/identity/bundle.js";

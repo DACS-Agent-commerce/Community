@@ -10,7 +10,7 @@ import {
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
-import { identityBundleHash } from "@kynesyslabs/dacs/identity";
+import { identityBundleHash } from "../sdkVerification.js";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
