@@ -162,12 +162,14 @@ export interface ReputationHint {
   categoryScope: string;
   metricsUnavailableReason?: string;
   observedOutcomesLabel?: string;
+  metricsProfile?: "TP-1";
   completionRate: number | null;
   averageSellerRating?: number | null;
-  bundleCount: number;
-  windowStart: number;
-  windowEnd: number;
-  computedAt: number;
+  /** Absent when a cached listing has no scoped history observation. */
+  bundleCount?: number;
+  windowStart?: number;
+  windowEnd?: number;
+  computedAt?: number;
 }
 
 export interface VerifiedRating {
@@ -249,6 +251,11 @@ export interface SellerRecord {
   reputation: {
     metricsUnavailableReason?: string;
     observedOutcomesLabel?: string;
+    metricsProfile?: "TP-1";
+    completedLabel?: string;
+    totalAgreementsLabel?: string;
+    observedTransactionalVolumeLabel?: string;
+    transactionCountByCurrencyLabel?: string;
     completed: number;
     bundleCount?: number;
     totalAgreements: number;

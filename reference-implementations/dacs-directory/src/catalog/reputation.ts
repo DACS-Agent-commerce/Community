@@ -1,5 +1,5 @@
 import type { DealRecord, SellerRecord } from "./types.js";
-import { observedOutcomesLabel, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
+import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -106,6 +106,7 @@ export function deriveSellerReputation(
     bundleCount: scoped.length,
     totalAgreements: scoped.length,
     ...UNAVAILABLE_TESTNET_METRICS,
+    ...OBSERVED_REPUTATION_COUNTS,
     observedOutcomesLabel: observedOutcomesLabel(scoped.length),
     observedTransactionalVolume,
     transactionCountByCurrency,

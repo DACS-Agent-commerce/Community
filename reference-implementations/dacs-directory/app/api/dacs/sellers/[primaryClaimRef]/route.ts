@@ -31,9 +31,9 @@ export async function GET(
       limitation: "GCR identity links are not fresh DACS-2 verifiedBy results.",
     },
     reputation: {
-      profile: "testnet-observed-history-no-rates",
+      profile: "TP-1",
       ...seller.reputation,
-      limitation: "Completion verification unavailable. Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion; the catalog may be incomplete. Individual evidence remains available for inspection.",
+      limitation: "Completion verification unavailable under TP-1. Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion; the catalog may be incomplete. Individual evidence remains available for inspection.",
     },
     deals: seller.deals,
   }, {

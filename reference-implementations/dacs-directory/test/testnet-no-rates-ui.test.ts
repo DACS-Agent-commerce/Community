@@ -67,7 +67,7 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
 });
 
 test("rendered legacy filter and ranking URLs explicitly refuse the query and offer clearing", () => {
-  for (const query of ["trackRecord=90", "minCompletionRate=0.9", "minRating=5", "sort=completionRate"]) {
+  for (const query of ["trackRecord=90", "minCompletionRate=0.9", "minRating=5", "sort=completionRate", "minCompletionRate%5B%5D=0.9", "order=asc"]) {
     const html = renderDiscovery(query);
     assert.match(html, /role="alert"/);
     assert.match(html, /unavailable on testnet/);
