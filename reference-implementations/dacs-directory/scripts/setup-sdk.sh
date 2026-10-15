@@ -27,6 +27,11 @@ git_with_sdk_auth() {
 # dacs.standardRevision); the Directory conforms to the same revision.
 STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
 SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
+SDK_MANIFEST="vendor/dacs-sdk/dist/.dacs-sdk-manifest"
+# scripts/sdk-dist-digest.mjs over the dist that SDK_REV builds to (`npm ci`
+# then `npm run build`; the build is reproducible). A packaged or freshly built
+# dist is accepted only with exactly these bytes.
+SDK_DIST_SHA256="eda8a1f62194e8e8d0b4815770a7af4056d6934a0fd82150b207daa0e3ace2d2"
 
 require_standard_revision() {
   local declared
@@ -37,14 +42,24 @@ require_standard_revision() {
   fi
 }
 
+require_pinned_dist() {
+  local digest
+  digest="$(node scripts/sdk-dist-digest.mjs vendor/dacs-sdk/dist "$@")"
+  if [ "$digest" != "$SDK_DIST_SHA256" ]; then
+    echo "vendor/dacs-sdk/dist has digest ${digest}, not the pinned build ${SDK_DIST_SHA256}" >&2
+    exit 1
+  fi
+}
+
 if [ -d vendor/dacs-sdk/dist ] && [ ! -d vendor/dacs-sdk/.git ]; then
-  # A packaged build is accepted only when the source build below produced it
-  # from the pinned commit.
+  # A packaged build is accepted only when its bytes are the pinned build of
+  # the pinned commit; the marker alone is not evidence.
   if [ "$(cat "$SDK_REV_MARKER" 2>/dev/null)" != "$SDK_REV" ]; then
     echo "packaged dacs-sdk build is not marked as built from ${SDK_REV}; refusing it" >&2
     exit 1
   fi
   require_standard_revision
+  require_pinned_dist
   echo "using packaged dacs-sdk build of ${SDK_REV}"
 else
   if [ ! -d vendor/dacs-sdk ]; then
@@ -58,8 +73,9 @@ else
     exit 1
   fi
   require_standard_revision
-  rm -f "$SDK_REV_MARKER"
+  rm -f "$SDK_REV_MARKER" "$SDK_MANIFEST"
   (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
+  require_pinned_dist --manifest "$SDK_MANIFEST"
   printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then

@@ -111,8 +111,11 @@ railway up . --no-gitignore
 `.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
 vendor directory. `scripts/setup-sdk.sh` accepts that packaged build only when
 `dist/.dacs-sdk-revision` names the pinned `SDK_REV` (written by the source build after it
-checks a clean checkout of that commit) and the SDK's `package.json` declares the pinned
-`dacs.standardRevision`; otherwise it refuses to continue.
+checks a clean checkout of that commit), the SDK's `package.json` declares the pinned
+`dacs.standardRevision`, and the `dist` bytes hash to the pinned `SDK_DIST_SHA256`
+(`scripts/sdk-dist-digest.mjs`; the SDK build is reproducible, and a source build is held to
+the same digest and records its per-file `dist/.dacs-sdk-manifest`); otherwise it refuses to
+continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SDK_DIST_SHA256`.
 
 ### Configuration
 

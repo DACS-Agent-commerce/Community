@@ -92,7 +92,8 @@ stops at that check:
   [ "$(git -C "$sdk" rev-parse HEAD)" = "$sdk_rev" ] || die "$sdk is not at $sdk_rev"
 
   (cd "$sdk" && npm ci --no-audit --no-fund && npm run build)
-  # scripts/setup-sdk.sh accepts a packaged dist only with this marker.
+  # scripts/setup-sdk.sh accepts a packaged dist only with this marker, and
+  # only when its bytes also hash to the pinned SDK_DIST_SHA256.
   printf '%s' "$sdk_rev" > "$sdk/dist/.dacs-sdk-revision"
   npm ci --no-audit --no-fund
 )
