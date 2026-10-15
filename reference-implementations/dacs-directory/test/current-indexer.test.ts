@@ -1100,6 +1100,36 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
   assert.equal(record.reputation.bundleCount, 1);
 });
 
+test("a divergent two-copy deal in the listing's category never enters its reputationHint", async () => {
+  // Each copy verifies on its own, but the seller copy reports another outcome
+  // (#230), so the deal is unverified: neither the seller's reputation nor the
+  // listing's hint may count it.
+  const fixture = await vector("hint-divergent-job", 140);
+  const sellerScope = signedScope(fixture.sellerBundle, "bundle");
+  sellerScope.outcome = "failed-counterparty";
+  sellerScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "counterparty" }];
+  const divergentSellerCopy = {
+    ...sellerScope,
+    signatures: [await sign(sellerScope, "bundle", 0, true), await sign(sellerScope, "bundle", 1, true)],
+    anchoredByRole: "seller",
+  };
+  maps.set(fixture.locators.seller, divergentSellerCopy);
+  const deal = registeredDeal("hint-divergent-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, divergentSellerCopy, 1),
+  ] });
+  const [published] = record.deals;
+  assert.deepEqual(
+    { refsVerified: published.refsVerified, reputationEligible: published.reputationEligible, category: published.category },
+    { refsVerified: false, reputationEligible: false, category: "services.test" },
+  );
+  const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
+  assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
+    { categoryScope: "services.test", completionRate: null, averageSellerRating: null, bundleCount: 0 });
+  assert.equal(record.reputation.bundleCount, 0);
+});
+
 test("a BundleBinding resolves only to the copy anchored by the role it names", async () => {
   // Both copies share one bundle hash; only the unhashed anchoredByRole tells them apart (BB-5).
   const fixture = await vector("misrole-job", 150);

@@ -137,6 +137,13 @@ test("publisher options bind AP2 rail ids to phases and project metered pricing"
   assert.equal(publishableRail("ap2:stripe-paymentintents")?.availability, "operator_gated");
   assert.ok(PUBLISHABLE_PRICING_KINDS.includes("metered"));
   assert.equal(negotiationPhaseForPricing("metered"), "negotiate-fixed-price");
+  // The pinned SDK runs RFQ only on negotiable (or metered) pricing.
+  assert.deepEqual(PUBLISHABLE_PRICING_KINDS.map((kind) => [kind, negotiationPhaseForPricing(kind)]), [
+    ["fixed", "negotiate-fixed-price"],
+    ["negotiable", "negotiate-rfq"],
+    ["auction", "negotiate-sealed-envelope"],
+    ["metered", "negotiate-fixed-price"],
+  ]);
 
   const presentation = listingPresentation({
     offering: { title: "Metered API", description: "Per call", category: "services.api", tags: [] },

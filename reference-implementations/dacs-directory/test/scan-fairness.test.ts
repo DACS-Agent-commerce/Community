@@ -799,6 +799,34 @@ test("a known verified marker that answers without a readable artifact withholds
   }
 });
 
+test("a verified marker another party anchored is remembered by the pass and withholds its listing once unreadable", async () => {
+  // Only the scan state's memory of the verified marker withholds this listing:
+  // the writer is not the owner, and no published binding is carried.
+  const cases: Array<[string, (at: string) => void]> = [
+    ["503", (at) => unavailable.add(at)],
+    ["404", (at) => answers.set(at, () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }))],
+    ["fetch rejects", (at) => answers.set(at, () => { throw new TypeError("fetch failed"); })],
+  ];
+  const summary = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];
+  for (const [name, outage] of cases) {
+    resetIndex([sellerRegistration, later], 42);
+    chain({
+      [locator(1)]: { data: JSON.stringify(listing) },
+      [locator(62)]: { data: JSON.stringify(marker), owner: ownerOf(outsider) },
+    }, [locator(1), locator(62)]);
+    await reindex();
+    assert.equal(summary()?.status, "revoked", `${name}: the marker was verified`);
+    assert.deepEqual(store.loadScanState().verifiedRevocations[listingHash], [locator(62)], `${name}: the pass saved the marker`);
+    // As after a pass that withheld the listing: no published binding to carry.
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 43, sellers: [] });
+    transactions = [];
+    outage(locator(62));
+    await reindex();
+    assert.equal(summary(), undefined, `${name}: the listing is withheld, not republished active`);
+    assert.deepEqual(store.loadScanState().verifiedRevocations[listingHash], [locator(62)], `${name}: the marker stays known`);
+  }
+});
+
 test("a transient retry is read before rejected retries and the revocation it carries is applied", async () => {
   resetIndex([sellerRegistration, later], 10);
   chain({ [locator(1)]: { data: JSON.stringify(listing) }, [locator(60)]: { data: JSON.stringify(marker) } }, [locator(1), locator(60)]);
