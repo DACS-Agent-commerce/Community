@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
@@ -103,4 +114,48 @@ test("the Node runtime check fails unless the .nvmrc release runs", () => {
     assert.equal(cli.status, 1, cli.stdout);
     assert.match(cli.stderr, /^\[deployment config\] Node .* is running, but \.nvmrc pins/);
   }
+});
+
+// CI's Node always matches .nvmrc, so run copies of the check and the start script
+// in an app whose .nvmrc pins a release that never runs. Output goes to a file, not
+// a pipe: if the script went on, its background indexer would keep a pipe open.
+function runWithWrongNvmrc(t, command) {
+  const dir = mkdtempSync(join(tmpdir(), "node-runtime-mismatch-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "scripts"));
+  for (const file of ["check-node-runtime.mjs", "start-railway.sh"]) {
+    copyFileSync(join(appDir, "scripts", file), join(dir, "scripts", file));
+  }
+  writeFileSync(join(dir, ".nvmrc"), "0.0.0\n");
+  const out = join(dir, "out.log");
+  const fd = openSync(out, "w");
+  const run = spawnSync(command[0], command.slice(1).map((arg) => join(dir, arg)), {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: `${dirname(process.execPath)}:${process.env.PATH}`,
+      DACS_DIRECTORY_DATA: join(dir, "data"),
+      DACS_INDEX_INTERVAL_SECONDS: "1",
+      NODE_NO_WARNINGS: "1",
+      PORT: "0",
+    },
+    stdio: ["ignore", fd, fd],
+    timeout: 60_000,
+  });
+  closeSync(fd);
+  return { status: run.status, output: readFileSync(out, "utf8"), dir };
+}
+
+test("the Node runtime check exits 1 when another release runs", (t) => {
+  const { status, output } = runWithWrongNvmrc(t, [process.execPath, "scripts/check-node-runtime.mjs"]);
+  assert.equal(status, 1, output);
+  assert.match(output, new RegExp(`^\\[deployment config\\] Node ${process.versions.node} is running, but \\.nvmrc pins 0\\.0\\.0; `));
+});
+
+test("start:railway stops before the indexer and server when the check fails", (t) => {
+  const { status, output, dir } = runWithWrongNvmrc(t, ["bash", "scripts/start-railway.sh"]);
+  assert.equal(status, 1, output);
+  assert.match(output, /^\[deployment config\] Node .* is running, but \.nvmrc pins 0\.0\.0; /);
+  assert.doesNotMatch(output, /\[indexer\]|next/);
+  assert.ok(!existsSync(join(dir, "data")), "start-railway.sh must fail before it prepares the data directory");
 });
