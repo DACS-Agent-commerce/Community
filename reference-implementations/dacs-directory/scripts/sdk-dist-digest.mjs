@@ -7,7 +7,7 @@
 //
 // usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,8 +32,12 @@ export function distManifest(root) {
 
 export const distDigest = (root) => createHash("sha256").update(distManifest(root)).digest("hex");
 
-// Compared as paths: a URL built from argv misreads `#`, `%` and spaces.
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Compared as real paths: a URL built from argv misreads `#`, `%` and spaces,
+// and Node loads the main module from its real path, not the symlinked one.
+const invokedPath = (path) => {
+  try { return realpathSync(path); } catch { return resolve(path); }
+};
+if (process.argv[1] && fileURLToPath(import.meta.url) === invokedPath(process.argv[1])) {
   const [root, flag, out] = process.argv.slice(2);
   if (!root || (flag !== undefined && (flag !== "--manifest" || !out))) {
     console.error("usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]");
