@@ -19,7 +19,7 @@ artifacts; GCR identity links are shown separately and are not called DACS-2 ver
 Completion verification unavailable: TP-1 testnet catalog projections publish completion and
 fault rates and numeric reputation scores as `null`, with a reason. Counts are labelled
 as observed outcomes, not verified completion. Rate and score filters and ranking return
-400. Individual evidence inspection remains available. Full metrics return later under
+400. Individual evidence inspection remains available. Full metrics return under
 a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
 while chain inclusion still depends on the disclosed proxy/RPC path.
 
