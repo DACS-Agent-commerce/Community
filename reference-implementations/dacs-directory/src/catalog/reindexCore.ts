@@ -97,8 +97,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 
   // Nothing from a node outside the pinned build and chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.
-  const deployment = await (opts.nodeDeployment ?? pinnedNodeDeployment)();
-  if (!deployment.ok) throw new Error(`catalog not updated: ${deployment.reason}`);
+  // The refusal is still recorded as a failed run, so the public status shows
+  // that the catalog is not advancing.
+  const deployment = await (opts.nodeDeployment ?? pinnedNodeDeployment)().catch((error: unknown) => ({
+    ok: false as const,
+    reason: `could not read the Demos node's build and chain: ${error instanceof Error ? error.message : String(error)}`,
+  }));
+  if (!deployment.ok) {
+    const error = `catalog not updated: ${deployment.reason}`;
+    const { lastSeenTxId } = loadScanState();
+    finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
+    throw new Error(error);
+  }
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a

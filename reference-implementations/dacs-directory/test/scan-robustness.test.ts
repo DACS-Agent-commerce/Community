@@ -356,6 +356,16 @@ test("a node outside the pinned deployment fails the pass before the catalog or 
   resetIndex([later], 13);
   chain({ [locator(91)]: { data: JSON.stringify(listing) } }, [locator(91)]);
   const before = store.loadScanState();
+  const runs = () => Number(sql("SELECT COUNT(*) count FROM scan_runs")[0].count);
+  const runsBefore = runs();
+  /** The refused pass is the latest run, failed with its reason, and scanned nothing. */
+  const assertFailedRun = (error: RegExp) => {
+    const run = scanCounts();
+    assert.equal(run.status, "failed");
+    assert.match(String(run.error), error);
+    assert.equal(run.txs_scanned, 0);
+    assert.equal(store.indexerDiagnostics().lastRun?.status, "failed", "the public status shows the refusal");
+  };
   await assert.rejects(
     reindexAll({
       log: () => {},
@@ -366,10 +376,22 @@ test("a node outside the pinned deployment fails the pass before the catalog or 
   );
   assert.equal(store.loadCatalog().generatedAt, 13);
   assert.deepEqual(store.loadScanState(), before);
-  // Without an injected preflight the pass asks the node itself; this stub reports no build.
-  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }));
+  assert.equal(runs(), runsBefore + 1);
+  assertFailedRun(/^catalog not updated: Demos node build 61b8e75\+dirty@x is not pinned$/);
+  // A preflight that cannot read the node fails the pass the same way.
+  await assert.rejects(
+    reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: async () => { throw new Error("getNetworkInfo transport failed"); } }),
+    /^Error: catalog not updated: could not read the Demos node's build and chain: getNetworkInfo transport failed$/,
+  );
   assert.equal(store.loadCatalog().generatedAt, 13);
   assert.deepEqual(store.loadScanState(), before);
+  assertFailedRun(/could not read the Demos node's build and chain/);
+  // Without an injected preflight the pass asks the node itself; this stub reports no build.
+  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }), /catalog not updated: Demos node reports no build identity/);
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
+  assert.equal(runs(), runsBefore + 3);
+  assertFailedRun(/reports no build identity/);
 });
 
 test("a SQLite failure during seller indexing fails the pass and records its status", async () => {
