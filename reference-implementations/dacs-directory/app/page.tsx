@@ -1,8 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { homeCatalogDisplayState } from "@/src/components/home-hero-state";
+import { homeCatalogSummary } from "@/src/components/home-hero-state";
 import { loadCatalog } from "@/src/catalog/store";
-import { activeCatalogListings, activeCatalogSellers } from "@/src/catalog/discovery";
 
 export const dynamic = "force-dynamic";
 
@@ -34,14 +33,7 @@ const DIRECTORY_CAPABILITIES = [
 ];
 
 export default function Home() {
-  const catalog = loadCatalog();
-  const sellers = activeCatalogSellers(catalog.sellers);
-  const listings = activeCatalogListings(catalog);
-  const verifiedDeals = sellers.reduce((sum, seller) => sum + seller.deals.filter((deal) => deal.refsVerified).length, 0);
-  const indexed = catalog.generatedAt > 0;
-  const catalogDisplayState = homeCatalogDisplayState(indexed, listings.length);
-  const indexedAgoMin = indexed ? Math.max(0, Math.round((Date.now() - catalog.generatedAt) / 60_000)) : 0;
-  const indexedAgo = indexedAgoMin < 60 ? `${indexedAgoMin}m` : `${Math.round(indexedAgoMin / 60)}h`;
+  const summary = homeCatalogSummary(loadCatalog(), Date.now());
 
   return (
     <>
@@ -58,26 +50,20 @@ export default function Home() {
         </div>
         <div className="trust-strip" aria-label="Catalog summary">
           <div>
-            <strong>{listings.length}</strong>
+            <strong>{summary.activeServices}</strong>
             <span>active services</span>
           </div>
           <div>
-            <strong>{sellers.length}</strong>
+            <strong>{summary.sellers}</strong>
             <span>indexed sellers</span>
           </div>
           <div>
-            <strong>{verifiedDeals}</strong>
+            <strong>{summary.verifiedDeals}</strong>
             <span>verified deal graphs</span>
           </div>
           <div>
-            <strong>{indexed ? indexedAgo : "pending"}</strong>
-            <span>
-              {catalogDisplayState === "indexing"
-                ? "initial chain index"
-                : catalogDisplayState === "empty"
-                  ? "last index; no active listings"
-                  : "since last index"}
-            </span>
+            <strong>{summary.freshness.value}</strong>
+            <span>{summary.freshness.label}</span>
           </div>
         </div>
       </section>
