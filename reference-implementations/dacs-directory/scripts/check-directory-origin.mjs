@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 // The tables below mirror upstream registries; test/fixtures/origin-policy-sources.json
 // records the pinned copies they were checked against, and the deliberate deviations.
 
-// IPv4 space this deployment can't be served from: every block the IANA IPv4
-// Special-Purpose Address Registry marks not globally reachable, plus multicast
-// and the deprecated 6to4 relay anycast block. This fails closed: the whole of
-// 192.0.0.0/24 is rejected, including its globally reachable anycast exceptions
-// (192.0.0.9/32, 192.0.0.10/32), which are protocol addresses, not hosting space.
+// IPv4 space this deployment can't be served from: every block in the IANA IPv4
+// Special-Purpose Address Registry, plus multicast and the deprecated 6to4 relay
+// anycast block. The registry's globally reachable rows (PCP and TURN anycast
+// inside 192.0.0.0/24, AS112, AMT) are protocol addresses, not hosting space, so
+// this fails closed and rejects them with the rest.
 export const NON_PUBLIC_IPV4_SUBNETS = [
   ["0.0.0.0", 8],
   ["10.0.0.0", 8],
@@ -19,8 +19,11 @@ export const NON_PUBLIC_IPV4_SUBNETS = [
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
   ["192.0.2.0", 24],
+  ["192.31.196.0", 24],
+  ["192.52.193.0", 24],
   ["192.88.99.0", 24],
   ["192.168.0.0", 16],
+  ["192.175.48.0", 24],
   ["198.18.0.0", 15],
   ["198.51.100.0", 24],
   ["203.0.113.0", 24],
@@ -28,22 +31,24 @@ export const NON_PUBLIC_IPV4_SUBNETS = [
   ["240.0.0.0", 4],
 ];
 // IPv6 literals must be global unicast (2000::/3). That rejects loopback,
-// unspecified, IPv4-mapped, IPv4-compatible, NAT64, ULA, link-local, site-local,
-// and multicast. Inside 2000::/3 the documentation, IETF-protocol (including
-// Teredo) and 6to4 blocks are rejected too. Like the IPv4 table this fails closed:
-// the globally reachable exceptions inside 2001::/23 are rejected with it.
+// unspecified, IPv4-mapped, IPv4-compatible, NAT64, discard-only, ULA, link-local,
+// site-local, and multicast. Inside 2000::/3 the documentation, IETF-protocol
+// (including Teredo), 6to4 and Direct Delegation AS112 blocks are rejected too.
+// Like the IPv4 table this fails closed: the globally reachable exceptions inside
+// 2001::/23 are rejected with it.
 export const GLOBAL_UNICAST_IPV6_SUBNETS = [["2000::", 3]];
 export const NON_PUBLIC_IPV6_SUBNETS = [
   ["2001::", 23],
   ["2001:db8::", 32],
   ["2002::", 16],
+  ["2620:4f:8000::", 48],
   ["3fff::", 20],
 ];
 
 // IANA Special-Use Domain Names that can't name a public origin (each with its
 // subdomains; `arpa` covers home.arpa, resolver.arpa, service.arpa, ipv4only.arpa,
-// 6tisch.arpa and the reverse-mapping zones), plus the private-use `internal` TLD
-// and the conventional `localdomain`.
+// 6tisch.arpa, eap.arpa, eap-noob.arpa and the reverse-mapping zones), plus the
+// private-use `internal` TLD and the conventional `localdomain`.
 export const NON_PUBLIC_SUFFIXES = [
   "localhost",
   "local",

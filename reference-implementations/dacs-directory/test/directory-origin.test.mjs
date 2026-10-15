@@ -17,6 +17,7 @@ import {
   checkDirectoryOrigin,
   httpsOrigin,
 } from "../scripts/check-directory-origin.mjs";
+import { cpythonRows, dnsNames, fetchBadPorts, wiresharkRows } from "../scripts/verify-origin-sources.mjs";
 
 const sources = JSON.parse(readFileSync(new URL("./fixtures/origin-policy-sources.json", import.meta.url), "utf8"));
 
@@ -72,10 +73,16 @@ test("accepts addresses next to each blocked range", () => {
     "https://172.15.255.255",
     "https://192.0.1.1",
     "https://192.0.3.0",
+    "https://192.31.195.255",
+    "https://192.31.197.0",
+    "https://192.52.192.255",
+    "https://192.52.194.0",
     "https://192.88.98.255",
     "https://192.88.100.0",
     "https://192.167.255.255",
     "https://192.169.0.0",
+    "https://192.175.47.255",
+    "https://192.175.49.0",
     "https://198.17.255.255",
     "https://198.20.0.1",
     "https://198.51.99.255",
@@ -88,6 +95,8 @@ test("accepts addresses next to each blocked range", () => {
     "https://[2001:db7:ffff::1]",
     "https://[2001:db9::1]",
     "https://[2003::1]",
+    "https://[2620:4f:7fff:ffff:ffff:ffff:ffff:ffff]",
+    "https://[2620:4f:8001::]",
     "https://[3fff:1000::1]",
     "https://[3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]",
   ]) assertPublic(value);
@@ -220,6 +229,10 @@ test("rejects single-label, malformed, and private-use names", () => {
     "https://router.home.arpa",
     "https://home.arpa",
     "https://localhost.localdomain",
+    "https://directory.invalid",
+    "https://directory.onion",
+    "https://directory.alt",
+    "https://directory.eap-noob.arpa",
   ]) assertNotPublic(value);
 });
 
@@ -285,6 +298,9 @@ test("rejects special-use, documentation, multicast, and reserved IP literals", 
   for (const value of [
     "https://192.0.0.192",
     "https://192.0.2.1",
+    "https://192.31.196.1",
+    "https://192.52.193.1",
+    "https://192.175.48.1",
     "https://192.88.99.1",
     "https://198.18.0.1",
     "https://198.19.255.255",
@@ -301,9 +317,11 @@ test("rejects special-use, documentation, multicast, and reserved IP literals", 
     "https://[3fff:fff::1]",
     "https://[2001::1]",
     "https://[2001:1ff::1]",
+    "https://[2620:4f:8000::1]",
     "https://[fec0::1]",
     "https://[ff02::1]",
     "https://[100::1]",
+    "https://[100:0:0:1::1]",
     "https://[1fff:ffff::1]",
     "https://[4000::1]",
   ]) assertNotPublic(value);
@@ -382,14 +400,24 @@ test("only CI's placeholder check allows documentation names", () => {
   assert.equal(pkg.scripts["check:deploy-config"], "node scripts/check-directory-origin.mjs");
 });
 
-function subnetEdges(network, prefix) {
+function subnetRange(network, prefix) {
   const family = isIP(network);
   const bits = family === 4 ? 32 : 128;
   const value = family === 4
     ? network.split(".").reduce((acc, part) => (acc << 8n) | BigInt(part), 0n)
     : expandIpv6(network).reduce((acc, part) => (acc << 16n) | BigInt(`0x${part}`), 0n);
   const hostMask = (1n << BigInt(bits - prefix)) - 1n;
-  return [value & ~hostMask, value | hostMask].map((n) => formatAddress(n, family));
+  return [value & ~hostMask, value | hostMask];
+}
+
+function subnetEdges(network, prefix) {
+  return subnetRange(network, prefix).map((n) => formatAddress(n, isIP(network)));
+}
+
+function covers([network, prefix], [inner, innerPrefix]) {
+  const [low, high] = subnetRange(network, prefix);
+  const [innerLow, innerHigh] = subnetRange(inner, innerPrefix);
+  return low <= innerLow && innerHigh <= high;
 }
 
 function expandIpv6(address) {
@@ -413,7 +441,9 @@ test("the denylists match the pinned registry snapshot", () => {
     for (const [network, prefix] of [...notGloballyReachable, ...globallyReachableButRejected, ...extraRejections]) {
       for (const edge of subnetEdges(network, prefix)) assertNotPublic(`https://${edge}`);
     }
-    const traced = new Set([...notGloballyReachable, ...extraRejections].map(([n, p]) => `${n}/${p}`));
+    const traced = new Set(
+      [...notGloballyReachable, ...globallyReachableButRejected, ...extraRejections].map(([n, p]) => `${n}/${p}`),
+    );
     const moduleRows = family === "ipv4" ? NON_PUBLIC_IPV4_SUBNETS : NON_PUBLIC_IPV6_SUBNETS;
     for (const [network, prefix] of moduleRows) assert.ok(traced.has(`${network}/${prefix}`), `${network}/${prefix}`);
   }
@@ -425,6 +455,63 @@ test("the denylists match the pinned registry snapshot", () => {
   }
   assert.deepEqual(DOCUMENTATION_SUFFIXES, sources.names.documentation.map(([name]) => name));
   assert.deepEqual([...BAD_PORTS], sources.badPorts.ports);
+});
+
+// registryRows is every row of the pinned registry copy. Each is rejected at both
+// edges, and none is missing from the tables above: a not-globally-reachable row
+// sits inside a notGloballyReachable row, a globally reachable one inside a
+// row that is rejected anyway.
+test("every IANA special-purpose block is rejected and traced", () => {
+  for (const family of ["ipv4", "ipv6"]) {
+    const { registryRows, notGloballyReachable, globallyReachableButRejected } = sources[family];
+    assert.ok(registryRows.length >= 24, family);
+    for (const [network, prefix, globallyReachable, name] of registryRows) {
+      for (const edge of subnetEdges(network, prefix)) assertNotPublic(`https://${edge}`);
+      const listed = globallyReachable
+        ? [...notGloballyReachable, ...globallyReachableButRejected]
+        : notGloballyReachable;
+      assert.ok(listed.some((row) => covers(row, [network, prefix])), `${family} ${network}/${prefix} ${name}`);
+    }
+  }
+});
+
+// `npm run verify:origin-sources` fetches these; each pin must name an exact
+// upstream revision, a sha256, and the cited lines.
+test("every pinned copy names a fixed revision, a sha256, and its lines", () => {
+  for (const [id, copy] of Object.entries(sources.pinnedCopies)) {
+    assert.match(copy.url, /^https:\/\/raw\.githubusercontent\.com\/[\w.-]+\/[\w.-]+\/([0-9a-f]{40}|v\d+\.\d+\.\d+)\//, id);
+    assert.match(copy.sha256, /^[0-9a-f]{64}$/, id);
+    for (const [first, last] of Array.isArray(copy.lines) ? [copy.lines] : Object.values(copy.lines)) {
+      assert.ok(Number.isInteger(first) && first > 0 && last >= first, id);
+    }
+  }
+  assert.match(sources.asOf, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("the source verifier extracts rows the way the pinned copies write them", () => {
+  assert.deepEqual(
+    wiresharkRows([
+      '\t{ 4, { .ipv4 = { 0xc01fc400, 0xffffff00 } }, "AS112-v4", true, true, true, true, false },',
+      "\t{ 6, { .ipv6 = { { { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } }, 64 } },",
+      '\t\t"Dummy IPv6 Prefix", true, false, false, false, false },',
+      "\t{ 6, { .ipv6 = { { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 } }, 128 } },",
+      '\t\t"Loopback Address", false, false, false, false, true },',
+    ].join("\n")),
+    [
+      ["192.31.196.0", 24, true, "AS112-v4"],
+      ["100:0:0:1::", 64, false, "Dummy IPv6 Prefix"],
+      ["::1", 128, false, "Loopback Address"],
+    ],
+  );
+  assert.deepEqual(
+    cpythonRows("        IPv4Network('192.0.0.170/31'),\n        IPv6Network('2001:4:112::/48'),"),
+    [["192.0.0.170", 31], ["2001:4:112::", 48]],
+  );
+  assert.deepEqual(dnsNames('\t"home.arpa.",\t\t/* RFC 8375 */\n\t{ KR_RULE_SUB_NXDOMAIN, "eap-noob.arpa."},'), [
+    "home.arpa",
+    "eap-noob.arpa",
+  ]);
+  assert.deepEqual(fetchBadPorts(" <tbody><tr><th>Port<th>Typical service\n <tr><td>0<td>—\n <tr><td>10080<td>amanda"), [0, 10080]);
 });
 
 const script = fileURLToPath(new URL("../scripts/check-directory-origin.mjs", import.meta.url));
@@ -498,6 +585,20 @@ test("importing the module does not run the CLI", () => {
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout + result.stderr, "");
+});
+
+// argv[1] names a script that doesn't exist, so realpathSync throws while the
+// module is preloaded; the guard must treat that as "not invoked directly".
+test("preloading the module before a missing entry script does not run the CLI", () => {
+  const missing = join(tmpdir(), "directory-origin-missing", "entry.mjs");
+  const result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(script).href, missing],
+    { env: childEnv("http://localhost:3400"), encoding: "utf8" },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Cannot find module|ERR_MODULE_NOT_FOUND/);
+  assert.doesNotMatch(result.stdout + result.stderr, /\[deployment config\]/);
 });
 
 test("the CLI checks ignore runtime warnings from the inherited environment", () => {
