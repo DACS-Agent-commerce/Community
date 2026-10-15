@@ -2,8 +2,10 @@
  * POST /api/dacs/confirm-listing — independently read and verify a listing
  * after the wallet broadcasts its StorageProgram transaction.
  *
- * Visibility alone is insufficient: the canonical transaction and its
- * BFT-confirmed block first produce a portable finalized AnchorReceipt. The
+ * Visibility alone is insufficient: the canonical transaction and the block
+ * the configured node reports as confirmed first produce a portable
+ * `included` AnchorReceipt. Demos finality is not verified (validator
+ * signatures and quorum need SDK support), so nothing here is labelled final. The
  * native address, owner, producer-held program name, listing tuple, content
  * hash, seller, identity presentation and listing signature must then all bind
  * before the browser may register the pointer.
@@ -11,7 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listingAddress } from "@kynesyslabs/dacs/canonical";
 import { readAnchorRecord } from "@/src/catalog/chain";
-import { finalizedListingAnchorReceipt } from "@/src/catalog/listingFinality";
+import { includedListingAnchorReceipt } from "@/src/catalog/listingFinality";
 import { verifyListing } from "@/src/catalog/listingVerification";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 
@@ -81,7 +83,7 @@ export async function POST(req: NextRequest) {
     body.listingId,
     Number(body.listingVersion),
   );
-  const finality = await finalizedListingAnchorReceipt({
+  const inclusion = await includedListingAnchorReceipt({
     anchorAddress: body.anchorAddress,
     logicalAddress,
     programName: body.programName,
@@ -91,27 +93,28 @@ export async function POST(req: NextRequest) {
       ? body.transactionRef.toLowerCase()
       : undefined,
   });
-  if (finality.status === "pending") {
+  if (inclusion.status === "pending") {
     return NextResponse.json(
-      { confirmed: false, state: "finality-pending", reason: finality.reason },
+      { confirmed: false, state: "inclusion-pending", reason: inclusion.reason },
       { status: 202 },
     );
   }
-  if (finality.status === "rejected") {
+  if (inclusion.status === "rejected") {
     return NextResponse.json(
-      { confirmed: false, state: "finality-failed", error: finality.reason },
+      { confirmed: false, state: "inclusion-failed", error: inclusion.reason },
       { status: 409 },
     );
   }
 
   return NextResponse.json({
     confirmed: true,
-    state: "finalized-and-verified",
+    state: "included-and-verified",
+    finality: inclusion.finality,
     anchorAddress: body.anchorAddress,
     contentHash: verified.contentHash,
     sellerClaim: verified.sellerClaim,
     listingId: body.listingId,
     listingVersion: body.listingVersion,
-    anchorReceipt: finality.receipt,
+    anchorReceipt: inclusion.receipt,
   });
 }

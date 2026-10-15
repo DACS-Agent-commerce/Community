@@ -7,9 +7,18 @@ import { canonicalize, contentHash, listingAddress, sha256Hex } from "@kynesysla
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 const { POST } = await import("../app/api/dacs/confirm-listing/route.js");
+const { PINNED_DEMOS_CHAIN_IDENTITY, nodeBuildRejection, pinnedChainIdentity, pinnedNodeBuilds } = await import(
+  "../src/catalog/nodeDeployment.js"
+);
 const { decodeDemosAnchorReceiptProof, demosSignedTransactionProofHash } = await import(
   "../vendor/dacs-sdk/dist/substrate/demosWriteEvidence.js"
 );
+/**
+ * The receipt carries the SDK's portable Demos proof, restated as `included`.
+ * The SDK decoder reads only `finalized` receipts, so decode the same proof.
+ */
+const proofOf = (receipt: unknown) =>
+  decodeDemosAnchorReceiptProof({ ...(receipt as Record<string, unknown>), state: "finalized" } as never);
 
 const privateKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21)));
 const keyHex = Buffer.from(rawPublicKey(publicKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 21))))).toString("hex");
@@ -118,6 +127,10 @@ const historyRow = (tx: NodeTransaction) => ({
 const byHashRow = ({ id: _id, type: _type, to: _to, ...tx }: NodeTransaction) => ({ ...tx, ed25519_signature: null });
 const blockHash = "ef".repeat(32);
 const chainId = "83".repeat(32);
+// The fixture chain stands in for the pinned Demos deployment.
+process.env.DEMOS_CHAIN_IDENTITY = chainId;
+const pinnedCommit = "61b8e75aa8db5e408c49e1c3a89db4d673f45578";
+const cleanBuild = { name: "demos-node-software", version: "0.9.8", commit: pinnedCommit, dirty: false };
 const coordinates = {
   anchorAddress,
   programName,
@@ -137,6 +150,14 @@ function stubChain(overrides: {
   transactionMetadata?: Record<string, unknown>;
   block?: Record<string, unknown>;
   history?: boolean;
+  /** Block zero's answer; by default node2's `result: 400` error. */
+  genesis?: Record<string, unknown>;
+  /** Members replacing block one's. */
+  first?: Record<string, unknown>;
+  /** Members replacing the getTxByHash row's. */
+  byHash?: Record<string, unknown>;
+  /** getNetworkInfo's `nodeVersion`; a clean build of the pinned commit by default. */
+  nodeVersion?: Record<string, unknown> | null;
 } = {}): string[] {
   const write = transaction.content.data[1] as Record<string, unknown>;
   const written = overrides.transactionMetadata
@@ -162,7 +183,7 @@ function stubChain(overrides: {
     }
     if (call.message === "getTxByHash") {
       return call.data.hash === transactionHash
-        ? Response.json({ result: 200, response: byHashRow(written) })
+        ? Response.json({ result: 200, response: { ...byHashRow(written), ...overrides.byHash } })
         : Response.json({ result: 404, response: "error" });
     }
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 5) {
@@ -178,13 +199,19 @@ function stubChain(overrides: {
         },
       });
     }
+    if (call.message === "getNetworkInfo") {
+      const nodeVersion = overrides.nodeVersion === undefined ? cleanBuild : overrides.nodeVersion;
+      return Response.json({ result: 200, response: { forks: {}, ...(nodeVersion ? { nodeVersion } : {}) } });
+    }
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 0) {
-      return Response.json({ result: 400, response: "error", extra: "Block number not provided" });
+      return overrides.genesis
+        ? Response.json({ result: 200, response: overrides.genesis })
+        : Response.json({ result: 400, response: "error", extra: "Block number not provided" });
     }
     if (call.message === "getBlockByNumber" && call.data.blockNumber === 1) {
       return Response.json({
         result: 200,
-        response: { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32), content: { previousHash: chainId, timestamp: 1 } },
+        response: { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32), content: { previousHash: chainId, timestamp: 1 }, ...overrides.first },
       });
     }
     return Response.json({ result: 500, response: null });
@@ -200,7 +227,8 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     assert.equal(response.status, 200);
     const body = await response.json() as Record<string, unknown>;
     assert.equal(body.confirmed, true);
-    assert.equal(body.state, "finalized-and-verified");
+    assert.equal(body.state, "included-and-verified");
+    assert.equal(body.finality, "not-verified", "inclusion is never labelled final");
     assert.equal(body.anchorAddress, anchorAddress);
     assert.equal(body.contentHash, listingHash);
     assert.equal(body.sellerClaim, sellerClaim);
@@ -208,7 +236,7 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     assert.equal(body.listingVersion, 1);
     const receipt = body.anchorReceipt as Record<string, unknown>;
     assert.equal(isAnchorReceipt(receipt), true);
-    assert.equal(receipt.state, "finalized");
+    assert.equal(receipt.state, "included");
     assert.equal(receipt.observationDisposition, "established");
     assert.equal(receipt.logicalAddress, logicalAddress);
     assert.equal(receipt.nativeAddress, anchorAddress);
@@ -216,7 +244,7 @@ test("listing confirmation verifies coordinates, owner, identity, signature, has
     assert.deepEqual(receipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
     // node2 serves block timestamps in seconds; the receipt carries milliseconds.
     assert.deepEqual(receipt.blockRef, { id: blockHash, height: "5", timestamp: 1_786_360_000_000 });
-    const proof = decodeDemosAnchorReceiptProof(receipt as never);
+    const proof = proofOf(receipt);
     assert.equal(proof.chainIdentity, chainId, "block zero answers `error`, so block one's predecessor names the chain");
     // Portable: the SDK verifier re-reads getTxByHash, whose signature is an object.
     assert.equal(proof.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
@@ -235,10 +263,10 @@ test("listing confirmation reads a browser-supplied transactionRef by hash", asy
       const response = await POST(request({ ...coordinates, transactionRef }));
       assert.equal(response.status, 200, transactionRef);
       const body = await response.json() as { state: string; anchorReceipt: Record<string, unknown> };
-      assert.equal(body.state, "finalized-and-verified");
+      assert.equal(body.state, "included-and-verified");
       assert.deepEqual(body.anchorReceipt.transactionRef, { kind: "demos-storage-program", value: transactionHash });
       assert.equal(
-        decodeDemosAnchorReceiptProof(body.anchorReceipt as never).signedTransactionHash,
+        proofOf(body.anchorReceipt).signedTransactionHash,
         demosSignedTransactionProofHash(byHashRow(transaction)),
       );
       assert.ok(calls.includes("getTxByHash"));
@@ -247,7 +275,7 @@ test("listing confirmation reads a browser-supplied transactionRef by hash", asy
     stubChain();
     const other = await POST(request({ ...coordinates, transactionRef: "ef".repeat(32) }));
     assert.equal(other.status, 202);
-    assert.equal((await other.json() as { state: string }).state, "finality-pending");
+    assert.equal((await other.json() as { state: string }).state, "inclusion-pending");
     const malformed = await POST(request({ ...coordinates, transactionRef: "not-a-hash" }));
     assert.equal(malformed.status, 400);
   } finally {
@@ -255,7 +283,7 @@ test("listing confirmation reads a browser-supplied transactionRef by hash", asy
   }
 });
 
-test("listing confirmation never registers before the write is BFT-final", async () => {
+test("listing confirmation never registers before the write is in a node-confirmed block", async () => {
   const originalFetch = globalThis.fetch;
   try {
     for (const block of [
@@ -274,7 +302,7 @@ test("listing confirmation never registers before the write is BFT-final", async
       assert.equal(response.status, 202, JSON.stringify(block));
       const body = await response.json() as Record<string, unknown>;
       assert.equal(body.confirmed, false);
-      assert.equal(body.state, "finality-pending");
+      assert.equal(body.state, "inclusion-pending");
       assert.equal(body.anchorReceipt, undefined);
     }
   } finally {
@@ -295,7 +323,7 @@ test("listing confirmation rejects native metadata that does not bind the signed
       const response = await POST(request(coordinates));
       assert.equal(response.status, 409, Object.keys(overrides).join("+"));
       const body = await response.json() as Record<string, unknown>;
-      assert.equal(body.state, "finality-failed");
+      assert.equal(body.state, "inclusion-failed");
       assert.equal(body.anchorReceipt, undefined);
     }
   } finally {
@@ -335,4 +363,168 @@ test("listing confirmation rejects valid bytes under the wrong expected content 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+/** The receipt's chain identity when `pinned` is the pinned chain, or the confirmation state. */
+async function chainIdentityFor(overrides: Parameters<typeof stubChain>[0], pinned = chainId): Promise<string> {
+  stubChain(overrides);
+  process.env.DEMOS_CHAIN_IDENTITY = pinned;
+  try {
+    const response = await POST(request(coordinates));
+    const body = await response.json() as { state: string; anchorReceipt?: unknown };
+    return response.status === 200 ? proofOf(body.anchorReceipt).chainIdentity : body.state;
+  } finally {
+    process.env.DEMOS_CHAIN_IDENTITY = chainId;
+  }
+}
+
+test("chain identity is a genesis block that answers as block zero, else a well-formed block one's predecessor", async () => {
+  const originalFetch = globalThis.fetch;
+  const genesisHash = "0a".repeat(32);
+  try {
+    assert.equal(await chainIdentityFor({ genesis: { number: 0, hash: ` ${genesisHash.toUpperCase()} ` } }, genesisHash), genesisHash);
+    assert.equal(await chainIdentityFor({ genesis: { id: 0, hash: genesisHash } }, genesisHash), genesisHash, "the node's `id` numbers the block");
+    assert.equal(await chainIdentityFor({ genesis: { hash: genesisHash } }, genesisHash), genesisHash);
+    // A block that is not block zero, or has no hash, never names the chain.
+    assert.equal(await chainIdentityFor({ genesis: { number: 3, hash: genesisHash } }), chainId);
+    assert.equal(await chainIdentityFor({ genesis: { number: 0, hash: "  " } }), chainId);
+    for (const first of [
+      { status: "pending" },
+      { number: 2 },
+      { hash: undefined },
+      { hash: "  " },
+      { content: { timestamp: 1 } },
+      { content: JSON.stringify({ previousHash: "", timestamp: 1 }) },
+    ]) {
+      assert.equal(await chainIdentityFor({ first }), "inclusion-pending", JSON.stringify(first));
+    }
+    // node2 may serve block one's content as a JSON string.
+    assert.equal(await chainIdentityFor({ first: { content: JSON.stringify({ previousHash: chainId, timestamp: 1 }) } }), chainId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("every validator-signature entry must have the node's key and signature shape", async () => {
+  const originalFetch = globalThis.fetch;
+  const key = `0x${"aa".repeat(32)}`;
+  const signature = `0x${"bb".repeat(64)}`;
+  try {
+    for (const [name, signatures] of [
+      ["a malformed entry beside a good one", { [key]: signature, [`0x${"cc".repeat(32)}`]: "0x1234" }],
+      ["a 63-hex key", { [`0x${"a".repeat(63)}`]: signature }],
+      ["a 65-byte key", { [`0x${"a".repeat(66)}`]: signature }],
+      ["a key without 0x", { ["aa".repeat(32)]: signature }],
+      ["a 127-hex signature", { [key]: `0x${"b".repeat(127)}` }],
+      ["a 129-hex signature", { [key]: `0x${"b".repeat(129)}` }],
+      ["a non-string signature", { [key]: 7 }],
+    ] as const) {
+      stubChain({ block: { validation_data: { signatures } } });
+      const response = await POST(request(coordinates));
+      assert.equal(response.status, 202, name);
+      assert.equal((await response.json() as { state: string }).state, "inclusion-pending", name);
+    }
+    // Several well-formed entries, in either hex case, keep the node's shape.
+    stubChain({ block: { validation_data: { signatures: { [key]: signature, [`0x${"CC".repeat(32)}`]: `0x${"DD".repeat(64)}` } } } });
+    assert.equal((await POST(request(coordinates))).status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("native and transaction metadata must agree and bind the logical address, content and envelope", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [name, overrides] of [
+      ["transaction metadata differs", { transactionMetadata: { ...metadata, note: "other" } }],
+      ["native metadata missing", { nativeMetadata: undefined as never, transactionMetadata: metadata, dropNative: true }],
+      ["another logical address", { nativeMetadata: { ...metadata, logicalAddress: "dacs1:other" }, transactionMetadata: { ...metadata, logicalAddress: "dacs1:other" } }],
+      ["another content hash", { nativeMetadata: { ...metadata, contentHash: "0".repeat(64) }, transactionMetadata: { ...metadata, contentHash: "0".repeat(64) } }],
+    ] as const) {
+      const { dropNative, ...stub } = overrides as Parameters<typeof stubChain>[0] & { dropNative?: boolean };
+      stubChain(stub);
+      if (dropNative) {
+        const stubbed = globalThis.fetch;
+        globalThis.fetch = async (input, init) => init?.method === "POST" ? stubbed(input, init)
+          : Response.json({ success: true, data: listing, owner, programName, storageAddress: anchorAddress });
+      }
+      const response = await POST(request(coordinates));
+      assert.equal(response.status, 409, name);
+      assert.equal((await response.json() as { state: string }).state, "inclusion-failed", name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a by-hash write at another locator or with other content never stands in for this listing", async () => {
+  const originalFetch = globalThis.fetch;
+  const other = `stor-${"cd".repeat(20)}`;
+  const write = transaction.content.data[1] as Record<string, unknown>;
+  try {
+    for (const [name, content] of [
+      ["another locator", { ...transaction.content, to: other, data: ["storageProgram", { ...write, storageAddress: other }] }],
+      ["other listing bytes", { ...transaction.content, data: ["storageProgram", { ...write, data: { ...listing, terms: { other: true } } }] }],
+    ] as const) {
+      stubChain({ history: false, byHash: { content } });
+      const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
+      assert.equal(response.status, 202, name);
+      assert.equal((await response.json() as { state: string }).state, "inclusion-pending", name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("only the pinned Demos deployment's report becomes a receipt", async () => {
+  const originalFetch = globalThis.fetch;
+  const node2 = { ...cleanBuild, dirty: true, builtAt: "2026-10-14T16:45:24Z" };
+  const confirm = async (overrides: Parameters<typeof stubChain>[0]) => {
+    stubChain(overrides);
+    const response = await POST(request(coordinates));
+    return { status: response.status, body: await response.json() as { state: string; error?: string } };
+  };
+  try {
+    for (const [name, nodeVersion, reason] of [
+      ["a build with uncommitted changes", node2, /\+dirty@2026-10-14T16:45:24Z is not pinned/],
+      ["another commit", { ...cleanBuild, commit: "0".repeat(40) }, /is not pinned/],
+      ["no dirty flag", { ...cleanBuild, dirty: undefined }, /no build identity/],
+      ["no build identity", null, /no build identity/],
+    ] as const) {
+      const { status, body } = await confirm({ nodeVersion });
+      assert.equal(status, 409, name);
+      assert.equal(body.state, "inclusion-failed", name);
+      assert.match(body.error ?? "", reason, name);
+    }
+    // An operator may pin exactly one observed dirty build, never dirty builds in general.
+    process.env.DEMOS_NODE_BUILDS = `${pinnedCommit}+dirty@2026-10-14T16:45:24Z`;
+    assert.equal((await confirm({ nodeVersion: node2 })).status, 200);
+    assert.equal((await confirm({ nodeVersion: { ...node2, builtAt: "2026-10-15T00:00:00Z" } })).status, 409);
+    assert.equal((await confirm({})).status, 409, "the clean build is not in an explicit list that omits it");
+    delete process.env.DEMOS_NODE_BUILDS;
+    // A node on another chain never issues a receipt for the pinned one.
+    process.env.DEMOS_CHAIN_IDENTITY = "aa".repeat(32);
+    const otherChain = await confirm({});
+    assert.equal(otherChain.status, 409);
+    assert.match(otherChain.body.error ?? "", /not the pinned chain/);
+  } finally {
+    delete process.env.DEMOS_NODE_BUILDS;
+    process.env.DEMOS_CHAIN_IDENTITY = chainId;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the release pins node2's chain and clean build by default", () => {
+  delete process.env.DEMOS_CHAIN_IDENTITY;
+  try {
+    assert.equal(pinnedChainIdentity(), "83082fbb733d76475a33a9f52fe3700d667a976c2d46bef33a149f47057f7dd4");
+  } finally {
+    process.env.DEMOS_CHAIN_IDENTITY = chainId;
+  }
+  assert.equal(pinnedChainIdentity("  "), PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.deepEqual(pinnedNodeBuilds(undefined), [pinnedCommit]);
+  assert.deepEqual(pinnedNodeBuilds(" , "), [pinnedCommit]);
+  assert.deepEqual(pinnedNodeBuilds(`${pinnedCommit}, ${"1".repeat(40)}`), [pinnedCommit, "1".repeat(40)]);
+  assert.equal(nodeBuildRejection({ nodeVersion: { commit: pinnedCommit.toUpperCase(), dirty: false } }, [pinnedCommit]),
+    "Demos node reports no build identity");
 });

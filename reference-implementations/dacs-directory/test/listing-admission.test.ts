@@ -202,7 +202,7 @@ test("published summaries never claim transaction readiness the Directory did no
   );
 });
 
-test("registration admits only an SDK-shaped, established, finalized receipt for this exact write", () => {
+test("registration admits only an SDK-shaped, established, included receipt for this exact write", () => {
   const listingContentHash = "d".repeat(64);
   const expected = {
     anchorAddress: `stor-${"5".repeat(40)}`,
@@ -221,7 +221,7 @@ test("registration admits only an SDK-shaped, established, finalized receipt for
     transactionRef: { kind: "demos-storage-program", value: expected.transactionRef },
     writer: seller,
     nonce: "7",
-    state: "finalized",
+    state: "included",
     observationDisposition: "established",
     observedAt: 1_786_360_000_000,
     blockRef: { id: "block-5", height: "5", timestamp: 1_786_360_000_000 },
@@ -235,11 +235,13 @@ test("registration admits only an SDK-shaped, established, finalized receipt for
   const rejections: Record<string, [Obj, RegExp]> = {
     "missing evidence": [withoutEvidence, /not a CORE §5\.1 AnchorReceipt/],
     "unknown member": [{ ...receipt, trustLevel: "high" }, /not a CORE §5\.1 AnchorReceipt/],
-    "finalized without a block": [withoutBlock, /not a CORE §5\.1 AnchorReceipt/],
-    "included, not finalized": [{ ...receipt, state: "included" }, /does not establish a finalized write/],
+    "included without a block": [withoutBlock, /not a CORE §5\.1 AnchorReceipt/],
+    // Demos finality is not verified, so a receipt claiming it is never admitted.
+    "finalized claim": [{ ...receipt, state: "finalized" }, /does not establish an included write/],
+    "only accepted": [{ ...receipt, state: "accepted" }, /does not establish an included write/],
     "indeterminate observation": [
       { ...receipt, observationDisposition: "indeterminate", preservedReceiptHash: "f".repeat(64) },
-      /does not establish a finalized write/,
+      /does not establish an included write/,
     ],
     "another logical address": [{ ...receipt, logicalAddress: listingAddress(seller, "receipt-listing", 2) }, /does not bind/],
     "another native address": [{ ...receipt, nativeAddress: `stor-${"6".repeat(40)}` }, /does not bind/],

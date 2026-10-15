@@ -169,7 +169,7 @@ export default function Register() {
     setStatus("Waiting for the exact signed listing to become readable and independently verifiable…");
     for (let attempt = 0; attempt < 20; attempt++) {
       if (attempt > 0 && attempt % 4 === 0) {
-        setStatus(`The listing is still finalising on-chain. Verification check ${attempt + 1} of 20; no new transaction will be sent.`);
+        setStatus(`The listing is not yet included on-chain. Verification check ${attempt + 1} of 20; no new transaction will be sent.`);
       }
       const response = await fetch("/api/dacs/confirm-listing", {
         method: "POST",
@@ -206,7 +206,7 @@ export default function Register() {
     }
     onStep?.("registering");
     setPublishStep("registering");
-    setStatus("One final wallet signature connects this finalized, authenticated catalog candidate to the directory.");
+    setStatus("One final wallet signature connects this included (finality not verified), authenticated catalog candidate to the directory.");
     const prepared = await fetch("/api/dacs/prepare-registration", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -239,7 +239,7 @@ export default function Register() {
     clearPendingListingPublication(window.localStorage);
     setPendingPublication(null);
     setPublishStep("complete");
-    setStatus("Your signed listing has a finalized anchor, is authenticated as a catalog candidate, and is queued for the next index pass. Buyers still run their own SDK transaction-readiness checks.");
+    setStatus("Your signed listing is included on-chain (finality not verified), is authenticated as a catalog candidate, and is queued for the next index pass. Buyers still run their own SDK transaction-readiness checks.");
     setProfileUrl(`/seller/${encodeURIComponent(pending.claim)}`);
     setScreen("done");
   };
@@ -370,7 +370,7 @@ export default function Register() {
         ) throw new Error("The final publication no longer matches the exact reviewed Listing.");
       }
       if (!publication.anchorAddress || !publication.registration) {
-        throw new Error("The finalized listing builder returned incomplete recovery coordinates.");
+        throw new Error("The listing builder returned incomplete recovery coordinates.");
       }
       const { ownerSignature: _ownerSignature, ...unsignedRegistration } = publication.registration;
       const signedListing = publication.listing;
@@ -398,7 +398,7 @@ export default function Register() {
       }
 
       if (!publication.exists) {
-        if (!transaction) throw new Error("The finalized listing builder returned no anchor transaction.");
+        if (!transaction) throw new Error("The listing builder returned no anchor transaction.");
         activeStep = "anchoring"; setPublishStep("anchoring");
         setStatus("Approve the on-chain anchor transaction. Its recovery coordinates are already saved in this browser.");
         const sent = await wallet.send(transaction);

@@ -8,6 +8,7 @@ import {
 import { isAnchorReceipt, type AnchorReceipt } from "@kynesyslabs/dacs/artifacts";
 
 import { readAnchorRecord } from "./chain.js";
+import { nodeBuildRejection, pinnedChainIdentity } from "./nodeDeployment.js";
 import { storageWriteCandidate } from "./scan.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -132,10 +133,15 @@ async function findCanonicalWrite(
   throw new Error(`finality lookup exceeded ${MAX_TRANSACTIONS} transactions`);
 }
 
-export type FinalizedListingAnchorResult =
+/**
+ * Inclusion is all the Directory can establish: it does not verify Demos
+ * consensus (validator signatures, eligible pool, quorum), so it never labels
+ * a write final. Verified Demos finality needs SDK support.
+ */
+export type ListingAnchorInclusionResult =
   | { status: "pending"; reason: string }
   | { status: "rejected"; reason: string }
-  | { status: "finalized"; receipt: AnchorReceipt };
+  | { status: "included"; finality: "not-verified"; receipt: AnchorReceipt };
 
 export interface ExpectedListingAnchorWrite {
   anchorAddress: string;
@@ -147,16 +153,18 @@ export interface ExpectedListingAnchorWrite {
 
 /**
  * Registration admits a Listing only on a receipt that passes the SDK's CORE
- * §5.1 AnchorReceipt gate, records an established finalized write, and binds
- * this exact listing write. Returns the rejection reason, or null to admit.
+ * §5.1 AnchorReceipt gate, records an established included write, and binds
+ * this exact listing write. A `finalized` receipt is refused: this flow cannot
+ * verify Demos finality, so such a claim would be unverified. Returns the
+ * rejection reason, or null to admit.
  */
 export function listingAnchorReceiptRejection(
   receipt: unknown,
   expected: ExpectedListingAnchorWrite,
 ): string | null {
   if (!isAnchorReceipt(receipt)) return "anchor receipt is not a CORE §5.1 AnchorReceipt";
-  if (receipt.state !== "finalized" || receipt.observationDisposition !== "established") {
-    return "anchor receipt does not establish a finalized write";
+  if (receipt.state !== "included" || receipt.observationDisposition !== "established") {
+    return "anchor receipt does not establish an included write";
   }
   if (
     receipt.logicalAddress !== expected.logicalAddress ||
@@ -169,19 +177,20 @@ export function listingAnchorReceiptRejection(
 }
 
 /**
- * Establish a finalized Demos AnchorReceipt from the canonical transaction,
- * the block the configured node reports as BFT-confirmed, and exact native
- * readback. Read visibility alone never returns `finalized`. Consensus
- * signatures are not independently verified (see validatorSignatureShape).
+ * Establish an `included` Demos AnchorReceipt from the canonical transaction,
+ * the block the configured node reports as confirmed, and exact native
+ * readback. Read visibility alone never returns `included`, and nothing here
+ * returns `finalized`: consensus signatures are not verified (see
+ * validatorSignatureShape).
  */
-export async function finalizedListingAnchorReceipt(input: {
+export async function includedListingAnchorReceipt(input: {
   anchorAddress: string;
   logicalAddress: string;
   programName: string;
   listingContentHash: string;
   sellerClaim: string;
   transactionRef?: string;
-}): Promise<FinalizedListingAnchorResult> {
+}): Promise<ListingAnchorInclusionResult> {
   try {
     const anchored = await readAnchorRecord(input.anchorAddress);
     if (!anchored) return { status: "pending", reason: "native anchor is not readable" };
@@ -194,7 +203,7 @@ export async function finalizedListingAnchorReceipt(input: {
       input.listingContentHash,
       input.transactionRef,
     );
-    if (!tx) return { status: "pending", reason: "canonical transaction is not finalized" };
+    if (!tx) return { status: "pending", reason: "canonical transaction is not included" };
     const txRef = typeof tx.hash === "string" ? tx.hash.toLowerCase() : "";
     const blockNumber = Number(tx.blockNumber);
     const txContent = record(tx.content);
@@ -215,7 +224,15 @@ export async function finalizedListingAnchorReceipt(input: {
       typeof block.hash !== "string" || !/^[0-9a-f]{64}$/.test(block.hash) ||
       !Number.isSafeInteger(blockTimestamp) || !orderedTransactions.includes(txRef) ||
       !validatorSignatureShape(block.validation_data)
-    ) return { status: "pending", reason: "canonical block is not BFT-confirmed" };
+    ) return { status: "pending", reason: "canonical block is not confirmed by the configured node" };
+
+    // Only the pinned deployment's report becomes a portable receipt.
+    const buildRejection = nodeBuildRejection(await nodeCall("getNetworkInfo", {}));
+    if (buildRejection) return { status: "rejected", reason: buildRejection };
+    const servedChain = await chainIdentity();
+    if (servedChain !== pinnedChainIdentity()) {
+      return { status: "rejected", reason: `Demos node serves chain ${servedChain}, not the pinned chain` };
+    }
 
     const payload = Array.isArray(txContent.data) ? record(txContent.data[1]) : null;
     const transactionMetadata = record(payload?.metadata);
@@ -226,7 +243,7 @@ export async function finalizedListingAnchorReceipt(input: {
     const finalityProof = canonicalize(block.validation_data);
     const evidence: DemosWriteEvidence = {
       evidenceVersion: "1",
-      chainIdentity: await chainIdentity(),
+      chainIdentity: servedChain,
       writer: owner,
       logicalName: input.logicalAddress,
       nativeAddress: input.anchorAddress,
@@ -256,18 +273,25 @@ export async function finalizedListingAnchorReceipt(input: {
       metadata.envelopeHash !== nativeValueHash
     ) return { status: "rejected", reason: "native listing metadata does not bind the signed artifact" };
     assertDemosWriteEvidence(evidence);
-    const receipt = demosWriteEvidenceToAnchorReceipt({
-      logicalAddress: input.logicalAddress,
-      contentHash: input.listingContentHash,
-      writer: input.sellerClaim,
-      evidence,
-    });
+    // The SDK's portable form always states `finalized`; without consensus
+    // verification the Directory can establish only inclusion (CORE §5.1).
+    const receipt: AnchorReceipt = {
+      ...demosWriteEvidenceToAnchorReceipt({
+        logicalAddress: input.logicalAddress,
+        contentHash: input.listingContentHash,
+        writer: input.sellerClaim,
+        evidence,
+      }),
+      state: "included",
+    };
     const rejection = listingAnchorReceiptRejection(receipt, { ...input, transactionRef: txRef });
-    return rejection ? { status: "rejected", reason: rejection } : { status: "finalized", receipt };
+    return rejection
+      ? { status: "rejected", reason: rejection }
+      : { status: "included", finality: "not-verified", receipt };
   } catch (error) {
     return {
       status: "pending",
-      reason: error instanceof Error ? error.message : "finality observation failed",
+      reason: error instanceof Error ? error.message : "inclusion observation failed",
     };
   }
 }
@@ -277,8 +301,7 @@ export async function finalizedListingAnchorReceipt(input: {
  * key to Ed25519 block signature. This refuses placeholder or arbitrary
  * objects, but it is a shape check only. The signatures, the eligible
  * validator pool and the 2/3+1 quorum are not verified here, nor by the
- * pinned SDK's own Demos adapter, so a `finalized` receipt rests on the
- * configured Demos node's report.
+ * pinned SDK's own Demos adapter, which is why receipts state `included`.
  */
 function validatorSignatureShape(value: unknown): boolean {
   const signatures = record(record(value)?.signatures);

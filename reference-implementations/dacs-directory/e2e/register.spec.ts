@@ -88,8 +88,9 @@ test("seller publication survives registration failure and reload without rebroa
     confirmationPosts++;
     return json(route, {
       confirmed: true,
-      state: "finalized-and-verified",
-      anchorReceipt: { receiptVersion: "1", state: "finalized", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
+      state: "included-and-verified",
+      finality: "not-verified",
+      anchorReceipt: { receiptVersion: "1", state: "included", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
     });
   });
   await context.route("**/api/dacs/prepare-registration", (route) => json(route, {
@@ -145,7 +146,7 @@ test("seller publication survives registration failure and reload without rebroa
   await expect(page.getByText(anchorAddress, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Check chain and resume" }).click();
 
-  await expect(page.getByText(/finalized anchor.*authenticated as a catalog candidate/)).toBeVisible();
+  await expect(page.getByText(/included on-chain \(finality not verified\).*authenticated as a catalog candidate/)).toBeVisible();
   await expect.poll(() => page.evaluate(() => (
     (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
       .filter((call) => call.method === "sendTransaction").length
