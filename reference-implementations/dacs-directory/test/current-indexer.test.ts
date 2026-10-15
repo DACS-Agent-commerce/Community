@@ -749,7 +749,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     dealRecord(kindDeal, kindDivergence),
   ], 0, 200);
   assert.equal(reputation.bundleCount, 1);
-  assert.equal(reputation.completionRate, 1);
+  assert.equal(reputation.completionRate, null);
   assert.deepEqual(reputation.bundleRefs?.map((item) => item.id), ["clean-job"]);
 });
 
@@ -995,7 +995,7 @@ test("current bundle shape requires registry pins, party hashes and valid unique
   });
 });
 
-test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction uniqueness", () => {
+test("DACS-5 keeps exact volume, SR-2 window and uniqueness with testnet ratings unavailable", () => {
   const base: DealRecord = { jobId: "a", rail: "pay-dem", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: "a".repeat(64), agreementPrice: { amount: "1.25", currency: "DEM" },
@@ -1003,7 +1003,7 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2 }] };
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
-  assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+  assert.equal(out.averageSellerRating, null); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
 });
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {
@@ -1096,7 +1096,7 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
   });
   const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
   assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
-    { categoryScope: "services.test", completionRate: 1, averageSellerRating: 5, bundleCount: 1 });
+    { categoryScope: "services.test", completionRate: null, averageSellerRating: null, bundleCount: 1 });
   assert.equal(record.reputation.bundleCount, 1);
 });
 

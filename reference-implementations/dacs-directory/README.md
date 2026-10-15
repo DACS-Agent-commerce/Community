@@ -16,8 +16,12 @@ name and (when owner-signed) the "owner-registered" badge — it is never a gate
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
-The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
-checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
+Completion verification unavailable: testnet catalog projections publish completion and
+fault rates and numeric reputation scores as `null`, with a reason. Counts are labelled
+as observed outcomes, not verified completion. Rate and score filters and ranking return
+400. Individual evidence inspection remains available. Full metrics return later under
+DEC-11's contract. “Verify yourself” repeats strict cryptographic checks in-browser,
+while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
@@ -27,7 +31,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Seller publication | DACS-1 §6.3.4 | **`/register` does not publish pay-bearing listings at this pin.** DACS-1 requires LP-6 `verified` rail authority and an LP-1 verified `finalized` AnchorReceipt before a pay-bearing listing is published, and the Directory can establish neither. `/register` emits DACS-4 §9.4.2 registry rail IDs (`demos-native:DEM`, `x402:default`, `ap2:stripe-paymentintents`) and runs the SDK rail resolver over this release's disclosed PA-1 in-code table (`pa1-in-code`). LRR-6 accepts only a signed snapshot, and the pinned Standard publishes no signed v0.1 snapshot, so the table is unsigned and every rail resolves `indeterminate` (`pa1-definition-unverifiable`). `build-listing` therefore refuses with 409 before the seller signs anything; it publishes only on `verified`. Every `/register` listing has exactly one rail, so `/register` refuses every listing until a signed PA-1 snapshot or an authenticated PA-2/PA-3 registry exists. Behind that gate, `/register` refuses attested-payload methods whose seller-runtime production capability it cannot prove. It shows the exact server-built unsigned Listing before signature and checks that the configured node reports the pinned build and chain before it returns any transaction. It creates the StorageProgram with the current SDK name/next-nonce/empty-salt mapping and persists non-secret recovery coordinates before broadcast. After broadcast, `confirm-listing` independently verifies native address, owner, program name, tuple, identity, signature and content hash. It reads the write back by hash, in a block the pinned node reports as confirmed. It returns that report only as an unauthenticated `nodeObservation` with `confirmed:false` and state `finality-unverified`, never as an `AnchorReceipt`. The Directory checks the node's validator-signature shape but, like the pinned SDK adapter, does not verify the validator pool, signatures or quorum, and on Demos an `included` write is also `finalized`. The browser therefore stops there and does not register the listing. `POST /api/dacs/register` still accepts pointer sets from any client, and the indexer re-reads and re-authenticates every anchor on each pass |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Observed history | DACS-5 §10.4–§10.5 | Bundle references, labelled observed counts, individual evidence, exact-decimal volume and time windows are kept. Completion and fault rates and numeric reputation scores are unavailable on testnet |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -54,7 +58,7 @@ two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its li
 uses the early SDK's compact signature encoding; the verifier accepts that encoding
 only after checking the same Ed25519 signature, signed scope, agent key, and anchor owner
 as current structured signature envelopes. Historical deals are displayed, but only
-strictly party-bound bundles with verified references contribute to reputation.
+strictly party-bound bundles with verified references contribute to labelled observed counts.
 
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
@@ -321,9 +325,13 @@ pass the pinned SDK's normative shape and component-signature APIs and are expli
 labelled transaction-readiness-unassessed until a buyer runs the complete SDK reader; current-contract
 evidence graphs use directory-native validation, while the SDK bundle verifier is retained
 for labelled legacy artifacts. DACS-2 tier derivation fails closed on
-unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
-settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
-computations remain advisory and independently reproducible from their refs.
+unresolved recipe/evidence/freshness. Observed-history processing retains volume,
+settlement uniqueness, anchor-time windowing and evidence references. Completion and
+fault rates and numeric reputation scores remain unavailable during testnet.
+
+The offline no-rate browser regression uses an isolated populated catalog, including
+aborted outcomes and old numeric metrics: `npm run test:e2e:no-rates`. It refuses external
+network requests and checks discovery, service detail, seller evidence and API responses.
 
 ## License
 

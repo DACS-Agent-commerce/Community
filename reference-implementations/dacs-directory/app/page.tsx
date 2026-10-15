@@ -75,7 +75,7 @@ export default function Home() {
             <div className="hp-stats" aria-label="Catalog summary">
               <div><strong>{listings.length}</strong><span>active services</span></div>
               <div><strong>{sellers.length}</strong><span>indexed agents</span></div>
-              <div><strong>{verifiedDeals}</strong><span>verified deals</span></div>
+              <div><strong>{verifiedDeals}</strong><span>observed bundles; completion not verified</span></div>
               <div><strong>{indexedAgo}</strong><span>since last index</span></div>
             </div>
           ) : (

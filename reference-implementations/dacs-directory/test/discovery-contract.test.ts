@@ -107,9 +107,15 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");
   assert.ok(profile?.schema.enum);
   assert.ok(profile.schema.enum.includes("fixture-listing"));
-  for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
+  for (const filter of ["credential", "primaryClaim", "priceMax"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }
+  for (const filter of ["minCompletionRate", "minRating"]) {
+    assert.ok(!filters.includes(filter), `testnet must not advertise ${filter}`);
+    assert.ok(!directoryManifest("https://directory.example").filters.includes(filter));
+  }
+  assert.equal(listingSummarySchema.properties.reputationHint.properties.completionRate.type, "null");
+  assert.equal(listingSummarySchema.properties.reputationHint.properties.averageSellerRating.type, "null");
   const status = document.paths["/api/dacs/status"].get;
   assert.deepEqual(status.parameters.map((parameter) => parameter.name), ["deadLetterLimit", "locator"]);
   assert.equal(status.parameters[0].schema.maximum, 100);

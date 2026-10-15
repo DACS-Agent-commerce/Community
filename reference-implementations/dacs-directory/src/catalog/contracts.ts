@@ -81,7 +81,21 @@ export const listingSummarySchema = {
       },
       description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
     },
-    reputationHint: { type: "object" },
+    reputationHint: {
+      type: "object",
+      description: "Testnet observed history; completion and fault rates and numeric reputation scores are unavailable.",
+      required: ["completionRate", "averageSellerRating", "metricsUnavailableReason", "observedOutcomesLabel"],
+      properties: {
+        completionRate: { type: "null" },
+        counterpartyAdjustedCompletionRate: { type: "null" },
+        counterpartyFaultRate: { type: "null" },
+        averageBuyerRating: { type: "null" },
+        averageSellerRating: { type: "null" },
+        metricsUnavailableReason: { const: "Completion verification unavailable" },
+        observedOutcomesLabel: { type: "string" },
+        bundleCount: { type: "integer", minimum: 0 },
+      },
+    },
     inspection: {
       type: "object",
       required: ["artifactType", "maturity", "href"],
@@ -266,13 +280,13 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
   maturity: {
     listings: "current publisher and dual-profile reader",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
-    reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
+    reputation: "Completion verification unavailable. Testnet publishes observed counts and individual evidence; completion and fault rates and numeric reputation scores are null.",
   },
   verification: {
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
+  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "q", "profile", "limit", "cursor"],
 });
 
 export const openApiDocument = (origin: string) => ({
@@ -288,6 +302,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs/listings": {
       get: {
         summary: "Search active services",
+        description: "Completion verification unavailable. Rate and score filters (including minCompletionRate and minRating) and ranking parameters are refused with 400 on testnet.",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
@@ -296,14 +311,12 @@ export const openApiDocument = (origin: string) => ({
           { name: "primaryClaim", in: "query", schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
-          { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
-          { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
           { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: artifactProfiles } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid query, or unavailable rate/score filtering or ranking" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
