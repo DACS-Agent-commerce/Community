@@ -95,3 +95,38 @@ export function reconcileCurrentCopies(
     selectedLocator,
   };
 }
+
+/** Legacy references may be checked only after authenticating this exact copy. */
+export function legacyCopyCanVerifyRefs(
+  signaturesOk: boolean,
+  bindingOk: boolean,
+  anchoredByRole: unknown,
+  expectedRole: "buyer" | "seller",
+): boolean {
+  return signaturesOk && bindingOk && anchoredByRole === expectedRole;
+}
+
+/** Keep the two-copy and terminal-outcome gates independent of SDK reference support. */
+export function reconcileLegacyCopies<T extends { refsOk: boolean; bundle?: { outcome?: string } }>(
+  buyerCopy: T,
+  sellerCopy: T | null,
+) {
+  const divergent = Boolean(
+    buyerCopy.refsOk && sellerCopy?.refsOk && buyerCopy.bundle && sellerCopy.bundle &&
+    currentBundleCopiesDiverge(
+      buyerCopy.bundle as unknown as Record<string, unknown>,
+      sellerCopy.bundle as unknown as Record<string, unknown>,
+    ),
+  );
+  const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
+  const sellerOutcome = authoritative === sellerCopy
+    ? authoritative.bundle?.outcome : flipOutcome(authoritative.bundle?.outcome);
+  const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+  return {
+    authoritative,
+    refsVerified,
+    sellerOutcome,
+    reputationEligible: refsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+  };
+}

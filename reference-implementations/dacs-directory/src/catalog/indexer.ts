@@ -53,10 +53,10 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
   bundleBindingOverflowKey,
   resolveBundleSide,
@@ -501,31 +501,22 @@ export async function indexRegistration(
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
+      const refsOk = verification && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole)
         ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
       return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
     const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
-    const divergent = Boolean(
-      buyerCopy.refsOk && sellerCopy?.refsOk &&
-      buyerCopy.bundle && sellerCopy.bundle && currentBundleCopiesDiverge(
-        buyerCopy.bundle as unknown as Record<string, unknown>,
-        sellerCopy.bundle as unknown as Record<string, unknown>,
-      ),
-    );
-    const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+    const { authoritative, refsVerified: strictRefsVerified, sellerOutcome, reputationEligible } =
+      reconcileLegacyCopies(buyerCopy, sellerCopy);
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {
       delete signedBundleScope.signatures;
       delete signedBundleScope.anchoredByRole;
     }
-    const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
-    const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = verifiedListingTerms(
       authoritative.verification,
@@ -544,7 +535,7 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+      reputationEligible,
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
