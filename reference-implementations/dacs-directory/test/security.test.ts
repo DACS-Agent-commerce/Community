@@ -206,6 +206,7 @@ test("well-known listing indexes enforce normative revocation coherence", () => 
     version: 1,
     contentHash,
     anchor: { kind: "storage-program", locator: `stor-${"c".repeat(40)}` },
+    summary: { title: "Service", category: "services.other", tags: ["a"] },
     status: "active",
   };
   const revocation = {
@@ -227,15 +228,43 @@ test("well-known listing indexes enforce normative revocation coherence", () => 
     { ...active, status: "revoked", revocation },
   ], claim), { ok: true, listingAnchors: [], contentHashes: {} });
 
-  for (const invalid of [
-    { ...active, revocation },
-    { ...active, status: "revoked" },
-    { ...active, status: "revoked", revocation: { ...revocation, listingContentHash: "f".repeat(64) } },
-    { ...active, contentHash: contentHash.toUpperCase() },
-    null,
-  ]) {
-    assert.equal(projectActiveListingIndexEntries([invalid], claim).ok, false);
+  assert.equal(projectActiveListingIndexEntries([
+    { ...active, summary: { ...active.summary, priceHint: "1 DEM" } },
+  ], claim).ok, true);
+
+  const { summary: _summary, ...summaryless } = active;
+  for (const [name, invalid] of [
+    ["an active entry carrying a binding", { ...active, revocation }],
+    ["a revoked entry without one", { ...active, status: "revoked" }],
+    ["a binding for other content", { ...active, status: "revoked", revocation: { ...revocation, listingContentHash: "f".repeat(64) } }],
+    ["an uppercase content hash", { ...active, contentHash: contentHash.toUpperCase() }],
+    ["null", null],
+    ["an array", [active]],
+    // §6.3.5 ListingIndexEntry.summary is required on every entry.
+    ["no summary", summaryless],
+    ["a revoked entry with no summary", { ...summaryless, status: "revoked", revocation }],
+    ["a string summary", { ...active, summary: "Service" }],
+    ["a summary without a title", { ...active, summary: { category: "services.other", tags: [] } }],
+    ["a summary without a category", { ...active, summary: { title: "Service", tags: [] } }],
+    ["a summary without tags", { ...active, summary: { title: "Service", category: "services.other" } }],
+    ["a non-string tag", { ...active, summary: { ...active.summary, tags: [1] } }],
+    ["a numeric priceHint", { ...active, summary: { ...active.summary, priceHint: 1 } }],
+    // Every other entry field.
+    ["no listingId", { ...active, listingId: undefined }],
+    ["a listingId with a slash", { ...active, listingId: "service/1" }],
+    ["a 129-character listingId", { ...active, listingId: "a".repeat(129) }],
+    ["version zero", { ...active, version: 0 }],
+    ["a string version", { ...active, version: "1" }],
+    ["another anchor kind", { ...active, anchor: { ...active.anchor, kind: "ipfs" } }],
+    ["a locator with a junk prefix", { ...active, anchor: { ...active.anchor, locator: `x${active.anchor.locator}` } }],
+    ["a locator with a junk suffix", { ...active, anchor: { ...active.anchor, locator: `${active.anchor.locator}0` } }],
+    ["a short content hash", { ...active, contentHash: "b".repeat(63) }],
+    ["another status", { ...active, status: "retired" }],
+  ] as const) {
+    assert.equal(projectActiveListingIndexEntries([invalid], claim).ok, false, name);
   }
+  assert.equal(projectActiveListingIndexEntries({ listings: [active] }, claim).ok, false, "a non-array index");
+  assert.equal(projectActiveListingIndexEntries(Array(201).fill(active), claim).ok, false, "more than 200 entries");
 });
 
 test("rate-limit state ignores spoofed proxy headers by default and stays bounded", () => {

@@ -101,7 +101,8 @@ test("the crawler accepts the well-known files the Directory generates for a par
 test("a revocation binding is accepted only for the index seller and the address its own claim derives", () => {
   const entry = {
     listingId: "wk-revoked", version: 1, contentHash: verifiedRevoked.contentHash,
-    anchor: { kind: "storage-program", locator: locator(2) }, status: "revoked", revocation: binding,
+    anchor: { kind: "storage-program", locator: locator(2) },
+    summary: { title: "wk-revoked", category: "conformance.signature", tags: [] }, status: "revoked", revocation: binding,
   };
   assert.deepEqual(projectActiveListingIndexEntries([entry], claim), { ok: true, listingAnchors: [], contentHashes: {} });
   const other = `did:demos:agent:${"b".repeat(64)}`;
@@ -139,6 +140,14 @@ test("the crawler refuses well-known files whose binding, version or seller does
     ["fractional generatedAt", rehashed(files, JSON.stringify({ ...index, generatedAt: 1.5 })), /invalid version or generatedAt/],
     ["non-canonical seller", rehashed(files, JSON.stringify({ ...index, seller: claim.toUpperCase() })), /no canonical Demos seller/],
     ["another seller", rehashed(files, JSON.stringify({ ...index, seller: `did:demos:agent:${"b".repeat(64)}` })), /no matching revocation binding/],
+    ["a null index", rehashed(files, "null"), /invalid version or generatedAt/],
+    ["an array index", rehashed(files, JSON.stringify([index])), /invalid version or generatedAt/],
+    ["a non-string seller", rehashed(files, JSON.stringify({ ...index, seller: 7 })), /no canonical Demos seller/],
+    ["no listings array", rehashed(files, JSON.stringify({ ...index, listings: null })), /at most 200 listings/],
+    ["an entry without its summary", rehashed(files, JSON.stringify({
+      ...index,
+      listings: index.listings.map(({ summary: _summary, ...entry }: Record<string, unknown>) => entry),
+    })), /invalid listing entry/],
   ];
   for (const [name, hosted, error] of cases) {
     const crawled = await crawlDomain(domain, served(hosted));
