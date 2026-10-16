@@ -384,9 +384,13 @@ text and refusal of old filters, including bracketed query keys. Run `npm test`.
 
 TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commit:
 `minCompletionRate` and `minRating` return 400, and `completionRate` remains null
-even when `bundleCount` is positive. `metricsProfile: "TP-1"` and
-`metricsUnavailableReason` identify this restriction. A cached listing with no
-hint still has null metrics; its observed count is computed from retained eligible
+even when `bundleCount` is positive. [`docs/TP-1.md`](./docs/TP-1.md) defines TP-1
+and declares these as open `nonconforming` deviations in the Standard's
+`ImplementationDeviation` shape. `metricsProfile: "TP-1"`,
+`metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
+restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
+document `2.0.0`. A cached listing with no hint, or one the pinned SDK reader would
+reject, still has null metrics; its observed count is computed from retained eligible
 category records using the existing indexer rule, with the catalog snapshot window.
 The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
 `completed` and `totalAgreements` for compatibility, with explicit observed-count

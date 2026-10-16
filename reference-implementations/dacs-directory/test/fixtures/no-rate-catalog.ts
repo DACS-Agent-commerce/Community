@@ -51,6 +51,8 @@ export function noRateCatalog(): Catalog {
       completed: 1, totalAgreements: deals.length, bundleCount: deals.length,
       completionRate: 0.95, counterpartyAdjustedCompletionRate: 1,
       counterpartyFaultRate: 0.25, averageBuyerRating: 4, averageSellerRating: 5,
+      observedTransactionalVolume: [{ currency: "DEM", amount: "2" }],
+      transactionCountByCurrency: [{ currency: "DEM", count: 1 }],
       bundleRefs: deals.map((deal) => ({
         kind: "dacs-5-bundle", id: deal.jobId, contentHash: deal.bundleContentHash!,
         anchor: { kind: "storage-program", locator: deal.buyerBundleRef },

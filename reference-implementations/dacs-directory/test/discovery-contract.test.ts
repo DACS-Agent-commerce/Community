@@ -56,6 +56,46 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.ok(manifest.filters.includes("identityTier"));
 });
 
+test("the TP-1 contract change carries version signals and the exact advertised filters", async () => {
+  const manifest = directoryManifest("https://directory.example", "https://node.example/demos");
+  assert.equal(manifest.dacsDirectoryVersion, "2");
+  assert.deepEqual([...manifest.restrictions], ["TP-1"]);
+  assert.deepEqual(manifest.filters, [
+    "category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "q", "profile", "limit", "cursor",
+  ]);
+  const document = openApiDocument("https://directory.example");
+  assert.equal(document.info.version, "2.0.0");
+  const listings = document.paths["/api/dacs/listings"].get;
+  assert.deepEqual(listings.parameters.map((parameter) => parameter.name).sort(), [...manifest.filters].sort());
+  assert.deepEqual(listings.responses, {
+    "200": { description: "A cursor-paginated listing page" },
+    "400": { description: "Invalid query, or unavailable rate/score filtering or ranking" },
+  });
+  assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
+  // The schema URL is unversioned, so a changed schema must not be cached as immutable.
+  const { GET: getSchema } = await import("../app/schemas/listing-summary.schema.json/route.js");
+  const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.schema.json"));
+  const cacheControl = response.headers.get("cache-control") ?? "";
+  assert.doesNotMatch(cacheControl, /immutable/);
+  assert.match(cacheControl, /must-revalidate/);
+  assert.ok(Number(/max-age=(\d+)/.exec(cacheControl)?.[1]) <= 300, cacheControl);
+  assert.deepEqual(await response.json(), JSON.parse(JSON.stringify(listingSummarySchema)));
+});
+
+test("TP-1 is defined in-tree and declares its deviations in the Standard's ImplementationDeviation shape", () => {
+  const definition = readFileSync(new URL("../docs/TP-1.md", import.meta.url), "utf8");
+  assert.match(definition, /DACS-Standard\/tree\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/);
+  const deviations = JSON.parse(/```json\n([\s\S]+?)\n```/.exec(definition)![1]) as Array<Record<string, unknown>>;
+  for (const deviation of deviations) {
+    assert.deepEqual(Object.keys(deviation).sort(), ["capabilityRefs", "description", "effect", "id", "ruleRefs", "status"]);
+    assert.equal(deviation.status, "open");
+    assert.equal(deviation.effect, "nonconforming");
+  }
+  assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-1"]);
+  assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
+  assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
+});
+
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {
   const priorInternal = process.env.DEMOS_RPC;
   const priorPublic = process.env.NEXT_PUBLIC_DEMOS_RPC;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime.js";
 import { PathnameContext, SearchParamsContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime.js";
 import DirectoryExplorer from "../src/components/DirectoryExplorer.js";
+import { ObservedOutcomeBadge } from "../src/components/Badge.js";
 import { noRateCatalog, noRateClaim } from "./fixtures/no-rate-catalog.js";
 import { projectTestnetCatalog } from "../src/catalog/testnetMetrics.js";
 
@@ -74,4 +75,14 @@ test("rendered legacy filter and ranking URLs explicitly refuse the query and of
     assert.match(html, /Clear all filters/);
     assert.doesNotMatch(html, /class="card service-card"/);
   }
+});
+
+test("the verify page's outcome badge is a neutral observation, never a success badge", () => {
+  for (const outcome of ["completed", "aborted-by-other"]) {
+    const html = renderToStaticMarkup(React.createElement(ObservedOutcomeBadge, { outcome }));
+    assert.equal(html, `<span class="badge"><b>observed</b>${outcome}; completion not verified</span>`);
+  }
+  const source = readFileSync(new URL("../app/verify/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /<ObservedOutcomeBadge outcome=\{loaded\.outcome\} \/>/);
+  assert.doesNotMatch(source, /outcome === "completed"/);
 });

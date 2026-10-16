@@ -413,7 +413,11 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => projectTestnetCatalog(getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] }));
+/** The persisted catalog as indexed. Writers read this; public reads use loadCatalog. */
+export const loadStoredCatalog = (): Catalog => getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+// TP-1 projection on every public read. Never save its result: that would
+// persist the null rating values over the indexed ones.
+export const loadCatalog = (): Catalog => projectTestnetCatalog(loadStoredCatalog());
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);

@@ -2,8 +2,9 @@ import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./ty
 
 export const COMPLETION_VERIFICATION_UNAVAILABLE = "Completion verification unavailable";
 
-// DEC-11: completion cannot yet be verified on testnet. Apply this on reads
-// as well as indexing so a catalog cached by an older release is safe to serve.
+// TP-1 (docs/TP-1.md): completion cannot yet be verified on testnet. Apply this
+// on reads as well as indexing so a catalog cached by an older release is safe
+// to serve.
 export const UNAVAILABLE_TESTNET_METRICS = {
   completionRate: null,
   counterpartyAdjustedCompletionRate: null,
@@ -24,12 +25,34 @@ export const OBSERVED_REPUTATION_COUNTS = {
   transactionCountByCurrencyLabel: "Observed priced completed outcomes, not verified completion or settlement",
 } as const;
 
+const isSafeUint = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+// The pinned SDK catalog reader marks a whole page malformed when one hint
+// fails its DACS-1 §6.3.6 shape check, so a cached hint is reused only when it
+// passes the same check (the rate fields are always replaced with null).
+function isServableCachedHint(hint: ReputationHint | undefined, category: string): hint is ReputationHint {
+  return Boolean(hint) && typeof hint!.categoryScope === "string" && hint!.categoryScope.length > 0 &&
+    (category === hint!.categoryScope || category.startsWith(`${hint!.categoryScope}.`)) &&
+    isSafeUint(hint!.bundleCount) && isSafeUint(hint!.windowStart) && isSafeUint(hint!.windowEnd) &&
+    hint!.windowStart <= hint!.windowEnd && isSafeUint(hint!.computedAt);
+}
+
+// TP-1 allowlists the reputation, hint and rating shapes; any other rate,
+// rating or score a cached catalog carries at seller, deal or listing level is
+// dropped too. No current field at those levels ends in these words.
+const UNAVAILABLE_METRIC_KEY = /(?:rate|rating|score)$/i;
+function withoutMetricKeys<T extends object>(record: T): T {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !UNAVAILABLE_METRIC_KEY.test(key))) as T;
+}
+
 function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number): ReputationHint {
   // Match the indexer's existing category-scoped observation count. A missing
-  // cached hint must still have the count/window shape the SDK catalog reader
-  // requires; no completion authority follows from these retained records.
+  // or malformed cached hint must still have the count/window shape the SDK
+  // catalog reader requires; no completion authority follows from these
+  // retained records.
   const category = listing.offering?.category ?? "";
-  const hint = listing.reputationHint ?? {
+  const hint = isServableCachedHint(listing.reputationHint, category) ? listing.reputationHint : {
     categoryScope: category,
     bundleCount: (seller.deals ?? []).filter((deal) =>
       deal.refsVerified && deal.reputationEligible &&
@@ -54,10 +77,10 @@ export function projectTestnetCatalog(catalog: Catalog): Catalog {
   return {
     ...catalog,
     sellers: catalog.sellers.map((seller) => ({
-      ...seller,
+      ...withoutMetricKeys(seller),
       ...(seller.deals ? {
         deals: seller.deals.map((deal) => ({
-          ...deal,
+          ...withoutMetricKeys(deal),
           ...(deal.ratings ? {
             ratings: deal.ratings.map((rating) => ({
               rater: rating.rater,
@@ -92,7 +115,7 @@ export function projectTestnetCatalog(catalog: Catalog): Catalog {
       } : {}),
       ...(seller.listings ? {
         listings: seller.listings.map((listing) => ({
-          ...listing,
+          ...withoutMetricKeys(listing),
           reputationHint: listingObservationHint(seller, listing, catalog.generatedAt),
         })),
       } : {}),

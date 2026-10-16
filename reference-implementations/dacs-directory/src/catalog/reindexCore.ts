@@ -20,11 +20,11 @@ import { crawlDomains } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
-  loadCatalog,
   loadDomains,
   loadFixtureSeeds,
   loadRegistrations,
   loadScanState,
+  loadStoredCatalog,
   admitRevocationCandidates,
   saveCatalog,
   saveScanState,
@@ -93,7 +93,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
   }
-  const prior = loadCatalog();
+  const prior = loadStoredCatalog();
 
   // Nothing from a node outside the pinned build and chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.

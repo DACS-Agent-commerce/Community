@@ -3,6 +3,12 @@ import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
+// Unix milliseconds and counts the pinned SDK catalog reader accepts.
+const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
+
+/** The no-rate testnet restriction this Directory applies. See docs/TP-1.md. */
+export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
+
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
@@ -83,11 +89,14 @@ export const listingSummarySchema = {
     },
     reputationHint: {
       type: "object",
-      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. Missing cached hints use the existing category-scoped observation count from retained records.",
+      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. Missing or malformed cached hints use the existing category-scoped observation count from retained records. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
       additionalProperties: false,
-      required: ["completionRate", "averageSellerRating", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel"],
+      required: [
+        "categoryScope", "completionRate", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
+        "computedAt", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel",
+      ],
       properties: {
-        categoryScope: { type: "string" },
+        categoryScope: { type: "string", minLength: 1 },
         completionRate: { type: "null" },
         counterpartyAdjustedCompletionRate: { type: "null" },
         counterpartyFaultRate: { type: "null" },
@@ -96,10 +105,10 @@ export const listingSummarySchema = {
         metricsUnavailableReason: { const: "Completion verification unavailable" },
         metricsProfile: { const: "TP-1" },
         observedOutcomesLabel: { type: "string" },
-        bundleCount: { type: "integer", minimum: 0 },
-        windowStart: { type: "integer" },
-        windowEnd: { type: "integer" },
-        computedAt: { type: "integer" },
+        bundleCount: safeUint,
+        windowStart: safeUint,
+        windowEnd: safeUint,
+        computedAt: safeUint,
       },
     },
     inspection: {
@@ -247,7 +256,9 @@ export const catalogStatusSchema = {
 export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()) => ({
   name: "DACS Directory",
   description: "A discovery catalog for signed, chain-anchored DACS agent services.",
-  dacsDirectoryVersion: "1",
+  // 2: TP-1 refuses the DACS-1 §6.3.6 rate filters and publishes null rates.
+  dacsDirectoryVersion: "2",
+  restrictions: TESTNET_RESTRICTIONS,
   humanUrl: origin,
   agentCard: `${origin}/.well-known/agent.json`,
   api: `${origin}/api/dacs`,
@@ -299,7 +310,8 @@ export const openApiDocument = (origin: string) => ({
   openapi: "3.1.0",
   info: {
     title: "DACS Directory API",
-    version: "1.0.0",
+    // 2.0.0: minCompletionRate and minRating were removed (now refused with 400 under TP-1).
+    version: "2.0.0",
     description: "Discover DACS services and retrieve the signed chain artifacts behind them.",
   },
   servers: [{ url: origin }],
