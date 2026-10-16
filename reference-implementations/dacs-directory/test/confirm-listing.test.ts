@@ -138,6 +138,23 @@ const request = (body: Record<string, unknown>) => new NextRequest(
   { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
 );
 
+/** Every getTransactions request the stub served since the last stubChain. */
+const historyRequests: Array<Record<string, unknown>> = [];
+const write = transaction.content.data[1] as Record<string, unknown>;
+/** A confirmed storage write in node history, varied from the listing's own. */
+function historyWrite(id: number, hash: string, change: { to?: string; data?: Record<string, unknown> } = {}): NodeTransaction {
+  const to = change.to ?? anchorAddress;
+  return {
+    ...transaction, id, hash, to,
+    content: { ...transaction.content, to, data: ["storageProgram", { ...write, storageAddress: to, ...(change.data ? { data: change.data } : {}) }] },
+  };
+}
+/** A confirmed transfer, which is no storage write at all. */
+const transfer = (id: number | undefined): NodeTransaction => ({
+  id, status: "confirmed", type: "native", hash: (id ?? 0).toString(16).padStart(64, "9"), blockNumber: 4,
+  content: { type: "native", from: owner, to: owner, amount: 1, data: ["native", {}] }, signature: transaction.signature,
+});
+
 /** Stub the Demos node: native readback, canonical write, and its block. */
 function stubChain(overrides: {
   nativeMetadata?: Record<string, unknown>;
@@ -152,12 +169,19 @@ function stubChain(overrides: {
   byHash?: Record<string, unknown>;
   /** getNetworkInfo's `nodeVersion`; a clean build of the pinned commit by default. */
   nodeVersion?: Record<string, unknown> | null;
+  /** getTxByHash answers node2's unknown-hash `result: 400` for every hash. */
+  byHashUnknown?: boolean;
+  /** getTransactions pages keyed by `start`; by default one newest page holding the write. */
+  historyPages?: Record<string, NodeTransaction[]>;
+  /** Members replacing the native readback's. */
+  native?: Record<string, unknown>;
 } = {}): string[] {
   const write = transaction.content.data[1] as Record<string, unknown>;
   const written = overrides.transactionMetadata
     ? { ...transaction, content: { ...transaction.content, data: ["storageProgram", { ...write, metadata: overrides.transactionMetadata }] } }
     : transaction;
   const calls: string[] = [];
+  historyRequests.length = 0;
   globalThis.fetch = async (_input, init) => {
     if (init?.method !== "POST") {
       return Response.json({
@@ -167,15 +191,21 @@ function stubChain(overrides: {
         programName,
         storageAddress: anchorAddress,
         metadata: overrides.nativeMetadata ?? metadata,
+        ...overrides.native,
       });
     }
     const rpc = JSON.parse(String(init.body)) as { params: Array<{ message: string; data: Record<string, unknown> }> };
     const call = rpc.params[0]!;
     calls.push(call.message);
     if (call.message === "getTransactions") {
+      historyRequests.push(call.data);
+      if (overrides.historyPages) {
+        return Response.json({ result: 200, response: (overrides.historyPages[String(call.data.start)] ?? []).map(historyRow) });
+      }
       return Response.json({ result: 200, response: overrides.history === false ? [] : [historyRow(written)] });
     }
     if (call.message === "getTxByHash") {
+      if (overrides.byHashUnknown) return Response.json({ result: 400, response: "error" });
       return call.data.hash === transactionHash
         ? Response.json({ result: 200, response: { ...byHashRow(written), ...overrides.byHash } })
         : Response.json({ result: 404, response: "error" });
@@ -251,6 +281,9 @@ test("a node-reported inclusion is an unauthenticated observation, never a recei
     // The SDK's proof hash of the getTxByHash form, whose signature is an object.
     assert.equal(observation.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
     assert.equal(observation.nativeRead.metadataHash, sha256Hex(canonicalize(metadata)));
+    assert.equal(observation.nativeRead.owner, owner, "the native readback's owner");
+    assert.equal(observation.nativeRead.programName, programName);
+    assert.equal(observation.nativeRead.valueHash, sha256Hex(canonicalize(listing)));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -300,6 +333,10 @@ test("listing confirmation never registers before the write is in a node-confirm
       { validation_data: { signatures: { "fixture-validator": "signed" } } },
       { hash: "block-5" },
       { hash: "" },
+      // The block the node serves must be the transaction's own, under an exact hash.
+      { number: 6 },
+      { hash: `0x${blockHash}` },
+      { hash: `${blockHash}00` },
     ]) {
       stubChain({ block });
       const response = await POST(request(coordinates));
@@ -427,6 +464,11 @@ test("every validator-signature entry must have the node's key and signature sha
       ["a 127-hex signature", { [key]: `0x${"b".repeat(127)}` }],
       ["a 129-hex signature", { [key]: `0x${"b".repeat(129)}` }],
       ["a non-string signature", { [key]: 7 }],
+      ["a signature inside an array", { [key]: [signature] }],
+      ["a key with a junk prefix", { [`x${key}`]: signature }],
+      ["a key with a junk suffix", { [`${key}00`]: signature }],
+      ["a signature with a junk prefix", { [key]: `x${signature}` }],
+      ["a signature with a junk suffix", { [key]: `${signature}00` }],
     ] as const) {
       stubChain({ block: { validation_data: { signatures } } });
       const response = await POST(request(coordinates));
@@ -469,19 +511,131 @@ test("native and transaction metadata must agree and bind the logical address, c
 test("a by-hash write at another locator or with other content never stands in for this listing", async () => {
   const originalFetch = globalThis.fetch;
   const other = `stor-${"cd".repeat(20)}`;
-  const write = transaction.content.data[1] as Record<string, unknown>;
+  const otherHash = "ef".repeat(32);
   try {
-    for (const [name, content] of [
-      ["another locator", { ...transaction.content, to: other, data: ["storageProgram", { ...write, storageAddress: other }] }],
-      ["other listing bytes", { ...transaction.content, data: ["storageProgram", { ...write, data: { ...listing, terms: { other: true } } }] }],
+    for (const [name, byHash] of [
+      ["another locator", { content: { ...transaction.content, to: other, data: ["storageProgram", { ...write, storageAddress: other }] } }],
+      ["other listing bytes", { content: { ...transaction.content, data: ["storageProgram", { ...write, data: { ...listing, terms: { other: true } } }] } }],
+      ["another transaction's hash", { hash: otherHash }],
     ] as const) {
-      stubChain({ history: false, byHash: { content } });
+      // The block would carry either transaction, so only the by-hash match decides.
+      stubChain({ history: false, byHash, block: { content: { timestamp: 1_786_360_000, ordered_transactions: [transactionHash, otherHash] } } });
       const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
       assert.equal(response.status, 202, name);
       const body = await response.json() as { state: string; confirmed: unknown };
       assert.equal(body.state, "inclusion-pending", name);
       assert.equal(body.confirmed, false, name);
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a missed by-hash read falls back to newest history, paging down by transaction id", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    // node2 answers an unknown hash with `result: 400`; the write is on the second page.
+    stubChain({
+      byHashUnknown: true,
+      historyPages: { latest: [transfer(12), transfer(11)], 10: [historyWrite(10, transactionHash)] },
+    });
+    const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
+    assert.equal(response.status, 200);
+    const body = await response.json() as { state: string; nodeObservation: Observation };
+    assert.equal(body.state, "finality-unverified");
+    assert.equal(body.nodeObservation.transactionRef, transactionHash);
+    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }, { start: 10, limit: 100 }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("history paging stops at the oldest transaction and refuses a page without a cursor", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    stubChain({ historyPages: { latest: [transfer(2), transfer(1)] } });
+    const exhausted = await POST(request(coordinates));
+    assert.equal(exhausted.status, 202);
+    assert.equal((await exhausted.json() as { reason: string }).reason, "canonical transaction is not included");
+    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }], "transaction one is the end of history");
+
+    for (const [name, page] of [
+      ["no ids", [transfer(undefined)]],
+      ["a negative id", [transfer(-1)]],
+      ["a fractional id", [transfer(1.5)]],
+    ] as const) {
+      stubChain({ historyPages: { latest: [...page] } });
+      const response = await POST(request(coordinates));
+      assert.equal(response.status, 202, name);
+      assert.match((await response.json() as { reason: string }).reason, /no valid cursor/, name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a history write at another locator, with other bytes, or under another hash never stands in", async () => {
+  const originalFetch = globalThis.fetch;
+  const other = `stor-${"cd".repeat(20)}`;
+  const impostors = {
+    otherLocator: historyWrite(14, "a1".repeat(32), { to: other }),
+    otherBytes: historyWrite(13, "a2".repeat(32), { data: { ...listing, terms: { other: true } } }),
+    rewrite: historyWrite(12, "a3".repeat(32)),
+  };
+  // The block would carry any of them, so only the history match decides.
+  const block = {
+    content: {
+      timestamp: 1_786_360_000,
+      ordered_transactions: [transactionHash, ...Object.values(impostors).map((tx) => tx.hash)],
+    },
+  };
+  try {
+    // Without a browser transactionRef, the newest write of these exact bytes at this locator.
+    stubChain({ block, historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, historyWrite(10, transactionHash)] } });
+    const plain = await POST(request(coordinates));
+    assert.equal(plain.status, 200);
+    assert.equal((await plain.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
+
+    // With one, an identical rewrite under another hash is not the browser's write either.
+    stubChain({
+      block,
+      byHashUnknown: true,
+      historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, impostors.rewrite, historyWrite(10, transactionHash)] },
+    });
+    const pinned = await POST(request({ ...coordinates, transactionRef: transactionHash }));
+    assert.equal(pinned.status, 200);
+    assert.equal((await pinned.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
+
+    stubChain({ block, byHashUnknown: true, historyPages: { latest: Object.values(impostors) } });
+    const none = await POST(request({ ...coordinates, transactionRef: transactionHash }));
+    assert.equal(none.status, 202);
+    assert.equal((await none.json() as { state: string }).state, "inclusion-pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a native readback that reports another storage address is a coordinate mismatch", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    stubChain({ native: { storageAddress: `stor-${"cd".repeat(20)}` } });
+    const response = await POST(request(coordinates));
+    assert.equal(response.status, 409);
+    const body = await response.json() as { state: string; error: string };
+    assert.equal(body.state, "inclusion-failed");
+    assert.equal(body.error, "native anchor coordinates do not match");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a block timestamp already in milliseconds is carried unchanged", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    stubChain({ block: { content: { timestamp: 1_786_360_000_123, ordered_transactions: [transactionHash] } } });
+    const response = await POST(request(coordinates));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { nodeObservation: Observation }).nodeObservation.blockTimestamp, 1_786_360_000_123);
   } finally {
     globalThis.fetch = originalFetch;
   }
