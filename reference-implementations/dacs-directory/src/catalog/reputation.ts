@@ -67,15 +67,17 @@ export function deriveSellerReputation(
     const timestamp = timestampOf(deal);
     return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
   });
-  // SB-2: a settlement transaction reused across jobs contributes once, at
-  // its earliest evidence observation. Deterministic jobId breaks exact ties.
-  const settlementOwner = new Map<string, DealRecord>();
+  // DACS-4 SB-2: group the whole presented set by settlement id before counting.
+  // Repeating one (jobId, phaseIndex) claim is idempotent. A group claimed by
+  // two or more tuples is indeterminate without settlement-side binding
+  // authority, which this Directory does not verify, so no member counts. The
+  // producer-set observedAt, arrival and jobId order never pick a winner.
+  const claimants = new Map<string, Set<string>>();
   for (const deal of scoped) for (const tx of deal.settlementTxIds ?? []) {
-    const prior = settlementOwner.get(tx.id);
-    const priorTime = prior?.settlementTxIds?.find((candidate) => candidate.id === tx.id)?.observedAt ?? Infinity;
-    if (!prior || tx.observedAt < priorTime || (tx.observedAt === priorTime && deal.jobId < prior.jobId)) settlementOwner.set(tx.id, deal);
+    const key = settlementGroupKey(tx.id);
+    claimants.set(key, (claimants.get(key) ?? new Set()).add(JSON.stringify([deal.jobId, tx.phaseIndex])));
   }
-  scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
+  scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => claimants.get(settlementGroupKey(tx.id))!.size > 1));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,
@@ -115,6 +117,15 @@ export function deriveSellerReputation(
     windowEnd,
     windowingBasis: useAnchorTimestamps ? "sr2-anchor-timestamp" : "finalisedAt",
   };
+}
+
+/**
+ * Collision grouping key. SB-1 renders hashes as lower-case hex without `0x`,
+ * so spelling variants of one hash group together; grouping more never lets a
+ * collision go uncounted.
+ */
+function settlementGroupKey(id: string): string {
+  return id.trim().replace(/(?:0x)?([0-9a-f]{64})/gi, (_match, hash: string) => hash.toLowerCase());
 }
 
 /** Exact non-negative decimal addition without binary floating-point drift. */

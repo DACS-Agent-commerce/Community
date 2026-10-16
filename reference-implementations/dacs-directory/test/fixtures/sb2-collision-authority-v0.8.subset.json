@@ -1,0 +1,139 @@
+{
+  "source": {
+    "repository": "https://github.com/DACS-Agent-commerce/DACS-Standard",
+    "commit": "d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20",
+    "path": "conformance/vectors/security/sb2-collision-authority-v0.8.json",
+    "sha256": "2f01d94de434195d032fa1336702a8e45da21c0120879412624d4c9ac429a3ad",
+    "set": "sb2-collision-authority-v0.8",
+    "rule": "DACS-4 §9.5.8 SB-2"
+  },
+  "vectors": [
+    {
+      "name": "no-binding-collision-voids-both",
+      "records": [
+        {
+          "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 2000,
+          "sr2AnchorOrder": 2
+        },
+        {
+          "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "jobId": "01KTY8ZJ01CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 1000,
+          "sr2AnchorOrder": 1
+        }
+      ],
+      "settlementAuthorities": [],
+      "expected": "indeterminate",
+      "want": {
+        "countedEvidenceHashes": [],
+        "rejectedEvidenceHashes": [],
+        "indeterminateEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "reason": "collision-without-authority",
+        "selectedBy": null,
+        "partyFaultCreatedByThisGate": false
+      },
+      "note": "An unbound rail collision suspends both claims."
+    },
+    {
+      "name": "backdated-attacker-does-not-win",
+      "records": [
+        {
+          "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 2000,
+          "sr2AnchorOrder": 2
+        },
+        {
+          "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "jobId": "01KTY8ZJ01CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 1000,
+          "sr2AnchorOrder": 1
+        }
+      ],
+      "settlementAuthorities": [
+        {
+          "source": "independently-verified-settlement",
+          "state": "finalized",
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "railId": "base-usdc-x402",
+          "railProfile": "pay-x402/eip-3009:dacs-sb3-v1",
+          "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+          "phaseIndex": 1
+        }
+      ],
+      "expected": "pass",
+      "want": {
+        "countedEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "rejectedEvidenceHashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "indeterminateEvidenceHashes": [],
+        "reason": "authenticated-settlement-binding",
+        "selectedBy": "settlement-authority",
+        "partyFaultCreatedByThisGate": false
+      },
+      "note": "B has earlier observedAt but cannot override the binding to A."
+    },
+    {
+      "name": "equal-producer-timestamps-do-not-tie-break",
+      "records": [
+        {
+          "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 2000,
+          "sr2AnchorOrder": 2
+        },
+        {
+          "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "jobId": "01KTY8ZJ01CW7KSECW3FS6PQPK",
+          "phaseIndex": 1,
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "observedAt": 2000,
+          "sr2AnchorOrder": 1
+        }
+      ],
+      "settlementAuthorities": [
+        {
+          "source": "independently-verified-settlement",
+          "state": "finalized",
+          "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+          "railId": "base-usdc-x402",
+          "railProfile": "pay-x402/eip-3009:dacs-sb3-v1",
+          "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+          "phaseIndex": 1
+        }
+      ],
+      "expected": "pass",
+      "want": {
+        "countedEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "rejectedEvidenceHashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "indeterminateEvidenceHashes": [],
+        "reason": "authenticated-settlement-binding",
+        "selectedBy": "settlement-authority",
+        "partyFaultCreatedByThisGate": false
+      },
+      "note": "Equal timestamps and hash order are irrelevant when authority binds A."
+    }
+  ]
+}

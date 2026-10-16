@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
@@ -995,15 +996,66 @@ test("current bundle shape requires registry pins, party hashes and valid unique
   });
 });
 
-test("DACS-5 keeps exact volume, SR-2 window and uniqueness with testnet ratings unavailable", () => {
+test("DACS-5 keeps exact volume and SR-2 window and voids SB-2 settlement collisions with testnet ratings unavailable", () => {
   const base: DealRecord = { jobId: "a", rail: "pay-dem", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: "a".repeat(64), agreementPrice: { amount: "1.25", currency: "DEM" },
     settlementTxIds: [{ id: "tx", observedAt: 10, phaseIndex: 2 }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
   const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2 }] };
-  const out = deriveSellerReputation([base, duplicate], 0, 200);
-  assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
+  const unrelated = { ...base, jobId: "c", bundleContentHash: "d".repeat(64), agreementPrice: { amount: "2", currency: "DEM" }, settlementTxIds: [{ id: "other-tx", observedAt: 30, phaseIndex: 2 }] };
+  // SB-2(2): no settlement-side binding authority, so the whole collision group is void.
+  const out = deriveSellerReputation([base, duplicate, unrelated], 0, 200);
+  assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "2" }]);
+  assert.deepEqual(out.bundleRefs?.map((ref) => ref.id), ["c"]);
   assert.equal(out.averageSellerRating, null); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+  // Repeating one (jobId, phaseIndex) claim is idempotent and still counts once.
+  const repeated = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: "tx", observedAt: 11, phaseIndex: 2 }] }], 0, 200);
+  assert.equal(repeated.bundleCount, 1);
+  assert.deepEqual(repeated.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
+  // One job claiming the settlement for two phases is a collision too.
+  const twoPhases = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: "tx", observedAt: 10, phaseIndex: 3 }] }], 0, 200);
+  assert.equal(twoPhases.bundleCount, 0);
+  // Hash spelling variants are one settlement (SB-1 lower-case hex without 0x).
+  const hash = "ab".repeat(32);
+  const spelled = deriveSellerReputation([
+    { ...base, settlementTxIds: [{ id: `demos:${hash}`, observedAt: 10, phaseIndex: 2 }] },
+    { ...duplicate, settlementTxIds: [{ id: `demos:0x${hash.toUpperCase()}`, observedAt: 20, phaseIndex: 2 }] },
+  ], 0, 200);
+  assert.equal(spelled.bundleCount, 0);
+});
+
+test("DACS-4 SB-2 collision vectors: an earlier or tied producer timestamp never wins", () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/sb2-collision-authority-v0.8.subset.json", import.meta.url), "utf8")) as {
+    source: { commit: string; path: string };
+    vectors: Array<{
+      name: string; settlementAuthorities: unknown[];
+      records: Array<{ contentHash: string; jobId: string; phaseIndex: number; settlementTxId: string; observedAt: number; sr2AnchorOrder: number }>;
+      want: { countedEvidenceHashes: string[]; rejectedEvidenceHashes: string[]; indeterminateEvidenceHashes: string[] };
+    }>;
+  };
+  assert.equal(fixture.source.commit, "d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20");
+  assert.deepEqual(fixture.vectors.map((vector) => vector.name), [
+    "no-binding-collision-voids-both", "backdated-attacker-does-not-win", "equal-producer-timestamps-do-not-tie-break",
+  ]);
+  for (const vector of fixture.vectors) {
+    const deals: DealRecord[] = vector.records.map((record, index) => ({
+      jobId: record.jobId, rail: "pay-x402", buyerBundleRef: locator(200 + index), sellerBundleRef: locator(210 + index),
+      owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+      sellerOutcome: "completed", finalisedAt: 100, anchorTimestamp: 100 + record.sr2AnchorOrder, verifiedAt: 1,
+      bundleContentHash: record.contentHash, agreementPrice: { amount: "1", currency: "USDC" },
+      settlementTxIds: [{ id: record.settlementTxId, observedAt: record.observedAt, phaseIndex: record.phaseIndex }],
+    }));
+    for (const order of [deals, [...deals].reverse()]) {
+      const counted = deriveSellerReputation(order, 0, 10_000).bundleRefs!.map((ref) => ref.contentHash);
+      for (const hash of [...vector.want.rejectedEvidenceHashes, ...vector.want.indeterminateEvidenceHashes]) {
+        assert.ok(!counted.includes(hash), `${vector.name}: ${hash.slice(0, 4)} must not count`);
+      }
+      // The Directory verifies no settlement-side authority (SB-3), so every
+      // group stays indeterminate here, including the authority vectors.
+      if (vector.settlementAuthorities.length === 0) assert.deepEqual(counted, vector.want.countedEvidenceHashes, vector.name);
+      assert.deepEqual(counted, [], vector.name);
+    }
+  }
 });
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {
