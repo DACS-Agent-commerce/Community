@@ -1083,3 +1083,33 @@ test("fault counterparty attribution rejects non-string parties under valid bund
   } });
   assert.equal(graph.ok, false);
 });
+
+test("procurement vet requirements bind the seller counterparty rather than the buyer publisher", async () => {
+  const identity: Obj = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1, claims: [{ ref: dids[BUYER] }] };
+  const presentation = Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[BUYER]))).toString("hex");
+  const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
+  const pipeline = [{ kind: "vet-credentials" }, { kind: "negotiate-sealed-envelope-procurement", parameters: { commitDeadline: 100, revealWindow: 60, selectionRule: "lowest-price", auctionMode: "procurement" } }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }];
+  const scope = { ...signedScopeOf(listing), seller: { displayName: "procurement buyer", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[BUYER], signature: presentation }] } } },
+    buyerRequirement: requirement, pipeline, pricing: { kind: "auction", selectionRule: "lowest-price" } };
+  const procurement = { ...scope, signature: await envelope(scope, "listing", BUYER) };
+  for (const resultParty of [SELLER, BUYER]) {
+    const graph = await evaluate({ listing: procurement, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:pay-dem:3` },
+      scopes: (scopes) => {
+        scopes.agreement.derivedFromPattern = "sealed-envelope";
+        scopes.bundle.phaseSummary = pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
+      },
+      bundle: async (bundle, session) => {
+        const attestation = { authority: "registry", body: "match" }; session.store.set(at(20), attestation);
+        const result = await publish(session, 21, { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
+          method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20,
+          attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: contentHash(attestation) } }, "verify-result", OUTSIDER);
+        bundle.vetRecords = await Promise.all([BUYER, SELLER].map((party) => publish(session, 30 + party, {
+          recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: (party === BUYER ? "a" : "b").repeat(64),
+          requirementHash: party === SELLER ? contentHash(requirement) : "c".repeat(64),
+          freshness: party === resultParty ? [{ ...result, recipeVersion: 1 }] : [], dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: 30,
+        }, "composite", OUTSIDER)));
+      },
+    });
+    assert.equal(graph.ok, resultParty === SELLER, `${resultParty}: ${graph.reason}`);
+  }
+});

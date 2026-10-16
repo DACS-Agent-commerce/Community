@@ -777,7 +777,9 @@ async function verifyCurrentEvidenceGraph(
     return failSigned("completed session lacks passing vet records for both parties");
   }
   if (raw.outcome === "completed" && requirement && pipeline.some((phase) => phase.kind === "vet-credentials")) {
-    const buyer = parties.find((party) => party.role === "buyer")!;
+    const seller = parties.find((party) => party.role === "seller")!;
+    const counterpartyRole = sameSigningIdentity(seller.primaryClaim, verifiedListing.sellerClaim) ? "buyer" : "seller";
+    const counterparty = parties.find((party) => party.role === counterpartyRole)!;
     const provesRequirement = (record: ResolvedEvidence): boolean => {
       const results = [...arr(record.raw.freshness), ...arr(record.raw.dealSpecific)]
         .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)?.raw).filter(Boolean);
@@ -789,7 +791,7 @@ async function verifyCurrentEvidenceGraph(
       return arr(requirement.required).every(satisfied) &&
         (Array.isArray(requirement.oneOf) ? requirement.oneOf : []).every((group) => arr(group).some(satisfied));
     };
-    if (!composites.some((record) => sameSigningIdentity(record.raw.evaluatedParty, buyer.primaryClaim) &&
+    if (!composites.some((record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && provesRequirement(record))) {
       return failSigned("completed vet lacks passing verification evidence for the listing's requirements");
     }
