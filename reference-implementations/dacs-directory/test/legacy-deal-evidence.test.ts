@@ -155,3 +155,14 @@ test("a legacy deal with only one verifiable copy keeps its signature verdict bu
   assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.bundleCount, 0);
 });
+
+test("legacy anchor names are the historical producer's raw-jobId names", () => {
+  // Literal names from the SDK-MVP producer this Directory indexed before this
+  // release (dacs-sdk 44d8ff2, src/agent/runSessionCore.ts sessionAnchorName).
+  // It never percent-encoded the job ID, so a delimiter stays raw.
+  assert.equal(legacySessionAnchorName.agreement("job-1"), "dacs3:agreement:job-1");
+  assert.equal(legacySessionAnchorName.evidence("job-1"), "dacs4:evidence:job-1");
+  assert.equal(legacySessionAnchorName.vet("job-1"), "dacs2:verifyrecord:job-1");
+  assert.equal(legacySessionAnchorName.vet("a:b"), "dacs2:verifyrecord:a:b");
+  assert.equal(legacySessionAnchorName.agreement("a:b%2F"), "dacs3:agreement:a:b%2F");
+});

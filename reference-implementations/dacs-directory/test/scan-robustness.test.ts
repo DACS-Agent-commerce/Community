@@ -14,7 +14,7 @@ const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-malformed-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
 process.env.DACS_SCAN_FINALITY_DEPTH = "0";
 const store = await import("../src/catalog/store.js");
-const { scanChain, readStorage } = await import("../src/catalog/scan.js");
+const { scanChain, readStorage, storageWriteCandidate } = await import("../src/catalog/scan.js");
 const { verifyListing } = await import("../src/catalog/listingVerification.js");
 const { logicalBundleAddress, verifyBundleBinding } = await import("../src/catalog/bundleBinding.js");
 const { artifactHash, buildCurrentEvidenceGraph } = await import("../src/catalog/evidenceGraph.js");
@@ -404,4 +404,27 @@ test("a SQLite failure during seller indexing fails the pass and records its sta
     assert.equal(store.loadCatalog().generatedAt, 12);
     assert.equal(scanCounts().status, "failed");
   } finally { db.exec("DROP TRIGGER fail_listing_rejection"); db.close(); }
+});
+
+test("only a confirmed storageProgram transaction is a storage write candidate", () => {
+  const to = `stor-${"4".repeat(40)}`;
+  const write = {
+    status: "confirmed", type: "storageProgram", blockNumber: 3, hash: "5".repeat(64), to,
+    content: JSON.stringify({
+      type: "storageProgram", to,
+      data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", storageAddress: to, data: { listingId: "x" } }],
+    }),
+  };
+  assert.deepEqual(storageWriteCandidate(write), {
+    locator: to, contentHash: contentHash({ listingId: "x" }), blockNumber: 3, transactionHash: "5".repeat(64),
+  });
+  for (const [name, tx] of [
+    ["a failed transaction", { ...write, status: "failed" }],
+    ["a pending transaction", { ...write, status: "pending" }],
+    ["another transaction type", { ...write, type: "native" }],
+    ["a failed transaction of another type", { ...write, status: "failed", type: "native" }],
+    ["no transaction", null],
+  ] as const) {
+    assert.equal(storageWriteCandidate(tx), null, name);
+  }
 });

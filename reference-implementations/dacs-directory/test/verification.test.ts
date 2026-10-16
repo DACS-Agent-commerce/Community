@@ -267,6 +267,18 @@ test("strict bundle signer policy rejects malformed roles and binds aborts to th
     signatures: rawBundleSignatures(valid),
     signature: null,
   }), false);
+
+  // Every carried signature must verify, not only those of the required roles.
+  const extraInvalid = result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "valid" },
+    { party: "witness", verdict: "invalid" },
+  ]);
+  assert.equal(strictSigners(extraInvalid), false, "an invalid extra signature fails the bundle");
+  assert.equal(strictSigners(result("completed", [
+    { party: "buyer", verdict: "valid" },
+    { party: "seller", verdict: "invalid" },
+  ])), false, "an invalid seller signature fails the bundle");
 });
 
 test("reputation binding requires the submitted job and seller to match the signed bundle", () => {
