@@ -21,9 +21,19 @@ export const activeCatalogSellers = (sellers: SellerRecord[]): SellerRecord[] =>
     }))
     .filter((seller) => seller.listings.length > 0);
 
+/** Bound public query work before parsing untrusted ClaimReferences. */
+export const MAX_CLAIM_QUERY_BYTES = 1024;
+
+/** Compile once per request; callers supply the canonical seller-record key. */
+export function primaryClaimPredicate(filter: string): (identity: string) => boolean {
+  const canonicalFilter = sellerIdentity(filter).toLowerCase();
+  return (identity) => {
+    const claim = identity.toLowerCase();
+    return claim === canonicalFilter || claim.startsWith(canonicalFilter + ":");
+  };
+}
+
 /** Match either one exact canonical claim or a claim-scheme/prefix filter. */
 export function primaryClaimMatches(claim: string, filter: string): boolean {
-  const canonicalClaim = sellerIdentity(claim).toLowerCase();
-  const canonicalFilter = sellerIdentity(filter).toLowerCase();
-  return canonicalClaim === canonicalFilter || canonicalClaim.startsWith(canonicalFilter + ":");
+  return primaryClaimPredicate(filter)(sellerIdentity(claim));
 }

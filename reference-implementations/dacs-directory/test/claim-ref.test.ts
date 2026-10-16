@@ -35,6 +35,10 @@ const CASES = [
   `${claim}?a=%41`,
   `${claim}?a=%3a`,
   `${claim}?a=%3`,
+  `${claim}?a=%GG`,
+  `${claim}?a=%7F`,
+  `${claim}?a=\u0000`,
+  `${claim}?a=\u007f`,
   `${claim}?a=1&`,
   `${claim}?a=b c`,
   `${claim}?a=b\n`,
@@ -72,4 +76,15 @@ test("advisory parameters do not change identity, resolution, or the registratio
   // Registrations and other Directory-issued claims stay parameter-free.
   assert.equal(isCanonicalDemosAgentClaim(claim), true);
   assert.equal(isCanonicalDemosAgentClaim(advisory), false);
+});
+
+
+test("large canonical parameter sets remain bounded and reject late duplicates or disorder", () => {
+  const parameters = Array.from({ length: 60_000 }, (_, index) => `k${String(index).padStart(5, "0")}=v`);
+  const reference = `${claim}?${parameters.join("&")}`;
+  const started = performance.now();
+  assert.equal(canonicalDemosAgentClaim(reference), claim);
+  assert.ok(performance.now() - started < 1500, "60,000 parameters must parse within a generous linear-work budget");
+  assert.equal(canonicalDemosAgentClaim(`${reference}&${parameters.at(-1)}`), null);
+  assert.equal(canonicalDemosAgentClaim(`${reference}&a=last`), null);
 });
