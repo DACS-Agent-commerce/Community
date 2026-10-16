@@ -273,7 +273,14 @@ export async function indexRegistration(
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
-      seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
+      // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
+      // match the revocation binding against, the exact `presentedBy` bytes.
+      seller: {
+        primaryClaim: verified.profile === "dacs-v0.1"
+          ? verified.listing.seller.identity.presentedBy
+          : reg.primaryClaim,
+        displayName: reg.displayName,
+      },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {

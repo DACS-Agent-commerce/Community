@@ -4,6 +4,7 @@ import type {
   DirectoryTransactionReadiness,
   ListingSummary,
 } from "./types.js";
+import { sellerIdentity } from "./discovery.js";
 
 export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
   disposition: "unassessed",
@@ -69,15 +70,15 @@ const limitations: DirectoryServiceProfile["limitations"] = [
 const encode = encodeURIComponent;
 
 export function servicePath(listing: ListingSummary): string {
-  return `/service/${encode(listing.seller.primaryClaim)}/${encode(listing.listingId)}/${listing.version}`;
+  return `/service/${encode(sellerIdentity(listing.seller.primaryClaim))}/${encode(listing.listingId)}/${listing.version}`;
 }
 
 export function listingJsonPath(listing: ListingSummary): string {
-  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(sellerIdentity(listing.seller.primaryClaim))}`;
 }
 
 export function inspectServicePath(listing: ListingSummary): string {
-  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(sellerIdentity(listing.seller.primaryClaim))}`;
 }
 
 export function inspectServiceUrl(origin: string, listing: ListingSummary): string {

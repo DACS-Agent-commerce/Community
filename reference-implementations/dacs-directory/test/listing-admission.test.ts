@@ -327,9 +327,16 @@ test("the indexer publishes current-SDK listings under the registered identity a
       record.listings.map((listing) => listing.listingId).sort(),
       ["depth-128", "indexed-advisory", "indexed-pay-alternative"],
     );
+    // The seller record is keyed by the registered CF-3 identity; each §6.3.6
+    // summary carries its listing's exact `presentedBy` bytes (RB-2).
+    assert.equal(record.primaryClaim, seller);
     for (const listing of record.listings) {
       assert.equal(listing.status, "active", listing.listingId);
-      assert.equal(listing.seller.primaryClaim, seller, listing.listingId);
+      assert.equal(
+        listing.seller.primaryClaim,
+        listing.listingId === "indexed-advisory" ? advisory : seller,
+        listing.listingId,
+      );
     }
   } finally {
     globalThis.fetch = originalFetch;

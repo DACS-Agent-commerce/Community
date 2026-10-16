@@ -3,7 +3,7 @@
  * Normative filters plus q/profile directory extensions.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { activeCatalogListings, primaryClaimMatches } from "@/src/catalog/discovery";
+import { activeCatalogListings, primaryClaimMatches, sellerIdentity } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;
     if (rail && !(l.offering.rails ?? []).includes(rail)) return false;
     if (profile && l.artifactProfile !== profile) return false;
-    if (identityTier && tierByClaim.get(l.seller.primaryClaim) !== identityTier) return false;
+    if (identityTier && tierByClaim.get(sellerIdentity(l.seller.primaryClaim)) !== identityTier) return false;
     if (primaryClaim && !primaryClaimMatches(l.seller.primaryClaim, primaryClaim)) return false;
     if (credential) {
       const required = Array.isArray(l.buyerRequirement?.required)
