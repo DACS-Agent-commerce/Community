@@ -591,7 +591,7 @@ test("deal-owner lookup answers only when one attributed deal holds the jobId", 
     await (await dealOwnersRoute.GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}${query}`))).json();
   const verified = (deal: ReturnType<typeof entry>) => ({ ...deal, refsVerified: true });
   const catalogOf = (...records: Array<[string, Array<ReturnType<typeof entry> & { refsVerified?: boolean; sellerBundleRef?: string }>]>) => store.saveCatalog({ catalogVersion: "1", generatedAt: 1,
-    sellers: records.map(([claim, deals]) => ({ primaryClaim: claim,
+    sellers: records.map(([claim, deals]) => ({ primaryClaim: claim, listings: [],
       deals: deals.map((deal) => ({ signatureVerified: false, refsVerified: false, verifiedAt: 1, ...deal })) })) as never });
   resetIndex([later], 14);
   owns(buyer, 46, 56);
@@ -761,7 +761,7 @@ test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } } as BundleBinding;
   assert.ok(await verifyBundleBinding(binding));
   store.saveScanState({ ...emptyState(), schemaVersion: 10, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
-  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: seller,
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: seller, listings: [],
     deals: [{ ...scanned, buyerBundleRef: locator(951), signatureVerified: true, refsVerified: true, verifiedAt: 1 }] }] } as never);
   const lookup = ownersLookup(jobId);
   const resolved = { owners: { buyer, seller }, buyerBundleRef: locator(951), sellerBundleRef: null };

@@ -1335,9 +1335,37 @@ test("reindex admits a shared settlement once across sellers before seller and c
       const loser = sellers.find((seller) => seller.primaryClaim === dids[1])!;
       assert.equal(winner.deals[0].refsVerified, true); assert.equal(loser.deals[0].refsVerified, true);
       assert.equal(winner.reputation.completed, 1); assert.equal(loser.reputation.completed, 0);
-      assert.equal(winner.deals[0].reputationEligible, true); assert.equal(loser.deals[0].reputationEligible, false);
+      assert.equal(winner.deals[0].reputationEligible, true); assert.equal(loser.deals[0].reputationEligible, true);
+      assert.equal(winner.deals[0].settlementRejected, undefined); assert.equal(loser.deals[0].settlementRejected, true);
       assert.equal(winner.listings[0].reputationHint?.bundleCount, 1); assert.equal(loser.listings[0].reputationHint?.bundleCount, 0);
       assert.deepEqual(loser.reputation.observedTransactionalVolume, []);
+
+      // Run the immediate-refresh publication operations in both arrival orders. Refreshing
+      // either participant must not restore the later claim or duplicate volume/ratings.
+      for (const reg of order) {
+        const catalog = store.loadCatalog();
+        const i = catalog.sellers.findIndex((seller) => seller.primaryClaim === reg.primaryClaim);
+        catalog.sellers[i] = await indexRegistration(reg, catalog.sellers[i], async () => []);
+        catalog.generatedAt = Date.now();
+        store.saveCatalog(catalog);
+        const published = store.loadCatalog().sellers;
+        assert.deepEqual(published.map((seller) => seller.reputation.completed).sort(), [0, 1]);
+        const rejected = published.find((seller) => seller.primaryClaim === dids[1])!;
+        assert.deepEqual(rejected.reputation.observedTransactionalVolume, []);
+        assert.equal(rejected.reputation.averageSellerRating, null);
+        assert.equal(rejected.listings[0].reputationHint?.bundleCount, 0);
+      }
+
+      // Losing admission is reversible without re-verifying or refreshing that seller.
+      const catalog = store.loadCatalog();
+      catalog.sellers = catalog.sellers.filter((seller) => seller.primaryClaim === dids[1]);
+      store.saveCatalog(catalog);
+      const reconsidered = store.loadCatalog().sellers[0];
+      assert.equal(reconsidered.deals[0].reputationEligible, true);
+      assert.equal(reconsidered.deals[0].settlementRejected, undefined);
+      assert.equal(reconsidered.reputation.completed, 1);
+      assert.deepEqual(reconsidered.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
+      assert.equal(reconsidered.listings[0].reputationHint?.bundleCount, 1);
     }
   } finally {
     globalThis.fetch = originalFetch;

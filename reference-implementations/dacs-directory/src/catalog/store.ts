@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, ScanState } from "./types.js";
-import { deriveSellerReputation } from "./reputation.js";
+import { deriveSellerReputation, reconcileCatalogReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -343,7 +343,11 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
 }
 
 export const loadCatalog = (): Catalog => getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
-export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
+export const saveCatalog = (catalog: Catalog): void => {
+  // Every publication, including index-now, shares one settlement ledger.
+  reconcileCatalogReputation(catalog.sellers, catalog.generatedAt);
+  setJson("catalog", catalog);
+};
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = () => normalizeScanState(getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} }));

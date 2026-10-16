@@ -279,6 +279,13 @@ unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, vo
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
 
+Every catalog save applies one settlement ledger across all sellers, including scheduled
+indexing and immediate refreshes. A deal's `reputationEligible` records its verified evidence
+eligibility; `settlementRejected` records its current catalog admission separately. Rejected
+deals contribute no metrics or listing hints, and later saves reconsider them if the winning
+claim disappears or changes. Run a full reindex when upgrading an existing catalog so its
+cached evidence eligibility is refreshed.
+
 **Upstream source contracts.** The Directory records these source revisions:
 
 - **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,

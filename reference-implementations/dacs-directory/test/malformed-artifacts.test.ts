@@ -378,9 +378,8 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   };
 }
 
-test("malformed bundles stay unverified, and a settlement reference with no SB-1 key is never counted", async () => {
-  // Signed evidence citing a transaction reference SB-1 cannot key: the graph verifies, but the
-  // settlement is `error`, so the deal is listed and never counted (DACS-4 §9.5.8).
+test("malformed bundles and malformed payment references stay unverified and never counted", async () => {
+  // A malformed signed ChainTxRef fails the evidence graph before settlement keying.
   const poisoned = await currentDeal("job-poisoned", 100, [{ txId: { toString: 1 } }]);
   const valid = await currentDeal("job-valid", 200);
   const legacyBundle = locator(61);
@@ -405,9 +404,9 @@ test("malformed bundles stay unverified, and a settlement reference with no SB-1
   const record = await indexRegistration(registration, undefined, offline);
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
-  assert.equal(byJob.get("job-poisoned")?.refsVerified, true);
+  assert.equal(byJob.get("job-poisoned")?.refsVerified, false);
   assert.equal(byJob.get("job-poisoned")?.reputationEligible, false);
-  assert.deepEqual(byJob.get("job-poisoned")?.settlementTxIds, []);
+  assert.equal(byJob.get("job-poisoned")?.settlementTxIds, undefined);
   for (const jobId of ["job-legacy-malformed", "job-current-malformed"]) {
     assert.equal(byJob.get(jobId)?.signatureVerified, false, jobId);
     assert.equal(byJob.get(jobId)?.refsVerified, false, jobId);

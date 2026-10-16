@@ -11,7 +11,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-indexer-binding-rules-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
 const { indexRegistration } = await import("../src/catalog/indexer.js");
-const { artifactHash, signedScope } = await import("../src/catalog/evidenceGraph.js");
+const { artifactHash, buildCurrentEvidenceGraph, signedScope } = await import("../src/catalog/evidenceGraph.js");
 const { bundleBindingOverflowKey, logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
 const { loadScanState, saveScanState } = await import("../src/catalog/store.js");
 const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
@@ -72,19 +72,23 @@ function binding(role: "buyer" | "seller", nativeAddress: string, signer: number
 }
 
 async function index(bindings: Obj[], overflow: string[] = []) {
+  return (await indexSeller(bindings, overflow)).deals[0];
+}
+
+async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "pay-dem") {
   const state = loadScanState();
   state.bundleBindingOverflow = overflow;
   saveScanState(state);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = store.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:${data.phase ?? "pay-dem"}:2`, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1)],
-      deals: [{ jobId: JOB, rail: "pay-dem", buyerBundleRef: at(90), sellerBundleRef: at(91), owners: { buyer: dids[BUYER], seller: dids[SELLER] } }],
+      deals: [{ jobId: JOB, rail, buyerBundleRef: at(90), sellerBundleRef: at(91), owners: { buyer: dids[BUYER], seller: dids[SELLER] } }],
       bundleBindings: bindings as never }, undefined, async () => { throw new Error("identity unavailable"); });
-    return record.deals[0];
+    return record;
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -196,4 +200,109 @@ test("a completed deal with no pay phase or evidence never contributes reputatio
   const deal = await index([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
   assert.equal(deal.refsVerified, false);
   assert.equal(deal.reputationEligible, false);
+});
+
+test("completed sessions reject failed mandatory phases and retain the non-fatal rate exception", async () => {
+  const original = new Map(store);
+  try {
+    for (const kind of ["pay-dem", "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "vet-credentials", "negotiate-fixed-price", "commit-agreement", "rate"]) {
+      store.clear(); for (const [key, raw] of original) store.set(key, raw);
+      const failedSettlement = kind.startsWith("pay-") || kind.startsWith("deliver-");
+      const pipeline = structuredClone(listingScope.pipeline) as Obj[];
+      if (kind !== "pay-dem") pipeline.push({ kind });
+      const listedScope = { ...listingScope, pipeline };
+      const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
+      store.set(at(1), listed);
+      const listingRef = { ...bundleScope().listingRef as Obj, contentHash: artifactHash(listed, "listing") };
+      const agreedScope = { ...agreementScope, listingRef };
+      const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
+      store.set(at(2), agreed);
+      const failedScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: kind, outcome: "failure", observedAt: 100 };
+      const failed = { ...failedScope, signature: signedWith(failedScope, "evidence", SELLER) };
+      store.set(at(30), failed);
+      const phaseSummary = kind === "pay-dem" ? [{ index: 2, kind, outcome: "fail", errorClass: "permanent" }]
+        : [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "fail", errorClass: "permanent" }];
+      const settlementEvidence = kind === "pay-dem" ? [refTo(at(30), failed, "evidence")]
+        : [refTo(at(3), evidence, "evidence"), ...(failedSettlement ? [refTo(at(30), failed, "evidence")] : [])];
+      const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary, settlementEvidence });
+      store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+      const graph = await buildCurrentEvidenceGraph(at(20), {
+        read: async (locator) => store.get(locator) ?? null,
+        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }),
+        resolveListing: async () => ({ locator: at(1), raw: listed }),
+      });
+      assert.equal(graph.signaturesVerified, true, kind);
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+      const allowed = kind === "rate";
+      assert.equal(graph.refsVerified, allowed, `${kind}: ${graph.reason}`);
+      assert.equal(seller.deals[0].refsVerified, allowed, kind);
+      assert.equal(seller.deals[0].reputationEligible, allowed, kind);
+      assert.equal(seller.reputation.completed, allowed ? 1 : 0, kind);
+      assert.equal(seller.reputation.bundleCount, allowed ? 1 : 0, kind);
+      assert.deepEqual(seller.reputation.observedTransactionalVolume, allowed ? [{ currency: "DEM", amount: "2" }] : [], kind);
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("each signed payment phase requires its own transaction kind and complete ChainTxRef fields", async () => {
+  const hash = "ab".repeat(32);
+  const rails: Array<{ phase: string; ref: Obj; finality: Obj; required: string[] }> = [
+    { phase: "pay-dem", ref: { kind: "demos", txHash: hash }, finality: { model: "bft-final" }, required: ["txHash"] },
+    { phase: "pay-evm-erc20", ref: { kind: "evm", chainId: 8453, txHash: hash, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["chainId", "txHash"] },
+    { phase: "pay-solana-spl", ref: { kind: "solana", cluster: "devnet", signature: "1".repeat(64), instructionIndex: 0 }, finality: { model: "commitment-level", finalityCommitmentLevel: "finalized" }, required: ["cluster", "signature"] },
+    { phase: "pay-x402", ref: { kind: "x402", httpResource: "https://example.com/resource", paymentReceiptHash: hash, protocolVersion: "2", settlementTxHash: hash, chainId: 8453, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["httpResource", "paymentReceiptHash", "protocolVersion", "chainId"] },
+    { phase: "pay-ap2", ref: { kind: "ap2", mandateId: "mandate", providerRef: "receipt", protocolVersion: "1", receiptAttestation: { anchor: { kind: "storage-program", locator: at(60) }, contentHash: contentHash({ receipt: true }) } }, finality: { model: "provider-receipt" }, required: ["mandateId", "providerRef", "protocolVersion", "receiptAttestation"] },
+    { phase: "pay-cross-chain-htlc", ref: { kind: "htlc-claim", chainId: 8453, contractAddress: `0x${"12".repeat(20)}`, claimTxHash: hash }, finality: { model: "htlc-reveal" }, required: ["chainId", "contractAddress", "claimTxHash"] },
+    { phase: "pay-cross-chain-liquidity-tank", ref: { kind: "liquidity-tank", bridgeId: "bridge", sourceChainId: 1, destChainId: 2, lockTxHash: hash, releaseTxHash: hash }, finality: { model: "liquidity-tank" }, required: ["bridgeId", "sourceChainId", "destChainId", "lockTxHash", "releaseTxHash"] },
+  ];
+  const original = new Map(store);
+  try {
+    for (const rail of rails) {
+      const variants: Array<[string, Obj[], boolean]> = [
+        ["valid", [rail.ref], true],
+        ["another rail", [rail.phase === "pay-dem" ? rails[1].ref : rails[0].ref], false],
+        ["mixed rails", [rail.ref, rail.phase === "pay-dem" ? rails[1].ref : rails[0].ref], false],
+        ["non-object", [null as unknown as Obj], false],
+        ...rail.required.map((field): [string, Obj[], boolean] => {
+          const ref = { ...rail.ref }; delete ref[field]; return [`missing ${field}`, [ref], false];
+        }),
+      ];
+      if (rail.phase === "pay-x402") {
+        const receiptOnly = { ...rail.ref }; delete receiptOnly.settlementTxHash; delete receiptOnly.chainId;
+        variants.push(["provider receipt", [receiptOnly], true]);
+        variants.push(["uppercase receipt hash", [{ ...rail.ref, paymentReceiptHash: hash.toUpperCase() }], false]);
+        variants.push(["prefixed receipt hash", [{ ...rail.ref, paymentReceiptHash: `0x${hash}` }], false]);
+        variants.push(["nonminimal protocol version", [{ ...rail.ref, protocolVersion: "02" }], false]);
+      }
+      for (const [name, refs, expected] of variants) {
+        store.clear(); for (const [key, raw] of original) store.set(key, raw);
+        store.set(at(60), { receipt: true });
+        const listedScope = { ...listingScope, pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail.phase, parameters: { rail: rail.phase } }], acceptedRails: [{ railId: rail.phase }] };
+        const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
+        store.set(at(1), listed);
+        const listingRef = { listingId: "binding-rules", version: 1, contentHash: artifactHash(listed, "listing") };
+        const agreedScope = { ...agreementScope, listingRef, terms: { ...agreementScope.terms as Obj, rail: { railId: rail.phase } } };
+        const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
+        store.set(at(2), agreed);
+        const paidScope = { ...evidenceScope, phase: rail.phase, paymentTxRefs: refs, settlementFinality: { ...rail.finality, ...(name === "provider receipt" ? { model: "provider-receipt" } : {}), finalityObservedAt: 100 } };
+        const paid = { ...paidScope, signature: signedWith(paidScope, "evidence", SELLER) };
+        store.set(at(3), paid);
+        const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary: [{ index: 2, kind: rail.phase, outcome: "ok" }], settlementEvidence: [refTo(at(3), paid, "evidence")] });
+        store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+        const graph = await buildCurrentEvidenceGraph(at(20), {
+          read: async (locator) => store.get(locator) ?? null,
+          readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:${rail.phase}:2` }),
+          resolveListing: async () => ({ locator: at(1), raw: listed }),
+        });
+        assert.equal(graph.signaturesVerified, true, `${rail.phase}: ${name}`);
+        assert.equal(graph.refsVerified, expected, `${rail.phase}: ${name}: ${graph.reason}`);
+        const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], rail.phase);
+        // AP2, HTLC, tank and receipt-only x402 intentionally have no supported SB-1 key.
+        const counted = expected && ["pay-dem", "pay-evm-erc20", "pay-solana-spl", "pay-x402"].includes(rail.phase) && name !== "provider receipt";
+        assert.equal(seller.deals[0].reputationEligible, counted, `${rail.phase}: ${name}`);
+        assert.equal(seller.reputation.completed, counted ? 1 : 0, `${rail.phase}: ${name}`);
+        assert.deepEqual(seller.reputation.observedTransactionalVolume, counted ? [{ currency: "DEM", amount: "2" }] : [], `${rail.phase}: ${name}`);
+      }
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });

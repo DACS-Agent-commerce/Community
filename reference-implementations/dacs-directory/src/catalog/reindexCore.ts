@@ -8,7 +8,6 @@ import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERS
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
-import { reconcileCatalogReputation } from "./reputation";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
@@ -405,8 +404,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     if (fixtureSeeds.includes("counterparty-evidence")) {
       log("fixture: Counterparty Evidence Desk preserved");
     }
-
-    reconcileCatalogReputation(catalogSellers, generatedAt);
 
     for (const seller of catalogSellers) for (const listing of seller.listings) {
       const locator = listing.revocationBinding?.markerAnchor.locator;

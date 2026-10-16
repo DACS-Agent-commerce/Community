@@ -142,8 +142,8 @@ test("storage failures are classified into public-safe operational causes", () =
   assert.equal(storageReadFailureCode(503), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(503, "NOT_FOUND"), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(200), "STORAGE_INVALID_RESPONSE");
-  // The node's 400 INVALID_REQUEST is terminal; an unexplained 400 stays retryable.
-  assert.equal(storageReadFailureCode(400, "INVALID_REQUEST"), "STORAGE_NOT_FOUND");
+  // A valid locator cannot be declared absent by an INVALID_REQUEST response.
+  assert.equal(storageReadFailureCode(400, "INVALID_REQUEST"), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(400), "STORAGE_RPC_UNAVAILABLE");
 });
 
@@ -191,8 +191,25 @@ test("terminal storage failures skip retries while transient failures remain bou
 // Review's wrong-status probes plus all terminal-looking aliases: none may hide an artifact.
 test("terminal body codes on an unrelated status remain retryable", () => {
   for (const status of [200, 201, 400, 402, 410, 429, 503]) {
-    for (const code of ["NOT_FOUND", "STORAGE_NOT_FOUND", "PROGRAM_NOT_FOUND", "PERMISSION_DENIED", "UNAUTHORIZED"]) {
+    for (const code of ["NOT_FOUND", "STORAGE_NOT_FOUND", "PROGRAM_NOT_FOUND", "PERMISSION_DENIED", "UNAUTHORIZED", "INVALID_REQUEST"]) {
       assert.equal(storageReadFailureCode(status, code), status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE", `${status} ${code}`);
     }
   }
+});
+
+test("valid locators retry INVALID_REQUEST; malformed locators never reach the RPC", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ success: false, errorCode: "INVALID_REQUEST" }, { status: 400 });
+  };
+  try {
+    assert.deepEqual(await readStorage(native, 3), { success: false, failureCode: "STORAGE_RPC_UNAVAILABLE" });
+    assert.equal(calls, 3);
+    for (const locator of ["invalid", `${native}f`, `${native}/other`, logical]) {
+      assert.deepEqual(await readStorage(locator, 3), { success: false, failureCode: "ARTIFACT_REJECTED" });
+    }
+    assert.equal(calls, 3);
+  } finally { globalThis.fetch = originalFetch; }
 });

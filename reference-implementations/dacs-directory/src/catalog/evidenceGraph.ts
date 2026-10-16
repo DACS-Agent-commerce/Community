@@ -3,6 +3,7 @@ import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyListing } from "./listingVerification.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
+import { settlementTxId } from "./settlementKey.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -68,6 +69,38 @@ const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
 const PAYMENT_PHASES = new Set(["pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem"]);
 const DELIVERY_PHASES = new Set(["deliver-storage-program", "deliver-entitlement", "deliver-attested-payload"]);
 const settlesPhase = (kind: unknown): boolean => PAYMENT_PHASES.has(String(kind)) || DELIVERY_PHASES.has(String(kind));
+/** DACS-4 §9.14: a payment phase cannot substitute another rail's ChainTxRef. */
+export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
+  if (!PAYMENT_PHASES.has(String(raw.phase)) || !Array.isArray(raw.paymentTxRefs)) return false;
+  if (raw.outcome === "success" && raw.paymentTxRefs.length === 0) return false;
+  const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  const hash = (value: unknown): boolean => typeof value === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(value);
+  const chain = (value: unknown): boolean => Number.isSafeInteger(value) && Number(value) >= 0;
+  return raw.paymentTxRefs.every((value) => {
+    const ref = rec(value);
+    if (!ref) return false;
+    switch (raw.phase) {
+      case "pay-dem": return ref.kind === "demos" && hash(ref.txHash);
+      case "pay-evm-erc20": return ref.kind === "evm" && chain(ref.chainId) && hash(ref.txHash);
+      case "pay-solana-spl": return ref.kind === "solana" && settlementTxId({ ...ref, instructionIndex: 0 }) !== null;
+      case "pay-x402": return ref.kind === "x402" && text(ref.httpResource) &&
+        typeof ref.paymentReceiptHash === "string" && /^[0-9a-f]{64}$/.test(ref.paymentReceiptHash) &&
+        typeof ref.protocolVersion === "string" && /^(?:0|[1-9]\d*)$/.test(ref.protocolVersion) &&
+        (ref.settlementTxHash === undefined ? ref.chainId === undefined : hash(ref.settlementTxHash) && chain(ref.chainId));
+      case "pay-ap2": return ref.kind === "ap2" && text(ref.mandateId) && text(ref.providerRef) && text(ref.protocolVersion) &&
+        (ref.receiptAttestation === undefined ? raw.outcome !== "success" : isCurrentRef(ref.receiptAttestation));
+      case "pay-cross-chain-htlc": {
+        const field = new Map([
+          ["htlc-lock", "lockTxHash"], ["htlc-reveal", "revealTxHash"], ["htlc-claim", "claimTxHash"], ["htlc-refund", "refundTxHash"],
+        ]).get(String(ref.kind));
+        return field !== undefined && chain(ref.chainId) && text(ref.contractAddress) && hash(ref[field]);
+      }
+      case "pay-cross-chain-liquidity-tank": return ref.kind === "liquidity-tank" && text(ref.bridgeId) && chain(ref.sourceChainId) && chain(ref.destChainId) &&
+        hash(ref.lockTxHash) && (ref.releaseTxHash === undefined ? raw.outcome !== "success" : hash(ref.releaseTxHash));
+      default: return false;
+    }
+  });
+}
 /** DACS-4 §9.7: model and parameters describe the finality actually applied on this rail. */
 export function paymentFinalityOk(raw: Record<string, unknown>): boolean {
   const finality = rec(raw.settlementFinality);
@@ -360,6 +393,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && settlesPhase(raw.phase) &&
       (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" &&
       (raw.paymentTxRefs === undefined || Array.isArray(raw.paymentTxRefs)) &&
+      (!payment || (raw.paymentTxRefs === undefined ? raw.outcome === "failure" : paymentTxRefsOk(raw))) &&
       (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef)) &&
       // DACS-4 §9.7 and PC-6: a successful payment states its settled amount, its finality model and the
       // transactions it cites; delivery evidence and a failed payment carry no finality record.
@@ -692,6 +726,12 @@ async function verifyCurrentEvidenceGraph(
   if (raw.outcome === "completed" && pipeline.some((phase, index) => settlesPhase(phase.kind) &&
       !phases.some((entry) => entry.index === index))) {
     return failSigned("completed session omits a settle phase from the listing pipeline");
+  }
+  // ST-2 / ST-8: completion requires successful mandatory phases and settlement evidence.
+  // ST-5 explicitly permits a failed or declined rate phase without failing the session.
+  if (raw.outcome === "completed" && (phases.some((phase) => phase.outcome === "fail" && phase.kind !== "rate") ||
+      topLevelEvidence.some((evidence) => evidence.raw.outcome !== "success"))) {
+    return failSigned("completed session contains a failed mandatory phase");
   }
   // SB-1 / PC-2: native Demos locators are opaque. Recover the tuple from fresh SR-2 program
   // metadata, checking the reread's hash so metadata can never be borrowed from another record.

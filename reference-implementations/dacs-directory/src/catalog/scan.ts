@@ -97,12 +97,13 @@ export function storageReadFailureCode(status: number, errorCode?: string): Stor
   if (status === 404) return normalized === "NOT_FOUND" ? "STORAGE_NOT_FOUND" : "STORAGE_RPC_UNAVAILABLE";
   if (status === 403) return normalized === "PERMISSION_DENIED" ? "STORAGE_NOT_PUBLIC" : "STORAGE_RPC_UNAVAILABLE";
   if (status === 401) return "STORAGE_RPC_UNAVAILABLE";
-  // The node answers 400 INVALID_REQUEST for an address no program can occupy; retrying cannot help.
-  if (status === 400 && normalized === "INVALID_REQUEST") return "STORAGE_NOT_FOUND";
   return status >= 200 && status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE";
 }
 
 export async function readStorage(address: string, attempts = 3): Promise<StorageRead> {
+  // Scanner reads use native locators only. Reject malformed input locally; an HTTP 400 for a
+  // valid locator says nothing about the program's existence and must remain retryable.
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { success: false, failureCode: "ARTIFACT_REJECTED" };
   let lastFailure: StorageReadFailureCode = "STORAGE_RPC_UNAVAILABLE";
   const boundedAttempts = Number.isSafeInteger(attempts) && attempts >= 1 && attempts <= 5 ? attempts : 3;
   for (let attempt = 1; attempt <= boundedAttempts; attempt++) {

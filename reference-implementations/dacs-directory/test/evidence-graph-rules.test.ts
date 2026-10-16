@@ -268,7 +268,7 @@ test("DACS-5 §10.4.3: top-level references are current, unique, hash-bound and 
     "a rating by an outsider": { ratingSigner: OUTSIDER, scopes: (scopes) => { scopes.rating.rater = dids[OUTSIDER]; } },
     "a rating of an outsider": { scopes: (scopes) => { scopes.rating.target = dids[OUTSIDER]; } },
     "a rating naming the wrong target role": { scopes: (scopes) => { scopes.rating.targetRole = "buyer"; } },
-    "a second evidence at a fresh locator": { artifacts: other(6, { ...baseScopes().evidence, phaseIndex: 3, paymentTxRefs: ["tx-2"] }, "evidence", SELLER) },
+    "a second evidence at a fresh locator": { artifacts: other(6, { ...baseScopes().evidence, phaseIndex: 3, paymentTxRefs: [{ kind: "demos", txHash: "ac".repeat(32) }] }, "evidence", SELLER) },
     "the agreement's sha256-prefixed hash": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), contentHash: `sha256:${(bundle.agreementRef as Obj).contentHash}` }; } },
   }), {
     "an agreementRef with another content hash": "agreement reference failed",
@@ -357,6 +357,7 @@ test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly s
   // Boundaries that stay valid: failure evidence for a failed phase, ratings of 1 and 5, and exactly 1,000 characters of free text.
   const failedPayment: Case = { scopes: (scopes) => {
     scopes.evidence.outcome = "failure"; delete scopes.evidence.settlementFinality;
+    scopes.bundle.outcome = "failed-perm";
     scopes.bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "fail", errorClass: "permanent" }];
   } };
   for (const c of [failedPayment, rating((scope) => { scope.value = 1; }),
@@ -583,6 +584,7 @@ test("DACS-4 AMEND-1..4: an amendment that fails its rules is flagged, kept for 
   const failed = await evaluate({
     scopes: (scopes) => {
       scopes.evidence.outcome = "failure"; delete scopes.evidence.settlementFinality;
+      scopes.bundle.outcome = "failed-perm";
       scopes.bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "fail", errorClass: "permanent" }];
     },
     bundle: amendment({ amendmentType: "refund" }),

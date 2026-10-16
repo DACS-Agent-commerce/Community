@@ -201,8 +201,10 @@ export interface DealRecord extends RegisteredDeal {
   bundleContentHash?: string;
   /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
   fullSignatureStanding?: boolean;
-  /** True only when the outcome belongs to the current DACS-5 closed set. */
+  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission. */
   reputationEligible?: boolean;
+  /** Recomputed catalog-wide SB-2 rejection; never overwrites evidence eligibility. */
+  settlementRejected?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
   /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */

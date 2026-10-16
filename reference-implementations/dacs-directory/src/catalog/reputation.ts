@@ -49,7 +49,7 @@ export function isNeutralCancellation(
 
 /** Admit the consumer's complete evidence set before seller, category or window filtering. */
 export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
-  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
+  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && !deal.settlementRejected && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
   // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) only. Claims are admitted in
   // the winning order, earliest evidence observation first, then the lower evidence hash, then the
   // jobId so the choice is deterministic; a job holding any rejected claim is not counted.
@@ -66,10 +66,12 @@ export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
 
 /** Final catalog pass: one ledger for every seller, then recompute every published metric. */
 export function reconcileCatalogReputation(sellers: SellerRecord[], now: number): void {
+  // Reconsider previous losers when a winner disappears or its evidence changes.
+  for (const seller of sellers) for (const deal of seller.deals) delete deal.settlementRejected;
   const admitted = new Set(settlementEligibleDeals(sellers.flatMap((seller) => seller.deals)));
   for (const seller of sellers) {
     for (const deal of seller.deals) {
-      if (deal.reputationEligible && !admitted.has(deal)) deal.reputationEligible = false;
+      if (deal.reputationEligible && !admitted.has(deal)) deal.settlementRejected = true;
     }
     seller.reputation = deriveSellerReputation(seller.deals, 0, now);
     for (const listing of seller.listings) {

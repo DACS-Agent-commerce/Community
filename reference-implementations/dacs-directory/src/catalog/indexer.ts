@@ -55,7 +55,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
+import { agreementPrice, buildCurrentEvidenceGraph, paymentTxRefsOk, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
 import { legacySettlementTxId, settlementTxId } from "./settlementKey.js";
 import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
@@ -104,6 +104,7 @@ function currentSettlementClaims(settlement: ResolvedEvidence[]): SettlementTxId
   const claims: SettlementTxIds = [];
   for (const evidence of settlement) {
     if (evidence.raw.outcome !== "success" || typeof evidence.raw.phase !== "string" || !evidence.raw.phase.startsWith("pay-")) continue;
+    if (!paymentTxRefsOk(evidence.raw)) return null;
     const refs = Array.isArray(evidence.raw.paymentTxRefs) ? evidence.raw.paymentTxRefs : [];
     if (evidence.phaseIndex === undefined || refs.length === 0) return null;
     for (const ref of refs) {
