@@ -73,6 +73,12 @@ const settlesPhase = (kind: unknown): boolean => PAYMENT_PHASES.has(String(kind)
 export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
   if (!PAYMENT_PHASES.has(String(raw.phase)) || !Array.isArray(raw.paymentTxRefs)) return false;
   if (raw.outcome === "success" && raw.paymentTxRefs.length === 0) return false;
+  // DACS-4 §9.14 / ST-8: a refund is the failed path. Success needs all
+  // three stages, rather than merely one individually well-shaped reference.
+  if (raw.phase === "pay-cross-chain-htlc" && raw.outcome === "success") {
+    const kinds = new Set(arr(raw.paymentTxRefs).map((ref) => ref.kind));
+    if (kinds.has("htlc-refund") || !["htlc-lock", "htlc-reveal", "htlc-claim"].every((kind) => kinds.has(kind))) return false;
+  }
   const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
   const hash = (value: unknown): boolean => typeof value === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(value);
   const chain = (value: unknown): boolean => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -85,7 +91,7 @@ export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
       case "pay-solana-spl": return ref.kind === "solana" && settlementTxId({ ...ref, instructionIndex: 0 }) !== null;
       case "pay-x402": return ref.kind === "x402" && text(ref.httpResource) &&
         typeof ref.paymentReceiptHash === "string" && /^[0-9a-f]{64}$/.test(ref.paymentReceiptHash) &&
-        typeof ref.protocolVersion === "string" && /^(?:0|[1-9]\d*)$/.test(ref.protocolVersion) &&
+        (ref.protocolVersion === "1" || ref.protocolVersion === "2") &&
         (ref.settlementTxHash === undefined ? ref.chainId === undefined : hash(ref.settlementTxHash) && chain(ref.chainId));
       case "pay-ap2": return ref.kind === "ap2" && text(ref.mandateId) && text(ref.providerRef) && text(ref.protocolVersion) &&
         (ref.receiptAttestation === undefined ? raw.outcome !== "success" : isCurrentRef(ref.receiptAttestation));
@@ -640,7 +646,8 @@ async function verifyCurrentEvidenceGraph(
     }
     // DACS-2 VPC-4: a vet phase whose decision is not pass fails, so it cannot have succeeded.
     const decision = compositeDecisions.get(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`);
-    if (phase.outcome === "ok" && decision !== undefined && decision !== "pass") {
+    if (phase.outcome === "ok" && ((phase.kind === "vet-credentials" && decision !== "pass") ||
+        (decision !== undefined && decision !== "pass"))) {
       return failSigned("a successful vet phase rests on a composite record that did not pass");
     }
   }
@@ -718,14 +725,14 @@ async function verifyCurrentEvidenceGraph(
     ? await verifyListing(listed.raw, resolveKey) : null;
   if (!listed || !verifiedListing) return failSigned("listing reference failed");
   // A summary entry is an invocation of the signed pipeline at this exact index. A completed
-  // session executed every settle phase; the bundle cannot omit one to avoid evidence coverage.
+  // session executed every mandatory phase. ST-5 permits rate to be declined.
   const pipeline = arr(listed.raw.pipeline);
   if (phases.some((phase) => pipeline[Number(phase.index)]?.kind !== phase.kind)) {
     return failSigned("phase summary does not match the listing pipeline");
   }
-  if (raw.outcome === "completed" && pipeline.some((phase, index) => settlesPhase(phase.kind) &&
+  if (raw.outcome === "completed" && pipeline.some((phase, index) => phase.kind !== "rate" &&
       !phases.some((entry) => entry.index === index))) {
-    return failSigned("completed session omits a settle phase from the listing pipeline");
+    return failSigned("completed session omits a mandatory phase from the listing pipeline");
   }
   // ST-2 / ST-8: completion requires successful mandatory phases and settlement evidence.
   // ST-5 explicitly permits a failed or declined rate phase without failing the session.
@@ -761,6 +768,31 @@ async function verifyCurrentEvidenceGraph(
     !sameSigningIdentity(artifact.raw.evaluatedParty, verifiedListing.sellerClaim) &&
     normalizedHash(artifact.raw.requirementHash) !== contentHash(requirement))) {
     return failSigned("composite record is not bound to the listing's requirement");
+  }
+  // VPC-2 / VPC-3: a required vet executes for both counterparties and anchors
+  // their passing composites. A summary's 'ok' does not supply that evidence.
+  if (raw.outcome === "completed" && pipeline.some((phase) => phase.kind === "vet-credentials") &&
+      parties.filter((party) => party.role === "buyer" || party.role === "seller").some((party) =>
+        !passed.has(canonicalSigningIdentity(String(party.primaryClaim))))) {
+    return failSigned("completed session lacks passing vet records for both parties");
+  }
+  if (raw.outcome === "completed" && requirement && pipeline.some((phase) => phase.kind === "vet-credentials")) {
+    const buyer = parties.find((party) => party.role === "buyer")!;
+    const provesRequirement = (record: ResolvedEvidence): boolean => {
+      const results = [...arr(record.raw.freshness), ...arr(record.raw.dealSpecific)]
+        .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)?.raw).filter(Boolean);
+      // DACS-2 §7.7.1: every required scheme and each oneOf group needs a
+      // passing result in freshness/dealSpecific; supplementary signals do not count.
+      const satisfied = (claim: Record<string, unknown>) =>
+        results.some((result) => result!.decision === "pass" && result!.scheme === claim.scheme &&
+          (claim.recipeVersion === undefined || result!.recipeVersion === claim.recipeVersion));
+      return arr(requirement.required).every(satisfied) &&
+        (Array.isArray(requirement.oneOf) ? requirement.oneOf : []).every((group) => arr(group).some(satisfied));
+    };
+    if (!composites.some((record) => sameSigningIdentity(record.raw.evaluatedParty, buyer.primaryClaim) &&
+        record.raw.overallDecision === "pass" && provesRequirement(record))) {
+      return failSigned("completed vet lacks passing verification evidence for the listing's requirements");
+    }
   }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return failSigned("agreement listing binding failed");
   if (agreement) {

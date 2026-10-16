@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "../src/catalog/reputation.js";
+import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation, settlementEligibleDeals } from "../src/catalog/reputation.js";
 import type { DealRecord } from "../src/catalog/types.js";
 
 // DACS-5 §10.5 derivation: which deals count, on which time basis, and what the reported
@@ -188,4 +188,13 @@ test("SB-2 rejects one job reusing a settlement under two pipeline indices", () 
   ] });
   assert.equal(deriveSellerReputation([reused], 0, 100).completed, 0);
   assert.equal(deriveSellerReputation([reused], 0, 100).bundleCount, 0);
+});
+
+
+test("equal-time/hash/job settlement claims choose the lower phase index in both insertion orders", () => {
+  const claim = { id: "shared", observedAt: 1, evidenceHash: "a".repeat(64) };
+  const low = deal({ jobId: "same", settlementTxIds: [{ ...claim, phaseIndex: 0 }] });
+  const high = deal({ jobId: "same", settlementTxIds: [{ ...claim, phaseIndex: 1 }] });
+  assert.deepEqual(settlementEligibleDeals([low, high]), [low]);
+  assert.deepEqual(settlementEligibleDeals([high, low]), [low]);
 });

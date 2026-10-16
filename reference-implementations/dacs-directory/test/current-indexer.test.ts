@@ -41,7 +41,7 @@ const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], ext
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHash = txHashOf(jobId), observedAt = 100) {
+async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHash = txHashOf(jobId), observedAt = 100, withVet = false) {
   maps.clear();
   const buyerIndex = 1 - sellerIndex;
   const at = (n: number) => locator(offset + n);
@@ -50,7 +50,7 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
     seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "vet-credentials" }],
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, ...(withVet ? [{ kind: "vet-credentials" }] : [])],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
   };
   // Listing verifier requires a presentation signature for the seller claim.
@@ -78,7 +78,7 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[buyerIndex] },
       { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
     ],
-    phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
+    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
   const signatures = [await sign(bundleScope, "bundle", buyerIndex, true), await sign(bundleScope, "bundle", sellerIndex, true)];
@@ -169,6 +169,7 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
   const updateListingRef = (raw: Obj) => {
     const scope = signedScope(raw, "bundle");
     scope.listingRef = listingRef;
+    scope.phaseSummary = (scope.phaseSummary as Obj[]).map((phase) => phase.kind === "commit-agreement" ? { ...phase, kind: "commit-payee-bound-agreement" } : phase);
     return { ...scope, signatures: raw.signatures, anchoredByRole: raw.anchoredByRole };
   };
   fixture.buyerBundle = updateListingRef(fixture.buyerBundle);
@@ -287,7 +288,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   maps.set(locator(4), rating);
 
   const linkedPhase = signedScope(bundle, "bundle");
-  linkedPhase.phaseSummary = [{
+  linkedPhase.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, {
     index: 2,
     kind: "pay-dem",
     outcome: "ok",
@@ -678,7 +679,7 @@ test("the evidence graph rejects an agreement that does not conform to its listi
 });
 
 test("current evidence graph accepts a verified vet record as its phase attestation", async () => {
-  const { listing, buyerBundle: bundle } = await vector();
+  const { listing, buyerBundle: bundle } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
   const compositeScope: Obj = {
     recordVersion: "1",
     jobId: "job-1",
@@ -698,8 +699,11 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   maps.set(locator(6), composite);
 
   const scope = signedScope(bundle, "bundle");
-  scope.vetRecords = [ref(locator(6), composite, "composite")];
-  scope.phaseSummary = [{
+  const buyerScope = { ...compositeScope, evaluatedParty: dids[0], bundleHash: "a".repeat(64), requirementHash: contentHash(listing.buyerRequirement as Obj) };
+  const buyerComposite = { ...buyerScope, signature: await sign(buyerScope, "composite", 1) };
+  maps.set(locator(19), buyerComposite);
+  scope.vetRecords = [ref(locator(6), composite, "composite"), ref(locator(19), buyerComposite, "composite")];
+  scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, {
     index: 3,
     kind: "vet-credentials",
     outcome: "ok",
@@ -713,7 +717,7 @@ test("current evidence graph accepts a verified vet record as its phase attestat
 });
 
 test("a vet record binds the listing's requirement and must pass for a vet phase or agreement to rest on it (DACS-2 §7.7, VPC-4)", async () => {
-  const { listing, buyerBundle: bundle } = await vector();
+  const { listing, buyerBundle: bundle } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
   const requirementHash = contentHash((listing as Obj).buyerRequirement as Obj);
   const record = (party: number, extra: Obj = {}): Obj => ({
     recordVersion: "1", jobId: "job-1", evaluatedParty: dids[party], bundleHash: (party === 0 ? "a" : "b").repeat(64),
@@ -729,7 +733,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     }
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = refs;
-    if (vetPhase !== null) scope.phaseSummary = [{ index: 3, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }, { index: 2, kind: "pay-dem", outcome: "ok" }];
+    scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 3, kind: "vet-credentials", outcome: "ok", ...(vetPhase === null ? {} : { attestationRef: refs[vetPhase] }) }, { index: 2, kind: "pay-dem", outcome: "ok" }];
     maps.set(locator(5), await resignBundle(scope));
     return buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
@@ -745,7 +749,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
       "a committed session has a vetted party with no passing composite record", overallDecision);
   }
   // A failed attempt beside the passing record for the same party is consistent with the session.
-  assert.equal((await graphWith([record(0, { overallDecision: "fail", generatedAt: 20 }), record(0)], 1)).ok, true);
+  assert.equal((await graphWith([record(0, { overallDecision: "fail", generatedAt: 20 }), record(0), record(1)], 1)).ok, true);
   // A failed vet on a session that never reached its agreement is ordinary evidence of that failure.
   const aborted = signedScope(bundle, "bundle");
   delete aborted.agreementRef;
@@ -914,7 +918,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   // Each substituted kind is already invalid against the signed pipeline at index 3.
   for (const [role, kind] of [["buyer", "rate"], ["seller", "commit-agreement"]] as const) {
     const kindScope = signedScope(role === "buyer" ? kindFixture.buyerBundle : kindFixture.sellerBundle, "bundle");
-    kindScope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "ok" }];
+    kindScope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "ok" }];
     maps.set(kindFixture.locators[role], {
       ...kindScope,
       signatures: [await sign(kindScope, "bundle", 0, true), await sign(kindScope, "bundle", 1, true)],
@@ -1370,5 +1374,104 @@ test("reindex admits a shared settlement once across sellers before seller and c
   } finally {
     globalThis.fetch = originalFetch;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+  }
+});
+
+test("passive reindex carries signed holder bindings and unions sticky cache and scanner overflows", async () => {
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const { bundleBindingOverflowKey } = await import("../src/catalog/bundleBinding.js");
+  const fixture = await vector("passive-binding-job", 1600);
+  const originalMaps = new Map(maps);
+  const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const originalFetch = globalThis.fetch;
+  const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH;
+  process.env.DACS_SCAN_FINALITY_DEPTH = "0";
+  try {
+    store.saveRegistrations([]); store.saveDomains([]);
+    for (const fromRegistration of [false, true]) for (const flood of [false, true]) for (const sticky of [false, true]) {
+      maps.clear(); for (const [key, value] of originalMaps) maps.set(key, value);
+      const bindings = [];
+      for (const [role, signer, bundle, native] of [["buyer", 0, fixture.buyerBundle, fixture.locators.buyer], ["seller", 1, fixture.sellerBundle, fixture.locators.seller]] as const) {
+        for (let index = 0; index < (flood ? 33 : 1); index++) {
+          const address = index === 0 ? native : locator(1700 + signer * 100 + index);
+          maps.set(address, bundle);
+          const bound = await bindingFor("passive-binding-job", role, address, bundle, signer);
+          maps.set(locator(2000 + signer * 100 + index), bound as unknown as Obj); bindings.push(bound);
+        }
+      }
+      store.saveRegistrations(fromRegistration ? [{ primaryClaim: dids[1], displayName: "registered", listingAnchors: [fixture.locators.listing],
+        deals: [registeredDeal("passive-binding-job", fixture.locators.buyer, fixture.locators.seller)], bundleBindings: bindings }] : []);
+      const buyerOverflow = bundleBindingOverflowKey("passive-binding-job", "buyer", dids[0]);
+      const sellerOverflow = bundleBindingOverflowKey("passive-binding-job", "seller", dids[1]);
+      const unrelated = bundleBindingOverflowKey("other-job", "buyer", dids[0]);
+      store.saveScanState({ schemaVersion: 10, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, programs: {},
+        bundleBindings: { "passive-binding-job": [bindings[0]] }, bundleBindingOverflow: sticky ? [unrelated, buyerOverflow] : [],
+        revocations: {}, verifiedRevocations: {} });
+      globalThis.fetch = async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: fromRegistration ? [] : [{ id: 1, content: [...maps.keys()] }] });
+        const native = path.split("/").pop() ?? "";
+        const data = maps.get(native);
+        const owner = native === fixture.locators.listing ? dids[1] : data?.anchoredByRole === "buyer" ? dids[0] : dids[1];
+        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+          : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+      };
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+      const saved = store.loadScanState();
+      assert.deepEqual(saved.bundleBindings!["passive-binding-job"].map((binding) => JSON.stringify(binding)).sort(), bindings.map((binding) => JSON.stringify(binding)).sort());
+      const expectedOverflow = [...new Set([...(sticky ? [unrelated, buyerOverflow] : []), ...(flood ? [buyerOverflow, sellerOverflow] : [])])].sort();
+      assert.deepEqual(saved.bundleBindingOverflow, expectedOverflow);
+      const seller = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+      assert.ok(seller, "the seller is discovered without registration");
+      const counted = !sticky && !flood;
+      assert.equal(seller.deals[0].refsVerified, counted);
+      assert.equal(seller.reputation.completed, counted ? 1 : 0);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
+    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+  }
+});
+
+test("history replay discards pre-v9 attribution and a later duplicate invalidates cached legacy copy pointers", async () => {
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const { discoveredDealKey } = await import("../src/catalog/scanState.js");
+  const originalFetch = globalThis.fetch;
+  const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH; process.env.DACS_SCAN_FINALITY_DEPTH = "0";
+  const deal = { jobId: "cached-legacy", rail: "pay-dem", buyerBundleRef: locator(3001), sellerBundleRef: locator(3002),
+    owners: { buyer: dids[0], seller: dids[1] }, sellerFromAgreement: dids[1] };
+  const key = discoveredDealKey(dids[0], deal.jobId);
+  try {
+    store.saveRegistrations([]); store.saveDomains([]);
+    store.saveScanState({ schemaVersion: 8, lastSeenTxId: 0, listings: {}, deals: { [key]: deal }, programs: {} });
+    globalThis.fetch = async () => Response.json({ result: 200, response: [] });
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    assert.deepEqual(Object.keys(store.loadScanState().deals), []);
+    for (const name of [`dacs3:agreement:${deal.jobId}`, `dacs5:bundle:${deal.jobId}`]) {
+      const programKey = store.programBindingKey(dids[0], name);
+      const duplicate = locator(3003);
+      store.saveScanState({ schemaVersion: 10, lastSeenTxId: 0, listings: {}, deals: { [key]: structuredClone(deal) }, programs: { [programKey]: locator(3000) } });
+      globalThis.fetch = async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [{ id: 1, content: duplicate }] });
+        return path.endsWith(duplicate)
+          ? Response.json({ success: true, owner: `0x${dids[0].slice(-64).toUpperCase()}`, programName: name, data: {} })
+          : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+      };
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+      const state = store.loadScanState();
+      assert.equal(state.programs[programKey], null, name);
+      assert.equal(state.deals[key].owners.seller, "", name);
+      assert.equal(state.deals[key].sellerBundleRef, undefined, name);
+      assert.equal((state.deals[key] as unknown as Obj).sellerFromAgreement, undefined, name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
+    store.saveScanState(priorState); store.saveRegistrations(priorRegs); store.saveDomains(priorDomains);
   }
 });

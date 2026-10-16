@@ -358,7 +358,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
-    phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
+    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];

@@ -284,6 +284,82 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   // A copy carrying the current discriminator is verified as a current bundle, never retried as legacy.
   const current = await verdict({ ...base, [at(2)]: copy("buyer", { bundleVersion: "1" }), [at(3)]: copy("seller", { bundleVersion: "1" }) });
   assert.equal(current, "unverified ineligible undefined");
+  for (const discriminator of [{ bundleVersion: "1" }, { faultBundleVersion: "1" }]) {
+    const selected = await run({ ...base, [at(3)]: copy("seller", discriminator) });
+    assert.equal(selected.deals[0].refsVerified, false);
+    assert.equal(selected.deals[0].reputationEligible, false);
+    assert.equal(selected.reputation.completed, 0);
+  }
+  const signedCopies = (buyerScope: Obj, sellerScope = buyerScope) => {
+    const signed = (scope: Obj, role: string) => ({ ...scope, anchoredByRole: role,
+      signatures: [BUYER, SELLER].map((signer) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(scope)}`, signer, "base64url") })) });
+    return { [at(2)]: signed(buyerScope, "buyer"), [at(3)]: signed(sellerScope, "seller") };
+  };
+  for (const [buyerOutcome, sellerOutcome] of [["failed-perm", "failed-counterparty"], ["failed-counterparty", "failed-perm"],
+    ["aborted-by-self", "aborted-by-other"], ["aborted-by-other", "aborted-by-self"], ["failed-substrate", "failed-substrate"]]) {
+    const buyer = { ...bundleScope, outcome: buyerOutcome }; const seller = { ...bundleScope, outcome: sellerOutcome };
+    const stored = { ...base, ...signedCopies(buyer, seller) };
+    const result = await run(stored);
+    assert.equal(result.deals[0].refsVerified, true, sellerOutcome);
+    assert.equal(result.deals[0].sellerOutcome, sellerOutcome);
+    assert.equal(result.deals[0].anchoredByRole, "seller");
+    assert.equal(result.deals[0].bundleContentHash, contentHash(seller));
+    assert.equal(result.reputation.completed, 0);
+    const fallback = await run({ ...stored, [at(3)]: undefined as unknown as Obj });
+    assert.equal(fallback.deals[0].refsVerified, false);
+    assert.equal(fallback.deals[0].sellerOutcome, sellerOutcome);
+    assert.equal(fallback.deals[0].anchoredByRole, "buyer");
+    assert.equal(fallback.deals[0].bundleContentHash, contentHash(buyer));
+    assert.equal(fallback.deals[0].reputationEligible, false);
+  }
+  // Non-evidence artifacts may carry advisory outcome fields; only the evidence
+  // contributes settlement claims, and failed evidence contributes none.
+  const annotatedAgreement = { ...agreementScope, outcome: "success" };
+  const signedAgreement = { ...annotatedAgreement, signatures: [BUYER, SELLER].map((signer) => ({
+    algorithm: "ed25519", signer: dids[signer], value: sign(`dacs-agreement:v1:${contentHash(annotatedAgreement)}`, signer),
+  })) };
+  const annotatedBundle = { ...bundleScope, agreementRef: { kind: "dacs-3-agreement", id: "agreement-legacy", contentHash: contentHash(annotatedAgreement) } };
+  const annotated = await run({ ...base, [resolveProgramAddress(dids[BUYER], `dacs3:agreement:${JOB}`)!]: signedAgreement, ...signedCopies(annotatedBundle) });
+  assert.equal(annotated.deals[0].reputationEligible, true);
+  assert.equal(annotated.deals[0].settlementTxIds?.length, 1);
+  const failedEvidence = { ...evidenceScope, outcome: "failure" };
+  const failedBundle = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(failedEvidence) }] };
+  const failed = await run({ ...base, [evidenceAt]: { ...failedEvidence, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(failedEvidence)}`, SELLER) } },
+    ...signedCopies({ ...failedBundle, outcome: "failed-counterparty" }, { ...failedBundle, outcome: "failed-perm" }) });
+  assert.equal(failed.deals[0].refsVerified, true);
+  assert.deepEqual(failed.deals[0].settlementTxIds, []);
+  assert.equal(failed.reputation.completed, 0);
+
+  const store = await import("../src/catalog/store.js");
+  const priorState = store.loadScanState();
+  const vetScope = { jobId: JOB, subject: dids[BUYER], recipeId: "legacy-vet", recipeVersion: "1", decision: "pass", verifiedAt: "2026-10-16T00:00:00Z",
+    results: [{ claimRef: dids[BUYER], method: "self-signed", status: "pass", authority: dids[BUYER] }] };
+  const vet = { ...vetScope, signature: { algorithm: "ed25519", signer: dids[OUTSIDER], value: sign(`dacs-composite:v1:${contentHash(vetScope)}`, OUTSIDER) } };
+  const vettedBundle = { ...bundleScope, vetRecords: [{ kind: "dacs-2-verifyresult", id: "legacy-vet", contentHash: contentHash(vetScope) }] };
+  // Match the pinned SDK's session-anchor contract, through an observed cache entry.
+  const { sessionAnchorName } = await import("../vendor/dacs-sdk/dist/agent/runSessionCore.js");
+  const actualVetName = sessionAnchorName.vet(JOB);
+  const vetKey = store.programBindingKey(dids[BUYER], actualVetName);
+  try {
+    store.saveScanState({ ...priorState, programs: { ...priorState.programs, [vetKey]: at(90) } });
+    const complete = { ...base, [at(90)]: vet, ...signedCopies(vettedBundle) };
+    assert.equal((await run(complete)).deals[0].refsVerified, true, actualVetName);
+    assert.equal((await run({ ...complete, [at(90)]: undefined as unknown as Obj })).deals[0].refsVerified, false);
+    store.saveScanState({ ...priorState, programs: { ...priorState.programs, [vetKey]: null } });
+    assert.equal((await run(complete)).deals[0].refsVerified, false, "indeterminate program names never fall back");
+  } finally { store.saveScanState(priorState); }
+
+  for (const change of [{ phaseIndex: -1 }, { phaseIndex: "0" }, { paymentTxRefs: [] },
+    { paymentTxRefs: [{ rail: "foreign", txHash: "ab".repeat(32), kind: "payment" }] },
+    { paymentTxRefs: [{ rail: "demos", txHash: "ab".repeat(32), kind: "refund" }] }]) {
+    const scope = { ...evidenceScope, ...change };
+    const paid = { ...scope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(scope)}`, SELLER) } };
+    const referenced = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(scope) }] };
+    const result = await run({ ...base, [evidenceAt]: paid, ...signedCopies(referenced) });
+    assert.equal(result.deals[0].reputationEligible, false, JSON.stringify(change));
+    assert.deepEqual(result.deals[0].settlementTxIds, [], JSON.stringify(change));
+    assert.equal(result.reputation.completed, 0);
+  }
 });
 
 test("further legacy rules: an invalid presented signature, empty optional lists, unique ids, and the pinned listing content", async () => {

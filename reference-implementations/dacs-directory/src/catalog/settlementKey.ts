@@ -60,7 +60,8 @@ export function settlementTxId(ref: unknown): string | null {
  */
 export function legacySettlementTxId(phase: unknown, ref: unknown): string | null {
   const value = record(ref);
-  return phase === "pay-dem" && value ? settlementTxId({ kind: "demos", txHash: value.txHash }) : null;
+  return phase === "pay-dem" && value?.rail === "demos" && value.kind === "payment"
+    ? settlementTxId({ kind: "demos", txHash: value.txHash }) : null;
 }
 
 export interface SettlementClaim {
