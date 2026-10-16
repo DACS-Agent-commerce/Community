@@ -328,6 +328,9 @@ export async function POST(req: NextRequest) {
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
   let signedCandidate: Record<string, unknown> | undefined;
   if (body.listingSignature !== undefined) {
+    if (typeof body.listingSignature !== "string") {
+      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+    }
     const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
     if (!/^[0-9a-fA-F]{128}$/.test(listingSigHex)) {
       return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });

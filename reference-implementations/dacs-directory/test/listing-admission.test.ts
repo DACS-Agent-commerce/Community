@@ -342,3 +342,17 @@ test("the indexer publishes current-SDK listings under the registered identity a
     globalThis.fetch = originalFetch;
   }
 });
+
+test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
+  const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
+  const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");
+  const pattern = new RegExp(listingRejectionDiagnosticSchema.properties.listingId.pattern);
+  for (const listingId of ["a".repeat(65), "A.b_c~d-".repeat(16), "x"]) {
+    assert.deepEqual(listingDiagnosticCoordinates({ listingId, listingVersion: 2 }), { listingId, listingVersion: 2 }, listingId);
+    assert.ok(pattern.test(listingId), listingId);
+  }
+  for (const listingId of ["a".repeat(129), "a/b", "a b", ""]) {
+    assert.equal(listingDiagnosticCoordinates({ listingId, listingVersion: 2 }), undefined, listingId);
+    assert.equal(pattern.test(listingId), false, listingId);
+  }
+});

@@ -488,6 +488,12 @@ test("publisher returns no transaction for a listing signature that does not ver
       const body = await response.json() as { tx?: unknown };
       assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
     }
+    // A signature that is not a string is a client error, never an unhandled 500.
+    for (const listingSignature of [7, null, ["ab".repeat(64)], { value: "ab".repeat(64) }]) {
+      const response = await POST(request({ ...finalInput, listingSignature }));
+      assert.equal(response.status, 400, JSON.stringify(listingSignature));
+      assert.equal((await response.json() as { tx?: unknown }).tx, undefined);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
