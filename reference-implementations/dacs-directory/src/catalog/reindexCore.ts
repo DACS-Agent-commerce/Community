@@ -1,3 +1,4 @@
+import { rebuildCatalogObservations } from "./testnetMetrics.js";
 /**
  * Full reindex, callable: incremental chain scan to the tip, §6.3.5 domain
  * crawl, then re-verify every registration (submitted + discovered) against
@@ -419,7 +420,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    saveCatalog(rebuildCatalogObservations({ catalogVersion: "1", generatedAt, sellers: catalogSellers }));
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 

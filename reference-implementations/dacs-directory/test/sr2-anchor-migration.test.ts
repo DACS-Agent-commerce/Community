@@ -91,10 +91,13 @@ test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 test("SR-2 migration removes every legacy producer-controlled anchor time once", () => {
   assert.equal(store.artifactAnchorTime(locator), undefined);
+  const stored = store.loadStoredCatalog();
+  assert.equal(stored.sellers[0]?.deals[0]?.anchorTimestamp, undefined);
+  assert.equal(stored.sellers[0]?.reputation.bundleCount, 1, "migration retains the stored history");
   const catalog = store.loadCatalog();
   assert.equal(catalog.sellers[0]?.deals[0]?.anchorTimestamp, undefined);
   assert.equal(catalog.sellers[0]?.reputation.windowingBasis, "finalisedAt");
-  assert.equal(catalog.sellers[0]?.reputation.bundleCount, 1);
+  assert.equal(catalog.sellers[0]?.reputation.bundleCount, 0, "unversioned records await reindexing");
   const hint = catalog.sellers[0]?.listings[0]?.reputationHint;
   assert.equal(hint?.completionRate, null);
   assert.equal(hint?.metricsUnavailableReason, "Completion verification unavailable");

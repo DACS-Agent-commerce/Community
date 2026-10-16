@@ -338,7 +338,13 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, {
+      read: readAnchor, resolveListing,
+      readEvidenceAnchor: async (address) => {
+        const anchored = await readAnchorRecord(address);
+        return anchored ? { data: anchored.data, logicalAddress: anchored.metadata?.logicalAddress } : null;
+      },
+    });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -434,8 +440,10 @@ export async function indexRegistration(
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
       const { settlementTxIds, projected } = settlementClaims((authoritative?.artifacts ?? [])
-        .filter((artifact) => artifact.kind === "evidence").map((artifact) => artifact.raw), {
+        .filter((artifact) => artifact.kind === "evidence"), {
+        jobId: authoritative?.bundle.jobId,
         railId: agreementRail(authoritative?.agreement),
+        railRegistryVersion: authoritative?.bundle.railRegistryVersion,
         phaseSummary: authoritative?.bundle.phaseSummary,
         pipeline: authoritative?.listing?.pipeline,
       });
@@ -529,7 +537,9 @@ export async function indexRegistration(
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
     const { settlementTxIds, projected } = settlementClaims(authoritative.resolvedArtifacts
-      .filter((artifact) => artifact.kind === "dacs-4-evidence").map((artifact) => artifact.raw), {
+      .filter((artifact) => artifact.kind === "dacs-4-evidence"), {
+      jobId: bundle?.jobId,
+      railRegistryVersion: selectedRaw?.railRegistryVersion,
       railId: agreementRail(authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-3-agreement")?.raw),
       phaseSummary: bundle?.phaseSummary,
       pipeline: authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-1-listing")?.raw.pipeline,

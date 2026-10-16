@@ -111,6 +111,10 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
     const evidence = await inspection.json();
     assert.equal(evidence.artifact.listing.anchor.locator, fixture.sellers[0].listings[0].anchor.locator);
     assert.ok(evidence.artifact.links.listingJson);
+    assert.equal(evidence.artifact.transactionReadiness.disposition, "unassessed");
+    assert.equal(evidence.artifact.maturityProfile.noReputationClaim, true);
+    assert.equal(evidence.artifact.maturityProfile.noLivePaymentClaim, true);
+    assert.equal(evidence.artifact.derivation, undefined, "observations do not mint a settlement verification receipt");
   }
   // Reads never write the projection back: the stored catalog keeps its indexed values.
   const stored = loadStoredCatalog();
@@ -363,4 +367,39 @@ test("non-rate search and price filtering still work over the same history", asy
     assert.equal(body.total, expected);
     assertNoNumericMetrics(body);
   }
+});
+
+test("cached API reads remove cross-seller settlement reuse from every affected observation", async () => {
+  const catalog = noRateCatalog();
+  const first = catalog.sellers[0];
+  first.deals = first.deals.slice(0, 1);
+  first.deals[0].settlementTxIds = [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2 }];
+  const second = structuredClone(first);
+  second.primaryClaim = `did:demos:agent:${"c".repeat(64)}`;
+  second.deals[0].jobId = "other-seller-job";
+  second.deals[0].owners.seller = second.primaryClaim;
+  second.deals[0].bundleContentHash = "f".repeat(64);
+  second.listings[0].seller.primaryClaim = second.primaryClaim;
+  catalog.sellers.push(second);
+  saveCatalog(catalog);
+  for (const claim of [first.primaryClaim, second.primaryClaim]) {
+    const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
+      params: Promise.resolve({ primaryClaimRef: encodeURIComponent(claim) }),
+    });
+    assert.equal(response.status, 200);
+    const seller = await response.json();
+    assert.equal(seller.reputation.bundleCount, 0);
+    assert.equal(seller.reputation.completed, 0);
+    assert.equal(seller.reputation.totalAgreements, 0);
+    assert.deepEqual(seller.reputation.bundleRefs, []);
+    assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+    assert.deepEqual(seller.reputation.transactionCountByCurrency, []);
+    assert.equal(seller.listings[0].reputationHint.bundleCount, 0);
+    assert.equal(seller.reputation.counterpartyFaultRate, null);
+  }
+  const listings = await getListings(new NextRequest("https://directory.example/api/dacs/listings"));
+  const body = await listings.json();
+  assert.equal(body.listings.length, 2);
+  assert.ok(body.listings.every((listing: { reputationHint: { bundleCount: number } }) => listing.reputationHint.bundleCount === 0));
+  assert.equal(loadStoredCatalog().sellers[0].deals[0].ratings![0].value, 5);
 });

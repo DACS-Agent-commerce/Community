@@ -1,8 +1,9 @@
 import type { DealRecord } from "./types.js";
-import { isChainTxRef } from "@kynesyslabs/dacs/artifacts";
+import { paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
+import { isChainTxRef, isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 
 /** Bump whenever persisted settlement eligibility/identity rules change. */
-export const SETTLEMENT_PROJECTION_VERSION = 1;
+export const SETTLEMENT_PROJECTION_VERSION = 2;
 
 const CURRENT_OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate",
@@ -79,12 +80,27 @@ export function settlementTxId(ref: unknown): string | null {
 }
 
 /**
- * SB-1 identities claimed by a deal's success-outcome settlement evidence.
- * `projected` is false when any cited reference cannot be projected; such a
- * deal is not countable.
+ * Pinned registry identity to handler mapping.
  */
-export function settlementClaims(evidence: Array<Record<string, unknown>>, context: {
+// DACS-4 §9.4.2 at Standard d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20.
+// Unknown/custom registry entries need authenticated resolution before use.
+const PINNED_RAIL_HANDLERS: Readonly<Record<string, string>> = {
+  "demos-native:DEM": "pay-dem",
+  "evm-erc20:1:USDC": "pay-evm-erc20",
+  "evm-erc20:8453:USDC": "pay-evm-erc20",
+  "evm-erc20:42161:USDC": "pay-evm-erc20",
+  "evm-erc20:137:USDC": "pay-evm-erc20",
+  "solana-spl:mainnet:USDC": "pay-solana-spl",
+  "solana-spl:mainnet:USDT": "pay-solana-spl",
+  "x402:default": "pay-x402",
+};
+const JOB_ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
+
+/** Project only SDK-valid success evidence with a matching authenticated PC-2 tuple. */
+export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>; logicalAddress?: unknown }>, context: {
+  jobId: unknown;
   railId: string | null;
+  railRegistryVersion: unknown;
   phaseSummary: unknown;
   pipeline: unknown;
 }): {
@@ -92,35 +108,52 @@ export function settlementClaims(evidence: Array<Record<string, unknown>>, conte
   projected: boolean;
 } {
   let projected = true;
-  const settlementTxIds = evidence.filter((record) => record.outcome === "success").flatMap((record) => {
-    const refs = Array.isArray(record.paymentTxRefs) ? record.paymentTxRefs : [];
-    const observedAt = Number(record.observedAt);
-    const phaseIndex = Number(record.phaseIndex ?? 0);
+  const handler = context.railRegistryVersion === 1 && context.railId !== null &&
+    Object.hasOwn(PINNED_RAIL_HANDLERS, context.railId) ? PINNED_RAIL_HANDLERS[context.railId] : null;
+  const settlementTxIds = evidence.filter(({ raw }) => raw.outcome === "success").flatMap(({ raw: record, logicalAddress }) => {
+    // Delivery evidence cannot replace payment evidence in a settlement phase.
+    if (typeof record.phase === "string" && record.phase.startsWith("deliver-")) {
+      if (!isSettlementEvidence(record) || !Array.isArray(context.phaseSummary) ||
+          !context.phaseSummary.some((phase) => isRecord(phase) && isSafeUint(phase.index) &&
+            (phase.kind === "deliver" || phase.kind === record.phase) &&
+            Array.isArray(context.pipeline) && isRecord(context.pipeline[phase.index]) &&
+            context.pipeline[phase.index].kind === record.phase)) projected = false;
+      return [];
+    }
+    // The metadata-of-record belongs to the same native anchor whose signed
+    // bytes the evidence graph verified. A ref annotation cannot supply it.
+    const address = typeof logicalAddress === "string"
+      ? /^dacs4:payment:([^:]+):([^:]+):(0|[1-9][0-9]*)(:resolved)?$/.exec(logicalAddress) : null;
+    const phaseIndex = address ? Number(address[3]) : NaN;
     const phase = Array.isArray(context.phaseSummary) ? context.phaseSummary.find((entry) =>
       isRecord(entry) && entry.index === phaseIndex) : undefined;
     const pipelinePhase = Array.isArray(context.pipeline) ? context.pipeline[phaseIndex] : undefined;
-    // Delivery evidence carries no payment claims, but cannot stand in for
-    // payment evidence at a signed settlement phase.
-    if (typeof record.phase === "string" && record.phase.startsWith("deliver-")) {
-      if (!isSafeUint(record.phaseIndex) || !isRecord(phase) ||
-          (phase.kind !== "deliver" && phase.kind !== record.phase) ||
-          !isRecord(pipelinePhase) || pipelinePhase.kind !== record.phase ||
-          (record.paymentTxRefs !== undefined &&
-            (!Array.isArray(record.paymentTxRefs) || !record.paymentTxRefs.every(isChainTxRef)))) projected = false;
+    // ST-8 resolutions use HTLC/tank rails, outside this pinned projection.
+    let addressMatches = false;
+    if (address && isSafeUint(phaseIndex) && typeof record.jobId === "string" && JOB_ID.test(record.jobId) &&
+        record.jobId === context.jobId && address[1] === record.jobId && context.railId !== null) {
+      try {
+        addressMatches = logicalAddress === paymentEvidenceAddress(record.jobId, context.railId, phaseIndex, Boolean(address[4])) &&
+          !address[4];
+      } catch { /* A malformed tuple never supplies a claim. */ }
+    }
+    if (!isSettlementEvidence(record) || !addressMatches || !handler || record.phase !== handler ||
+        !isRecord(phase) || (phase.kind !== "settle" && phase.kind !== handler) || phase.outcome !== "ok" ||
+        !isRecord(pipelinePhase) || pipelinePhase.kind !== handler ||
+        !isRecord(pipelinePhase.parameters) || pipelinePhase.parameters.rail !== context.railId) {
+      projected = false;
       return [];
     }
-    if (refs.length === 0 || !isSafeUint(record.phaseIndex) || record.phase !== context.railId ||
-        !isRecord(phase) || (phase.kind !== "settle" && phase.kind !== context.railId) ||
-        !isRecord(pipelinePhase) || pipelinePhase.kind !== context.railId) projected = false;
+    const refs = record.paymentTxRefs as unknown[];
     return refs.flatMap((ref) => {
       const id = settlementTxId(ref);
       const kind = isRecord(ref) ? ref.kind : undefined;
-      const railMatches = context.railId === "pay-dem" ? kind === "demos" || kind === "settlement"
-        : context.railId === "pay-evm-erc20" ? kind === "evm-event"
-          : context.railId === "pay-solana-spl" ? kind === "solana-instruction"
-            : context.railId === "pay-x402" && kind === "x402-event";
+      const railMatches = handler === "pay-dem" ? kind === "demos"
+        : handler === "pay-evm-erc20" ? kind === "evm-event"
+          : handler === "pay-solana-spl" ? kind === "solana-instruction"
+            : handler === "pay-x402" && kind === "x402-event";
       if (id === null || !railMatches) projected = false;
-      return id === null ? [] : [{ id, observedAt, phaseIndex }];
+      return id === null ? [] : [{ id, observedAt: Number(record.observedAt), phaseIndex }];
     });
   });
   return { settlementTxIds, projected };
@@ -135,6 +168,20 @@ function settlementGroupKey(id: string): string {
   return id.trim().replace(/(?:0x)?([0-9a-f]{64})/gi, (_match, hash: string) => hash.toLowerCase());
 }
 
+const isAdmissibleDeal = (deal: DealRecord): boolean =>
+  deal.refsVerified && Boolean(deal.reputationEligible) && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? "");
+
+/** Build the complete catalog collision set once, before any seller/window scope. */
+export function settlementCollisions(presentedDeals: DealRecord[]): ReadonlySet<string> {
+  const claimants = new Map<string, Set<string>>();
+  for (const deal of presentedDeals.filter(isAdmissibleDeal)) for (const tx of deal.settlementTxIds ?? []) {
+    const key = settlementGroupKey(tx.id);
+    const claimant = JSON.stringify([deal.owners?.buyer, deal.owners?.seller, deal.jobId, tx.phaseIndex, deal.bundleContentHash]);
+    claimants.set(key, (claimants.get(key) ?? new Set()).add(claimant));
+  }
+  return new Set([...claimants].filter(([, records]) => records.size > 1).map(([key]) => key));
+}
+
 /**
  * The records DACS-5 may count over one window, shared by seller reputation and
  * listing hints so the two never disagree.
@@ -146,22 +193,16 @@ function settlementGroupKey(id: string): string {
  * authority, which this Directory does not verify, so no member counts. The
  * producer-set observedAt, arrival and jobId order never pick a winner.
  */
-export function countableDeals(deals: DealRecord[], windowStart: number, windowEnd: number): {
+export function countableDeals(
+  deals: DealRecord[], windowStart: number, windowEnd: number,
+  excludedSettlementIds: ReadonlySet<string> = settlementCollisions(deals),
+): {
   deals: DealRecord[];
   useAnchorTimestamps: boolean;
 } {
-  const eligible = deals.filter((deal) =>
-    deal.refsVerified && deal.reputationEligible &&
-    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
-  );
-  const claimants = new Map<string, Set<string>>();
-  for (const deal of eligible) for (const tx of deal.settlementTxIds ?? []) {
-    const key = settlementGroupKey(tx.id);
-    const claimant = JSON.stringify([deal.owners?.buyer, deal.jobId, tx.phaseIndex, deal.bundleContentHash]);
-    claimants.set(key, (claimants.get(key) ?? new Set()).add(claimant));
-  }
+  const eligible = deals.filter(isAdmissibleDeal);
   const unique = eligible.filter((deal) =>
-    !(deal.settlementTxIds ?? []).some((tx) => claimants.get(settlementGroupKey(tx.id))!.size > 1));
+    !(deal.settlementTxIds ?? []).some((tx) => excludedSettlementIds.has(settlementGroupKey(tx.id))));
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records

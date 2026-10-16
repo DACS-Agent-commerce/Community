@@ -1,4 +1,4 @@
-import { countableDeals, inCategory, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
+import { countableDeals, inCategory, settlementCollisions, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
 import { deriveSellerReputation } from "./reputation.js";
 import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
 
@@ -33,7 +33,7 @@ function withoutMetricKeys<T extends object>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !UNAVAILABLE_METRIC_KEY.test(key))) as T;
 }
 
-function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number): ReputationHint {
+function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number, excludedSettlementIds: ReadonlySet<string>): ReputationHint {
   // A missing or malformed cached hint must still have the count/window shape
   // the SDK catalog reader requires. The count is always recomputed from the
   // retained records with the indexer's SB-2 rule, so a hint cached before a
@@ -46,7 +46,7 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
     windowEnd: generatedAt,
     computedAt: generatedAt,
   };
-  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd).deals
+  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd, excludedSettlementIds).deals
     .filter((deal) => inCategory(deal, hint.categoryScope)).length;
   return {
     categoryScope: hint.categoryScope,
@@ -59,51 +59,58 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
   };
 }
 
-export function projectTestnetCatalog(catalog: Catalog): Catalog {
+export function rebuildCatalogObservations(catalog: Catalog): Catalog {
+  // Version gating precedes catalog-wide collision grouping. Keep all
+  // eligible claims here, including those outside a seller/category window.
+  const sellers = catalog.sellers.map((seller) => ({
+    ...seller,
+    deals: (seller.deals ?? []).map((deal) => ({
+      ...deal,
+      reputationEligible: deal.settlementProjectionVersion === SETTLEMENT_PROJECTION_VERSION &&
+        Boolean(deal.reputationEligible),
+    })),
+  }));
+  const excludedSettlementIds = settlementCollisions(sellers.flatMap((seller) => seller.deals));
   return {
     ...catalog,
-    sellers: catalog.sellers.map((storedSeller) => {
-      // Old summaries cannot distinguish no settlement from an unprojected
-      // object TxRef. Keep their evidence visible, but withhold contributions
-      // until a successful reindex supplies the current projection version.
-      const seller = {
-        ...storedSeller,
-        deals: (storedSeller.deals ?? []).map((deal) => ({
-          ...deal,
-          reputationEligible: deal.settlementProjectionVersion === SETTLEMENT_PROJECTION_VERSION &&
-            Boolean(deal.reputationEligible),
-        })),
-      };
+    sellers: sellers.map((seller, index) => {
       const windowStart = isSafeUint(seller.reputation?.windowStart) ? seller.reputation.windowStart : 0;
       const windowEnd = isSafeUint(seller.reputation?.windowEnd) && seller.reputation.windowEnd >= windowStart
         ? seller.reputation.windowEnd : Math.max(windowStart, catalog.generatedAt);
-      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd);
+      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd, excludedSettlementIds);
       return {
-        ...withoutMetricKeys(seller),
-        ...(seller.deals ? {
-          deals: seller.deals.map((deal) => ({
-            ...withoutMetricKeys(deal),
-            ...(deal.ratings ? {
-              ratings: deal.ratings.map((rating) => ({
-                rater: rating.rater,
-                target: rating.target,
-                targetRole: rating.targetRole,
-                ratedAt: rating.ratedAt,
-                contentHash: rating.contentHash,
-                value: null,
-                metricsUnavailableReason: COMPLETION_VERIFICATION_UNAVAILABLE,
-              })),
-            } : {}),
-          })),
-        } : {}),
+        ...catalog.sellers[index],
         reputation,
-        ...(seller.listings ? {
-          listings: seller.listings.map((listing) => ({
-            ...withoutMetricKeys(listing),
-            reputationHint: listingObservationHint(seller, listing, catalog.generatedAt),
-          })),
-        } : {}),
+        listings: (seller.listings ?? []).map((listing) => ({
+          ...listing,
+          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt, excludedSettlementIds),
+        })),
       };
     }),
+  };
+}
+
+/** Public projection never changes the evidence retained by catalog writers. */
+export function projectTestnetCatalog(catalog: Catalog): Catalog {
+  const observed = rebuildCatalogObservations(catalog);
+  return {
+    ...observed,
+    sellers: observed.sellers.map((seller) => ({
+      ...withoutMetricKeys(seller),
+      deals: (seller.deals ?? []).map((deal) => ({
+        ...withoutMetricKeys(deal),
+        reputationEligible: deal.settlementProjectionVersion === SETTLEMENT_PROJECTION_VERSION &&
+          Boolean(deal.reputationEligible),
+        ...(deal.ratings ? {
+          ratings: deal.ratings.map((rating) => ({
+            rater: rating.rater, target: rating.target, targetRole: rating.targetRole,
+            ratedAt: rating.ratedAt, contentHash: rating.contentHash,
+            value: null,
+            metricsUnavailableReason: COMPLETION_VERIFICATION_UNAVAILABLE,
+          })),
+        } : {}),
+      })),
+      listings: (seller.listings ?? []).map(withoutMetricKeys),
+    })),
   };
 }

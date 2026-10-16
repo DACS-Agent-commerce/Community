@@ -59,20 +59,20 @@ the affected capability; this Directory makes none for these capabilities.
     "description": "minCompletionRate and minRating return 400 instead of filtering. completionRate and averageSellerRating are null even when bundleCount is positive, and published reputation carries no re-derivable metrics."
   },
   {
-    "id": "sb1-phase-index-from-signed-record",
+    "id": "sb3-session-binding-unverified",
     "capabilityRefs": ["directory-reputation-hints"],
-    "ruleRefs": ["SB-1"],
+    "ruleRefs": ["SB-3"],
     "status": "open",
     "effect": "nonconforming",
-    "description": "Settlement grouping takes phaseIndex from the evidence record instead of recovering it from the payment-evidence anchor address. Collisions across jobs are voided regardless of phaseIndex; only repeats within one job depend on it."
+    "description": "The Directory does not independently authenticate the rail profile's mandatory settlement-side session binding. Counts, references and currency totals are observations only; they cannot establish settlement, transaction readiness, a final verification decision, or a DACS-5 replayable derivation."
   },
   {
     "id": "sb1-settlement-id-without-ledger-check",
     "capabilityRefs": ["directory-reputation-hints"],
-    "ruleRefs": ["SB-1"],
+    "ruleRefs": ["SB-1", "SB-2"],
     "status": "open",
     "effect": "nonconforming",
-    "description": "The settlement-tx-id is projected from the signed TxRef without resolving authenticated ledger data, so the transfer it names is not checked against the evidence and agreement. Arms whose identity needs that ledger data (legacy evm, solana and x402, legacy non-Demos rails, and all other arms) are not projected, and their records do not count."
+    "description": "The settlement-tx-id is projected from the signed TxRef without independently authenticated ledger data: asset, payer, agreed payee, amount, finality and x402 receipt-to-transaction/network binding are not established. No settlement-side collision winner is authenticated; all competing records are excluded across the complete presented catalog. Arms whose identity needs that ledger data (legacy evm, solana and x402, legacy non-Demos rails, and all other arms) are not projected, and their records do not count."
   }
 ]
 ```
@@ -81,18 +81,24 @@ Settlement uniqueness (SB-1, SB-2) applies to the records counted in seller
 reputation and in listing hints:
 
 - Success payment evidence requires a nonempty array of exact TxRef shapes.
-  Its phase must match the signed agreement rail and the signed listing
-  pipeline at the recorded phase index, with a matching bundle phase entry.
+  The phase index comes from the evidence anchor's metadata-of-record PC-2
+  logical address, read with the verified signed bytes. Its complete canonical
+  job/CF-4 rail/index tuple must match the signed job, agreement and bundle.
+  Registry rail IDs and phase handlers are distinct: the pinned Standard table
+  determines the handler, and the signed listing pipeline must bind that handler
+  and rail at the same index. Unknown registry entries/versions and unsupported
+  ST-8 resolved records are withheld until their authority can be resolved.
   Demos, EVM ERC-20, Solana SPL and x402 rails accept only their corresponding
   TxRef arms. A mismatch excludes the deal from every aggregate.
 - Each `paymentTxRefs` entry of success-outcome payment evidence is
-  projected to its SB-1 `settlement-tx-id`: `demos` and the legacy
-  `{ rail: "demos", txHash }` give `demos:{txHash}`; `evm-event` and
+  projected to its SB-1 `settlement-tx-id`: `demos` gives `demos:{txHash}`;
+  `evm-event` and
   `x402-event` give `evm:{chainId}:{txHash}:{logIndex}`; `solana-instruction`
   gives `solana:{cluster}:{signature}:{instructionIndex}`. A record citing a
   reference that cannot be projected this way does not count.
-- The complete set of otherwise countable records is grouped by that id before
-  the window is applied. One record repeating one `(jobId, phaseIndex)` claim
+- The complete catalog set of otherwise countable records, across all sellers,
+  is grouped by that id before seller, category or window projection. One record
+  repeating one `(jobId, phaseIndex)` claim
   counts once. A group claimed by more than one record or tuple follows SB-2
   rule (2): this Directory verifies no settlement-side binding authority, so
   the group is indeterminate and none of its records count, whatever their

@@ -45,8 +45,9 @@ export function deriveSellerReputation(
   deals: DealRecord[],
   windowStart = 0,
   windowEnd = Date.now(),
+  excludedSettlementIds?: ReadonlySet<string>,
 ): SellerRecord["reputation"] {
-  const { deals: scoped, useAnchorTimestamps } = countableDeals(deals, windowStart, windowEnd);
+  const { deals: scoped, useAnchorTimestamps } = countableDeals(deals, windowStart, windowEnd, excludedSettlementIds);
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,

@@ -1,3 +1,4 @@
+import { rebuildCatalogObservations } from "@/src/catalog/testnetMetrics";
 /**
  * POST /api/dacs/index-now { claim } — index one registration immediately
  * (fresh publishes shouldn't wait for the next timer pass). Full chain
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
     if (i >= 0) catalog.sellers[i] = record;
     else catalog.sellers.push(record);
     catalog.generatedAt = Date.now();
-    saveCatalog(catalog);
+    saveCatalog(rebuildCatalogObservations(catalog));
     return NextResponse.json({
       ok: true,
       listings: record.listings.length,

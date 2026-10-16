@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
+import { contentHash, paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
@@ -14,7 +15,8 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
-import { settlementTxId, SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
+import { settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
+import { projectTestnetCatalog, rebuildCatalogObservations } from "../src/catalog/testnetMetrics.js";
 import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
@@ -23,10 +25,11 @@ import { registrationMessage } from "../src/catalog/registrationSig.js";
 import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
-const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
+const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const maps = new Map<string, Obj>();
+const evidenceAddresses = new Map<string, string>();
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
@@ -35,9 +38,9 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
+  // Current Listings and evidence carry CORE §B.7 SIG-6 base64url.
   const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer])))
-    .toString(kind === "listing" ? "base64url" : "hex");
+    .toString(kind === "listing" || kind === "evidence" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
@@ -47,44 +50,47 @@ const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], ext
 /** A distinct, canonical Demos transaction hash per job. */
 const demosTxHash = (jobId: string) => createHash("sha256").update(jobId).digest("hex");
 
-async function vector(jobId = "job-1", offset = 0, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: demosTxHash(jobId) }], rail = "pay-dem", evidencePhase = rail, phaseIndex = 2) {
+async function vector(jobId = "0009NBCEE23QWAN075F29Q1AEV", offset = 0, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: demosTxHash(jobId) }], rail = "pay-dem", evidencePhase = rail, phaseIndex = 2, sellerIndex = 1) {
   maps.clear();
+  const railId = ({ "pay-dem": "demos-native:DEM", "pay-evm-erc20": "evm-erc20:8453:USDC",
+    "pay-solana-spl": "solana-spl:mainnet:USDC", "pay-x402": "x402:default" } as Record<string, string>)[rail] ?? rail;
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
-    seller: { identity: { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1, claims: [{ ref: dids[1] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
+    seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail, parameters: { rail } }, { kind: "deliver-attested-payload" }],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: rail }], terms: {}, validity: { notBefore: 1 },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail, parameters: { rail: railId } }, { kind: "deliver-attested-payload" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId }], terms: {}, validity: { notBefore: 1 },
   };
   // Listing verifier requires a presentation signature for the seller claim.
   const identity = (listingScope.seller as Obj).identity as Obj;
   const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
-  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
-  (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
-  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
+  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[sellerIndex]))).toString("hex");
+  (identity.presentation as Obj).signatures = [{ ref: dids[sellerIndex], signature: identitySig }];
+  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", sellerIndex) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: rail },
+      rail: { railId },
     } };
-  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: evidencePhase, phaseIndex, outcome: "success", paymentTxRefs, observedAt: 100 };
-  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
-  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110 };
+  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", sellerIndex, true)] }; maps.set(at(2), agreement);
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: evidencePhase, outcome: "success", paymentTxRefs, paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
+  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", sellerIndex) }; maps.set(at(3), evidence);
+  evidenceAddresses.set(at(3), paymentEvidenceAddress(jobId, railId, phaseIndex));
+  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[sellerIndex], targetRole: "seller", value: 5, ratedAt: 110 };
   const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
   const bundleScope: Obj = { bundleVersion: "1", jobId, outcome: "completed", listingRef,
     agreementRef: ref(at(2), agreement, "agreement"), parties: [
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
-      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[1] },
+      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
     ],
     phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
-  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", 1, true)];
+  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", sellerIndex, true)];
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
   return {
@@ -145,7 +151,7 @@ async function installAgreement(
   fixture.sellerBundle = await installBundle(fixture.sellerBundle, "seller");
 }
 
-async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
+async function payeeBoundVector(jobId = "005J5EPZZ9TY1GDBK93GTS6RAR", offset = 0) {
   const fixture = await vector(jobId, offset);
   const listingScope = signedScope(fixture.listing, "listing");
   listingScope.pipeline = (listingScope.pipeline as Obj[]).map((phase) =>
@@ -162,8 +168,8 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "pay-dem" },
-      payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
+      rail: { railId: "demos-native:DEM" },
+      payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] }],
     },
   };
 
@@ -267,7 +273,7 @@ const resignBundle = async (scope: Obj): Promise<Obj> => ({
 test("current evidence graph verifies full references and rejects cross-job ratings", async () => {
   const { listing, buyerBundle: bundle, agreement, evidence, rating, locators } = await vector();
   assert.ok(await verifyListing(listing), "listing fixture must verify");
-  assert.equal(agreementRail(agreement), "pay-dem");
+  assert.equal(agreementRail(agreement), "demos-native:DEM");
   assert.equal(agreementRail({
     terms: { rail: { railId: "ap2:stripe-paymentintents" } },
   }), "ap2:stripe-paymentintents");
@@ -424,7 +430,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
 
   const malformedCompositeScope: Obj = {
     recordVersion: "1",
-    jobId: "job-1",
+    jobId: "0009NBCEE23QWAN075F29Q1AEV",
     evaluatedParty: dids[1],
     overallDecision: "pass",
     freshness: "not-an-array",
@@ -442,7 +448,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badCompositeRefs.ok, false);
 
-  const crossJobAgreementScope = { ...signedScope(agreement, "agreement"), jobId: "another-job" };
+  const crossJobAgreementScope = { ...signedScope(agreement, "agreement"), jobId: "00QFFVZB9YW36SJGJCXXGY8QFW" };
   const crossJobAgreement = {
     ...crossJobAgreementScope,
     signatures: [
@@ -481,7 +487,7 @@ test("current evidence graph verifies payee-bound agreements under their distinc
 });
 
 test("current evidence graph verifies v0.3 FaultAttestationBundle attribution and domain", async () => {
-  const fixture = await vector("fault-bundle-job", 20);
+  const fixture = await vector("00ZQ4NGYV544V8AY5ZTKK9NWJ6", 20);
   const install = async (raw: Obj, role: "buyer" | "seller") => {
     const scope = signedScope(raw, "bundle");
     delete scope.bundleVersion;
@@ -536,13 +542,13 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
     {
       name: "wrong payout rail",
       mutate: (scope) => {
-        (scope.terms as Obj).payoutBindings = [{ railId: "pay-x402", phaseIndex: 2, payeeAddress: dids[1] }];
+        (scope.terms as Obj).payoutBindings = [{ railId: "x402:default", phaseIndex: 2, payeeAddress: dids[1] }];
       },
     },
     {
       name: "duplicate payout key",
       mutate: (scope) => {
-        const binding = { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] };
+        const binding = { railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] };
         (scope.terms as Obj).payoutBindings = [binding, { ...binding }];
       },
     },
@@ -560,7 +566,7 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
   const legacy = await vector("legacy-with-payout-binding", 300);
   const legacyScope = signedScope(legacy.agreement, "agreement");
   (legacyScope.terms as Obj).payoutBindings = [
-    { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] },
+    { railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] },
   ];
   await installAgreement(legacy, legacyScope);
   const legacyGraph = await graphAt(legacy.locators.buyer, legacy.listing, legacy.locators.listing);
@@ -584,7 +590,7 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   const { listing, buyerBundle: bundle } = await vector();
   const compositeScope: Obj = {
     recordVersion: "1",
-    jobId: "job-1",
+    jobId: "0009NBCEE23QWAN075F29Q1AEV",
     evaluatedParty: dids[1],
     freshness: [],
     supplementary: [],
@@ -635,7 +641,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   maps.set(locator(8), verifyResult);
   const compositeScope: Obj = {
     recordVersion: "1",
-    jobId: "job-1",
+    jobId: "0009NBCEE23QWAN075F29Q1AEV",
     evaluatedParty: dids[1],
     freshness: [ref(locator(8), verifyResult, "verify-result", { recipeVersion: 1 })],
     supplementary: [],
@@ -679,8 +685,8 @@ test("current evidence graph caps attacker-controlled transitive work", async ()
 });
 
 test("strict two-copy fixtures exclude #230 outcome and #224 phase-index divergence", async () => {
-  const cleanFixture = await vector("clean-job", 0);
-  const cleanDeal = registeredDeal("clean-job", cleanFixture.locators.buyer, cleanFixture.locators.seller);
+  const cleanFixture = await vector("00YGXGZFGRHE1C38YH38B44ZFX", 0);
+  const cleanDeal = registeredDeal("00YGXGZFGRHE1C38YH38B44ZFX", cleanFixture.locators.buyer, cleanFixture.locators.seller);
   const clean = reconcileCurrentCopies(
     cleanDeal,
     dids[1],
@@ -694,7 +700,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   assert.equal(clean.selectedLocator, cleanFixture.locators.seller, "seller's verified copy is authoritative for seller reputation");
   const cleanRecord = dealRecord(cleanDeal, clean);
 
-  const outcomeFixture = await vector("disputed-job", 10);
+  const outcomeFixture = await vector("00F4DME5WZNBKWZZ9S570ZF4BT", 10);
   const outcomeScope = signedScope(outcomeFixture.sellerBundle, "bundle");
   outcomeScope.outcome = "failed-counterparty";
   outcomeScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "counterparty" }];
@@ -703,7 +709,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     signatures: [await sign(outcomeScope, "bundle", 0, true), await sign(outcomeScope, "bundle", 1, true)],
     anchoredByRole: "seller",
   });
-  const outcomeDeal = registeredDeal("disputed-job", outcomeFixture.locators.buyer, outcomeFixture.locators.seller);
+  const outcomeDeal = registeredDeal("00F4DME5WZNBKWZZ9S570ZF4BT", outcomeFixture.locators.buyer, outcomeFixture.locators.seller);
   const outcomeDivergence = reconcileCurrentCopies(
     outcomeDeal,
     dids[1],
@@ -713,7 +719,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   assert.equal(outcomeDivergence.divergent, true);
   assert.equal(outcomeDivergence.refsVerified, false, "#230 disputed job must not reach reputation");
 
-  const indexFixture = await vector("index-set-job", 20);
+  const indexFixture = await vector("00KBZZ61NRC8Q22VFDWR5EAC4P", 20);
   const indexScope = signedScope(indexFixture.sellerBundle, "bundle");
   indexScope.phaseSummary = [{ index: 3, kind: "settle", outcome: "ok" }];
   maps.set(indexFixture.locators.seller, {
@@ -721,7 +727,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     signatures: [await sign(indexScope, "bundle", 0, true), await sign(indexScope, "bundle", 1, true)],
     anchoredByRole: "seller",
   });
-  const indexDeal = registeredDeal("index-set-job", indexFixture.locators.buyer, indexFixture.locators.seller);
+  const indexDeal = registeredDeal("00KBZZ61NRC8Q22VFDWR5EAC4P", indexFixture.locators.buyer, indexFixture.locators.seller);
   const indexDivergence = reconcileCurrentCopies(
     indexDeal,
     dids[1],
@@ -731,7 +737,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   assert.equal(indexDivergence.divergent, true);
   assert.equal(indexDivergence.refsVerified, false, "#224 equal-length index-set mismatch must be excluded");
 
-  const kindFixture = await vector("kind-substitution-job", 30);
+  const kindFixture = await vector("00V0942PNM8XGE67DHF1B47XN6", 30);
   const kindScope = signedScope(kindFixture.sellerBundle, "bundle");
   kindScope.phaseSummary = [{ index: 2, kind: "commit-agreement", outcome: "ok" }];
   maps.set(kindFixture.locators.seller, {
@@ -739,7 +745,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     signatures: [await sign(kindScope, "bundle", 0, true), await sign(kindScope, "bundle", 1, true)],
     anchoredByRole: "seller",
   });
-  const kindDeal = registeredDeal("kind-substitution-job", kindFixture.locators.buyer, kindFixture.locators.seller);
+  const kindDeal = registeredDeal("00V0942PNM8XGE67DHF1B47XN6", kindFixture.locators.buyer, kindFixture.locators.seller);
   const kindDivergence = reconcileCurrentCopies(
     kindDeal,
     dids[1],
@@ -757,11 +763,11 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
   ], 0, 200);
   assert.equal(reputation.bundleCount, 1);
   assert.equal(reputation.completionRate, null);
-  assert.deepEqual(reputation.bundleRefs?.map((item) => item.id), ["clean-job"]);
+  assert.deepEqual(reputation.bundleRefs?.map((item) => item.id), ["00YGXGZFGRHE1C38YH38B44ZFX"]);
 });
 
 test("advisory skew stays unified and an invalid seller copy receipts the verified buyer locator", async () => {
-  const advisoryFixture = await vector("advisory-job", 40);
+  const advisoryFixture = await vector("00ZGAE9GMXAW4F3G27E0A3V1GG", 40);
   const advisoryScope = signedScope(advisoryFixture.sellerBundle, "bundle");
   advisoryScope.finalisedAt = 121;
   maps.set(advisoryFixture.locators.seller, {
@@ -769,7 +775,7 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
     signatures: [await sign(advisoryScope, "bundle", 0, true), await sign(advisoryScope, "bundle", 1, true)],
     anchoredByRole: "seller",
   });
-  const advisoryDeal = registeredDeal("advisory-job", advisoryFixture.locators.buyer, advisoryFixture.locators.seller);
+  const advisoryDeal = registeredDeal("00ZGAE9GMXAW4F3G27E0A3V1GG", advisoryFixture.locators.buyer, advisoryFixture.locators.seller);
   const advisory = reconcileCurrentCopies(
     advisoryDeal,
     dids[1],
@@ -779,9 +785,9 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
   assert.equal(advisory.divergent, false);
   assert.equal(advisory.refsVerified, true);
 
-  const fallbackFixture = await vector("fallback-job", 50);
+  const fallbackFixture = await vector("00QQF4C8AFB58YC9EWEGMQVSTV", 50);
   maps.set(fallbackFixture.locators.seller, { ...fallbackFixture.sellerBundle, signatures: [] });
-  const fallbackDeal = registeredDeal("fallback-job", fallbackFixture.locators.buyer, fallbackFixture.locators.seller);
+  const fallbackDeal = registeredDeal("00QQF4C8AFB58YC9EWEGMQVSTV", fallbackFixture.locators.buyer, fallbackFixture.locators.seller);
   const fallback = reconcileCurrentCopies(
     fallbackDeal,
     dids[1],
@@ -798,10 +804,10 @@ test("advisory skew stays unified and an invalid seller copy receipts the verifi
 });
 
 test("indexer resolves current copies through BundleBindings rather than submitted native pointers", async () => {
-  const fixture = await vector("binding-resolved-job", 70);
+  const fixture = await vector("00JSH15PNV9SR0N4KGHQZHTT70", 70);
   const submittedBuyerPointer = locator(998);
   const submittedSellerPointer = locator(999);
-  const deal = registeredDeal("binding-resolved-job", submittedBuyerPointer, submittedSellerPointer);
+  const deal = registeredDeal("00JSH15PNV9SR0N4KGHQZHTT70", submittedBuyerPointer, submittedSellerPointer);
   const bundleBindings = [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
@@ -811,7 +817,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", metadata: { logicalAddress: evidenceAddresses.get(String(input).split("/").pop() ?? "") }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -830,7 +836,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
     assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
-    assert.equal(record.deals[0].rail, "pay-dem");
+    assert.equal(record.deals[0].rail, "demos-native:DEM");
     assert.equal(record.reputation.bundleCount, 1);
   } finally {
     globalThis.fetch = originalFetch;
@@ -838,8 +844,8 @@ test("indexer resolves current copies through BundleBindings rather than submitt
 });
 
 test("bindings signed by other parties leave a deal's binding resolution intact", async () => {
-  const fixture = await vector("crowded-binding-job", 90);
-  const deal = registeredDeal("crowded-binding-job", locator(996), locator(997));
+  const fixture = await vector("00BKMT9R04TRF54JT8M4CZ48V7", 90);
+  const deal = registeredDeal("00BKMT9R04TRF54JT8M4CZ48V7", locator(996), locator(997));
   const holders = [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
@@ -862,7 +868,7 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", metadata: { logicalAddress: evidenceAddresses.get(String(input).split("/").pop() ?? "") }, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   let omitted = 0;
@@ -884,14 +890,14 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
 });
 
 test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
-  const fixture = await vector("seller-fallback-job", 80);
+  const fixture = await vector("00BN4YX701SACZCD8S19S07NAJ", 80);
   maps.delete(fixture.locators.buyer);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", metadata: { logicalAddress: evidenceAddresses.get(String(input).split("/").pop() ?? "") }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -899,7 +905,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
   };
   try {
     const deal = {
-      ...registeredDeal("seller-fallback-job", fixture.locators.buyer, fixture.locators.seller),
+      ...registeredDeal("00BN4YX701SACZCD8S19S07NAJ", fixture.locators.buyer, fixture.locators.seller),
       rail: "unknown",
     };
     const bundleBindings = [
@@ -925,7 +931,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
 });
 
 test("indexer never retries a malformed current seller copy as legacy", async () => {
-  const fixture = await vector("malformed-current-job", 120);
+  const fixture = await vector("000QER4J53BASDB033QD6S39BK", 120);
   maps.delete(fixture.locators.buyer);
   const sellerScope = signedScope(fixture.sellerBundle, "bundle");
   sellerScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
@@ -941,14 +947,14 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
     reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", metadata: { logicalAddress: evidenceAddresses.get(String(input).split("/").pop() ?? "") }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
     });
   };
   try {
-    const deal = registeredDeal("malformed-current-job", fixture.locators.buyer, fixture.locators.seller);
+    const deal = registeredDeal("000QER4J53BASDB033QD6S39BK", fixture.locators.buyer, fixture.locators.seller);
     const bundleBindings = [
       await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
       await bindingFor(deal.jobId, "seller", fixture.locators.seller, maps.get(fixture.locators.seller)!, 1),
@@ -1074,17 +1080,17 @@ test("SB-1 projects each signed TxRef arm to the pinned settlement-tx-id and ref
 
 /** Index one seller's two verified jobs whose settlement evidence cites the given refs. */
 async function indexTwoJobs(refsA: unknown[], refsB: unknown[], rail = "pay-dem", evidencePhase = rail, phaseIndex = 2) {
-  const a = await vector("sb2-job-a", 1000, refsA, rail, evidencePhase, phaseIndex);
+  const a = await vector("00XF8J44TWQZHSE3REYKBEKRA9", 1000, refsA, rail, evidencePhase, phaseIndex);
   const first = new Map(maps);
-  const b = await vector("sb2-job-b", 2000, refsB, rail);
+  const b = await vector("00RMM3D7M9Q2VC68EPBNNKEX3X", 2000, refsB, rail);
   for (const [at, raw] of first) maps.set(at, raw);
   return indexFixture(b, {
-    deals: [registeredDeal("sb2-job-a", a.locators.buyer, a.locators.seller), registeredDeal("sb2-job-b", b.locators.buyer, b.locators.seller)],
+    deals: [registeredDeal("00XF8J44TWQZHSE3REYKBEKRA9", a.locators.buyer, a.locators.seller), registeredDeal("00RMM3D7M9Q2VC68EPBNNKEX3X", b.locators.buyer, b.locators.seller)],
     bundleBindings: [
-      await bindingFor("sb2-job-a", "buyer", a.locators.buyer, a.buyerBundle, 0),
-      await bindingFor("sb2-job-a", "seller", a.locators.seller, a.sellerBundle, 1),
-      await bindingFor("sb2-job-b", "buyer", b.locators.buyer, b.buyerBundle, 0),
-      await bindingFor("sb2-job-b", "seller", b.locators.seller, b.sellerBundle, 1),
+      await bindingFor("00XF8J44TWQZHSE3REYKBEKRA9", "buyer", a.locators.buyer, a.buyerBundle, 0),
+      await bindingFor("00XF8J44TWQZHSE3REYKBEKRA9", "seller", a.locators.seller, a.sellerBundle, 1),
+      await bindingFor("00RMM3D7M9Q2VC68EPBNNKEX3X", "buyer", b.locators.buyer, b.buyerBundle, 0),
+      await bindingFor("00RMM3D7M9Q2VC68EPBNNKEX3X", "seller", b.locators.seller, b.sellerBundle, 1),
     ],
   });
 }
@@ -1093,8 +1099,6 @@ test("SB-2 voids one settlement cited by two verified jobs in every TxRef shape,
   const hash = "ab".repeat(32);
   const cases: Array<[string, unknown, unknown, string]> = [
     ["DACS-4 demos arm", { kind: "demos", txHash: hash, blockNumber: 7 }, { kind: "demos", txHash: hash, blockNumber: 8 }, `demos:${hash}`],
-    ["legacy flat Demos ref", { kind: "settlement", rail: "demos", txHash: hash }, { kind: "settlement", rail: "demos", txHash: hash }, `demos:${hash}`],
-    ["legacy and current spellings", { kind: "settlement", rail: "demos", txHash: `0x${hash.toUpperCase()}` }, { kind: "demos", txHash: hash }, `demos:${hash}`],
     ["evm-event", { kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }, { kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }, `evm:8453:${hash}:4`],
   ];
   const x402 = { kind: "x402-event", chainId: 8453, settlementTxHash: hash, logIndex: 4,
@@ -1126,6 +1130,7 @@ test("a deal whose settlement evidence cites a TxRef SB-1 cannot project here is
   for (const [name, ref] of [
     ["bare string", "tx-unprojectable"],
     ["legacy evm arm needs ledger data", { kind: "evm", chainId: 1, txHash: hash }],
+    ["legacy flat Demos evidence is history only", { kind: "settlement", rail: "demos", txHash: hash }],
     ["legacy non-Demos rail", { kind: "settlement", rail: "evm", txHash: hash }],
     ["id field only", { id: `demos:${hash}` }],
   ] as const) {
@@ -1147,7 +1152,7 @@ test("success payment claims require nonempty exact TxRefs matching the signed a
     ["empty payment refs", [], "pay-dem", "pay-dem"],
     ["non-array payment refs", null as unknown as unknown[], "pay-dem", "pay-dem"],
     ["delivery evidence in payment phase", [], "pay-dem", "deliver-attested-payload"],
-    ["wrong signed phase index", [demos], "pay-dem", "pay-dem", 1],
+    ["wrong anchor phase index", [demos], "pay-dem", "pay-dem", 1],
     ["EVM ref under Demos agreement", [evm], "pay-dem", "pay-dem"],
     ["Demos ref under EVM agreement", [demos], "pay-evm-erc20", "pay-evm-erc20"],
     ["evidence phase differs from agreement", [evm], "pay-evm-erc20", "pay-dem"],
@@ -1166,19 +1171,20 @@ test("success payment claims require nonempty exact TxRefs matching the signed a
     assert.equal(record.deals[1].reputationEligible, true, name);
     assert.equal(record.reputation.bundleCount, 1, name);
     assert.equal(record.reputation.completed, 1, name);
-    assert.deepEqual(record.reputation.bundleRefs?.map((ref) => ref.id), ["sb2-job-b"], name);
+    assert.deepEqual(record.reputation.bundleRefs?.map((ref) => ref.id), ["00RMM3D7M9Q2VC68EPBNNKEX3X"], name);
     assert.deepEqual(record.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }], name);
     assert.deepEqual(record.reputation.transactionCountByCurrency, [{ currency: "DEM", count: 1 }], name);
     assert.equal(record.listings[0].reputationHint!.bundleCount, 1, name);
   });
 });
 
-test("DACS-4 SB-2 collision vectors: an earlier or tied producer timestamp never wins", () => {
+test("TP-1 local no-authority adaptation: an earlier or tied producer timestamp never wins", () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/sb2-collision-authority-v0.8.subset.json", import.meta.url), "utf8")) as {
     source: { commit: string; path: string };
     vectors: Array<{
-      name: string; settlementAuthorities: unknown[];
-      records: Array<{ contentHash: string; jobId: string; phaseIndex: number; settlementTxId: string; observedAt: number; sr2AnchorOrder: number }>;
+      name: string; trustedContext: { settlementAuthorities: unknown[] };
+      protocolInput: { records: Array<{ contentHash: string; jobId: string; phaseIndex: number; settlementTxId: string; observedAt: number; sr2AnchorOrder: number }> };
+      expected: string;
       want: { countedEvidenceHashes: string[]; rejectedEvidenceHashes: string[]; indeterminateEvidenceHashes: string[] };
     }>;
   };
@@ -1187,7 +1193,7 @@ test("DACS-4 SB-2 collision vectors: an earlier or tied producer timestamp never
     "no-binding-collision-voids-both", "backdated-attacker-does-not-win", "equal-producer-timestamps-do-not-tie-break",
   ]);
   for (const vector of fixture.vectors) {
-    const deals: DealRecord[] = vector.records.map((record, index) => ({
+    const deals: DealRecord[] = vector.protocolInput.records.map((record, index) => ({
       jobId: record.jobId, rail: "pay-x402", buyerBundleRef: locator(200 + index), sellerBundleRef: locator(210 + index),
       owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true, refsVerified: true, reputationEligible: true,
       sellerOutcome: "completed", finalisedAt: 100, anchorTimestamp: 100 + record.sr2AnchorOrder, verifiedAt: 1,
@@ -1201,7 +1207,7 @@ test("DACS-4 SB-2 collision vectors: an earlier or tied producer timestamp never
       }
       // The Directory verifies no settlement-side authority (SB-3), so every
       // group stays indeterminate here, including the authority vectors.
-      if (vector.settlementAuthorities.length === 0) assert.deepEqual(counted, vector.want.countedEvidenceHashes, vector.name);
+      if (vector.trustedContext.settlementAuthorities.length === 0) assert.deepEqual(counted, vector.want.countedEvidenceHashes, vector.name);
       assert.deepEqual(counted, [], vector.name);
     }
   }
@@ -1262,7 +1268,7 @@ async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${(extra.primaryClaim ?? dids[1]).slice(-64)}`, programName: "dacs:test", metadata: { logicalAddress: evidenceAddresses.get(String(input).split("/").pop() ?? "") }, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   try {
@@ -1274,12 +1280,13 @@ async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: 
 }
 
 test("a verified two-copy deal publishes exactly the evidence its authoritative copy signs", async () => {
-  const fixture = await vector("projection-job", 130);
-  const deal = registeredDeal("projection-job", fixture.locators.buyer, fixture.locators.seller);
+  const fixture = await vector("00GP9P2HFCC58HN6BJ12E331H9", 130);
+  const deal = registeredDeal("00GP9P2HFCC58HN6BJ12E331H9", fixture.locators.buyer, fixture.locators.seller);
   const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
   ] });
+  assert.ok(isSettlementEvidence(fixture.evidence));
   const [published] = record.deals;
   assert.deepEqual({
     signatureVerified: published.signatureVerified, refsVerified: published.refsVerified,
@@ -1289,11 +1296,11 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
     finalisedAt: published.finalisedAt, agreementPrice: published.agreementPrice, category: published.category,
     ratings: published.ratings, settlementTxIds: published.settlementTxIds,
   }, {
-    signatureVerified: true, refsVerified: true, reputationEligible: true, rail: "pay-dem", outcome: "completed",
+    signatureVerified: true, refsVerified: true, reputationEligible: true, rail: "demos-native:DEM", outcome: "completed",
     sellerOutcome: "completed", anchoredByRole: "seller", bundleContentHash: artifactHash(fixture.sellerBundle, "bundle"),
     cancellationNeutral: false, finalisedAt: 120, agreementPrice: { amount: "1.25", currency: "DEM" }, category: "services.test",
     ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110, contentHash: artifactHash(fixture.rating, "rating") }],
-    settlementTxIds: [{ id: `demos:${demosTxHash("projection-job")}`, observedAt: 100, phaseIndex: 2 }],
+    settlementTxIds: [{ id: `demos:${demosTxHash("00GP9P2HFCC58HN6BJ12E331H9")}`, observedAt: 100, phaseIndex: 2 }],
   });
   const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
   assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
@@ -1303,12 +1310,13 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
 
 test("a BundleBinding resolves only to the copy anchored by the role it names", async () => {
   // Both copies share one bundle hash; only the unhashed anchoredByRole tells them apart (BB-5).
-  const fixture = await vector("misrole-job", 150);
-  const deal = registeredDeal("misrole-job", fixture.locators.buyer, fixture.locators.seller);
+  const fixture = await vector("00KZWZMSMTGEPXVTGBK05E648P", 150);
+  const deal = registeredDeal("00KZWZMSMTGEPXVTGBK05E648P", fixture.locators.buyer, fixture.locators.seller);
   const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.buyer, fixture.buyerBundle, 1),
   ] });
+  assert.ok(isSettlementEvidence(fixture.evidence));
   const [published] = record.deals;
   assert.equal(published.signatureVerified, false, "the seller side is indeterminate, so nothing is published as verified");
   assert.equal(published.refsVerified, false);
@@ -1318,7 +1326,7 @@ test("a BundleBinding resolves only to the copy anchored by the role it names", 
 });
 
 test("seller labels come only from a verifiable owner signature and verified identity claims", async () => {
-  const fixture = await vector("labels-job", 170);
+  const fixture = await vector("00FYGZPCJ0W949JJJ63Q1SCFAB", 170);
   const base = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing] };
   const signed = async (signedAt: number, extra: Partial<Registration> = {}) => {
     const message = registrationMessage({ ...base, ...extra }, signedAt);
@@ -1339,4 +1347,130 @@ test("seller labels come only from a verifiable owner signature and verified ide
   const malformed = await signed(Date.now());
   (malformed.ownerSignature as { signature: unknown }).signature = 42;
   assert.equal((await indexFixture(fixture, malformed)).ownerRegistered, false);
+});
+
+test("SB-1 recovers the authenticated PC-2 tuple from SDK-valid evidence anchors", async () => {
+  const fixture = await vector("01KTY8ZJ00CW7KSECW3FS6PQPK", 3000);
+  const jobId = String(fixture.evidence.jobId);
+  assert.ok(isSettlementEvidence(fixture.evidence), "positive evidence passes the pinned SDK validator");
+  assert.equal(Object.hasOwn(fixture.evidence, "phaseIndex"), false);
+  const extra = { deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)], bundleBindings: [
+    await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] };
+  const canonical = paymentEvidenceAddress(jobId, "demos-native:DEM", 2);
+  const accepted = await indexFixture(fixture, extra);
+  assert.equal(accepted.reputation.bundleCount, 1);
+  assert.equal(accepted.deals[0].settlementTxIds?.[0].phaseIndex, 2);
+  for (const address of [
+    undefined, canonical.replace(jobId, "01KTY8ZJ01CW7KSECW3FS6PQPK"),
+    canonical.replace(jobId, jobId.toLowerCase()), canonical.replace(jobId, "job-1"),
+    canonical.replace("demos-native%3ADEM", "x402%3Adefault"),
+    canonical.replace("%3A", "%3a"), canonical.replace("%3A", ":"),
+    canonical.replace("%3A", "%253A"), canonical.replace(":2", ":1"),
+    canonical.replace(":2", ":02"), canonical.replace(":2", ":9007199254740992"),
+    canonical + ":resolved", canonical + ":extra",
+  ]) {
+    if (address === undefined) evidenceAddresses.delete(fixture.locators.evidence);
+    else evidenceAddresses.set(fixture.locators.evidence, address);
+    const result = await indexFixture(fixture, extra);
+    assert.equal(result.deals[0].refsVerified, true, String(address));
+    assert.equal(result.deals[0].reputationEligible, false, String(address));
+    assert.deepEqual(result.deals[0].settlementTxIds, [], String(address));
+    assert.equal(result.reputation.bundleCount, 0, String(address));
+    assert.deepEqual(result.reputation.bundleRefs, [], String(address));
+    assert.deepEqual(result.reputation.observedTransactionalVolume, [], String(address));
+    assert.equal(result.listings[0].reputationHint!.bundleCount, 0, String(address));
+  }
+});
+
+test("SB-2 excludes a shared settlement across two independently signed sellers before window and category projection", async () => {
+  const shared = { kind: "demos", txHash: "ab".repeat(32) };
+  const sellers = [];
+  for (const [index, jobId] of ["01KTY8ZJ00CW7KSECW3FS6PQPK", "01KTY8ZJ01CW7KSECW3FS6PQPK"].entries()) {
+    const signer = index + 1;
+    const fixture = await vector(jobId, 4000 + index * 100, [shared], "pay-dem", "pay-dem", 2, signer);
+    assert.ok(isSettlementEvidence(fixture.evidence));
+    const seller = await indexFixture(fixture, {
+      primaryClaim: dids[signer],
+      deals: [{ ...registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller), owners: { buyer: dids[0], seller: dids[signer] } }],
+      bundleBindings: [
+        await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+        await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, signer),
+      ],
+    });
+    assert.equal(seller.reputation.bundleCount, 1, "each signed job is eligible before the competing claim arrives");
+    sellers.push(seller);
+  }
+  const catalog = { catalogVersion: "1" as const, generatedAt: 200, sellers };
+  for (const order of [sellers, [...sellers].reverse()]) {
+    for (const result of [rebuildCatalogObservations({ ...catalog, sellers: order }), projectTestnetCatalog({ ...catalog, sellers: order })]) {
+      for (const seller of result.sellers) {
+        assert.equal(seller.reputation.bundleCount, 0);
+        assert.equal(seller.reputation.completed, 0);
+        assert.equal(seller.reputation.totalAgreements, 0);
+        assert.deepEqual(seller.reputation.bundleRefs, []);
+        assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+        assert.deepEqual(seller.reputation.transactionCountByCurrency, []);
+        assert.equal(seller.listings[0].reputationHint!.bundleCount, 0);
+        assert.equal(seller.reputation.counterpartyFaultRate, null);
+      }
+    }
+  }
+  sellers[1].deals[0].finalisedAt = 300;
+  sellers[1].deals[0].category = "another.category";
+  sellers[0].reputation.windowEnd = 200;
+  assert.equal(projectTestnetCatalog(catalog).sellers[0].reputation.bundleCount, 0, "a later/out-of-category competitor still excludes the earlier claim");
+  const rebuilt = rebuildCatalogObservations(catalog);
+  assert.equal(rebuilt.sellers[0].deals[0].ratings![0].value, 5, "writer rebuilding retains source evidence");
+  assert.ok(rebuilt.sellers.every((seller) => seller.deals[0].reputationEligible), "collision exclusion does not destroy source eligibility");
+});
+
+test("SB-1 rejects valid Base58 outside 64 decoded bytes", async () => {
+  for (const size of [63, 64, 65, 89]) {
+    const signature = "1".repeat(size);
+    const ref = { kind: "solana-instruction", cluster: "mainnet", signature, instructionIndex: 0 };
+    assert.equal(settlementTxId(ref), size === 64 ? `solana:mainnet:${signature}:0` : null, String(size));
+    const record = await indexTwoJobs([ref], [{ ...ref, signature: "2" + "1".repeat(86), instructionIndex: 1 }], "pay-solana-spl");
+    assert.equal(record.deals[0].reputationEligible, size === 64, String(size));
+  }
+});
+
+test("SB-2 subset preserves the pinned upstream inputs and positive authority expectations", () => {
+  const bytes = readFileSync(new URL("./fixtures/sb2-collision-authority-v0.8.json", import.meta.url));
+  const upstream = JSON.parse(bytes.toString());
+  const subset = JSON.parse(readFileSync(new URL("./fixtures/sb2-collision-authority-v0.8.subset.json", import.meta.url), "utf8"));
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), "2f01d94de434195d032fa1336702a8e45da21c0120879412624d4c9ac429a3ad");
+  assert.equal(subset.source.sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(upstream.count, 32);
+  for (const vector of subset.vectors) {
+    assert.deepEqual(vector, upstream.vectors.find((entry: { name: string }) => entry.name === vector.name));
+    if (vector.trustedContext.settlementAuthorities.length > 0) {
+      assert.equal(vector.expected, "pass");
+      assert.deepEqual(vector.want.countedEvidenceHashes, ["1".repeat(64)]);
+    }
+  }
+});
+
+test("SB-1 keeps registry identity, pinned handler and signed pipeline context distinct", async () => {
+  const fixture = await vector("01KTY8ZJ00CW7KSECW3FS6PQPK", 5000);
+  const evidence = [{ raw: fixture.evidence, logicalAddress: evidenceAddresses.get(fixture.locators.evidence) }];
+  const context = {
+    jobId: fixture.evidence.jobId, railId: "demos-native:DEM", railRegistryVersion: 1,
+    phaseSummary: fixture.buyerBundle.phaseSummary, pipeline: fixture.listing.pipeline,
+  };
+  assert.equal(settlementClaims(evidence, context).projected, true);
+  for (const altered of [
+    { ...context, railId: "pay-dem" }, { ...context, railId: "custom-demos" },
+    { ...context, railId: "__proto__" }, { ...context, railRegistryVersion: 2 },
+    { ...context, railRegistryVersion: undefined },
+    { ...context, jobId: "01KTY8ZJ01CW7KSECW3FS6PQPK" },
+    { ...context, pipeline: [{}, {}, { kind: "pay-x402", parameters: { rail: "demos-native:DEM" } }] },
+    { ...context, pipeline: [{}, {}, { kind: "pay-dem", parameters: { rail: "x402:default" } }] },
+    { ...context, phaseSummary: [{ index: 2, kind: "settle", outcome: "fail" }] },
+  ]) assert.equal(settlementClaims(evidence, altered).projected, false);
+  assert.equal(settlementClaims([{ raw: { ...fixture.evidence, logicalAddress: evidence[0].logicalAddress } }], context).projected, false,
+    "an artifact annotation cannot replace the anchor metadata-of-record");
+  assert.equal(settlementClaims([{ ...evidence[0], raw: { ...fixture.evidence, phaseIndex: 2 } }], context).projected, false,
+    "the SDK-refused phaseIndex field cannot repair or replace address binding");
 });

@@ -10,7 +10,7 @@ import {
 
 export type ArtifactKind = "agreement" | "evidence" | "verify-result" | "composite" | "rating" | "listing" | "bundle" | "attestation";
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
-export interface ResolvedEvidence { kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string }
+export interface ResolvedEvidence { kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string; logicalAddress?: unknown }
 export interface EvidenceGraph {
   profile: "dacs-v0.1";
   ok: boolean;
@@ -26,6 +26,8 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
+  /** Metadata-of-record and bytes from the same native evidence anchor read. */
+  readEvidenceAnchor?: (locator: string) => Promise<{ data: Record<string, unknown>; logicalAddress?: unknown } | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
@@ -202,7 +204,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
         ? terms.payoutBindings === undefined
         : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
   }
-  if (kind === "evidence") return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
+  if (kind === "evidence") return !Object.hasOwn(raw, "phaseIndex") && raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" && (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef));
   if (kind === "verify-result") return raw.resultVersion === "1" && typeof raw.scheme === "string" && typeof raw.identifier === "string" && typeof raw.verifiedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.decision)) && isCurrentRef(raw.attestation);
   if (kind === "composite") {
     const supplementary = arr(raw.supplementary);
@@ -257,10 +259,12 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   }
   if (!isCurrentRef(ref)) return null;
   const hash = normalizedHash(ref.contentHash);
-  const raw = await deps.read(ref.anchor.locator);
+  const anchored = kind === "evidence" && deps.readEvidenceAnchor
+    ? await deps.readEvidenceAnchor(ref.anchor.locator) : undefined;
+  const raw = anchored === undefined ? await deps.read(ref.anchor.locator) : anchored?.data;
   if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash ||
       !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return null;
-  return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
+  return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash, logicalAddress: anchored?.logicalAddress };
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
