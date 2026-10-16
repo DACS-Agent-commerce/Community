@@ -91,7 +91,7 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
     assert.equal(deviation.status, "open");
     assert.equal(deviation.effect, "nonconforming");
   }
-  assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-1"]);
+  assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-1", "SB-1"]);
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
   assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
 });

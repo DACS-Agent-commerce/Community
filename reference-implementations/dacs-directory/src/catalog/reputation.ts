@@ -1,4 +1,5 @@
 import type { DealRecord, SellerRecord } from "./types.js";
+import { countableDeals } from "./settlementUniqueness.js";
 import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
@@ -7,11 +8,6 @@ import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_
 // bytes directly to implement the specified ordering.
 const byteOrder = (a: string, b: string): number =>
   Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-
-const CURRENT_OUTCOMES = new Set([
-  "completed", "failed-perm", "failed-counterparty", "failed-substrate",
-  "aborted-by-self", "aborted-by-other",
-]);
 
 export function flipOutcome(outcome: string | undefined): string | undefined {
   if (outcome === "aborted-by-self") return "aborted-by-other";
@@ -50,34 +46,7 @@ export function deriveSellerReputation(
   windowStart = 0,
   windowEnd = Date.now(),
 ): SellerRecord["reputation"] {
-  const eligible = deals.filter((deal) =>
-    deal.refsVerified && deal.reputationEligible &&
-    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
-  );
-  // A determinism receipt declares one timestamp basis for its entire input
-  // set. Use SR-2 anchor time only when it is available for every eligible
-  // record; otherwise fall back to finalisedAt uniformly and exclude records
-  // that cannot be evaluated on that honest basis.
-  const useAnchorTimestamps = eligible.length > 0 &&
-    eligible.every((deal) => typeof deal.anchorTimestamp === "number");
-  const timestampOf = (deal: DealRecord) => useAnchorTimestamps
-    ? deal.anchorTimestamp
-    : deal.finalisedAt;
-  let scoped = eligible.filter((deal) => {
-    const timestamp = timestampOf(deal);
-    return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
-  });
-  // DACS-4 SB-2: group the whole presented set by settlement id before counting.
-  // Repeating one (jobId, phaseIndex) claim is idempotent. A group claimed by
-  // two or more tuples is indeterminate without settlement-side binding
-  // authority, which this Directory does not verify, so no member counts. The
-  // producer-set observedAt, arrival and jobId order never pick a winner.
-  const claimants = new Map<string, Set<string>>();
-  for (const deal of scoped) for (const tx of deal.settlementTxIds ?? []) {
-    const key = settlementGroupKey(tx.id);
-    claimants.set(key, (claimants.get(key) ?? new Set()).add(JSON.stringify([deal.jobId, tx.phaseIndex])));
-  }
-  scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => claimants.get(settlementGroupKey(tx.id))!.size > 1));
+  const { deals: scoped, useAnchorTimestamps } = countableDeals(deals, windowStart, windowEnd);
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,
@@ -117,15 +86,6 @@ export function deriveSellerReputation(
     windowEnd,
     windowingBasis: useAnchorTimestamps ? "sr2-anchor-timestamp" : "finalisedAt",
   };
-}
-
-/**
- * Collision grouping key. SB-1 renders hashes as lower-case hex without `0x`,
- * so spelling variants of one hash group together; grouping more never lets a
- * collision go uncounted.
- */
-function settlementGroupKey(id: string): string {
-  return id.trim().replace(/(?:0x)?([0-9a-f]{64})/gi, (_match, hash: string) => hash.toLowerCase());
 }
 
 /** Exact non-negative decimal addition without binary floating-point drift. */

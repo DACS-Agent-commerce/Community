@@ -5,6 +5,7 @@ export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listin
 
 // Unix milliseconds and counts the pinned SDK catalog reader accepts.
 const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
+const CANONICAL_STRING_PATTERN = "^[^\\s\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^\\s\\u0000-\\u001f\\u007f])?$";
 
 /** The no-rate testnet restriction this Directory applies. See docs/TP-1.md. */
 export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
@@ -89,14 +90,20 @@ export const listingSummarySchema = {
     },
     reputationHint: {
       type: "object",
-      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. Missing or malformed cached hints use the existing category-scoped observation count from retained records. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
+      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. bundleCount is recomputed on read from the retained records the seller reputation counts, after the DACS-4 SB-2 settlement-collision exclusion; a missing or malformed cached hint uses the listing category and the catalog snapshot window. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
       additionalProperties: false,
       required: [
         "categoryScope", "completionRate", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
         "computedAt", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel",
       ],
       properties: {
-        categoryScope: { type: "string", minLength: 1 },
+        categoryScope: {
+          type: "string",
+          minLength: 1,
+          // No leading or trailing white space, C0 control or DEL; NFC cannot be expressed here.
+          pattern: CANONICAL_STRING_PATTERN,
+          description: "A canonical string: equal to its trim(), NFC-normalized, and free of C0 control characters and DEL.",
+        },
         completionRate: { type: "null" },
         counterpartyAdjustedCompletionRate: { type: "null" },
         counterpartyFaultRate: { type: "null" },

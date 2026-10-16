@@ -54,6 +54,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { countableDeals, inCategory, settlementClaims } from "./settlementUniqueness.js";
 import { observedOutcomesLabel, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
@@ -432,13 +433,8 @@ export async function indexRegistration(
         ratedAt: Number(rating.ratedAt),
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
-      const settlementTxIds = (authoritative?.artifacts ?? []).filter((artifact) => artifact.kind === "evidence")
-        .flatMap((artifact) => {
-          const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
-          const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
-          return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
-            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
-        });
+      const { settlementTxIds, projected } = settlementClaims((authoritative?.artifacts ?? [])
+        .filter((artifact) => artifact.kind === "evidence").map((artifact) => artifact.raw));
       const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
         .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
       const cancellationNeutral = isNeutralCancellation(
@@ -450,7 +446,7 @@ export async function indexRegistration(
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
-        reputationEligible: refsVerified,
+        reputationEligible: refsVerified && projected,
         cancellationNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
@@ -528,6 +524,8 @@ export async function indexRegistration(
     );
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
+    const { settlementTxIds, projected } = settlementClaims(authoritative.resolvedArtifacts
+      .filter((artifact) => artifact.kind === "dacs-4-evidence").map((artifact) => artifact.raw));
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -538,10 +536,11 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? "") && projected,
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
+      settlementTxIds,
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
@@ -559,16 +558,15 @@ export async function indexRegistration(
   const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
-  const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
-  const reputation = deriveSellerReputation(deals, 0, now);
   const windowStart = 0;
   const windowEnd = now;
+  const reputation = deriveSellerReputation(deals, windowStart, windowEnd);
+  // Listing hints count the same SB-2-filtered records as the seller reputation.
+  const counted = countableDeals(deals, windowStart, windowEnd).deals;
   const listingsWithHint = listings.map((l) => ({
     ...l,
     reputationHint: (() => {
-      const categoryDeals = counted.filter(
-        (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
-      );
+      const categoryDeals = counted.filter((d) => inCategory(d, l.offering.category));
       return {
         categoryScope: l.offering.category,
         ...UNAVAILABLE_TESTNET_METRICS,

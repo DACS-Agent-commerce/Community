@@ -340,7 +340,7 @@ test("current evidence graph fails closed on malformed bundles without hashing t
 });
 
 // Current-profile deal: listing, agreement, evidence and both bundle copies with BundleBindings.
-async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [`tx-${jobId}`]) {
+async function currentDeal(jobId: string, offset: number, phaseIndex: unknown = 2) {
   const at = (n: number) => locator(offset + n);
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
@@ -361,7 +361,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex, outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: contentHash({ jobId }) }], observedAt: 100 };
   const evidence = { ...evidenceScope, signature: await signArtifact(evidenceScope, "evidence", 1) };
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
@@ -387,8 +387,8 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
 }
 
 test("malformed bundles and a deal that cannot be summarized stay unverified while a later deal verifies", async () => {
-  // Signed evidence whose transaction id converts to no primitive: the graph verifies, the deal summary throws.
-  const poisoned = await currentDeal("job-poisoned", 100, [{ txId: { toString: 1 } }]);
+  // Signed evidence whose phaseIndex converts to no primitive: the graph verifies, the deal summary throws.
+  const poisoned = await currentDeal("job-poisoned", 100, { toString: 1 });
   const valid = await currentDeal("job-valid", 200);
   const legacyBundle = locator(61);
   const currentBundle = locator(62);

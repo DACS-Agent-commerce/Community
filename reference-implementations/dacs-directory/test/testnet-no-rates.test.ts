@@ -193,9 +193,35 @@ test("cached hints the SDK reader would reject fall back to the synthesized hint
   assert.deepEqual([hint.categoryScope, hint.bundleCount, hint.windowStart, hint.windowEnd, hint.computedAt], ["services", 6, 10, 200, 150]);
 });
 
+test("a cached scope that is a prefix but not a canonical string falls back to the listing category", async () => {
+  const fixture = noRateCatalog();
+  fixture.sellers[0].listings[0].offering.category = "services .test";
+  fixture.sellers[0].deals.forEach((deal) => { deal.category = "services .test"; });
+  fixture.sellers[0].listings[0].reputationHint!.categoryScope = "services ";
+  const { hint, sdkStatus } = await listingPageHint(fixture);
+  assert.equal(sdkStatus, "ok");
+  assert.deepEqual([hint.categoryScope, hint.bundleCount, hint.windowStart, hint.windowEnd], ["services .test", 6, 0, 200]);
+  const pattern = new RegExp(listingSummarySchema.properties.reputationHint.properties.categoryScope.pattern, "u");
+  for (const scope of ["services ", " services", "services\t.test", "a\u0007b", "a\u007fb", ""]) assert.doesNotMatch(scope, pattern, JSON.stringify(scope));
+  for (const scope of ["services .test", "services.test", "s"]) assert.match(scope, pattern, scope);
+});
+
+test("a served hint never counts SB-2 collision records its cached count still includes", async () => {
+  const fixture = noRateCatalog();
+  const shared = [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2 }];
+  fixture.sellers[0].deals[0].settlementTxIds = shared;
+  fixture.sellers[0].deals[1].settlementTxIds = shared;
+  assert.equal(fixture.sellers[0].listings[0].reputationHint!.bundleCount, 6, "cached before the collision was excluded");
+  const { hint, sdkStatus } = await listingPageHint(fixture);
+  assert.equal(sdkStatus, "ok");
+  assert.equal(deriveSellerReputation(fixture.sellers[0].deals, 0, 200).bundleCount, 4);
+  assert.equal(hint.bundleCount, 4);
+  assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 4, not verified");
+});
+
 test("the published hint schema matches emitted hints and requires every field the pinned SDK reader requires", async () => {
   const schema = listingSummarySchema.properties.reputationHint;
-  const properties = schema.properties as Record<string, { type?: string; const?: unknown; minimum?: number; maximum?: number; minLength?: number }>;
+  const properties = schema.properties as Record<string, { type?: string; const?: unknown; minimum?: number; maximum?: number; minLength?: number; pattern?: string }>;
   const { page, hint, sdkStatus } = await listingPageHint(noRateCatalog());
   assert.equal(sdkStatus, "ok");
   assert.deepEqual(Object.keys(hint).filter((key) => !(key in properties)), [], "additionalProperties: false");
@@ -204,7 +230,10 @@ test("the published hint schema matches emitted hints and requires every field t
     const value = hint[key];
     if ("const" in rule) assert.equal(value, rule.const, key);
     else if (rule.type === "null") assert.equal(value, null, key);
-    else if (rule.type === "string") assert.ok(typeof value === "string" && value.length >= (rule.minLength ?? 0), key);
+    else if (rule.type === "string") {
+      assert.ok(typeof value === "string" && value.length >= (rule.minLength ?? 0), key);
+      if (rule.pattern) assert.match(value, new RegExp(rule.pattern, "u"), key);
+    }
     else if (rule.type === "integer") {
       assert.ok(Number.isSafeInteger(value), key);
       assert.equal(rule.minimum, 0, key);

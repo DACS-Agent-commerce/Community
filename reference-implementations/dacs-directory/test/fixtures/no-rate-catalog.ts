@@ -20,6 +20,7 @@ export function noRateCatalog(): Catalog {
     sellerOutcome: outcome,
     finalisedAt: 100 + index,
     verifiedAt: 200,
+    category: "services.test",
     bundleContentHash: String(index + 1).repeat(64),
     ratings: [{
       rater: `did:demos:agent:${"b".repeat(64)}`, target: noRateClaim,

@@ -27,8 +27,10 @@ the revision the pinned SDK declares.
    totals and `bundleRefs` remain, labelled as observations that do not
    establish completion or settlement.
 5. A listing hint keeps the shape the pinned SDK catalog reader requires. A
-   missing or malformed cached hint is replaced by one computed from retained
-   eligible records in the listing's category, over the catalog snapshot window.
+   missing or malformed cached hint is replaced by one over the listing's
+   category and the catalog snapshot window. Its `bundleCount` is always
+   recomputed on read from the retained records the seller reputation counts
+   (the settlement rule below), within the hint's scope and window.
 
 ## Contract versions
 
@@ -60,10 +62,30 @@ the affected capability; this Directory makes none for these capabilities.
     "status": "open",
     "effect": "nonconforming",
     "description": "Settlement grouping takes phaseIndex from the evidence record instead of recovering it from the payment-evidence anchor address. Collisions across jobs are voided regardless of phaseIndex; only repeats within one job depend on it."
+  },
+  {
+    "id": "sb1-settlement-id-without-ledger-check",
+    "capabilityRefs": ["directory-reputation-hints"],
+    "ruleRefs": ["SB-1"],
+    "status": "open",
+    "effect": "nonconforming",
+    "description": "The settlement-tx-id is projected from the signed TxRef without resolving authenticated ledger data, so the transfer it names is not checked against the evidence and agreement. Arms whose identity needs that ledger data (legacy evm, solana and x402, legacy non-Demos rails, and all other arms) are not projected, and their records do not count."
   }
 ]
 ```
 
-SB-2 settlement collisions follow rule (2): this Directory verifies no
-settlement-side binding authority, so every collision group is indeterminate
-and none of its records count, whatever their `observedAt` or arrival order.
+Settlement uniqueness (SB-1, SB-2) applies to the records counted in seller
+reputation and in listing hints:
+
+- Each `paymentTxRefs` entry of success-outcome settlement evidence is
+  projected to its SB-1 `settlement-tx-id`: `demos` and the legacy
+  `{ rail: "demos", txHash }` give `demos:{txHash}`; `evm-event` and
+  `x402-event` give `evm:{chainId}:{txHash}:{logIndex}`; `solana-instruction`
+  gives `solana:{cluster}:{signature}:{instructionIndex}`. A record citing a
+  reference that cannot be projected this way does not count.
+- The complete set of otherwise countable records is grouped by that id before
+  the window is applied. One record repeating one `(jobId, phaseIndex)` claim
+  counts once. A group claimed by more than one record or tuple follows SB-2
+  rule (2): this Directory verifies no settlement-side binding authority, so
+  the group is indeterminate and none of its records count, whatever their
+  `observedAt` or arrival order.

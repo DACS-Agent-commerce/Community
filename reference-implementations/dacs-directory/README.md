@@ -390,9 +390,10 @@ and declares these as open `nonconforming` deviations in the Standard's
 `metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
 restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
 document `2.0.0`. A cached listing with no hint, or one the pinned SDK reader would
-reject, still has null metrics; its observed count is computed from retained eligible
-category records using the existing indexer rule, with the catalog snapshot window.
-The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
+reject, still has null metrics and uses the catalog snapshot window. Every served
+hint's observed count is recomputed from the retained category records the seller
+reputation counts, after the DACS-4 SB-2 settlement-collision exclusion that
+`docs/TP-1.md` describes. The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
 `completed` and `totalAgreements` for compatibility, with explicit observed-count
 labels. Currency totals count observed priced completed outcomes and do not
 establish completion or settlement.

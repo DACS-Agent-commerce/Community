@@ -1,3 +1,4 @@
+import { countableDeals, inCategory } from "./settlementUniqueness.js";
 import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
 
 export const COMPLETION_VERIFICATION_UNAVAILABLE = "Completion verification unavailable";
@@ -28,11 +29,16 @@ export const OBSERVED_REPUTATION_COUNTS = {
 const isSafeUint = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
+// The pinned SDK reader's canonical string: non-empty, trimmed, NFC, no C0 controls or DEL.
+const isCanonicalString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value === value.trim() &&
+  value === value.normalize("NFC") && !/[\u0000-\u001f\u007f]/.test(value);
+
 // The pinned SDK catalog reader marks a whole page malformed when one hint
 // fails its DACS-1 §6.3.6 shape check, so a cached hint is reused only when it
 // passes the same check (the rate fields are always replaced with null).
 function isServableCachedHint(hint: ReputationHint | undefined, category: string): hint is ReputationHint {
-  return Boolean(hint) && typeof hint!.categoryScope === "string" && hint!.categoryScope.length > 0 &&
+  return Boolean(hint) && isCanonicalString(hint!.categoryScope) &&
     (category === hint!.categoryScope || category.startsWith(`${hint!.categoryScope}.`)) &&
     isSafeUint(hint!.bundleCount) && isSafeUint(hint!.windowStart) && isSafeUint(hint!.windowEnd) &&
     hint!.windowStart <= hint!.windowEnd && isSafeUint(hint!.computedAt);
@@ -47,29 +53,28 @@ function withoutMetricKeys<T extends object>(record: T): T {
 }
 
 function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number): ReputationHint {
-  // Match the indexer's existing category-scoped observation count. A missing
-  // or malformed cached hint must still have the count/window shape the SDK
-  // catalog reader requires; no completion authority follows from these
-  // retained records.
+  // A missing or malformed cached hint must still have the count/window shape
+  // the SDK catalog reader requires. The count is always recomputed from the
+  // retained records with the indexer's SB-2 rule, so a hint cached before a
+  // collision was excluded cannot keep counting it; no completion authority
+  // follows from these records.
   const category = listing.offering?.category ?? "";
   const hint = isServableCachedHint(listing.reputationHint, category) ? listing.reputationHint : {
     categoryScope: category,
-    bundleCount: (seller.deals ?? []).filter((deal) =>
-      deal.refsVerified && deal.reputationEligible &&
-      (deal.category === category || deal.category?.startsWith(`${category}.`)),
-    ).length,
     windowStart: 0,
     windowEnd: generatedAt,
     computedAt: generatedAt,
   };
+  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd).deals
+    .filter((deal) => inCategory(deal, hint.categoryScope)).length;
   return {
     categoryScope: hint.categoryScope,
-    bundleCount: hint.bundleCount,
+    bundleCount,
     windowStart: hint.windowStart,
     windowEnd: hint.windowEnd,
     computedAt: hint.computedAt,
     ...UNAVAILABLE_TESTNET_METRICS,
-    observedOutcomesLabel: observedOutcomesLabel(hint.bundleCount),
+    observedOutcomesLabel: observedOutcomesLabel(bundleCount),
   };
 }
 

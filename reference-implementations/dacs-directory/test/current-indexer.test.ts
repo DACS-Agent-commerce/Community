@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -13,6 +14,8 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
+import { settlementTxId } from "../src/catalog/settlementUniqueness.js";
+import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { loadScanState, saveScanState } from "../src/catalog/store.js";
@@ -41,7 +44,10 @@ const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], ext
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-async function vector(jobId = "job-1", offset = 0) {
+/** A distinct, canonical Demos transaction hash per job. */
+const demosTxHash = (jobId: string) => createHash("sha256").update(jobId).digest("hex");
+
+async function vector(jobId = "job-1", offset = 0, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: demosTxHash(jobId) }]) {
   maps.clear();
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
@@ -66,7 +72,7 @@ async function vector(jobId = "job-1", offset = 0) {
       rail: { railId: "pay-dem" },
     } };
   const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [`tx-${jobId}`], observedAt: 100 };
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
   const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
   const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110 };
   const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
@@ -1022,6 +1028,100 @@ test("DACS-5 keeps exact volume and SR-2 window and voids SB-2 settlement collis
     { ...duplicate, settlementTxIds: [{ id: `demos:0x${hash.toUpperCase()}`, observedAt: 20, phaseIndex: 2 }] },
   ], 0, 200);
   assert.equal(spelled.bundleCount, 0);
+  // Two buyers' deals may share a jobId (dedupe keeps both); one settlement under both is a collision.
+  const otherBuyer = { ...base, buyerBundleRef: locator(7), owners: { ...base.owners, buyer: `did:demos:agent:${"e".repeat(64)}` }, bundleContentHash: "e".repeat(64) };
+  assert.equal(deriveSellerReputation([base, otherBuyer], 0, 200).bundleCount, 0);
+  // The complete presented set is grouped before the window: a partner outside it still voids the group.
+  const late = { ...duplicate, anchorTimestamp: 300 };
+  assert.equal(deriveSellerReputation([base, late], 0, 200).bundleCount, 0);
+  assert.equal(deriveSellerReputation([base, { ...late, settlementTxIds: unrelated.settlementTxIds }], 0, 200).bundleCount, 1);
+});
+
+test("SB-1 projects each signed TxRef arm to the pinned settlement-tx-id and refuses what it cannot project", () => {
+  const hash = "ab".repeat(32);
+  const signature = "99eUso3aSbE9tqGSTXzo3TLfKb9RkMTURrHKQ1K7Zh3BbeqPevr5E1iCbpTjqHuTFLtfxTTD5ekfVuZFzQyEQf8";
+  const projected: Array<[unknown, string]> = [
+    [{ kind: "demos", txHash: hash, blockNumber: 7 }, `demos:${hash}`],
+    [{ kind: "demos", txHash: `0x${hash.toUpperCase()}` }, `demos:${hash}`],
+    [{ kind: "settlement", rail: "demos", txHash: hash }, `demos:${hash}`],
+    [{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 3 }, `evm:8453:${hash}:3`],
+    [{ kind: "x402-event", httpResource: "https://seller.example/r", paymentReceiptHash: "cd".repeat(32), settlementTxHash: hash, chainId: 8453, logIndex: 0, protocolVersion: "2" }, `evm:8453:${hash}:0`],
+    [{ kind: "solana-instruction", cluster: "devnet", signature, instructionIndex: 1 }, `solana:devnet:${signature}:1`],
+  ];
+  for (const [ref, id] of projected) {
+    assert.equal(settlementTxId(ref), id, JSON.stringify(ref));
+    assert.ok(isCanonicalSettlementIdentity(id), `the pinned SDK accepts ${id}`);
+  }
+  for (const ref of [
+    null, "tx-job", `demos:${hash}`, { txId: hash }, { id: hash },
+    { kind: "evm", chainId: 1, txHash: hash }, { kind: "solana", cluster: "devnet", signature },
+    { kind: "x402", httpResource: "https://seller.example/r", paymentReceiptHash: "cd".repeat(32), protocolVersion: "2" },
+    { kind: "settlement", rail: "evm", txHash: hash }, { kind: "settlement", rail: "demos", txHash: "8e4b72" },
+    { kind: "demos", txHash: "short" }, { kind: "evm-event", chainId: 0, txHash: hash, logIndex: 3 },
+    { kind: "evm-event", chainId: 1, txHash: `0x${hash}`, logIndex: 3 }, { kind: "evm-event", chainId: 1, txHash: hash, logIndex: -1 },
+    { kind: "evm-event", chainId: 1, txHash: hash, logIndex: 1.5 },
+    { kind: "solana-instruction", cluster: "devnet", signature: "0OIl", instructionIndex: 1 },
+    { kind: "solana-instruction", cluster: "localnet", signature, instructionIndex: 1 },
+    { kind: "ap2", mandateId: "m", providerRef: "p", protocolVersion: "1" },
+    { kind: "htlc-claim", chainId: 1, contractAddress: "0x1", claimTxHash: hash },
+  ]) assert.equal(settlementTxId(ref), null, JSON.stringify(ref));
+});
+
+/** Index one seller's two verified jobs whose settlement evidence cites the given refs. */
+async function indexTwoJobs(refsA: unknown[], refsB: unknown[]) {
+  const a = await vector("sb2-job-a", 1000, refsA);
+  const first = new Map(maps);
+  const b = await vector("sb2-job-b", 2000, refsB);
+  for (const [at, raw] of first) maps.set(at, raw);
+  return indexFixture(b, {
+    deals: [registeredDeal("sb2-job-a", a.locators.buyer, a.locators.seller), registeredDeal("sb2-job-b", b.locators.buyer, b.locators.seller)],
+    bundleBindings: [
+      await bindingFor("sb2-job-a", "buyer", a.locators.buyer, a.buyerBundle, 0),
+      await bindingFor("sb2-job-a", "seller", a.locators.seller, a.sellerBundle, 1),
+      await bindingFor("sb2-job-b", "buyer", b.locators.buyer, b.buyerBundle, 0),
+      await bindingFor("sb2-job-b", "seller", b.locators.seller, b.sellerBundle, 1),
+    ],
+  });
+}
+
+test("SB-2 voids one settlement cited by two verified jobs in every TxRef shape, in seller reputation and listing hints alike", async () => {
+  const hash = "ab".repeat(32);
+  const cases: Array<[string, unknown, unknown, string]> = [
+    ["DACS-4 demos arm", { kind: "demos", txHash: hash, blockNumber: 7 }, { kind: "demos", txHash: hash, blockNumber: 8 }, `demos:${hash}`],
+    ["legacy flat Demos ref", { kind: "settlement", rail: "demos", txHash: hash }, { kind: "settlement", rail: "demos", txHash: hash }, `demos:${hash}`],
+    ["legacy and current spellings", { kind: "settlement", rail: "demos", txHash: `0x${hash.toUpperCase()}` }, { kind: "demos", txHash: hash }, `demos:${hash}`],
+    ["evm-event", { kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }, { kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }, `evm:8453:${hash}:4`],
+  ];
+  for (const [name, refA, refB, id] of cases) {
+    const record = await indexTwoJobs([refA], [refB]);
+    assert.deepEqual(record.deals.map((deal) => [deal.refsVerified, deal.reputationEligible]), [[true, true], [true, true]], name);
+    assert.deepEqual(record.deals.map((deal) => deal.settlementTxIds?.map((tx) => tx.id)), [[id], [id]], name);
+    assert.equal(record.reputation.bundleCount, 0, name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [], name);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, 0, `${name}: the listing hint excludes the collision too`);
+  }
+  // Distinct events of one batched transaction remain distinct settlements.
+  const batched = await indexTwoJobs([{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }], [{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 5 }]);
+  assert.equal(batched.reputation.bundleCount, 2);
+  assert.equal(batched.listings[0].reputationHint!.bundleCount, 2);
+});
+
+test("a deal whose settlement evidence cites a TxRef SB-1 cannot project here is not counted", async () => {
+  const hash = "ab".repeat(32);
+  for (const [name, ref] of [
+    ["bare string", "tx-unprojectable"],
+    ["legacy evm arm needs ledger data", { kind: "evm", chainId: 1, txHash: hash }],
+    ["legacy non-Demos rail", { kind: "settlement", rail: "evm", txHash: hash }],
+    ["id field only", { id: `demos:${hash}` }],
+  ] as const) {
+    const record = await indexTwoJobs([{ kind: "demos", txHash: hash }, ref], [{ kind: "demos", txHash: demosTxHash("other") }]);
+    const [unprojectable, counted] = record.deals;
+    assert.equal(unprojectable.refsVerified, true, name);
+    assert.equal(unprojectable.reputationEligible, false, name);
+    assert.equal(counted.reputationEligible, true, name);
+    assert.equal(record.reputation.bundleCount, 1, name);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, 1, name);
+  }
 });
 
 test("DACS-4 SB-2 collision vectors: an earlier or tied producer timestamp never wins", () => {
@@ -1144,7 +1244,7 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
     sellerOutcome: "completed", anchoredByRole: "seller", bundleContentHash: artifactHash(fixture.sellerBundle, "bundle"),
     cancellationNeutral: false, finalisedAt: 120, agreementPrice: { amount: "1.25", currency: "DEM" }, category: "services.test",
     ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110, contentHash: artifactHash(fixture.rating, "rating") }],
-    settlementTxIds: [{ id: "tx-projection-job", observedAt: 100, phaseIndex: 2 }],
+    settlementTxIds: [{ id: `demos:${demosTxHash("projection-job")}`, observedAt: 100, phaseIndex: 2 }],
   });
   const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
   assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
