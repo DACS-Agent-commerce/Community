@@ -227,6 +227,8 @@ export interface DealRecord extends RegisteredDeal {
   ratings?: VerifiedRating[];
   /** Settlement ids used for the SB-2 cross-job uniqueness gate. */
   settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number }>;
+  /** Version of the verified settlement projection; absent summaries need reindexing. */
+  settlementProjectionVersion?: number;
 }
 
 export interface SellerRecord {

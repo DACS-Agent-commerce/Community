@@ -6,7 +6,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
 import { directoryEvidenceState } from "./directory-evidence-state";
-import { COMPLETION_VERIFICATION_UNAVAILABLE, unavailableMetricQuery } from "@/src/catalog/testnetMetrics";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, unavailableMetricQuery } from "@/src/catalog/testnetMetricPolicy";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "./labels";
 
 const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declared";

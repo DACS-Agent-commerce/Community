@@ -1,4 +1,8 @@
 import type { DealRecord } from "./types.js";
+import { isChainTxRef } from "@kynesyslabs/dacs/artifacts";
+
+/** Bump whenever persisted settlement eligibility/identity rules change. */
+export const SETTLEMENT_PROJECTION_VERSION = 1;
 
 const CURRENT_OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate",
@@ -47,9 +51,12 @@ export function settlementTxId(ref: unknown): string | null {
   if (!isRecord(ref)) return null;
   // Frozen legacy MVP TxRef `{ rail, txHash, kind }`: a native Demos transfer is one settlement.
   if (typeof ref.rail === "string") {
-    const hash = ref.rail === "demos" ? collapsedHash(ref.txHash) : null;
+    const hash = ref.kind === "settlement" && ref.rail === "demos" &&
+      Object.keys(ref).every((key) => ["kind", "rail", "txHash"].includes(key))
+      ? collapsedHash(ref.txHash) : null;
     return hash && `demos:${hash}`;
   }
+  if (!isChainTxRef(ref)) return null;
   switch (ref.kind) {
     case "demos": {
       const hash = collapsedHash(ref.txHash);
@@ -76,7 +83,11 @@ export function settlementTxId(ref: unknown): string | null {
  * `projected` is false when any cited reference cannot be projected; such a
  * deal is not countable.
  */
-export function settlementClaims(evidence: Array<Record<string, unknown>>): {
+export function settlementClaims(evidence: Array<Record<string, unknown>>, context: {
+  railId: string | null;
+  phaseSummary: unknown;
+  pipeline: unknown;
+}): {
   settlementTxIds: NonNullable<DealRecord["settlementTxIds"]>;
   projected: boolean;
 } {
@@ -85,9 +96,30 @@ export function settlementClaims(evidence: Array<Record<string, unknown>>): {
     const refs = Array.isArray(record.paymentTxRefs) ? record.paymentTxRefs : [];
     const observedAt = Number(record.observedAt);
     const phaseIndex = Number(record.phaseIndex ?? 0);
+    const phase = Array.isArray(context.phaseSummary) ? context.phaseSummary.find((entry) =>
+      isRecord(entry) && entry.index === phaseIndex) : undefined;
+    const pipelinePhase = Array.isArray(context.pipeline) ? context.pipeline[phaseIndex] : undefined;
+    // Delivery evidence carries no payment claims, but cannot stand in for
+    // payment evidence at a signed settlement phase.
+    if (typeof record.phase === "string" && record.phase.startsWith("deliver-")) {
+      if (!isSafeUint(record.phaseIndex) || !isRecord(phase) ||
+          (phase.kind !== "deliver" && phase.kind !== record.phase) ||
+          !isRecord(pipelinePhase) || pipelinePhase.kind !== record.phase ||
+          (record.paymentTxRefs !== undefined &&
+            (!Array.isArray(record.paymentTxRefs) || !record.paymentTxRefs.every(isChainTxRef)))) projected = false;
+      return [];
+    }
+    if (refs.length === 0 || !isSafeUint(record.phaseIndex) || record.phase !== context.railId ||
+        !isRecord(phase) || (phase.kind !== "settle" && phase.kind !== context.railId) ||
+        !isRecord(pipelinePhase) || pipelinePhase.kind !== context.railId) projected = false;
     return refs.flatMap((ref) => {
       const id = settlementTxId(ref);
-      if (id === null) projected = false;
+      const kind = isRecord(ref) ? ref.kind : undefined;
+      const railMatches = context.railId === "pay-dem" ? kind === "demos" || kind === "settlement"
+        : context.railId === "pay-evm-erc20" ? kind === "evm-event"
+          : context.railId === "pay-solana-spl" ? kind === "solana-instruction"
+            : context.railId === "pay-x402" && kind === "x402-event";
+      if (id === null || !railMatches) projected = false;
       return id === null ? [] : [{ id, observedAt, phaseIndex }];
     });
   });

@@ -6,7 +6,7 @@ import CopyText from "@/src/components/CopyText";
 import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
-import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetrics";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetricPolicy";
 
 export const dynamic = "force-dynamic";
 const EXPLORER = "https://explorer.demos.sh";

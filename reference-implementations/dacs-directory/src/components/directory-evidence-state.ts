@@ -1,7 +1,7 @@
 import { safePublicEndpoint } from "../catalog/publicEndpoint.js";
 import { effectiveReachabilityStatus } from "../catalog/reachabilityStatus.js";
 import type { IdentityTier, ListingSummary, SellerRecord } from "../catalog/types.js";
-import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "../catalog/testnetMetrics.js";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "../catalog/testnetMetricPolicy.js";
 
 export const UNMEASURED_REACHABILITY_LABEL = "Not measured by Directory" as const;
 

@@ -1,30 +1,11 @@
-import { countableDeals, inCategory } from "./settlementUniqueness.js";
+import { countableDeals, inCategory, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
+import { deriveSellerReputation } from "./reputation.js";
 import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
 
-export const COMPLETION_VERIFICATION_UNAVAILABLE = "Completion verification unavailable";
-
-// TP-1 (docs/TP-1.md): completion cannot yet be verified on testnet. Apply this
-// on reads as well as indexing so a catalog cached by an older release is safe
-// to serve.
-export const UNAVAILABLE_TESTNET_METRICS = {
-  completionRate: null,
-  counterpartyAdjustedCompletionRate: null,
-  counterpartyFaultRate: null,
-  averageBuyerRating: null,
-  averageSellerRating: null,
-  metricsUnavailableReason: COMPLETION_VERIFICATION_UNAVAILABLE,
-  metricsProfile: "TP-1",
-} as const;
-
-export const observedOutcomesLabel = (count: number | undefined): string =>
-  count === undefined ? "Observed outcomes unavailable, not verified" : `Observed outcomes: ${count}, not verified`;
-
-export const OBSERVED_REPUTATION_COUNTS = {
-  completedLabel: "Observed completed outcomes, not verified",
-  totalAgreementsLabel: "Observed outcomes, not verified",
-  observedTransactionalVolumeLabel: "Observed amounts in completed outcomes, not verified completion or settlement",
-  transactionCountByCurrencyLabel: "Observed priced completed outcomes, not verified completion or settlement",
-} as const;
+import {
+  COMPLETION_VERIFICATION_UNAVAILABLE, UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel,
+} from "./testnetMetricPolicy.js";
+export * from "./testnetMetricPolicy.js";
 
 const isSafeUint = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -81,67 +62,48 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
 export function projectTestnetCatalog(catalog: Catalog): Catalog {
   return {
     ...catalog,
-    sellers: catalog.sellers.map((seller) => ({
-      ...withoutMetricKeys(seller),
-      ...(seller.deals ? {
-        deals: seller.deals.map((deal) => ({
-          ...withoutMetricKeys(deal),
-          ...(deal.ratings ? {
-            ratings: deal.ratings.map((rating) => ({
-              rater: rating.rater,
-              target: rating.target,
-              targetRole: rating.targetRole,
-              ratedAt: rating.ratedAt,
-              contentHash: rating.contentHash,
-              value: null,
-              metricsUnavailableReason: COMPLETION_VERIFICATION_UNAVAILABLE,
-            })),
-          } : {}),
+    sellers: catalog.sellers.map((storedSeller) => {
+      // Old summaries cannot distinguish no settlement from an unprojected
+      // object TxRef. Keep their evidence visible, but withhold contributions
+      // until a successful reindex supplies the current projection version.
+      const seller = {
+        ...storedSeller,
+        deals: (storedSeller.deals ?? []).map((deal) => ({
+          ...deal,
+          reputationEligible: deal.settlementProjectionVersion === SETTLEMENT_PROJECTION_VERSION &&
+            Boolean(deal.reputationEligible),
         })),
-      } : {}),
-      ...(seller.reputation ? {
-        reputation: {
-          completed: seller.reputation.completed,
-          totalAgreements: seller.reputation.totalAgreements,
-          bundleCount: seller.reputation.bundleCount,
-          windowStart: seller.reputation.windowStart,
-          windowEnd: seller.reputation.windowEnd,
-          windowingBasis: seller.reputation.windowingBasis,
-          bundleRefs: seller.reputation.bundleRefs?.map((ref) => ({
-            kind: ref.kind, id: ref.id, contentHash: ref.contentHash,
-            anchor: { kind: ref.anchor.kind, locator: ref.anchor.locator },
+      };
+      const windowStart = isSafeUint(seller.reputation?.windowStart) ? seller.reputation.windowStart : 0;
+      const windowEnd = isSafeUint(seller.reputation?.windowEnd) && seller.reputation.windowEnd >= windowStart
+        ? seller.reputation.windowEnd : Math.max(windowStart, catalog.generatedAt);
+      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd);
+      return {
+        ...withoutMetricKeys(seller),
+        ...(seller.deals ? {
+          deals: seller.deals.map((deal) => ({
+            ...withoutMetricKeys(deal),
+            ...(deal.ratings ? {
+              ratings: deal.ratings.map((rating) => ({
+                rater: rating.rater,
+                target: rating.target,
+                targetRole: rating.targetRole,
+                ratedAt: rating.ratedAt,
+                contentHash: rating.contentHash,
+                value: null,
+                metricsUnavailableReason: COMPLETION_VERIFICATION_UNAVAILABLE,
+              })),
+            } : {}),
           })),
-          observedTransactionalVolume: seller.reputation.observedTransactionalVolume?.map(({ currency, amount }) => ({ currency, amount })),
-          transactionCountByCurrency: seller.reputation.transactionCountByCurrency?.map(({ currency, count }) => ({ currency, count })),
-          ...UNAVAILABLE_TESTNET_METRICS,
-          ...OBSERVED_REPUTATION_COUNTS,
-          observedOutcomesLabel: observedOutcomesLabel(seller.reputation.totalAgreements),
-        },
-      } : {}),
-      ...(seller.listings ? {
-        listings: seller.listings.map((listing) => ({
-          ...withoutMetricKeys(listing),
-          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt),
-        })),
-      } : {}),
-    })),
+        } : {}),
+        reputation,
+        ...(seller.listings ? {
+          listings: seller.listings.map((listing) => ({
+            ...withoutMetricKeys(listing),
+            reputationHint: listingObservationHint(seller, listing, catalog.generatedAt),
+          })),
+        } : {}),
+      };
+    }),
   };
-}
-
-export function unavailableMetricQuery(params: URLSearchParams): string | undefined {
-  const metricKeys = new Set([
-    "mincompletionrate", "minrating", "trackrecord", "maxfaultrate", "faultrate",
-    "completionrate", "counterpartyadjustedcompletionrate", "counterpartyfaultrate",
-    "averagebuyerrating", "averagesellerrating", "reputationscore",
-  ]);
-  const rankingKeys = new Set(["sort", "sortby", "order", "orderby", "rank", "rankby"]);
-  for (const name of params.keys()) {
-    const key = name.replace(/(?:\[\])+$/, "").toLowerCase();
-    if (metricKeys.has(key)) {
-      return `Rate and score filters are unavailable on testnet under TP-1. ${COMPLETION_VERIFICATION_UNAVAILABLE}.`;
-    }
-    if (rankingKeys.has(key)) {
-      return "Sorting and ranking are unavailable on testnet under TP-1.";
-    }
-  }
 }

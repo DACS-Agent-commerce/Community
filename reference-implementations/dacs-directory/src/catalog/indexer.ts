@@ -54,7 +54,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { countableDeals, inCategory, settlementClaims } from "./settlementUniqueness.js";
+import { countableDeals, inCategory, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
 import { observedOutcomesLabel, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
@@ -434,7 +434,11 @@ export async function indexRegistration(
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
       const { settlementTxIds, projected } = settlementClaims((authoritative?.artifacts ?? [])
-        .filter((artifact) => artifact.kind === "evidence").map((artifact) => artifact.raw));
+        .filter((artifact) => artifact.kind === "evidence").map((artifact) => artifact.raw), {
+        railId: agreementRail(authoritative?.agreement),
+        phaseSummary: authoritative?.bundle.phaseSummary,
+        pipeline: authoritative?.listing?.pipeline,
+      });
       const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
         .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
       const cancellationNeutral = isNeutralCancellation(
@@ -451,7 +455,7 @@ export async function indexRegistration(
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
-        ratings, settlementTxIds,
+        ratings, settlementTxIds, settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION,
         category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
         verifiedAt: now,
@@ -525,7 +529,11 @@ export async function indexRegistration(
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
     const { settlementTxIds, projected } = settlementClaims(authoritative.resolvedArtifacts
-      .filter((artifact) => artifact.kind === "dacs-4-evidence").map((artifact) => artifact.raw));
+      .filter((artifact) => artifact.kind === "dacs-4-evidence").map((artifact) => artifact.raw), {
+      railId: agreementRail(authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-3-agreement")?.raw),
+      phaseSummary: bundle?.phaseSummary,
+      pipeline: authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-1-listing")?.raw.pipeline,
+    });
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -541,6 +549,7 @@ export async function indexRegistration(
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       settlementTxIds,
+      settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION,
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });

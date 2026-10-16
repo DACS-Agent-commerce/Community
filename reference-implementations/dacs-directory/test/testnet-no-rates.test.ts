@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { noRateCatalog, noRateClaim, noRateOutcomes } from "./fixtures/no-rate-catalog.js";
+import { SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
+import type { Catalog } from "../src/catalog/types.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import { queryListingCatalog } from "../vendor/dacs-sdk/dist/discovery/catalog.js";
 import { COMPLETION_VERIFICATION_UNAVAILABLE, UNAVAILABLE_TESTNET_METRICS } from "../src/catalog/testnetMetrics.js";
@@ -217,6 +219,63 @@ test("a served hint never counts SB-2 collision records its cached count still i
   assert.equal(deriveSellerReputation(fixture.sellers[0].deals, 0, 200).bundleCount, 4);
   assert.equal(hint.bundleCount, 4);
   assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 4, not verified");
+  const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
+    params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
+  });
+  const seller = await response.json();
+  assert.equal(seller.reputation.bundleCount, hint.bundleCount);
+  assert.equal(seller.reputation.totalAgreements, 4);
+  assert.equal(seller.reputation.completed, 0);
+  assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+  assert.deepEqual(seller.reputation.transactionCountByCurrency, []);
+  assert.deepEqual(seller.reputation.bundleRefs.map((ref: { id: string }) => ref.id), fixture.sellers[0].deals.slice(2).map((deal) => deal.jobId));
+});
+
+test("upgrading a pre-projection database with object TxRefs withholds all old contributions until reindexing", async () => {
+  // Actual b74542d indexer output: two signed jobs cite the same object TxRef,
+  // but their persisted settlementTxIds are empty. Never treat that as proof
+  // that the jobs had no settlement claim.
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/settlement-projection-v0-catalog.json", import.meta.url), "utf8")) as Catalog;
+  saveCatalog(fixture);
+  assert.equal(loadStoredCatalog().sellers[0].reputation.bundleCount, 2);
+  assert.deepEqual(loadStoredCatalog().sellers[0].deals.map((deal) => deal.settlementTxIds), [[], []]);
+  for (const version of [undefined, 0, SETTLEMENT_PROJECTION_VERSION + 1]) {
+    fixture.sellers[0].deals.forEach((deal) => { deal.settlementProjectionVersion = version; });
+    saveCatalog(fixture);
+    for (let read = 0; read < 2; read++) {
+      const catalog = loadCatalog();
+      const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
+        params: Promise.resolve({ primaryClaimRef: encodeURIComponent(fixture.sellers[0].primaryClaim) }),
+      });
+      assert.equal(response.status, 200);
+      for (const seller of [catalog.sellers[0], await response.json()]) {
+        assert.equal(seller.reputation.bundleCount, 0);
+        assert.equal(seller.reputation.totalAgreements, 0);
+        assert.equal(seller.reputation.completed, 0);
+        assert.deepEqual(seller.reputation.bundleRefs, []);
+        assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+        assert.deepEqual(seller.reputation.transactionCountByCurrency, []);
+        assert.equal(seller.listings[0].reputationHint.bundleCount, 0);
+        assert.equal(seller.deals.length, 2, "raw observations remain available");
+        assert.ok(seller.deals.every((deal: { reputationEligible: boolean }) => !deal.reputationEligible));
+      }
+      const listings = await getListings(new NextRequest("https://directory.example/api/dacs/listings"));
+      assert.equal((await listings.json()).listings[0].reputationHint.bundleCount, 0);
+    }
+  }
+  // A successful reindex replaces individual records, rather than blessing a
+  // whole catalog merely because a writer saved it. A mixed cache counts only
+  // its newly verified record, rebuilding stale amounts and refs with it.
+  fixture.sellers[0].deals[0].settlementProjectionVersion = SETTLEMENT_PROJECTION_VERSION;
+  fixture.sellers[0].deals[0].settlementTxIds = [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2 }];
+  saveCatalog(fixture);
+  const seller = loadCatalog().sellers[0];
+  assert.equal(seller.reputation.bundleCount, 1);
+  assert.equal(seller.listings[0].reputationHint!.bundleCount, 1);
+  assert.deepEqual(seller.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
+  assert.deepEqual(seller.reputation.transactionCountByCurrency, [{ currency: "DEM", count: 1 }]);
+  assert.deepEqual(seller.reputation.bundleRefs?.map((ref) => ref.id), ["sb2-job-a"]);
+  assert.equal(loadStoredCatalog().sellers[0].reputation.bundleCount, 2, "reads never rewrite the source cache");
 });
 
 test("the published hint schema matches emitted hints and requires every field the pinned SDK reader requires", async () => {

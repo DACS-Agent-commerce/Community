@@ -1,3 +1,4 @@
+import { SETTLEMENT_PROJECTION_VERSION } from "../../src/catalog/settlementUniqueness.js";
 import type { Catalog, DealRecord, SellerRecord } from "../../src/catalog/types.js";
 
 export const noRateClaim = `did:demos:agent:${"a".repeat(64)}`;
@@ -16,6 +17,9 @@ export function noRateCatalog(): Catalog {
     signatureVerified: true,
     refsVerified: true,
     reputationEligible: true,
+    settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION,
+    anchoredByRole: "buyer",
+    ...(outcome === "completed" ? { agreementPrice: { amount: "2", currency: "DEM" } } : {}),
     outcome,
     sellerOutcome: outcome,
     finalisedAt: 100 + index,

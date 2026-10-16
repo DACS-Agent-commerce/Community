@@ -24,8 +24,11 @@ the revision the pinned SDK declares.
    projection. Unknown `*Rate`, `*Rating` and `*Score` keys are dropped at
    seller, deal and listing level.
 4. Observed counts (`completed`, `totalAgreements`, `bundleCount`), currency
-   totals and `bundleRefs` remain, labelled as observations that do not
-   establish completion or settlement.
+   totals and `bundleRefs` are rebuilt together from eligible retained records,
+   labelled as observations that do not establish completion or settlement.
+   Records without the current `settlementProjectionVersion` contribute to
+   neither seller aggregates nor listing hints until a successful reindex.
+   Saving an older catalog does not upgrade its records.
 5. A listing hint keeps the shape the pinned SDK catalog reader requires. A
    missing or malformed cached hint is replaced by one over the listing's
    category and the catalog snapshot window. Its `bundleCount` is always
@@ -77,7 +80,12 @@ the affected capability; this Directory makes none for these capabilities.
 Settlement uniqueness (SB-1, SB-2) applies to the records counted in seller
 reputation and in listing hints:
 
-- Each `paymentTxRefs` entry of success-outcome settlement evidence is
+- Success payment evidence requires a nonempty array of exact TxRef shapes.
+  Its phase must match the signed agreement rail and the signed listing
+  pipeline at the recorded phase index, with a matching bundle phase entry.
+  Demos, EVM ERC-20, Solana SPL and x402 rails accept only their corresponding
+  TxRef arms. A mismatch excludes the deal from every aggregate.
+- Each `paymentTxRefs` entry of success-outcome payment evidence is
   projected to its SB-1 `settlement-tx-id`: `demos` and the legacy
   `{ rail: "demos", txHash }` give `demos:{txHash}`; `evm-event` and
   `x402-event` give `evm:{chainId}:{txHash}:{logIndex}`; `solana-instruction`
