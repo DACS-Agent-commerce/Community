@@ -47,6 +47,37 @@ export function isNeutralCancellation(
     agreementRef === undefined && preCommit;
 }
 
+/** Admit the consumer's complete evidence set before seller, category or window filtering. */
+export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
+  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
+  // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) only. Claims are admitted in
+  // the winning order, earliest evidence observation first, then the lower evidence hash, then the
+  // jobId so the choice is deterministic; a job holding any rejected claim is not counted.
+  const claims = deals.flatMap((deal) => (deal.settlementTxIds ?? []).map((tx) => ({ deal, tx })))
+    .sort((a, b) => a.tx.observedAt - b.tx.observedAt || byteOrder(a.tx.evidenceHash ?? "", b.tx.evidenceHash ?? "") ||
+      byteOrder(a.deal.jobId, b.deal.jobId) || a.tx.phaseIndex - b.tx.phaseIndex);
+  const ledger = new Map<string, { jobId: string; phaseIndex: number }>();
+  const rejected = new Set<DealRecord>();
+  for (const { deal, tx } of claims) {
+    if (admitSettlement(ledger, { id: tx.id, jobId: deal.jobId, phaseIndex: tx.phaseIndex }) === "reject") rejected.add(deal);
+  }
+  return deals.filter((deal) => !rejected.has(deal));
+}
+
+/** Final catalog pass: one ledger for every seller, then recompute every published metric. */
+export function reconcileCatalogReputation(sellers: SellerRecord[], now: number): void {
+  const admitted = new Set(settlementEligibleDeals(sellers.flatMap((seller) => seller.deals)));
+  for (const seller of sellers) {
+    for (const deal of seller.deals) {
+      if (deal.reputationEligible && !admitted.has(deal)) deal.reputationEligible = false;
+    }
+    seller.reputation = deriveSellerReputation(seller.deals, 0, now);
+    for (const listing of seller.listings) {
+      listing.reputationHint = categoryReputationHint(listing.offering.category, seller.deals, 0, now, now);
+    }
+  }
+}
+
 /**
  * DACS-5 scalar derivation over already signature/reference-verified,
  * seller-perspective records. Reconciliation and divergence exclusion happen
@@ -57,10 +88,7 @@ export function deriveSellerReputation(
   windowStart = 0,
   windowEnd = Date.now(),
 ): SellerRecord["reputation"] {
-  const eligible = deals.filter((deal) =>
-    deal.refsVerified && deal.reputationEligible &&
-    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
-  );
+  const eligible = settlementEligibleDeals(deals);
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records
@@ -70,22 +98,10 @@ export function deriveSellerReputation(
   const timestampOf = (deal: DealRecord) => useAnchorTimestamps
     ? deal.anchorTimestamp
     : deal.finalisedAt;
-  let scoped = eligible.filter((deal) => {
+  const scoped = eligible.filter((deal) => {
     const timestamp = timestampOf(deal);
     return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
   });
-  // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) only. Claims are admitted in
-  // the winning order, earliest evidence observation first, then the lower evidence hash, then the
-  // jobId so the choice is deterministic; a job holding any rejected claim is not counted.
-  const claims = scoped.flatMap((deal) => (deal.settlementTxIds ?? []).map((tx) => ({ deal, tx })))
-    .sort((a, b) => a.tx.observedAt - b.tx.observedAt || byteOrder(a.tx.evidenceHash ?? "", b.tx.evidenceHash ?? "") ||
-      byteOrder(a.deal.jobId, b.deal.jobId) || a.tx.phaseIndex - b.tx.phaseIndex);
-  const ledger = new Map<string, { jobId: string; phaseIndex: number }>();
-  const rejected = new Set<DealRecord>();
-  for (const { deal, tx } of claims) {
-    if (admitSettlement(ledger, { id: tx.id, jobId: deal.jobId, phaseIndex: tx.phaseIndex }) === "reject") rejected.add(deal);
-  }
-  scoped = scoped.filter((deal) => !rejected.has(deal));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
   const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral).length;
   const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral &&
@@ -157,7 +173,7 @@ export function categoryReputationHint(
   computedAt: number,
 ): ReputationHint {
   const scoped = deriveSellerReputation(
-    deals.filter((deal) => deal.category === category || deal.category?.startsWith(`${category}.`)), windowStart, windowEnd,
+    settlementEligibleDeals(deals).filter((deal) => deal.category === category || deal.category?.startsWith(`${category}.`)), windowStart, windowEnd,
   );
   return {
     categoryScope: category,

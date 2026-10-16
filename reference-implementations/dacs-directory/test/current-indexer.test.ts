@@ -20,6 +20,10 @@ const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 /** A distinct 32-byte Demos transaction hash per job, so each fixture cites its own settlement (SB-1). */
 const txHashOf = (jobId: string) => contentHash({ settlement: jobId });
 const maps = new Map<string, Obj>();
+const paymentAnchorRecord = async (at: string) => {
+  const data = maps.get(at);
+  return data ? { data, programName: `dacs4:payment:${data.jobId}:pay-dem:2` } : null;
+};
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
@@ -37,46 +41,47 @@ const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], ext
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-async function vector(jobId = "job-1", offset = 0) {
+async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHash = txHashOf(jobId), observedAt = 100) {
   maps.clear();
+  const buyerIndex = 1 - sellerIndex;
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
-    seller: { identity: { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1, claims: [{ ref: dids[1] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
+    seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "vet-credentials" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
   };
   // Listing verifier requires a presentation signature for the seller claim.
   const identity = (listingScope.seller as Obj).identity as Obj;
   const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
-  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
-  (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
-  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
+  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[sellerIndex]))).toString("hex");
+  (identity.presentation as Obj).signatures = [{ ref: dids[sellerIndex], signature: identitySig }];
+  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", sellerIndex) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    parties: [{ role: "buyer", primaryClaim: dids[buyerIndex] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
       deliverable: deliverableRef,
     } };
-  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: txHashOf(jobId) }],
-    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
-  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
-  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110 };
-  const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
+  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", buyerIndex, true), await sign(agreementScope, "agreement", sellerIndex, true)] }; maps.set(at(2), agreement);
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: settlementHash }],
+    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt };
+  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", sellerIndex) }; maps.set(at(3), evidence);
+  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[buyerIndex], target: dids[sellerIndex], targetRole: "seller", value: 5, ratedAt: 110 };
+  const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", buyerIndex) }; maps.set(at(4), rating);
   const bundleScope: Obj = { bundleVersion: "1", jobId, outcome: "completed", listingRef,
     agreementRef: ref(at(2), agreement, "agreement"), parties: [
-      { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
-      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[1] },
+      { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[buyerIndex] },
+      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
     ],
     phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
-  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", 1, true)];
+  const signatures = [await sign(bundleScope, "bundle", buyerIndex, true), await sign(bundleScope, "bundle", sellerIndex, true)];
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
   return {
@@ -174,7 +179,7 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
 
 async function graphAt(at: string, listing: Obj, listingLocator: string) {
   return buildCurrentEvidenceGraph(at, {
-    read: async (locatorValue) => maps.get(locatorValue) ?? null,
+    readAnchorRecord: paymentAnchorRecord, read: async (locatorValue) => maps.get(locatorValue) ?? null,
     resolveListing: async () => ({ locator: listingLocator, raw: listing }),
   });
 }
@@ -258,12 +263,12 @@ test("current evidence graph verifies full references and rejects cross-job rati
   }), "ap2:stripe-paymentintents");
   assert.equal(agreementRail({ terms: { rail: { railId: "" } } }), null);
   assert.equal(agreementRail({ terms: { rail: "pay-dem" } }), null);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { read: async (at) => maps.get(at) ?? null,
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, true, graph.reason); assert.equal(graph.ratings.length, 1);
   const ratingScope = signedScope(rating, "rating");
   maps.set(locator(4), { ...ratingScope, signature: await sign(ratingScope, "rating", 1) });
-  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(forgedRater.ok, false);
 
@@ -276,7 +281,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const wrongTargetRoleBundle = signedScope(bundle, "bundle");
   wrongTargetRoleBundle.ratingRefs = [ref(locator(4), wrongTargetRole, "rating")];
   maps.set(locator(5), await resignBundle(wrongTargetRoleBundle));
-  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(mismatchedTargetRole.ok, false);
   maps.set(locator(4), rating);
@@ -289,31 +294,31 @@ test("current evidence graph verifies full references and rejects cross-job rati
     attestationRef: (bundle.settlementEvidence as unknown[])[0],
   }];
   maps.set(locator(5), await resignBundle(linkedPhase));
-  const linked = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const linked = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(linked.ok, true, linked.reason);
 
   maps.set(locator(5), { ...bundle, signatures: [...(bundle.signatures as unknown[]), null] });
-  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedSignature.ok, false);
 
   maps.set(locator(5), { ...bundle, signature: null });
-  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousBundleSignature.ok, false);
 
   const wrongAlgorithmSignatures = (bundle.signatures as Obj[]).map((signature, index) =>
     index === 0 ? { ...signature, algorithm: "ecdsa-secp256k1" } : signature);
   maps.set(locator(5), { ...bundle, signatures: wrongAlgorithmSignatures });
-  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(wrongAlgorithm.ok, false);
 
   const missingRequiredArray = signedScope(bundle, "bundle");
   delete missingRequiredArray.settlementEvidence;
   maps.set(locator(5), await resignBundle(missingRequiredArray));
-  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(missingRefs.ok, false);
   assert.equal(missingRefs.reason, "invalid current DACS-5 bundle shape");
@@ -321,7 +326,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const unsupportedAmendment = signedScope(bundle, "bundle");
   unsupportedAmendment.amendments = [{}];
   maps.set(locator(5), await resignBundle(unsupportedAmendment));
-  const amendment = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const amendment = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(amendment.ok, false);
   assert.equal(amendment.reason, "duplicate or invalid top-level reference", "an amendments entry must be a reference");
@@ -329,7 +334,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const invalidRatingRefs = signedScope(bundle, "bundle");
   invalidRatingRefs.ratingRefs = "not-an-array";
   maps.set(locator(5), await resignBundle(invalidRatingRefs));
-  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(invalidRatings.ok, false);
 
@@ -339,7 +344,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     (bundle.ratingRefs as unknown[])[0],
   ];
   maps.set(locator(5), await resignBundle(duplicateTopLevel));
-  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(duplicateRefs.ok, true, duplicateRefs.reason);
   assert.equal(duplicateRefs.ratings.length, 1);
@@ -355,7 +360,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     },
   }];
   maps.set(locator(5), await resignBundle(orphanedPhase));
-  const orphaned = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const orphaned = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(orphaned.ok, false);
   assert.equal(orphaned.reason, "phase attestation reference is outside the verified graph");
@@ -370,7 +375,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedEvidenceBundle = signedScope(bundle, "bundle");
   malformedEvidenceBundle.settlementEvidence = [ref(locator(3), malformedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(malformedEvidenceBundle));
-  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badEvidenceRefs.ok, false);
 
@@ -384,7 +389,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const ambiguousEvidenceBundle = signedScope(bundle, "bundle");
   ambiguousEvidenceBundle.settlementEvidence = [ref(locator(3), ambiguousEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(ambiguousEvidenceBundle));
-  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousContainers.ok, false);
 
@@ -401,7 +406,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const conflictingNestedBundle = signedScope(bundle, "bundle");
   conflictingNestedBundle.settlementEvidence = [ref(locator(3), conflictingNestedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(conflictingNestedBundle));
-  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(conflictingNested.ok, false);
   assert.equal(conflictingNested.reason, "settlement evidence chain failed");
@@ -423,7 +428,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedCompositeBundle = signedScope(bundle, "bundle");
   malformedCompositeBundle.vetRecords = [ref(locator(6), malformedComposite, "composite")];
   maps.set(locator(5), await resignBundle(malformedCompositeBundle));
-  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badCompositeRefs.ok, false);
 
@@ -439,19 +444,19 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const crossJobAgreementBundle = signedScope(bundle, "bundle");
   crossJobAgreementBundle.agreementRef = ref(locator(2), crossJobAgreement, "agreement");
   maps.set(locator(5), await resignBundle(crossJobAgreementBundle));
-  const crossJob = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const crossJob = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(crossJob.ok, false);
   assert.equal(crossJob.reason, "agreement belongs to another job");
 
   maps.set(locator(5), bundle);
   maps.set(locator(2), { ...agreement, signatures: [...(agreement.signatures as unknown[]), null] });
-  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedAgreementSignature.ok, false);
   maps.set(locator(2), agreement);
   maps.set(locator(4), { ...rating, jobId: "replayed" });
-  const replay = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const replay = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(replay.ok, false);
 });
@@ -567,7 +572,7 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
 
 test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, rail, deliverable, pattern and role direction", () => {
   const offered = { kind: "attested-payload", payloadFormat: "application/json" };
-  const pays = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }];
+  const pays = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }];
   const listing = (pricing: Obj, negotiation: Obj = { kind: "negotiate-fixed-price" }, pipeline: Obj[] = pays): Obj => ({
     offering: { deliverable: offered }, pricing, pipeline: [negotiation, ...pipeline], acceptedRails: [{ railId: "pay-dem", railVersion: 1 }],
   });
@@ -616,7 +621,7 @@ test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, r
   assert.equal(check(agreement({ rail: { railId: "pay-x402" } }), fixed), "rail");
   assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 2 } }), fixed), "rail");
   assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 1 } }), fixed), null);
-  const intakeOnly = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } }, undefined, [{ kind: "commit-agreement" }, { kind: "deliver-attested-payload" }]);
+  const intakeOnly = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } }, undefined, [{ kind: "commit-agreement" }]);
   assert.equal(check(agreement({ rail: undefined }), intakeOnly), null);
   assert.equal(check(agreement(), intakeOnly), "rail");
   // 4. Deliverable.
@@ -695,14 +700,14 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   const scope = signedScope(bundle, "bundle");
   scope.vetRecords = [ref(locator(6), composite, "composite")];
   scope.phaseSummary = [{
-    index: 0,
+    index: 3,
     kind: "vet-credentials",
     outcome: "ok",
     attestationRef: (scope.vetRecords as unknown[])[0],
   }, { index: 2, kind: "pay-dem", outcome: "ok" }];
   maps.set(locator(5), await resignBundle(scope));
 
-  const graph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const graph = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(graph.ok, true, graph.reason);
 });
@@ -724,9 +729,9 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     }
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = refs;
-    if (vetPhase !== null) scope.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }, { index: 2, kind: "pay-dem", outcome: "ok" }];
+    if (vetPhase !== null) scope.phaseSummary = [{ index: 3, kind: "vet-credentials", outcome: "ok", attestationRef: refs[vetPhase] }, { index: 2, kind: "pay-dem", outcome: "ok" }];
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
   // The buyer is vetted against the listing's buyerRequirement; the publisher against requirements the listing omits.
@@ -749,11 +754,11 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   const signedFailing = { ...failing, signature: await sign(failing, "composite", 1) };
   maps.set(locator(20), signedFailing);
   aborted.vetRecords = [ref(locator(20), signedFailing, "composite")];
-  aborted.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "fail", errorClass: "counterparty", attestationRef: (aborted.vetRecords as unknown[])[0] }];
+  aborted.phaseSummary = [{ index: 3, kind: "vet-credentials", outcome: "fail", errorClass: "counterparty", attestationRef: (aborted.vetRecords as unknown[])[0] }];
   aborted.settlementEvidence = [];
   aborted.ratingRefs = [];
   maps.set(locator(5), await resignBundle(aborted));
-  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
@@ -797,7 +802,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = [ref(locator(6), signed, "composite")];
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
 
@@ -832,7 +837,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
+  const tampered = await buildCurrentEvidenceGraph(locator(5), { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(tampered.ok, false);
   assert.equal(tampered.reason, "VerifyResult attestation reference failed");
@@ -847,7 +852,7 @@ test("current evidence graph caps attacker-controlled transitive work", async ()
   }));
   const oversized = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "buyer" };
   maps.set(locators.buyer, oversized);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { read: async (at) => maps.get(at) ?? rating,
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? rating,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, false);
   assert.equal(graph.reason, "evidence graph exceeds size limit");
@@ -902,11 +907,11 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     await graphAt(indexFixture.locators.buyer, indexFixture.listing, indexFixture.locators.listing),
     await graphAt(indexFixture.locators.seller, indexFixture.listing, indexFixture.locators.listing),
   );
-  assert.equal(indexDivergence.divergent, true);
+  assert.equal(indexDivergence.sellerOk, false, "the seller copy already violates the signed pipeline index");
   assert.equal(indexDivergence.refsVerified, false, "#224 equal-length index-set mismatch must be excluded");
 
   const kindFixture = await vector("kind-substitution-job", 30);
-  // Both copies stay valid on their own; they disagree only on which phase ran at index 3.
+  // Each substituted kind is already invalid against the signed pipeline at index 3.
   for (const [role, kind] of [["buyer", "rate"], ["seller", "commit-agreement"]] as const) {
     const kindScope = signedScope(role === "buyer" ? kindFixture.buyerBundle : kindFixture.sellerBundle, "bundle");
     kindScope.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "ok" }];
@@ -923,7 +928,8 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     await graphAt(kindFixture.locators.buyer, kindFixture.listing, kindFixture.locators.listing),
     await graphAt(kindFixture.locators.seller, kindFixture.listing, kindFixture.locators.listing),
   );
-  assert.equal(kindDivergence.divergent, true);
+  assert.equal(kindDivergence.buyerOk, false);
+  assert.equal(kindDivergence.sellerOk, false);
   assert.equal(kindDivergence.refsVerified, false, "#254 same-index phase kind mismatch must be excluded");
 
   const reputation = deriveSellerReputation([
@@ -988,7 +994,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1047,7 +1053,7 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   let omitted = 0;
@@ -1076,7 +1082,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1126,7 +1132,7 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
     reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1261,4 +1267,80 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+});
+
+test("a mixed pair indexes the fault copy's advisory fields and hash even when it is the buyer copy", async () => {
+  const fixture = await vector("mixed-authority");
+  const scope = signedScope(fixture.buyerBundle, "bundle");
+  delete scope.bundleVersion;
+  Object.assign(scope, { faultBundleVersion: "1", faultedParty: "none", finalisedAt: 80, ratingRefs: [] });
+  const buyer = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "buyer" };
+  maps.set(fixture.locators.buyer, buyer);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    const record = await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+      deals: [registeredDeal("mixed-authority", fixture.locators.buyer, fixture.locators.seller)],
+      bundleBindings: [await bindingFor("mixed-authority", "buyer", fixture.locators.buyer, buyer, 0),
+        await bindingFor("mixed-authority", "seller", fixture.locators.seller, fixture.sellerBundle, 1)],
+    }, undefined, async () => []);
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].finalisedAt, 80);
+    assert.equal(record.deals[0].anchoredByRole, "buyer");
+    assert.equal(record.deals[0].bundleContentHash, artifactHash(buyer, "bundle"));
+    assert.deepEqual(record.deals[0].ratings, []);
+    assert.equal(record.reputation.averageSellerRating, null);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("reindex admits a shared settlement once across sellers before seller and category totals", async () => {
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const shared = "cd".repeat(32);
+  const later = await vector("seller-a-later", 300, 1, shared, 20);
+  const laterStore = new Map(maps);
+  const earlier = await vector("seller-b-earlier", 400, 0, shared, 10);
+  for (const [key, value] of laterStore) maps.set(key, value);
+  const registration = async (fixture: Awaited<ReturnType<typeof vector>>, jobId: string, seller: number) => ({
+    primaryClaim: dids[seller], displayName: `seller-${seller}`, listingAnchors: [fixture.locators.listing],
+    deals: [{ jobId, rail: "pay-dem", buyerBundleRef: fixture.locators.buyer, sellerBundleRef: fixture.locators.seller,
+      owners: { buyer: dids[1 - seller], seller: dids[seller] } }],
+    bundleBindings: [await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 1 - seller),
+      await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, seller)],
+  });
+  const registrations = [await registration(later, "seller-a-later", 1), await registration(earlier, "seller-b-earlier", 0)];
+  const originalFetch = globalThis.fetch;
+  const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
+    const data = maps.get(path.split("/").pop() ?? "");
+    const seller = data === later.listing ? 1 : data === earlier.listing ? 0 : 1;
+    return data ? Response.json({ success: true, owner: `0x${dids[seller].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    store.saveDomains([]);
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    for (const order of [registrations, [...registrations].reverse()]) {
+      store.saveRegistrations(order);
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+      const sellers = store.loadCatalog().sellers;
+      assert.equal(sellers.length, 2);
+      const winner = sellers.find((seller) => seller.primaryClaim === dids[0])!;
+      const loser = sellers.find((seller) => seller.primaryClaim === dids[1])!;
+      assert.equal(winner.deals[0].refsVerified, true); assert.equal(loser.deals[0].refsVerified, true);
+      assert.equal(winner.reputation.completed, 1); assert.equal(loser.reputation.completed, 0);
+      assert.equal(winner.deals[0].reputationEligible, true); assert.equal(loser.deals[0].reputationEligible, false);
+      assert.equal(winner.listings[0].reputationHint?.bundleCount, 1); assert.equal(loser.listings[0].reputationHint?.bundleCount, 0);
+      assert.deepEqual(loser.reputation.observedTransactionalVolume, []);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+  }
 });

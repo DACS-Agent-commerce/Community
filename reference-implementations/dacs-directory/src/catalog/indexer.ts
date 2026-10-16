@@ -97,8 +97,8 @@ type SettlementTxIds = NonNullable<DealRecord["settlementTxIds"]>;
 
 /**
  * DACS-4 SB-1 claims of a current bundle's successful payment evidence, keyed on
- * (settlement-tx-id, jobId, phaseIndex). The phase index comes from the bundle's phase entry,
- * never from the evidence. Null means a claim could not be keyed (`error`).
+ * (settlement-tx-id, jobId, phaseIndex). The phase index is recovered from the verified
+ * payment-evidence anchor. Null means a claim could not be keyed (`error`).
  */
 function currentSettlementClaims(settlement: ResolvedEvidence[]): SettlementTxIds | null {
   const claims: SettlementTxIds = [];
@@ -346,7 +346,7 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null

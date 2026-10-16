@@ -138,7 +138,7 @@ test("storage failures are classified into public-safe operational causes", () =
   assert.equal(storageReadFailureCode(404, "PERMISSION_DENIED"), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(403), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(401), "STORAGE_RPC_UNAVAILABLE");
-  assert.equal(storageReadFailureCode(200, "PERMISSION_DENIED"), "STORAGE_NOT_PUBLIC");
+  assert.equal(storageReadFailureCode(200, "PERMISSION_DENIED"), "STORAGE_INVALID_RESPONSE");
   assert.equal(storageReadFailureCode(503), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(503, "NOT_FOUND"), "STORAGE_RPC_UNAVAILABLE");
   assert.equal(storageReadFailureCode(200), "STORAGE_INVALID_RESPONSE");
@@ -185,5 +185,14 @@ test("terminal storage failures skip retries while transient failures remain bou
     assert.equal(calls, 2);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+// Review's wrong-status probes plus all terminal-looking aliases: none may hide an artifact.
+test("terminal body codes on an unrelated status remain retryable", () => {
+  for (const status of [200, 201, 400, 402, 410, 429, 503]) {
+    for (const code of ["NOT_FOUND", "STORAGE_NOT_FOUND", "PROGRAM_NOT_FOUND", "PERMISSION_DENIED", "UNAUTHORIZED"]) {
+      assert.equal(storageReadFailureCode(status, code), status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE", `${status} ${code}`);
+    }
   }
 });

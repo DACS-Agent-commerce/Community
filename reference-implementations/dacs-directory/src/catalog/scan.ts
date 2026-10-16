@@ -97,10 +97,6 @@ export function storageReadFailureCode(status: number, errorCode?: string): Stor
   if (status === 404) return normalized === "NOT_FOUND" ? "STORAGE_NOT_FOUND" : "STORAGE_RPC_UNAVAILABLE";
   if (status === 403) return normalized === "PERMISSION_DENIED" ? "STORAGE_NOT_PUBLIC" : "STORAGE_RPC_UNAVAILABLE";
   if (status === 401) return "STORAGE_RPC_UNAVAILABLE";
-  if (normalized === "NOT_FOUND" || normalized === "STORAGE_NOT_FOUND" || normalized === "PROGRAM_NOT_FOUND") {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (normalized === "PERMISSION_DENIED" || normalized === "UNAUTHORIZED") return "STORAGE_NOT_PUBLIC";
   // The node answers 400 INVALID_REQUEST for an address no program can occupy; retrying cannot help.
   if (status === 400 && normalized === "INVALID_REQUEST") return "STORAGE_NOT_FOUND";
   return status >= 200 && status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE";

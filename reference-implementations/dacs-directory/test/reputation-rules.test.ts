@@ -180,3 +180,12 @@ test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and 
   assert.equal(average([rating(4, 6, "1".repeat(64)), rating(2, 5, "9".repeat(64))]), 4);
   assert.equal(average([rating(3, 6, "9".repeat(64)), rating(5, 6, "1".repeat(64))]), 3, "an equal time keeps the higher hash in either order");
 });
+
+test("SB-2 rejects one job reusing a settlement under two pipeline indices", () => {
+  const reused = deal({ settlementTxIds: [
+    { id: "demos:shared", observedAt: 10, phaseIndex: 2, evidenceHash: "a" },
+    { id: "demos:shared", observedAt: 11, phaseIndex: 3, evidenceHash: "b" },
+  ] });
+  assert.equal(deriveSellerReputation([reused], 0, 100).completed, 0);
+  assert.equal(deriveSellerReputation([reused], 0, 100).bundleCount, 0);
+});

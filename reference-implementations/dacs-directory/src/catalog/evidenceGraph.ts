@@ -14,7 +14,7 @@ export type ArtifactKind = "agreement" | "evidence" | "amendment" | "verify-resu
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
 export interface ResolvedEvidence {
   kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string;
-  /** For a bundle's settlementEvidence entry: the BundlePhaseEntry.index it settles (SB-1), when the bundle determines it. */
+  /** SB-1 pipeline index independently recovered from the payment-evidence anchor. */
   phaseIndex?: number;
 }
 export interface EvidenceGraph {
@@ -28,7 +28,7 @@ export interface EvidenceGraph {
   signedParties: string[];
   refsVerified: boolean;
   artifacts: ResolvedEvidence[];
-  /** The bundle's own settlementEvidence entries, each paired with its phase index when the bundle determines it. */
+  /** The bundle's settlementEvidence entries, with payment indices recovered from their anchors. */
   settlement: ResolvedEvidence[];
   agreement?: Record<string, unknown>;
   listing?: Record<string, unknown>;
@@ -37,6 +37,7 @@ export interface EvidenceGraph {
   flaggedAmendments: Array<{ locator: string; reason: string }>;
 }
 export interface EvidenceGraphDeps {
+  readAnchorRecord?: (locator: string) => Promise<{ data: Record<string, unknown>; programName?: string } | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
@@ -67,8 +68,23 @@ const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
 const PAYMENT_PHASES = new Set(["pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem"]);
 const DELIVERY_PHASES = new Set(["deliver-storage-program", "deliver-entitlement", "deliver-attested-payload"]);
 const settlesPhase = (kind: unknown): boolean => PAYMENT_PHASES.has(String(kind)) || DELIVERY_PHASES.has(String(kind));
-/** DACS-4 SettlementFinalityRecord.model. */
-const FINALITY_MODELS = new Set(["block-depth", "commitment-level", "provider-receipt", "htlc-reveal", "liquidity-tank", "bft-final"]);
+/** DACS-4 §9.7: model and parameters describe the finality actually applied on this rail. */
+export function paymentFinalityOk(raw: Record<string, unknown>): boolean {
+  const finality = rec(raw.settlementFinality);
+  if (!finality || typeof finality.finalityObservedAt !== "number" || !Number.isFinite(finality.finalityObservedAt)) return false;
+  const expected: Record<string, string> = {
+    "pay-dem": "bft-final", "pay-evm-erc20": "block-depth", "pay-solana-spl": "commitment-level",
+    "pay-ap2": "provider-receipt", "pay-cross-chain-htlc": "htlc-reveal", "pay-cross-chain-liquidity-tank": "liquidity-tank",
+  };
+  // x402 uses its settlement chain when a transaction is returned, and only otherwise a provider receipt.
+  const model = raw.phase === "pay-x402"
+    ? arr(raw.paymentTxRefs).some((ref) => ref.settlementTxHash !== undefined) ? "block-depth" : "provider-receipt"
+    : expected[String(raw.phase)];
+  if (!model || finality.model !== model) return false;
+  if (model === "block-depth" && (!Number.isSafeInteger(finality.finalityBlocks) || Number(finality.finalityBlocks) < 1)) return false;
+  if (model === "commitment-level" && !["processed", "confirmed", "finalized"].includes(String(finality.finalityCommitmentLevel))) return false;
+  return true;
+}
 const AMENDMENT_TYPES = new Set(["refund", "partial-refund", "correction"]);
 const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
@@ -348,7 +364,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
       // DACS-4 §9.7 and PC-6: a successful payment states its settled amount, its finality model and the
       // transactions it cites; delivery evidence and a failed payment carry no finality record.
       (payment && raw.outcome === "success"
-        ? priceTermOk(raw.paymentAmount) && FINALITY_MODELS.has(String(rec(raw.settlementFinality)?.model)) &&
+        ? priceTermOk(raw.paymentAmount) && paymentFinalityOk(raw) &&
           Array.isArray(raw.paymentTxRefs) && raw.paymentTxRefs.length > 0
         : raw.settlementFinality === undefined);
   }
@@ -607,7 +623,7 @@ async function verifyCurrentEvidenceGraph(
   }
   // Pair each record with its phase entry: by the entry's attestationRef, else as the only entry of
   // its kind. The phase outcome and the evidence outcome must agree. The pairing gives SB-1 its
-  // phaseIndex, which is never read from the evidence itself.
+  // candidate phaseIndex; SB-1 independently verifies it against anchor metadata below.
   const outcomesAgree = (phase: Record<string, unknown>, evidence: ResolvedEvidence) =>
     (phase.outcome === "ok") === (evidence.raw.outcome === "success");
   const paired = new Map<ResolvedEvidence, number>();
@@ -667,6 +683,37 @@ async function verifyCurrentEvidenceGraph(
   const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
     ? await verifyListing(listed.raw, resolveKey) : null;
   if (!listed || !verifiedListing) return failSigned("listing reference failed");
+  // A summary entry is an invocation of the signed pipeline at this exact index. A completed
+  // session executed every settle phase; the bundle cannot omit one to avoid evidence coverage.
+  const pipeline = arr(listed.raw.pipeline);
+  if (phases.some((phase) => pipeline[Number(phase.index)]?.kind !== phase.kind)) {
+    return failSigned("phase summary does not match the listing pipeline");
+  }
+  if (raw.outcome === "completed" && pipeline.some((phase, index) => settlesPhase(phase.kind) &&
+      !phases.some((entry) => entry.index === index))) {
+    return failSigned("completed session omits a settle phase from the listing pipeline");
+  }
+  // SB-1 / PC-2: native Demos locators are opaque. Recover the tuple from fresh SR-2 program
+  // metadata, checking the reread's hash so metadata can never be borrowed from another record.
+  const recoveredPayments = new Set<number>();
+  for (const evidence of topLevelEvidence) {
+    if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
+    const anchor = await deps.readAnchorRecord?.(evidence.locator);
+    const match = anchor?.programName?.match(/^dacs4:payment:([^:]+):([^:]+):(0|[1-9]\d*)(?::resolved)?$/);
+    if (!anchor || !match || artifactHash(anchor.data, "evidence") !== evidence.contentHash) {
+      return failSigned("payment evidence anchor binding failed");
+    }
+    const index = Number(match[3]);
+    const phase = phases.find((entry) => entry.index === index);
+    const rail = rec(pipeline[index]?.parameters)?.rail;
+    if (!Number.isSafeInteger(index) || recoveredPayments.has(index) || match[1] !== raw.jobId || typeof rail !== "string" ||
+        match[2] !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
+        (paired.has(evidence) && paired.get(evidence) !== index) || !phase || !outcomesAgree(phase, evidence)) {
+      return failSigned("payment evidence anchor binding failed");
+    }
+    recoveredPayments.add(index);
+    evidence.phaseIndex = index;
+  }
   // DACS-2 §7.7: requirementHash binds a vet to the listing's BundleRequirement, which gates the
   // publisher's counterparty. The publisher itself is vetted against requirements the listing omits.
   const requirement = rec(listed.raw.buyerRequirement);

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { canonicalDemosAgentClaim } from "../src/catalog/claimRef.js";
+import { resolveBundleSide, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { currentBundleCopiesDiverge } from "../src/catalog/currentReconciliation.js";
 import {
   agreementListingConformance,
@@ -24,6 +25,7 @@ const fixture = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, im
 const load = <T>(name: string) => JSON.parse(readFileSync(fixture(name), "utf8")) as T;
 const pinned = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
 const VENDORED = [
+  "unresolved-vs-absent-v0.3.json", "bundle-absence-evidence-v0.3.json",
   "signature-value-encoding-v0.1.json", "revocation-binding-v0.3.json", "sb2-settlement-uniqueness-v0.1.json",
   "agreement-listing-v0.1.json", "mixed-version-reconciliation-v0.3.json", "fault-bundle-perspective-pair-v0.3.json",
   "payee-destination-binding-v0.1.json", "demos-agent-claim-reference.json", "listing-preserve-unknown-v0.1.json",
@@ -180,4 +182,42 @@ test("did:demos:agent ClaimReference profile fixture (DACS-Standard #296 at 725f
   const set = load<{ cases: Array<{ id: string; input: string; expected: { accepted: boolean; canonical: string | null } }> }>("demos-agent-claim-reference.json");
   assert.equal(set.cases.length, 4);
   for (const entry of set.cases) assert.equal(canonicalDemosAgentClaim(entry.input), entry.expected.canonical, entry.id);
+});
+
+test("BB-8 absence vectors distinguish missing discovery, unqualified reads and divergent content", async () => {
+  const seller = `did:demos:agent:${"6".repeat(64)}`;
+  const deviations = new Set(["binding-resolves-authoritative-absent-one-sided", "binding-qualified-absence-allows-one-sided"]);
+  let count = 0;
+  for (const name of ["unresolved-vs-absent-v0.3.json", "bundle-absence-evidence-v0.3.json"]) {
+    const set = load<{ vectors: Array<{ name: string; expected: string; binding: Obj; reads?: Record<string, Obj>; variants?: Obj[] }> }>(name);
+    assert.equal(set.vectors.length, 4);
+    for (const vector of set.vectors) {
+      const evaluate = async (reads: Record<string, Obj>) => {
+        const content = (read: Obj | undefined): Obj | undefined => read?.response === "content" ? read.bundle as Obj
+          : (read?.observations as Obj[] | undefined)?.find((view) => view.response === "content")?.bundle as Obj | undefined;
+        const buyer = content(reads.buyer);
+        const sellerCopy = content(reads.seller);
+        if (buyer && sellerCopy) return currentBundleCopiesDiverge(
+          { ...buyer, phaseSummary: [] }, { ...sellerCopy, phaseSummary: [] },
+        ) ? "fail" : "pass";
+        const binding = { bindingVersion: "1" as const, jobId: "vector-job", role: "seller" as const,
+          logicalAddress: logicalBundleAddress("vector-job", "seller"), nativeAddress: `stor-${"0".repeat(40)}`,
+          bundleContentHash: "a".repeat(64), signer: seller,
+          signature: { algorithm: "ed25519" as const, signer: seller, value: "" } };
+        // Only project discovered bindings; missing/unauthenticated/policy-qualified absence all
+        // stay unresolved on Demos, whose mapping has no absence-evidence policy (SPEC_PIN).
+        const resolution = await resolveBundleSide({ jobId: "vector-job", role: "seller", expectedSigner: seller,
+          bindings: vector.binding.resolved === false ? [] : [binding], inspect: async () => null });
+        return resolution.disposition;
+      };
+      const expected = deviations.has(vector.name) ? "indeterminate" : vector.expected;
+      assert.equal(await evaluate(vector.reads ?? {}), expected, vector.name);
+      for (const variant of vector.variants ?? []) {
+        assert.equal(await evaluate({ seller: variant.missingAddressRead as Obj }), "indeterminate", `${vector.name}/${variant.name}`);
+      }
+      count++;
+    }
+  }
+  assert.equal(count, 8);
+  assert.equal(deviations.size, 2);
 });

@@ -13,8 +13,21 @@
 #   CD-1: a non-canonical amount (e.g. "95.00") is rejected rather than canonicalised (fail-closed).
 #   agreement-listing-v0.1 `fractional-pct-out` expects reject; the §8.5.2 text (round to the CD-1
 #     digits of bandCenter) accepts it, and the Directory follows the text.
-#   SB-1: the evm and x402 ChainTxRef variants carry no logIndex, so their references are `error`
-#     and the deal is not counted.
+#   SB-1: pinned evm/x402 refs omit logIndex; Solana refs omit instructionIndex. These refs are
+#     error and never counted. AP2, htlc-* and liquidity-tank refs have no SB-1 key format and are
+#     likewise uncounted (HTLC-5 session binding is not an SB-1 key). Every legacy SDK evm-erc20
+#     or x402 deal is uncounted because its TxRef lacks the event index; only legacy pay-dem keys.
+#   Authoritative bundle absence: the Demos mapping declares no absence-evidence policy. Both
+#     absence sets below run; their policy-qualified one-sided pass/include cases deliberately
+#     remain indeterminate/excluded. No Directory endpoint authenticates those projected proofs.
+# Skipped vector sets at this pin:
+#   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
+#     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
+#     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
+#   Previously skipped unresolved-vs-absent-v0.3 and bundle-absence-evidence-v0.3 are now vendored
+#     and exercised, with the two one-sided pass cases explicitly recorded above.
+# Node compatibility: ac8f45f pins source/API behavior, not the revision of a remote deployment.
+#     No remote revision attestation is available; runtime probe output is dated evidence only.
 # Vendored conformance vectors (byte-identical copies; sha256 checked by test/standard-vectors.test.ts):
 #   conformance/vectors/security/signature-value-encoding-v0.1.json   bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
 #   conformance/vectors/security/revocation-binding-v0.3.json         3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
@@ -25,3 +38,5 @@
 #   conformance/vectors/security/payee-destination-binding-v0.1.json  cd83d95982d6529ac3f776d48df8d92c86b80806a88e96a62d80674563aaa779
 #   conformance/vectors/security/listing-preserve-unknown-v0.1.json   7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
 #   conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78) demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
+#   conformance/vectors/security/unresolved-vs-absent-v0.3.json 8a543319798cb60073631a9a2431f45e866f89db8b136a76b679780718a15b91
+#   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e

@@ -8,8 +8,9 @@ import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERS
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
+import { reconcileCatalogReputation } from "./reputation";
 import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { boundedBundleBindings, catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
+import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
   scanChain,
@@ -353,7 +354,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         reg.wellKnownDomains = [...new Set([...(reg.wellKnownDomains ?? []), agent.domain])];
         if (agent.bundleBindings.length > 0) {
           reg.bundleBindings ??= [];
-          const carried = boundedBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
+          const carried = catalogBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
           reg.bundleBindings = carried.bindings;
           for (const binding of carried.bindings) {
             const accumulated = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
@@ -404,6 +405,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     if (fixtureSeeds.includes("counterparty-evidence")) {
       log("fixture: Counterparty Evidence Desk preserved");
     }
+
+    reconcileCatalogReputation(catalogSellers, generatedAt);
 
     for (const seller of catalogSellers) for (const listing of seller.listings) {
       const locator = listing.revocationBinding?.markerAnchor.locator;

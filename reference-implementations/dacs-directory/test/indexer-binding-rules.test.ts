@@ -38,7 +38,7 @@ const listingScope: Obj = {
     signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[SELLER]))).toString("hex") }] } }, displayName: "seller" },
   offering: { title: "rules", description: "rules", category: "rules.binding", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
   buyerRequirement: { requirementVersion: "1", required: [] },
-  pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
+  pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }],
   pricing: { kind: "fixed", price: { amount: "2", currency: "DEM" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
 };
 const listing = { ...listingScope, signature: signedWith(listingScope, "listing", SELLER) };
@@ -48,7 +48,7 @@ const agreementScope: Obj = { agreementVersion: "1", jobId: JOB, listingRef, der
   terms: { price: { amount: "2", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: { deliverableType: "attested-payload", hash: contentHash({ kind: "attested-payload", payloadFormat: "application/json" }) } } };
 const agreement = { ...agreementScope, signatures: [signedWith(agreementScope, "agreement", BUYER, "party"), signedWith(agreementScope, "agreement", SELLER, "party")] };
 const evidenceScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: `0x${"AB".repeat(32)}` }],
-  paymentAmount: { amount: "2", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
+  paymentAmount: { amount: "2", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
 const evidence = { ...evidenceScope, signature: signedWith(evidenceScope, "evidence", SELLER) };
 const ratingScope: Obj = { ratingVersion: "1", jobId: JOB, rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 4, ratedAt: 110 };
 const rating = { ...ratingScope, signature: signedWith(ratingScope, "rating", BUYER) };
@@ -78,7 +78,7 @@ async function index(bindings: Obj[], overflow: string[] = []) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = store.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: "opaque", data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1)],
@@ -188,4 +188,12 @@ test("a session aborted before commitment verifies with each copy signed by its 
   assert.equal(deal.sellerOutcome, "aborted-by-other");
   assert.equal(deal.outcome, "aborted-by-other");
   assert.equal(deal.anchoredByRole, "seller");
+});
+
+test("a completed deal with no pay phase or evidence never contributes reputation (review probe P4)", async () => {
+  const bare = bundleScope({ phaseSummary: [], settlementEvidence: [] });
+  store.set(at(20), copy("buyer", bare)).set(at(21), copy("seller", bare));
+  const deal = await index([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+  assert.equal(deal.refsVerified, false);
+  assert.equal(deal.reputationEligible, false);
 });

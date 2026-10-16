@@ -216,11 +216,15 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
    Resolved bundles recursively validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
-   records, and ratings. Settlement evidence must cover each executed settle phase once,
-   and a successful payment must state its amount, finality and transactions. Settlements
+   records, and ratings. The signed listing fixes every phase kind and index; completed
+   sessions include every listed settle phase, with one evidence record per invocation.
+   A successful payment states its amount, rail-specific finality and observation time,
+   and transactions. Payment phase indices are recovered independently from the SR-2
+   program name and checked against the evidence hash and the listing rail. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
-   leaves the deal listed but uncounted. Legacy SDK artifacts remain on an
+   leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
+   computing any seller or category totals. Legacy SDK artifacts remain on an
    explicitly-labelled compatibility path.
 
 ## Architecture note: the web app is chain-fetch-only
@@ -275,7 +279,7 @@ unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, vo
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
 
-**Pinned upstreams.** Verdicts depend on three upstreams, each pinned:
+**Upstream source contracts.** The Directory records these source revisions:
 
 - **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
@@ -292,7 +296,9 @@ computations remain advisory and independently reproducible from their refs.
   1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` or 403
   `PERMISSION_DENIED` is a definitive absence; any other 4xx, such as a proxy's or a
   wrong route's, leaves a revocation check incomplete and a scan read retryable.
-  `test/chain-storage.test.ts` pins each classification.
+  `test/chain-storage.test.ts` pins each classification. This source pin does not
+  attest the revision running at a remote RPC. The configured live service remains
+  unpinned unless its operator supplies a verifiable deployment revision.
 
 **Node deployment contract.** At `ac8f45f` the exact-name program search used by the
 producer resume lookup exists only as the read-authenticated `gcr_routine

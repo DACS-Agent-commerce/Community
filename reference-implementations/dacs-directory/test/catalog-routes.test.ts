@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 // DACS-1 §6.3.6 read endpoints through the real reindex path over a stubbed node: they serve
@@ -159,4 +159,29 @@ test("§6.3.5: a well-known card without a dacs block imports nothing, and catal
   assert.deepEqual(registration?.listingAnchors, [locator(1)], "the card added no anchors");
   const page = await (await listingsRoute.GET(anonymous("/api/dacs/listings"))).json() as { listings: Obj[] };
   assert.equal(page.listings.length, 1, "the chain-registered listing is still discoverable");
+});
+
+test("well-known binding ingestion preserves all 40 records through reindex and catalog pagination", async () => {
+  const jobId = "well-known-job";
+  const bindings = await Promise.all(sellerBindings.map(async (value) => {
+    const scope: Obj = { ...value, jobId, logicalAddress: logicalBundleAddress(jobId, "seller") };
+    delete scope.signature;
+    return { ...scope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: await sign(`dacs-bundle-binding:v1:${contentHash(scope)}`, SELLER) } };
+  }));
+  const listings = JSON.stringify({ indexVersion: "1", generatedAt: 1, seller: dids[SELLER], listings: [] });
+  const bindingIndex = JSON.stringify({ bindings });
+  httpsAnswers.set("/listings.json", { status: 200, body: listings });
+  httpsAnswers.set("/bindings.json", { status: 200, body: bindingIndex });
+  httpsAnswers.set("/.well-known/agent.json", { status: 200, body: JSON.stringify({ dacs: { dacsVersion: "1",
+    listings: { indexUrl: `https://${DOMAIN}/listings.json`, indexHash: `sha256-${sha256Hex(listings)}` },
+    bundleBindings: { indexUrl: `https://${DOMAIN}/bindings.json`, indexHash: `sha256-${sha256Hex(bindingIndex)}` },
+  } }) });
+  await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+  assert.equal(store.loadScanState().bundleBindings?.[jobId]?.length, 40);
+  assert.ok(store.loadScanState().bundleBindingOverflow?.includes(bundleBindingOverflowKey(jobId, "seller", dids[SELLER])));
+  const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${jobId}?limit=100`), { params: Promise.resolve({ jobId }) });
+  assert.equal(response.status, 200);
+  const body = await response.json() as { bindings: Obj[]; total: number };
+  assert.equal(body.total, 40);
+  assert.deepEqual(new Set(body.bindings.map(contentHash)), new Set(bindings.map(contentHash)));
 });

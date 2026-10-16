@@ -336,7 +336,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     seller: { identity: { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
   };
   const identity = (listingRaw.seller as Obj).identity as Obj;
@@ -353,7 +353,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs,
-    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final" }, observedAt: 100 };
+    paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
   const evidence = { ...evidenceScope, signature: await signArtifact(evidenceScope, "evidence", 1) };
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
@@ -368,7 +368,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     listingAnchor: at(1),
     programs: {
       [at(1)]: { data: JSON.stringify(currentListing) }, [at(2)]: { data: JSON.stringify(agreement) },
-      [at(3)]: { data: JSON.stringify(evidence) }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
+      [at(3)]: { data: JSON.stringify(evidence), name: `dacs4:payment:${jobId}:pay-dem:2` }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
     },
     deal: { jobId, rail: "pay-dem", buyerBundleRef: at(5), sellerBundleRef: at(6), owners: { buyer, seller } } as RegisteredDeal,
     bindings: [
