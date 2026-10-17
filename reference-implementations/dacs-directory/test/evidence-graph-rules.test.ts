@@ -12,6 +12,7 @@ import {
   COMMITTED_AT_INDETERMINATE,
   isCurrentRef,
   paymentFinalityOk,
+  paymentTxRefsOk,
   verifiedDiscoveryAgreement,
   type ArtifactKind,
   type EvidenceGraphDeps,
@@ -922,6 +923,10 @@ test("payment finality records require observation time and the rail's own model
   assert.equal(paymentFinalityOk(x402), true);
   assert.equal(paymentFinalityOk({ ...x402, settlementFinality: { model: "provider-receipt", finalityObservedAt: 100 } }), false);
   assert.equal(paymentFinalityOk({ ...x402, paymentTxRefs: [{ kind: "x402" }], settlementFinality: { model: "provider-receipt", finalityObservedAt: 100 } }), true);
+  // A receipt-only x402 reference has no settlement transaction, so it cannot carry an orphan chainId.
+  const receipt = { kind: "x402", httpResource: "https://example.com/resource", paymentReceiptHash: "ab".repeat(32), protocolVersion: "2" };
+  assert.equal(paymentTxRefsOk({ phase: "pay-x402", outcome: "success", paymentTxRefs: [receipt] }), true);
+  assert.equal(paymentTxRefsOk({ phase: "pay-x402", outcome: "success", paymentTxRefs: [{ ...receipt, chainId: 8453 }] }), false);
 });
 
 test("SB-1 recovers job, encoded rail and index independently from payment anchor metadata", async () => {
@@ -1021,6 +1026,15 @@ test("mixed-scale competing refunds choose the same exact overdraw in either arr
     } });
     assert.equal(graph.ok, true, graph.reason); assert.deepEqual(graph.flaggedAmendments, []);
   }
+  // A coarser-scale refund after a finer one is rescaled up, not truncated, before the overdraw check.
+  const coarser = await evaluate({ bundle: async (bundle, session) => {
+    bundle.amendments = await Promise.all(["0.35", "1"].map((amount, index) => publish(session, 40 + index, {
+      amendmentVersion: "1", jobId: JOB, amendsEvidenceRef: session.refs.evidence, amendmentType: "partial-refund",
+      refundAmount: { amount, currency: "DEM" }, reason: "scale", observedAt: 130 + index,
+    }, "amendment", SELLER)));
+  } });
+  assert.equal(coarser.ok, true, coarser.reason);
+  assert.deepEqual(coarser.flaggedAmendments, [{ locator: at(41), reason: "AMEND-3: refunds exceed the settled amount" }]);
 });
 
 test("nested evidence must retain its job and amendment references are audited even outside bundle.amendments", async () => {
@@ -1037,6 +1051,39 @@ test("nested evidence must retain its job and amendment references are audited e
   assert.equal(nested.ok, true, nested.reason);
   assert.equal(nested.artifacts.some((artifact) => artifact.kind === "amendment" && artifact.locator === at(40)), true);
   assert.deepEqual(nested.flaggedAmendments, []);
+});
+
+test("nested amendment and superseded evidence records must be signed by a session party", async () => {
+  for (const signer of [SELLER, OUTSIDER]) {
+    const amended = await evaluate({ artifacts: async (session) => {
+      const amendment = await publish(session, 40, { amendmentVersion: "1", jobId: JOB, amendsEvidenceRef: session.refs.evidence,
+        amendmentType: "correction", reason: "metadata", observedAt: 130 }, "amendment", signer);
+      session.refs.evidence = await publish(session, 41, { ...session.scopes.evidence, amendmentRefs: [amendment] }, "evidence", SELLER);
+    } });
+    assert.equal(amended.ok, signer === SELLER, `amendment signer ${signer}: ${amended.reason}`);
+    if (signer === OUTSIDER) assert.equal(amended.reason, "settlement amendment reference failed");
+    const superseded = await evaluate({ artifacts: async (session) => {
+      const prior = await publish(session, 40, { ...session.scopes.evidence, observedAt: 90 }, "evidence", signer);
+      session.refs.evidence = await publish(session, 41, { ...session.scopes.evidence, supersedesEvidenceRef: prior }, "evidence", SELLER);
+    } });
+    assert.equal(superseded.ok, signer === SELLER, `superseded signer ${signer}: ${superseded.reason}`);
+    if (signer === OUTSIDER) assert.equal(superseded.reason, "settlement evidence chain failed");
+  }
+});
+
+test("nested resolution stops reading once the graph reaches its size bound", async () => {
+  let reads = 0;
+  const graph = await evaluate({ artifacts: async (session) => {
+    const refs: Obj[] = [];
+    for (let i = 0; i < 120; i++) refs.push(await publish(session, 100 + i, { amendmentVersion: "1", jobId: JOB,
+      amendsEvidenceRef: session.refs.evidence, amendmentType: "correction", reason: `r${i}`, observedAt: 130 }, "amendment", SELLER));
+    session.refs.evidence = await publish(session, 41, { ...session.scopes.evidence, amendmentRefs: refs }, "evidence", SELLER);
+    const get = session.store.get.bind(session.store);
+    session.store.get = (key: string) => { reads++; return get(key); };
+  } });
+  assert.equal(graph.ok, false);
+  assert.equal(graph.reason, "evidence graph exceeds size limit");
+  assert.ok(reads <= 70, `nested reads ${reads}`);
 });
 
 test("finality block-depth boundaries and mixed x402 receipts keep the applied chain model", () => {

@@ -32,11 +32,14 @@
 #     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
 #     live exact-version recipe policy, an allowed method and a trusted authenticated signer.
 #     RAV-2: the catalog does not disclose per-result availability yet. Non-live vet results
-#     remain indeterminate; non-live recipes cannot elevate identity tiers either.
+#     remain indeterminate; non-live recipes cannot elevate identity tiers either. This applies
+#     to every included VerifyResult, optional ones too: each needs a valid live recipe policy.
 #     Wrapper expiry and listing maxAge only narrow that authority window.
 #     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
 #     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
-#   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. Unreadable payloads,
+#   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. The DV-1 hash covers
+#     the complete NFC/JCS payload, including any signature/signatures fields (the pinned SDK's
+#     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
 #     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
 #     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
 # Skipped vector sets at this pin:

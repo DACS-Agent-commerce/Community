@@ -317,7 +317,7 @@ test("each signed payment phase requires its own transaction kind and complete C
         const agreedScope = { ...agreementScope, listingRef, terms: { ...agreementScope.terms as Obj, rail: { railId: rail.phase } } };
         const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
         store.set(at(2), agreed);
-        const paidScope = { ...evidenceScope, phase: rail.phase, paymentTxRefs: refs, settlementFinality: { ...rail.finality, ...(name === "provider receipt" ? { model: "provider-receipt" } : {}), finalityObservedAt: 100 } };
+        const paidScope = { ...evidenceScope, phase: rail.phase, paymentTxRefs: refs, settlementFinality: { ...rail.finality, ...(name === "provider receipt" || name === "orphan chainId" ? { model: "provider-receipt" } : {}), finalityObservedAt: 100 } };
         const paid = { ...paidScope, signature: signedWith(paidScope, "evidence", SELLER) };
         store.set(at(3), paid);
         const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: rail.phase, outcome: "ok" }], settlementEvidence: [refTo(at(3), paid, "evidence")] });
