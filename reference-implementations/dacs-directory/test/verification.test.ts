@@ -317,7 +317,9 @@ test("the browser deal verdict is strict only with matching parties, signatures,
   type Input = Parameters<typeof browserDealVerdict>[0];
   const base: Input = { verification, bundleRef: "stor-buyer", buyerOwner: "buyer", expectedSeller: "seller", registered, signaturesOk: true, refsOk: true };
   const verdict = (change: Partial<Input>) => browserDealVerdict({ ...base, ...change });
-  assert.deepEqual(verdict({}), { verdict: "strict-pass", reason: undefined });
+  assert.deepEqual(verdict({}), { verdict: "limited", reason: "legacy payment verification is indeterminate: authoritative settlement adapter is unavailable" });
+  const unpaid = { ...verification, bundle: { ...verification.bundle!, outcome: "aborted-by-self" as const, settlementEvidence: [] } };
+  assert.equal(verdict({ verification: unpaid }).verdict, "strict-pass", "an unpaid abort needs no settlement adapter");
   const cases: Array<[string, Partial<Input>, string, string | undefined]> = [
     ["another buyer expected", { buyerOwner: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
     ["another seller expected", { expectedSeller: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],

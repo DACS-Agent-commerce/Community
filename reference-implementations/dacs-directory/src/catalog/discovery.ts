@@ -2,7 +2,7 @@ import type { Catalog, ListingSummary, SellerRecord } from "./types.js";
 
 /** Historical signed phase-name aliases are retained for evidence, but cannot be executed
  * under the current registry. Publishers must issue a new signed version with canonical IDs. */
-const activeOffer = (listing: ListingSummary): boolean => listing.status === "active" &&
+export const activeOffer = (listing: ListingSummary): boolean => listing.status === "active" &&
   !(listing.artifactProfile === "dacs-v0.1" && listing.offering.rails?.some((rail) => rail === "pay-dem" || rail === "pay-x402"));
 
 /** Public discovery advertises active, executable offers only. */

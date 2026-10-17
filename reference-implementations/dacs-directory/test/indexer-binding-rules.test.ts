@@ -325,6 +325,11 @@ test("each signed payment phase requires its own transaction kind and complete C
         variants.push(["version 1", [{ ...rail.ref, protocolVersion: "1" }], true]);
         variants.push(["orphan chainId", [Object.fromEntries(Object.entries(rail.ref).filter(([key]) => key !== "settlementTxHash"))], false]);
       }
+      if (["pay-evm-erc20", "pay-solana-spl"].includes(rail.phase)) {
+        variants.push(["asserted settlement with wrong amount", [{ ...rail.ref, amount: "1", status: "confirmed" }], true]);
+        variants.push(["asserted settlement with wrong payee", [{ ...rail.ref, to: dids[OUTSIDER], status: "confirmed" }], true]);
+        variants.push(["nonexistent transaction without proof", [{ ...rail.ref, ...(rail.phase === "pay-evm-erc20" ? { txHash: "cd".repeat(32) } : { signature: "2".repeat(64) }) }], true]);
+      }
       if (rail.phase === "pay-evm-erc20") {
         const ref = { ...rail.ref }; delete ref.logIndex;
         variants.push(["upstream ref without logIndex", [ref], true]);
@@ -352,7 +357,7 @@ test("each signed payment phase requires its own transaction kind and complete C
           resolveListing: async () => ({ locator: at(1), raw: listed }),
         });
         assert.equal(graph.signaturesVerified, true, `${rail.phase}: ${name}`);
-        const verified = expected && !["pay-ap2", "pay-x402"].includes(rail.phase);
+        const verified = expected && rail.phase === "pay-dem";
         assert.equal(graph.refsVerified, verified, `${rail.phase}: ${name}: ${graph.reason}`);
         const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], rail.phase);
         // AP2, HTLC, tank and receipt-only x402 intentionally have no supported SB-1 key.

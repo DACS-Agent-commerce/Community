@@ -15,9 +15,13 @@ export function demOs(v: unknown): bigint | null {
   const [whole, fraction = ""] = v.split(".");
   return BigInt(whole) * 1_000_000_000n + BigInt(fraction.padEnd(9, "0"));
 }
-// The pinned node uses numeric DEM; the SDK's post-fork wire carries OS strings.
-const wireOs = (v: unknown): bigint | null => typeof v === "string" && /^(?:0|[1-9]\d*)$/.test(v)
-  ? BigInt(v) : typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? demOs(String(v)) : null;
+// getTxByHash reconstructs persisted OS as a safe number or an exact string.
+// The nested send payload is not reconstructed: only its canonical OS string is
+// supported. Numeric legacy DEM payloads need historical fork semantics and stay
+// indeterminate; do not infer their unit from the size of the amount.
+const payloadOs = (v: unknown): bigint | null => typeof v === "string" && /^(?:0|[1-9]\d*)$/.test(v) ? BigInt(v) : null;
+const storedOs = (v: unknown): bigint | null => typeof v === "number" && Number.isSafeInteger(v) && v >= 0
+  ? BigInt(v) : payloadOs(v);
 
 /** Public node reads establish terminal inclusion and the actual native-send payload. */
 export async function verifyNativePayment(ref: Obj, agreement: Obj, phaseIndex: number, read?: SettlementNodeRead): Promise<"pass" | "fail" | "indeterminate"> {
@@ -41,10 +45,11 @@ export async function verifyNativePayment(ref: Obj, agreement: Obj, phaseIndex: 
     const data = content?.data;
     const payload = Array.isArray(data) && data[0] === "native" ? rec(data[1]) : null;
     const args = payload?.args;
+    if (Array.isArray(args) && typeof args[1] === "number") return "indeterminate";
     if (hash(tx.hash) !== txHash || tx.blockNumber !== ref.blockNumber || content?.type !== "native" ||
         address(content.from) !== payer || address(content.to) !== payee ||
         payload?.nativeOperation !== "send" || !Array.isArray(args) || args.length !== 2 ||
-        address(args[0]) !== payee || wireOs(args[1]) !== amount || wireOs(content.amount) !== amount) return "fail";
+        address(args[0]) !== payee || payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount) return "fail";
     const block = rec(await read("getBlockByNumber", { blockNumber: ref.blockNumber }));
     if (!block) return "indeterminate";
     const transactions = rec(block.content)?.ordered_transactions;

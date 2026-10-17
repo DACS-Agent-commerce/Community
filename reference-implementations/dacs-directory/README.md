@@ -340,5 +340,10 @@ names as rail IDs remain readable as evidence, but are excluded from public disc
 a new signed listing version to make those offers executable.
 
 Native DEM success requires public transaction and block reads confirming inclusion, the payer
-and payee, and the exact agreed amount (1 DEM = 10^9 OS). AP2 and x402 success remains
-indeterminate until an authenticated authoritative-receipt adapter is available in this profile.
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). The stored RPC amount is OS,
+carried as a safe integer or an exact string; the send payload must contain a canonical OS
+string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
+All other current payment rails and paid SDK legacy sessions remain indeterminate until their
+authoritative settlement adapters are available. They contribute no completion or volume.
+Historical listings remain available on explicitly archival seller and service pages; the
+well-known index, skills, seller API and sitemap advertise executable offers only.

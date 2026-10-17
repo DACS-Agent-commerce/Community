@@ -177,7 +177,7 @@ test("browser verdict: registered owners must be an object naming both parties",
   const registered = { owners: { buyer: dids[BUYER], seller: dids[SELLER] }, buyerBundleRef: at(2), sellerBundleRef: at(3) };
   const verdict = (owners: unknown) => policy.browserDealVerdict({ verification: value, bundleRef: at(2), buyerOwner: dids[BUYER], expectedSeller: dids[SELLER],
     registered: { ...registered, owners }, signaturesOk: true, refsOk: true }).verdict;
-  assert.equal(verdict(registered.owners), "strict-pass");
+  assert.equal(verdict(registered.owners), "limited");
   for (const owners of ["owners", [registered.owners], { buyer: dids[BUYER] }, { buyer: dids[BUYER], seller: 7 }, { buyer: dids[OUTSIDER], seller: dids[SELLER] }]) {
     assert.equal(verdict(owners), "fail", JSON.stringify(owners));
   }
@@ -212,7 +212,7 @@ test("§10.5.1 reconciliation leaves unverified records and lone verified copies
     [[at(2), false, false], [at(2), false, false], [at(3), true, true]]);
 });
 
-test("an SDK-profile deal verifies end to end on the labelled legacy path, and each copy must be strict", async () => {
+test("an SDK-profile paid deal retains signatures but remains unverified without an authoritative adapter", async () => {
   // The legacy path is chosen only when neither copy carries the current bundleVersion "1" discriminator.
   const bundleScope: Obj = { ...verification().bundle } as Obj;
   delete bundleScope.anchoredByRole;
@@ -242,14 +242,15 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   assert.equal(record.deals.length, 1);
   assert.deepEqual({ ...record.deals[0], verifiedAt: 0, anchorTimestamp: undefined }, {
     jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] },
-    signatureVerified: true, refsVerified: true, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
-    bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: true, cancellationNeutral: false, orchestratorFaultNeutral: false,
+    signatureVerified: true, refsVerified: false, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
+    bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: false, cancellationNeutral: false, orchestratorFaultNeutral: false,
     finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", verifiedAt: 0,
     // SB-1 on the legacy profile: a pay-dem TxRef keys as demos:{hash}, under the evidence's own phaseIndex.
     settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 0, evidenceHash: contentHash(evidenceScope) }],
   });
-  assert.equal(record.reputation.completed, 1);
+  assert.equal(record.reputation.completed, 0);
   assert.equal((await run(base, { orchestratorFaultNeutral: true })).deals[0].orchestratorFaultNeutral, false, "registration cannot grant FAB neutrality to a legacy copy");
+  assert.deepEqual(record.reputation.observedTransactionalVolume, []);
   const verdict = async (stored: Record<string, Obj>, registered: Obj = {}) => {
     const deal = (await run(stored, registered)).deals[0];
     return `${deal.refsVerified ? "verified" : "unverified"} ${deal.reputationEligible ? "eligible" : "ineligible"} ${deal.sellerOutcome}`;
@@ -281,7 +282,7 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
     "two strict copies that diverge": "unverified ineligible failed-perm",
   });
   // Signature order is not significant.
-  assert.equal(await verdict({ ...base, [at(3)]: { ...copy("seller"), signatures: [bundleSignature(SELLER), bundleSignature(BUYER)] } }), "verified eligible completed");
+  assert.equal(await verdict({ ...base, [at(3)]: { ...copy("seller"), signatures: [bundleSignature(SELLER), bundleSignature(BUYER)] } }), "unverified ineligible completed");
   // A copy carrying the current discriminator is verified as a current bundle, never retried as legacy.
   const current = await verdict({ ...base, [at(2)]: copy("buyer", { bundleVersion: "1" }), [at(3)]: copy("seller", { bundleVersion: "1" }) });
   assert.equal(current, "unverified ineligible undefined");
@@ -296,12 +297,28 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
       signatures: [BUYER, SELLER].map((signer) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(scope)}`, signer, "base64url") })) });
     return { [at(2)]: signed(buyerScope, "buyer"), [at(3)]: signed(sellerScope, "seller") };
   };
+  for (const [name, change] of Object.entries({
+    "no block or transaction proof": {},
+    "nonexistent transaction": { paymentTxRefs: [{ rail: "demos", txHash: "cd".repeat(32), kind: "payment" }] },
+    "wrong amount": { paymentAmount: { amount: "1", currency: "DEM" } },
+    "wrong payee": { payee: dids[OUTSIDER] },
+  })) {
+    const paid = { ...evidenceScope, ...change };
+    const signed = { ...paid, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(paid)}`, SELLER) } };
+    const scoped = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(paid) }] };
+    const result = await run({ ...base, [evidenceAt]: signed, ...signedCopies(scoped) });
+    assert.equal(result.deals[0].signatureVerified, true, name);
+    assert.equal(result.deals[0].refsVerified, false, name);
+    assert.equal(result.deals[0].reputationEligible, false, name);
+    assert.equal(result.reputation.completed, 0, name);
+    assert.deepEqual(result.reputation.observedTransactionalVolume, [], name);
+  }
   for (const [buyerOutcome, sellerOutcome] of [["failed-perm", "failed-counterparty"], ["failed-counterparty", "failed-perm"],
     ["aborted-by-self", "aborted-by-other"], ["aborted-by-other", "aborted-by-self"], ["failed-substrate", "failed-substrate"]]) {
     const buyer = { ...bundleScope, outcome: buyerOutcome }; const seller = { ...bundleScope, outcome: sellerOutcome };
     const stored = { ...base, ...signedCopies(buyer, seller) };
     const result = await run(stored);
-    assert.equal(result.deals[0].refsVerified, true, sellerOutcome);
+    assert.equal(result.deals[0].refsVerified, false, sellerOutcome);
     assert.equal(result.deals[0].sellerOutcome, sellerOutcome);
     assert.equal(result.deals[0].anchoredByRole, "seller");
     assert.equal(result.deals[0].bundleContentHash, contentHash(seller));
@@ -321,13 +338,13 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   })) };
   const annotatedBundle = { ...bundleScope, agreementRef: { kind: "dacs-3-agreement", id: "agreement-legacy", contentHash: contentHash(annotatedAgreement) } };
   const annotated = await run({ ...base, [resolveProgramAddress(dids[BUYER], `dacs3:agreement:${JOB}`)!]: signedAgreement, ...signedCopies(annotatedBundle) });
-  assert.equal(annotated.deals[0].reputationEligible, true);
+  assert.equal(annotated.deals[0].reputationEligible, false);
   assert.equal(annotated.deals[0].settlementTxIds?.length, 1);
   const failedEvidence = { ...evidenceScope, outcome: "failure" };
   const failedBundle = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(failedEvidence) }] };
   const failed = await run({ ...base, [evidenceAt]: { ...failedEvidence, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(failedEvidence)}`, SELLER) } },
     ...signedCopies({ ...failedBundle, outcome: "failed-counterparty" }, { ...failedBundle, outcome: "failed-perm" }) });
-  assert.equal(failed.deals[0].refsVerified, true);
+  assert.equal(failed.deals[0].refsVerified, false);
   assert.deepEqual(failed.deals[0].settlementTxIds, []);
   assert.equal(failed.reputation.completed, 0);
 
@@ -344,7 +361,7 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   try {
     store.saveScanState({ ...priorState, programs: { ...priorState.programs, [vetKey]: at(90) } });
     const complete = { ...base, [at(90)]: vet, ...signedCopies(vettedBundle) };
-    assert.equal((await run(complete)).deals[0].refsVerified, true, actualVetName);
+    assert.equal((await run(complete)).deals[0].refsVerified, false, actualVetName);
     assert.equal((await run({ ...complete, [at(90)]: undefined as unknown as Obj })).deals[0].refsVerified, false);
     store.saveScanState({ ...priorState, programs: { ...priorState.programs, [vetKey]: null } });
     assert.equal((await run(complete)).deals[0].refsVerified, false, "indeterminate program names never fall back");
@@ -385,7 +402,7 @@ test("further legacy rules: an invalid presented signature, empty optional lists
   assert.equal(pinnedTo({ ...listingScope, listingVersion: 0, terms }, { ...listingScope, listingVersion: 0, terms }), undefined, "version 0");
 });
 
-test("the in-browser verifier: a strict pass, limited without a registered copy, and failure on an altered record", async () => {
+test("the in-browser verifier: unproven legacy settlement is limited and altered artifacts fail", async () => {
   const { detailRows, verdictPresentation, verificationErrorMessage, verifyDealInBrowser } = await import("../src/components/verifyDealModel.js");
   const bundleScope: Obj = { ...verification().bundle } as Obj;
   delete bundleScope.anchoredByRole;
@@ -407,9 +424,10 @@ test("the in-browser verifier: a strict pass, limited without a registered copy,
   const input = { bundleRef: at(2), buyerOwner: dids[BUYER], expectedSeller: dids[SELLER] };
 
   const strict = await verifyDealInBrowser(input, deps(registered));
-  assert.equal(strict.verdict, "strict-pass");
+  assert.equal(strict.verdict, "limited");
+  assert.match(strict.result.reason!, /authoritative settlement adapter/);
   const shown = verdictPresentation(strict.result, strict.verdict);
-  assert.deepEqual([shown.tone, shown.headline, shown.checks.map((check) => check.mark)], ["ok", "✓ Evidence is strictly verified", ["✓", "✓", "✓"]]);
+  assert.deepEqual([shown.tone, shown.headline, shown.checks.map((check) => check.mark)], ["limited", "◇ Evidence is internally consistent; settlement or copy role unverified", ["✓", "✓", "?"]]);
   // Session artifacts are read from the buyer's owner-scoped programs, by name; the bundle by its ref.
   assert.ok(requested.includes(`owner=${encodeURIComponent(dids[BUYER])}&name=${encodeURIComponent(`dacs3:agreement:${JOB}`)}`));
   assert.ok(requested.includes(`ref=${encodeURIComponent(at(2))}`));
@@ -421,7 +439,7 @@ test("the in-browser verifier: a strict pass, limited without a registered copy,
   assert.equal(limited.verdict, "limited");
   const limitedShown = verdictPresentation(limited.result, limited.verdict);
   assert.deepEqual([limitedShown.tone, limitedShown.headline, limitedShown.checks.map((check) => check.mark)],
-    ["limited", "◇ Evidence is internally consistent; copy role unverified", ["✓", "✓", "?"]]);
+    ["limited", "◇ Evidence is internally consistent; settlement or copy role unverified", ["✓", "✓", "?"]]);
 
   const altered = new Map(stored).set(`dacs4:evidence:${JOB}`, { ...evidence, observedAt: 101 });
   const failed = await verifyDealInBrowser(input, deps(registered, altered));

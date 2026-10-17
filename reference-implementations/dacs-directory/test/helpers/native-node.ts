@@ -17,6 +17,6 @@ export function nativeNodeFixture(artifacts: () => Iterable<Obj>): SettlementNod
     const amount = (BigInt(whole) * 1000000000n + BigInt(fraction.padEnd(9, "0"))).toString();
     const to = agreement.payeeBoundAgreementVersion === "1" ? agreement.terms.payoutBindings[0].payeeAddress : party("seller");
     return { hash: data.hash, status: "confirmed", blockNumber: ref.blockNumber,
-      content: { type: "native", from: party("buyer"), to, amount, data: ["native", { nativeOperation: "send", args: [to, amount] }] } };
+      content: { type: "native", from: party("buyer"), to, amount: BigInt(amount) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amount) : amount, data: ["native", { nativeOperation: "send", args: [to, amount] }] } };
   };
 }

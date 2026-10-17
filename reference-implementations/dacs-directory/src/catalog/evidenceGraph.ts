@@ -885,7 +885,10 @@ async function verifyCurrentEvidenceGraph(
     if (evidence.raw.phase === "pay-ap2" || evidence.raw.phase === "pay-x402") {
       return failSigned("payment verification is indeterminate: authenticated provider receipt is unavailable");
     }
-    if (evidence.raw.phase === "pay-dem") for (const ref of arr(evidence.raw.paymentTxRefs)) {
+    if (evidence.raw.phase !== "pay-dem") {
+      return failSigned("payment verification is indeterminate: authoritative rail adapter is unavailable");
+    }
+    for (const ref of arr(evidence.raw.paymentTxRefs)) {
       const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
       if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
     }

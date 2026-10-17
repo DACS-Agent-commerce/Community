@@ -1336,11 +1336,11 @@ test("a mixed pair indexes the fault copy's advisory fields and hash even when i
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("reindex admits a shared settlement once across sellers before seller and category totals", async () => {
+test("reindex and refresh never admit unsupported EVM settlements across sellers", async () => {
   const store = await import("../src/catalog/store.js");
   const { reindexAll } = await import("../src/catalog/reindexCore.js");
-  // Use an indexed EVM settlement to exercise the catalog-wide SB-2 ledger across
-  // sellers. One native send cannot simultaneously pay two different seller addresses.
+  // Two signed seller histories cite the same synthetic EVM settlement. Neither
+  // can establish settlement without an authoritative rail adapter.
   const asEvm = async (fixture: Awaited<ReturnType<typeof vector>>, seller: number) => {
     const listingScope = signedScope(fixture.listing, "listing");
     listingScope.pipeline = (listingScope.pipeline as Obj[]).map((p) => p.kind === "pay-dem" ? { kind: "pay-evm-erc20", parameters: { rail: "evm-test" } } : p);
@@ -1403,11 +1403,11 @@ test("reindex admits a shared settlement once across sellers before seller and c
       assert.equal(sellers.length, 2);
       const winner = sellers.find((seller) => seller.primaryClaim === dids[0])!;
       const loser = sellers.find((seller) => seller.primaryClaim === dids[1])!;
-      assert.equal(winner.deals[0].refsVerified, true); assert.equal(loser.deals[0].refsVerified, true);
-      assert.equal(winner.reputation.completed, 1); assert.equal(loser.reputation.completed, 0);
-      assert.equal(winner.deals[0].reputationEligible, true); assert.equal(loser.deals[0].reputationEligible, true);
-      assert.equal(winner.deals[0].settlementRejected, undefined); assert.equal(loser.deals[0].settlementRejected, true);
-      assert.equal(winner.listings[0].reputationHint?.bundleCount, 1); assert.equal(loser.listings[0].reputationHint?.bundleCount, 0);
+      assert.equal(winner.deals[0].refsVerified, false); assert.equal(loser.deals[0].refsVerified, false);
+      assert.equal(winner.reputation.completed, 0); assert.equal(loser.reputation.completed, 0);
+      assert.equal(winner.deals[0].reputationEligible, false); assert.equal(loser.deals[0].reputationEligible, false);
+      assert.equal(winner.deals[0].settlementRejected, undefined); assert.equal(loser.deals[0].settlementRejected, undefined);
+      assert.equal(winner.listings[0].reputationHint?.bundleCount, 0); assert.equal(loser.listings[0].reputationHint?.bundleCount, 0);
       assert.deepEqual(loser.reputation.observedTransactionalVolume, []);
 
       // Run the immediate-refresh publication operations in both arrival orders. Refreshing
@@ -1419,23 +1419,23 @@ test("reindex admits a shared settlement once across sellers before seller and c
         catalog.generatedAt = Date.now();
         store.saveCatalog(catalog);
         const published = store.loadCatalog().sellers;
-        assert.deepEqual(published.map((seller) => seller.reputation.completed).sort(), [0, 1]);
+        assert.deepEqual(published.map((seller) => seller.reputation.completed).sort(), [0, 0]);
         const rejected = published.find((seller) => seller.primaryClaim === dids[1])!;
         assert.deepEqual(rejected.reputation.observedTransactionalVolume, []);
         assert.equal(rejected.reputation.averageSellerRating, null);
         assert.equal(rejected.listings[0].reputationHint?.bundleCount, 0);
       }
 
-      // Losing admission is reversible without re-verifying or refreshing that seller.
+      // Removing the other seller cannot admit an unverified settlement.
       const catalog = store.loadCatalog();
       catalog.sellers = catalog.sellers.filter((seller) => seller.primaryClaim === dids[1]);
       store.saveCatalog(catalog);
       const reconsidered = store.loadCatalog().sellers[0];
-      assert.equal(reconsidered.deals[0].reputationEligible, true);
+      assert.equal(reconsidered.deals[0].reputationEligible, false);
       assert.equal(reconsidered.deals[0].settlementRejected, undefined);
-      assert.equal(reconsidered.reputation.completed, 1);
-      assert.deepEqual(reconsidered.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
-      assert.equal(reconsidered.listings[0].reputationHint?.bundleCount, 1);
+      assert.equal(reconsidered.reputation.completed, 0);
+      assert.deepEqual(reconsidered.reputation.observedTransactionalVolume, []);
+      assert.equal(reconsidered.listings[0].reputationHint?.bundleCount, 0);
     }
   } finally {
     globalThis.fetch = originalFetch;

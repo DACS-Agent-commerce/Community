@@ -11,6 +11,7 @@ import { contentHash, sha256Hex, stripSignature } from "@kynesyslabs/dacs/canoni
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
+import { activeOffer } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
@@ -30,8 +31,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const listings = seller.listings.filter(activeOffer);
   const entries = [];
-  for (const l of seller.listings) {
+  for (const l of listings) {
     const raw = await readAnchor(l.anchor.locator);
     if (!raw) continue;
     entries.push({
@@ -66,7 +68,7 @@ export async function GET(req: NextRequest) {
   const agentJson = JSON.stringify(
     {
       name: seller.displayName,
-      description: seller.listings[0]?.offering.description ?? "",
+      description: listings[0]?.offering.description ?? "",
       url: `https://${domain}`,
       version: "1.0.0",
       protocolVersion: "0.3.0",
@@ -74,7 +76,7 @@ export async function GET(req: NextRequest) {
       capabilities: { streaming: false, pushNotifications: false, stateTransitionHistory: false },
       defaultInputModes: ["application/json", "text/plain"],
       defaultOutputModes: ["application/json"],
-      skills: seller.listings.filter((listing) => listing.status === "active").map((listing) => ({
+      skills: listings.map((listing) => ({
         id: listing.listingId,
         name: listing.offering.title,
         description: listing.offering.description ?? "DACS service",

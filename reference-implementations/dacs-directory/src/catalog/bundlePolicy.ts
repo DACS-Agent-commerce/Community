@@ -68,6 +68,12 @@ export function bundleMatchesRegisteredAnchor(
   return expectedRole !== null && bundle?.anchoredByRole === expectedRole;
 }
 
+/** Legacy signatures/hashes establish artifact integrity, not paid settlement.
+ * No authoritative adapter exists for this profile, including native DEM. */
+export function legacyPaymentProofUnavailable(bundle: BundleVerification["bundle"]): boolean {
+  return bundle?.outcome === "completed" || Boolean(bundle?.settlementEvidence?.length);
+}
+
 export type BrowserDealVerdict = "strict-pass" | "limited" | "fail";
 
 /**
@@ -110,6 +116,9 @@ export function browserDealVerdict(input: {
           : !anchorRoleMatches
             ? "bundle anchoredByRole does not match its registered buyer/seller address"
             : verification.reason;
+  if (internallyConsistent && anchorRoleMatches && legacyPaymentProofUnavailable(verification.bundle)) {
+    return { verdict: "limited", reason: "legacy payment verification is indeterminate: authoritative settlement adapter is unavailable" };
+  }
   return {
     verdict: internallyConsistent && anchorRoleMatches ? "strict-pass"
       : internallyConsistent && !anchorBindingAvailable ? "limited" : "fail",
@@ -283,6 +292,7 @@ export async function verifyReferencedArtifactSignature(
   return true;
 }
 
+/** Artifact integrity only; callers must also apply legacyPaymentProofUnavailable. */
 export async function refsPassStrictPolicy(
   verification: BundleVerification,
   artifacts: ResolvedArtifact[],

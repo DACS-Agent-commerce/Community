@@ -74,6 +74,7 @@ import {
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
   legacyFullSignatureStanding,
+  legacyPaymentProofUnavailable,
   refsPassStrictPolicy,
   verifiedListingTerms,
   type ResolvedArtifact,
@@ -503,7 +504,7 @@ export async function indexRegistration(
     );
     const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
+    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent && !legacyPaymentProofUnavailable(bundle);
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {

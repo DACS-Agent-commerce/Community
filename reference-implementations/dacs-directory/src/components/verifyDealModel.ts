@@ -94,11 +94,11 @@ export function verdictPresentation(result: BundleVerification, verdict: DealVer
   return {
     tone: strict ? "ok" : limited ? "limited" : "err",
     headline: strict ? "✓ Evidence is strictly verified"
-      : limited ? "◇ Evidence is internally consistent; copy role unverified" : "✗ Evidence failed verification",
+      : limited ? "◇ Evidence is internally consistent; settlement or copy role unverified" : "✗ Evidence failed verification",
     summary: strict
       ? "The required parties signed, the copy role matches its registered address, and every referenced record matches its bundle hash."
       : limited
-        ? "Signatures and referenced hashes are consistent, but this directory has no registered address-role binding for the copy."
+        ? "Signatures and referenced hashes are consistent; settlement or the registered copy address remains unverified."
         : result.reason ?? "One or more cryptographic checks failed.",
     checks: [
       { label: "Party signatures", detail: "Buyer and seller signatures must match the keys named in the bundle.", mark: signaturesValid ? "✓" : "✗", ok: signaturesValid },
