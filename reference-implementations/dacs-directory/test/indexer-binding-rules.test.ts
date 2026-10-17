@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -364,6 +365,11 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "trusted closed-data recipe", policy: [{ availability: "closed_data" }] },
     { name: "trusted bilateral recipe", policy: [{ availability: "bilateral" }] },
     { name: "optional gated vet result also needs disclosure", policy: [{ availability: "operator_gated" }], requirement: { requirementVersion: "1", required: [] } },
+    { name: "optional live vet result", requirement: { requirementVersion: "1", required: [] }, expected: true },
+    ...["mocked", "disabled", "failed"].map((availability) => ({ name: `optional unusable recipe ${availability}`, policy: [{ availability }], requirement: { requirementVersion: "1", required: [] } })),
+    { name: "optional missing recipe policy", policy: [], requirement: { requirementVersion: "1", required: [] } },
+    { name: "optional gated untrusted signer", policy: [{ availability: "operator_gated", trustedResultSigners: [] }], requirement: { requirementVersion: "1", required: [] } },
+    { name: "optional gated forbidden method", policy: [{ availability: "operator_gated", methods: ["other"] }], requirement: { requirementVersion: "1", required: [] } },
     { name: "malformed recipe JSON", rawPolicy: "{invalid", result: { validUntil: undefined } },
     { name: "other scheme policy", policy: [{ scheme: "domain" }], result: { validUntil: undefined } },
     { name: "nonnumeric recipe lifetime", policy: [{ defaultMaxAgeSec: "1" }], result: { validUntil: undefined } },
@@ -691,8 +697,15 @@ test("HTLC success rejects a foreign kind even with a hash under the undefined l
 test("storage payload and ACL verification gates catalog completion and volume", async (t) => {
   const original = new Map(store);
   const payload = { report: "catalog delivery" };
-  const cases: Array<{ name: string; accessModel?: string; evidence?: Obj; metadata?: Obj; expected?: boolean }> = [
+  const signedPayload = { ...payload, signature: "original", signatures: ["original"] };
+  const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
+  const cases: Array<{ name: string; accessModel?: string; evidence?: Obj; metadata?: Obj; payload?: Obj; expected?: boolean }> = [
     { name: "verified public payload", expected: true },
+    { name: "verified payload includes both signature fields", payload: signedPayload, evidence: { deliverableContentHash: signedPayloadHash }, expected: true },
+    { name: "changed signature at fixed payload hash", payload: { ...signedPayload, signature: "tampered" }, evidence: { deliverableContentHash: signedPayloadHash } },
+    { name: "changed signatures at fixed payload hash", payload: { ...signedPayload, signatures: ["tampered"] }, evidence: { deliverableContentHash: signedPayloadHash } },
+    { name: "artifact hash cannot hide changed signature", payload: { ...signedPayload, signature: "tampered" } },
+    { name: "artifact hash cannot hide changed signatures", payload: { ...signedPayload, signatures: ["tampered"] } },
     { name: "verified buyer-only payload", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64)}`] } }, expected: true },
     { name: "missing hash", evidence: { deliverableContentHash: undefined } },
     { name: "wrong hash", evidence: { deliverableContentHash: "0".repeat(64) } },
@@ -720,7 +733,7 @@ test("storage payload and ACL verification gates catalog completion and volume",
       const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"),
         phaseSummary: pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })),
         settlementEvidence: [refTo(at(3), evidence, "evidence"), refTo(at(50), delivered, "evidence")] });
-      store.set(at(1), listed).set(at(2), agreed).set(at(50), delivered).set(at(51), payload).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+      store.set(at(1), listed).set(at(2), agreed).set(at(50), delivered).set(at(51), c.payload ?? payload).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const metadata = { [at(51)]: { programName: `dacs4:deliverable:${JOB}`, acl: { mode: "public" }, ...c.metadata } };
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "pay-dem", 2, metadata);
       assert.equal(seller.deals[0].refsVerified, c.expected ?? false);

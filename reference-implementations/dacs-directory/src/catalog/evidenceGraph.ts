@@ -1,4 +1,4 @@
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyIdentityPresentation, verifyListing } from "./listingVerification.js";
@@ -658,9 +658,9 @@ async function verifyCurrentEvidenceGraph(
   for (const result of artifacts.filter((artifact) => artifact.kind === "verify-result")) {
     const policy = await validateRecipeResult(result.raw, undefined, resolveKey);
     recipePolicies.set(result, policy);
-    // RAV-2: until per-result availability is disclosed, even optional non-live
-    // vet results cannot give the graph an undifferentiated verified verdict.
-    if (policy && policy.availability !== "live") return failSigned(`vet recipe availability is indeterminate: ${policy.availability}`);
+    // RAV-2/3: until per-result availability is disclosed, even optional results
+    // need a valid live policy before giving the graph verified standing.
+    if (!policy || policy.availability !== "live") return failSigned(`vet recipe availability is indeterminate: ${policy?.availability ?? "invalid policy"}`);
   }
   const vetDecisions = new Map(artifacts.filter((artifact) => artifact.kind === "composite" || artifact.kind === "verify-result").map((artifact) => [
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`,
@@ -884,8 +884,9 @@ async function verifyCurrentEvidenceGraph(
     const delivered = await deps.readAnchorRecord?.(String(anchor.locator));
     if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
     if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
+    // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
     if (delivered.programName !== `dacs4:deliverable:${raw.jobId}` || !withinArtifactLimit(delivered.data) ||
-        contentHash(delivered.data) !== normalizedHash(evidence.raw.deliverableContentHash)) {
+        sha256Hex(canonicalize(delivered.data)) !== normalizedHash(evidence.raw.deliverableContentHash)) {
       return failSigned("storage delivery payload binding failed");
     }
     const acl = rec(delivered.acl);

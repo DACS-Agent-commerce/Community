@@ -774,7 +774,13 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
 
-test("current evidence graph resolves VerifyResult authority attestations", async () => {
+test("current evidence graph resolves VerifyResult authority attestations", async (t) => {
+  const oldPolicies = process.env.DACS_RECIPE_POLICIES;
+  t.after(() => {
+    if (oldPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES;
+    else process.env.DACS_RECIPE_POLICIES = oldPolicies;
+  });
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", recipeVersion: 1, methods: ["consensus-backed-proxy"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: [dids[0]] }]);
   const { listing, buyerBundle: bundle } = await vector();
   const attestation = { authority: "registry", status: "active" };
   maps.set(locator(7), attestation);

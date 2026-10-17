@@ -123,7 +123,7 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
-| `DACS_RECIPE_POLICIES` | For tier elevation and required session vetting | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and required vet admission |
+| `DACS_RECIPE_POLICIES` | For tier elevation and session vetting | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and included vet results indeterminate for session admission |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 | `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
@@ -256,11 +256,13 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
   present in `DACS_RECIPE_POLICIES`; missing policy fails closed. Required session vetting
   uses the same policy: the exact scheme/version must be live, permit the result method,
-  and trust its authenticated signer, including results with an explicit expiry. Non-live
-  recipes remain indeterminate until the catalog can disclose each result's availability.
+  and trust its authenticated signer, including results with an explicit expiry. Every
+  included result, even an optional one, needs a valid live policy. Missing, invalid and
+  non-live recipes remain indeterminate until the catalog can disclose each result's availability.
 - **Storage delivery is verified from readable cleartext and node access metadata.**
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
-  The payload must match that hash and the job's program name; `buyer-only` requires a
+  The hash covers the complete canonical payload, including any `signature` or `signatures`
+  fields. The payload must match that hash and the job's program name; `buyer-only` requires a
   restricted ACL naming the agreement-bound buyer. Unreadable payloads, encrypted payloads
   and external pointers remain indeterminate and contribute no completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos

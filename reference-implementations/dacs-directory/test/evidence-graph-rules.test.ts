@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
@@ -368,7 +369,13 @@ test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly s
   }
 });
 
-test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked transitively", async () => {
+test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked transitively", async (t) => {
+  const oldPolicies = process.env.DACS_RECIPE_POLICIES;
+  t.after(() => {
+    if (oldPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES;
+    else process.env.DACS_RECIPE_POLICIES = oldPolicies;
+  });
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: [dids[OUTSIDER]] }]);
   const requirementHash = contentHash((listing.buyerRequirement as Obj));
   const attestationRaw = { authority: "registry", body: "ok" };
   const attest = (session: Session, n = 20) => {
@@ -1138,11 +1145,19 @@ test("payout helper rejects malformed entries with false and preserves its valid
 // Signed storage deliveries resolve the actual cleartext and node ACL, not an assertion of success.
 test("storage delivery requires hash-bound payload and agreement-bound access", async (t) => {
   const payload = { report: "delivered cleartext" };
+  const signedPayload = { ...payload, signature: "original", signatures: ["original"] };
+  // These keys are already in canonical order; hash every byte independently of the SDK artifact helper.
+  const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
   type DeliveryCase = { accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
     payload?: Obj; programName?: string; expected?: boolean; indeterminate?: boolean };
   const cases: Record<string, DeliveryCase> = {
     "public cleartext": { expected: true },
+    "complete payload includes both signature fields": { payload: signedPayload, evidence: { deliverableContentHash: signedPayloadHash }, expected: true },
+    "changed signature at fixed payload hash": { payload: { ...signedPayload, signature: "tampered" }, evidence: { deliverableContentHash: signedPayloadHash } },
+    "changed signatures at fixed payload hash": { payload: { ...signedPayload, signatures: ["tampered"] }, evidence: { deliverableContentHash: signedPayloadHash } },
+    "artifact hash cannot hide changed signature": { payload: { ...signedPayload, signature: "tampered" } },
+    "artifact hash cannot hide changed signatures": { payload: { ...signedPayload, signatures: ["tampered"] } },
     "buyer-only readable cleartext with buyer ACL": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
     "public declaration permits private delivery": { acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
     "buyer-only success without hash or anchor (review probe)": { accessModel: "buyer-only", evidence: { deliverableContentHash: undefined, deliverableAnchor: undefined } },
