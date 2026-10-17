@@ -1101,10 +1101,14 @@ test("procurement vet requirements bind the seller counterparty rather than the 
       bundle: async (bundle, session) => {
         const attestation = { authority: "registry", body: "match" }; session.store.set(at(20), attestation);
         const result = await publish(session, 21, { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
-          method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20,
+          method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
           attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: contentHash(attestation) } }, "verify-result", OUTSIDER);
+        const identities = [BUYER, SELLER].map((party) => ({ bundleVersion: "1", presentedBy: dids[party], presentedAt: 1,
+          claims: [{ ref: dids[party] }, ...(party === SELLER ? [{ ref: "lei:5493001KJTIIGC8Y1R12", verifiedBy: { ...result, recipeVersion: 1 } }] : [])] }));
+        bundle.parties = identities.map((identity, party) => ({ role: party === BUYER ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(identity),
+          identityBundle: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[party], signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[party]))).toString("hex") }] } } }));
         bundle.vetRecords = await Promise.all([BUYER, SELLER].map((party) => publish(session, 30 + party, {
-          recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: (party === BUYER ? "a" : "b").repeat(64),
+          recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: contentHash(identities[party]),
           requirementHash: party === SELLER ? contentHash(requirement) : "c".repeat(64),
           freshness: party === resultParty ? [{ ...result, recipeVersion: 1 }] : [], dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: 30,
         }, "composite", OUTSIDER)));

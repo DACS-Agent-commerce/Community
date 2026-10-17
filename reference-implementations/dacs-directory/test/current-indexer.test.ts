@@ -81,6 +81,14 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
     phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
+  if (withVet) {
+    bundleScope.parties = await Promise.all([buyerIndex, sellerIndex].map(async (party, index) => {
+      const scope = { bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, claims: [{ ref: dids[party] }] };
+      const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[party]))).toString("hex");
+      return { role: index === 0 ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(scope),
+        identityBundle: { ...scope, presentation: { kind: "per-claim", signatures: [{ ref: dids[party], signature }] } } };
+    }));
+  }
   const signatures = [await sign(bundleScope, "bundle", buyerIndex, true), await sign(bundleScope, "bundle", sellerIndex, true)];
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
@@ -684,7 +692,7 @@ test("current evidence graph accepts a verified vet record as its phase attestat
     recordVersion: "1",
     jobId: "job-1",
     evaluatedParty: dids[1],
-    bundleHash: "b".repeat(64),
+    bundleHash: (bundle.parties as Obj[])[1].bundleHash,
     requirementHash: "c".repeat(64),
     freshness: [],
     supplementary: [],
@@ -699,7 +707,7 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   maps.set(locator(6), composite);
 
   const scope = signedScope(bundle, "bundle");
-  const buyerScope = { ...compositeScope, evaluatedParty: dids[0], bundleHash: "a".repeat(64), requirementHash: contentHash(listing.buyerRequirement as Obj) };
+  const buyerScope = { ...compositeScope, evaluatedParty: dids[0], bundleHash: (bundle.parties as Obj[])[0].bundleHash, requirementHash: contentHash(listing.buyerRequirement as Obj) };
   const buyerComposite = { ...buyerScope, signature: await sign(buyerScope, "composite", 1) };
   maps.set(locator(19), buyerComposite);
   scope.vetRecords = [ref(locator(6), composite, "composite"), ref(locator(19), buyerComposite, "composite")];
@@ -720,7 +728,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   const { listing, buyerBundle: bundle } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
   const requirementHash = contentHash((listing as Obj).buyerRequirement as Obj);
   const record = (party: number, extra: Obj = {}): Obj => ({
-    recordVersion: "1", jobId: "job-1", evaluatedParty: dids[party], bundleHash: (party === 0 ? "a" : "b").repeat(64),
+    recordVersion: "1", jobId: "job-1", evaluatedParty: dids[party], bundleHash: (bundle.parties as Obj[])[party].bundleHash,
     requirementHash: party === 0 ? requirementHash : "c".repeat(64),
     freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...extra,
   });
@@ -743,8 +751,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   assert.equal((await graphWith([record(0, { requirementHash: "c".repeat(64) })], null)).reason,
     "composite record is not bound to the listing's requirement");
   for (const overallDecision of ["fail", "indeterminate", "error"]) {
-    assert.equal((await graphWith([record(0, { overallDecision })], 0)).reason,
-      "a successful vet phase rests on a composite record that did not pass", overallDecision);
+    assert.equal((await graphWith([record(0, { overallDecision })], 0)).ok, false, overallDecision);
     assert.equal((await graphWith([record(0, { overallDecision })], null)).reason,
       "a committed session has a vetted party with no passing composite record", overallDecision);
   }

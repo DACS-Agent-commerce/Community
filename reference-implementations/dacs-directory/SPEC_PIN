@@ -20,6 +20,18 @@
 #   Authoritative bundle absence: the Demos mapping declares no absence-evidence policy. Both
 #     absence sets below run; their policy-qualified one-sided pass/include cases deliberately
 #     remain indeterminate/excluded. No Directory endpoint authenticates those projected proofs.
+#   Vet admission resolves historical IdentityBundle bytes and checks the presentation/hash. This
+#     profile can read a signed BundleParty extension `identityBundle` (inline) or
+#     `identityBundleRef` (storage-program locator and IdentityBundle hash), use the publisher's
+#     pinned listing identity when its hash matches, or use EvidenceGraphDeps.resolveIdentityBundle.
+#     IdentityBundle hashes omit presentation per DACS-1; a hash alone is not a locator. Missing
+#     bytes remain unverified. Per-claim Ed25519 presentations are supported by this profile.
+#   Required credential matching uses the signed composite generatedAt (unix ms) as the historical
+#     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
+#     validUntil governs; without it, DACS_RECIPE_POLICIES must supply defaultMaxAgeSec for the exact
+#     scheme/recipeVersion. Wrapper expiry and listing maxAge only narrow that authority window.
+#     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
+#     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
 # Skipped vector sets at this pin:
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;

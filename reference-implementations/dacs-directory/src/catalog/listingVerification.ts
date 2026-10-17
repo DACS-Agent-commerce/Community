@@ -227,7 +227,7 @@ async function verifyEd25519(
     : null;
 }
 
-async function verifyIdentityPresentation(
+export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
   sellerClaim: string,
   resolveKey: ResolvePrimaryClaimKey,

@@ -1,9 +1,10 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
-import { verifyListing } from "./listingVerification.js";
+import { verifyIdentityPresentation, verifyListing } from "./listingVerification.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
+import { matchesVetRequirement } from "./vetClaimRules.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -42,6 +43,8 @@ export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
+  /** Resolve historical IdentityBundle bytes; the graph independently checks hash and presentation. */
+  resolveIdentityBundle?: (party: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
 }
 
 const rec = (value: unknown): Record<string, unknown> | null =>
@@ -635,8 +638,9 @@ async function verifyCurrentEvidenceGraph(
     (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
   const composites = artifacts.filter((artifact) => artifact.kind === "composite");
-  const compositeDecisions = new Map(composites.map((artifact) => [
-    `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`, artifact.raw.overallDecision,
+  const vetDecisions = new Map(artifacts.filter((artifact) => artifact.kind === "composite" || artifact.kind === "verify-result").map((artifact) => [
+    `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`,
+    artifact.kind === "composite" ? artifact.raw.overallDecision : artifact.raw.decision,
   ]));
   for (const phase of arr(raw.phaseSummary)) {
     if (phase.attestationRef === undefined) continue;
@@ -645,10 +649,10 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("phase attestation reference is outside the verified graph");
     }
     // DACS-2 VPC-4: a vet phase whose decision is not pass fails, so it cannot have succeeded.
-    const decision = compositeDecisions.get(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`);
+    const decision = vetDecisions.get(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`);
     if (phase.outcome === "ok" && ((phase.kind === "vet-credentials" && decision !== "pass") ||
         (decision !== undefined && decision !== "pass"))) {
-      return failSigned("a successful vet phase rests on a composite record that did not pass");
+      return failSigned("a successful vet phase rests on verification that did not pass");
     }
   }
   // DACS-5 §10.4.3: settlementEvidence holds one record per executed settle-phase invocation and
@@ -769,31 +773,57 @@ async function verifyCurrentEvidenceGraph(
     normalizedHash(artifact.raw.requirementHash) !== contentHash(requirement))) {
     return failSigned("composite record is not bound to the listing's requirement");
   }
-  // VPC-2 / VPC-3: a required vet executes for both counterparties and anchors
-  // their passing composites. A summary's 'ok' does not supply that evidence.
-  if (raw.outcome === "completed" && pipeline.some((phase) => phase.kind === "vet-credentials") &&
-      parties.filter((party) => party.role === "buyer" || party.role === "seller").some((party) =>
-        !passed.has(canonicalSigningIdentity(String(party.primaryClaim))))) {
-    return failSigned("completed session lacks passing vet records for both parties");
+  const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
+    (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
+  const vets = pipeline.some((phase) => phase.kind === "vet-credentials");
+  if (agreement && hasRequirements && (!vets || !phases.some((phase) => phase.kind === "vet-credentials" && phase.outcome === "ok"))) {
+    return failSigned("committed session has identity requirements without a successful vet phase");
   }
-  if (raw.outcome === "completed" && requirement && pipeline.some((phase) => phase.kind === "vet-credentials")) {
+  // VPC-2 / VPC-3: the party's signed bundleHash must resolve to its actual
+  // presented claims. A composite's assertion about a hash cannot replace those bytes.
+  const identities = new Map<string, Record<string, unknown>>();
+  if (agreement && vets) {
+    for (const party of parties.filter((party) => party.role === "buyer" || party.role === "seller")) {
+      if (!passed.has(canonicalSigningIdentity(String(party.primaryClaim)))) {
+        return failSigned("committed session lacks passing vet records for both parties");
+      }
+      let identity = rec(party.identityBundle);
+      if (!identity && party.identityBundleRef !== undefined) {
+        if (!isCurrentRef(party.identityBundleRef) ||
+            normalizedHash(party.identityBundleRef.contentHash) !== normalizedHash(party.bundleHash)) {
+          return failSigned("party IdentityBundle reference failed");
+        }
+        identity = await deps.read(party.identityBundleRef.anchor.locator);
+      }
+      if (!identity && sameSigningIdentity(party.primaryClaim, verifiedListing.sellerClaim)) {
+        identity = rec(rec(listed.raw.seller)?.identity);
+      }
+      identity ??= await deps.resolveIdentityBundle?.(party) ?? null;
+      if (!identity || !withinArtifactLimit(identity)) return failSigned("party IdentityBundle is unavailable");
+      const scope = { ...identity }; delete scope.presentation;
+      if (identity.bundleVersion !== "1" || contentHash(scope) !== normalizedHash(party.bundleHash) ||
+          !sameSigningIdentity(identity.presentedBy, party.primaryClaim) || !Array.isArray(identity.claims) ||
+          arr(identity.claims).length !== identity.claims.length || !arr(identity.claims).some((claim) =>
+            sameSigningIdentity(claim.ref, party.primaryClaim)) ||
+          !(await verifyIdentityPresentation(identity, String(party.primaryClaim), resolveKey))) {
+        return failSigned("party IdentityBundle hash or presentation failed");
+      }
+      identities.set(String(party.role), identity);
+    }
+  }
+  if (agreement && requirement && vets) {
     const seller = parties.find((party) => party.role === "seller")!;
     const counterpartyRole = sameSigningIdentity(seller.primaryClaim, verifiedListing.sellerClaim) ? "buyer" : "seller";
     const counterparty = parties.find((party) => party.role === counterpartyRole)!;
     const provesRequirement = (record: ResolvedEvidence): boolean => {
       const results = [...arr(record.raw.freshness), ...arr(record.raw.dealSpecific)]
-        .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)?.raw).filter(Boolean);
-      // DACS-2 §7.7.1: every required scheme and each oneOf group needs a
-      // passing result in freshness/dealSpecific; supplementary signals do not count.
-      const satisfied = (claim: Record<string, unknown>) =>
-        results.some((result) => result!.decision === "pass" && result!.scheme === claim.scheme &&
-          (claim.recipeVersion === undefined || result!.recipeVersion === claim.recipeVersion));
-      return arr(requirement.required).every(satisfied) &&
-        (Array.isArray(requirement.oneOf) ? requirement.oneOf : []).every((group) => arr(group).some(satisfied));
+        .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)).filter((value): value is ResolvedEvidence => Boolean(value));
+      return matchesVetRequirement(identities.get(counterpartyRole)!, requirement, results,
+        record.raw.generatedAt, raw.finalisedAt);
     };
     if (!composites.some((record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && provesRequirement(record))) {
-      return failSigned("completed vet lacks passing verification evidence for the listing's requirements");
+      return failSigned("committed vet lacks passing verification evidence for the listing's requirements");
     }
   }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return failSigned("agreement listing binding failed");
