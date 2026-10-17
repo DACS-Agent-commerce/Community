@@ -247,7 +247,7 @@ test("auction pricing accepts only the DACS-4 selectionRule enum and content-has
   for (const rule of ["lowest-price", "highest-price", "first-acceptable", `rule-ref:${"a".repeat(64)}:https://rules.example/r1`]) {
     assert.ok(await verifyListing(auction(rule)), rule);
   }
-  for (const rule of ["best-vibes", "", "rule-ref:not-a-hash:https://rules.example/r1", `rule-ref:${"a".repeat(64)}:`, 7]) {
+  for (const rule of ["best-vibes", "", "rule-ref:not-a-hash:https://rules.example/r1", `rule-ref:${"a".repeat(64)}:`, [`lowest-price`], [`rule-ref:${"a".repeat(64)}:https://rules.example/r1`], `xrule-ref:${"a".repeat(64)}:https://rules.example/r1`, `rule-ref:${"a".repeat(64)}:https://rules.example/r1 `, 7]) {
     assert.equal(await verifyListing(auction(rule)), null, String(rule));
   }
 });
@@ -259,11 +259,13 @@ test("schema conformance: recognised listing members must have their DACS-1/3/4 
   const accepted: Record<string, Record<string, unknown>> = {
     "full BundleRequirement": { buyerRequirement: { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, maxAge: 60, recipeVersion: 2, parameters: {} }],
       oneOf: [[{ scheme: "domain", verificationRequired: false }]], preferredPresentation: "per-claim", primaryClaimSelector: "lei" } },
+    "buyer jurisdiction": { terms: { conflictOfLawsRule: "buyer-jurisdiction" } },
     "full ListingTerms": { terms: { termsOfServiceUrl: "https://t.example", termsOfServiceHash: "a".repeat(64), jurisdictions: ["GB", "US"],
       conflictOfLawsRule: "rule-ref:https://law.example", deadlineSecAfterCommit: 3600, acceptanceModel: "auto-accept", cancellationPolicy: "pre-commit",
       retentionYears: 7, transcriptDisclosurePolicy: "none", futureTerm: true } },
     "entitlement deliverable": { offering: offering({ kind: "entitlement", durationSec: 86_400, renewable: true }) },
     "attested-payload deliverable": { offering: offering({ kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" }, expectedSizeBytes: 10 }) },
+    "encrypt-to-buyer storage": { offering: offering({ kind: "storage-program", accessModel: "encrypt-to-buyer" }) },
     "storage-program deliverable": { offering: offering({ kind: "storage-program", schemaUrl: "https://s.example", accessModel: "buyer-only" }) },
     "external deliverable": { offering: offering({ kind: "external", description: "Signed courier receipt", verificationMethod: { kind: "tlsnotary", endpoint: "https://n.example" } }) },
     "rate phase": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate", parameters: { required: true } }] },
@@ -278,6 +280,11 @@ test("schema conformance: recognised listing members must have their DACS-1/3/4 
   const rejected: Record<string, Record<string, unknown>> = {
     "BundleRequirement without its version": { buyerRequirement: { required: [] } },
     "BundleRequirement without required": { buyerRequirement: { requirementVersion: "1" } },
+    "ClaimRequirement array scheme": { buyerRequirement: { requirementVersion: "1", required: [{ scheme: ["lei"], verificationRequired: true }] } },
+    "nested jurisdictions": { terms: { jurisdictions: [["US"]] } },
+    "prefixed jurisdiction": { terms: { jurisdictions: ["XUS"] } },
+    "suffixed jurisdiction": { terms: { jurisdictions: ["USX"] } },
+    "unknown conflict rule": { terms: { conflictOfLawsRule: "xrule-ref:https://example.test" } },
     "ClaimRequirement without verificationRequired": { buyerRequirement: { requirementVersion: "1", required: [{ scheme: "lei" }] } },
     "empty oneOf group": { buyerRequirement: { requirementVersion: "1", required: [], oneOf: [[]] } },
     "unknown preferred presentation": { buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "telepathy" } },
@@ -358,5 +365,16 @@ test("the indexer publishes a current listing only once validity.notBefore has p
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("negotiable bounds and metered units retain their independent schema types", async () => {
+  const band = { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 0, maxPct: 0 };
+  const meter = { kind: "metered", unitPrice: { amount: "1", currency: "USDC" }, unit: "call" };
+  assert.ok(await verifyListing(signedCurrentListing({ pricing: band })));
+  assert.ok(await verifyListing(signedCurrentListing({ pricing: meter })));
+  for (const pricing of [{ ...band, minPct: "0" }, { ...band, maxPct: "0" }, { ...band, minPct: -1 }, { ...band, minPct: 100 },
+    { ...band, maxPct: -1 }, { ...meter, unit: ["call"] }, { ...meter, unit: 1 }, { ...meter, unit: "" }, { ...meter, unit: "x".repeat(65) }]) {
+    assert.equal(await verifyListing(signedCurrentListing({ pricing })), null);
   }
 });

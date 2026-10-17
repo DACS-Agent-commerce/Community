@@ -25,11 +25,13 @@
 #     `identityBundleRef` (storage-program locator and IdentityBundle hash), use the publisher's
 #     pinned listing identity when its hash matches, or use EvidenceGraphDeps.resolveIdentityBundle.
 #     IdentityBundle hashes omit presentation per DACS-1; a hash alone is not a locator. Missing
-#     bytes remain unverified. Per-claim Ed25519 presentations are supported by this profile.
+#     bytes remain unverified. presentedAt must be numeric but is not a freshness gate. Per-claim Ed25519 presentations are supported by this profile.
 #   Required credential matching uses the signed composite generatedAt (unix ms) as the historical
 #     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
 #     validUntil governs; without it, DACS_RECIPE_POLICIES must supply defaultMaxAgeSec for the exact
-#     scheme/recipeVersion. Wrapper expiry and listing maxAge only narrow that authority window.
+#     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
+#     operational exact-version recipe policy, an allowed method and a trusted authenticated signer.
+#     Wrapper expiry and listing maxAge only narrow that authority window.
 #     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
 #     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
 # Skipped vector sets at this pin:

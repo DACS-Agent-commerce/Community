@@ -731,11 +731,16 @@ test("a revocation candidate with no canonical form never stops the candidate lo
   assert.equal(await verifyListingRevocation(infinite, verified, 1), false);
   assert.equal(await verifyListingRevocation(fractional, verified, 1), false);
 
+  for (const signature of [undefined, null, []]) {
+    assert.equal(await verifyListingRevocation({ ...valid, signature }, verified, 1), false);
+  }
+  assert.equal(await verifyListingRevocation(valid, verified, 1), true);
   const records = new Map<string, Record<string, unknown>>([
+    ["missing-signature", { ...valid, signature: undefined }], ["array-signature", { ...valid, signature: [] }],
     ["infinite", infinite], ["fractional", fractional], ["valid", valid],
   ]);
   const read = async (ref: string) => records.get(ref) ?? null;
-  const binding = await findValidListingRevocation(["infinite", "fractional", "valid"], verified, 1, read);
+  const binding = await findValidListingRevocation(["missing-signature", "array-signature", "infinite", "fractional", "valid"], verified, 1, read);
   assert.equal(binding?.markerAnchor.locator, "valid");
   assert.equal(binding?.markerContentHash, contentHash(scope));
   assert.equal(await hasValidListingRevocation(["infinite", "fractional"], verified, 1, read), false);
@@ -926,4 +931,15 @@ test("DACS-5 determinism receipt orders arrays by byte order, not locale collati
   assert.equal(rep.bundleRefs[1].contentHash[0], "a");
   assert.deepEqual(rep.observedTransactionalVolume?.map(({ currency }) => currency), ["Z", "a"]);
   assert.deepEqual(rep.transactionCountByCurrency?.map(({ currency }) => currency), ["Z", "a"]);
+});
+
+
+test("SDK listing schema rejects signed malformed compatibility data without current-profile fallback", async () => {
+  for (const valid of [true, false]) {
+    const scope = { ...listing, name: valid ? "Service" : 1 };
+    const message = Buffer.from(`dacs-listing:v1:${contentHash(scope)}`, "utf8");
+    const value = Buffer.from(ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
+    const verified = await verifyListing({ ...scope, signature: { algorithm: "ed25519", signer: did, value } });
+    assert.equal(Boolean(verified), valid);
+  }
 });

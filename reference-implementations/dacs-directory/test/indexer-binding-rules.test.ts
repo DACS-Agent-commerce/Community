@@ -346,10 +346,37 @@ test("required vet execution binds presented claims, verification and phase poin
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
-    policy?: Obj[]; identityRef?: boolean; generatedAt?: number; verifiedByVersion?: number; sellerFromListing?: boolean; badAnchorHash?: boolean; bundleOutcome?: string; graphOnly?: boolean };
+    policy?: Obj[]; wrongLocator?: boolean; hashPrefix?: string; rawPolicy?: string; callback?: boolean; primaryProof?: boolean; badAuthority?: boolean; malformedFreshness?: boolean; identityRef?: boolean; generatedAt?: number; verifiedByVersion?: number; sellerFromListing?: boolean; badAnchorHash?: boolean; bundleOutcome?: string; graphOnly?: boolean };
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
+  const livePolicy = { scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [dids[OUTSIDER]] };
   const cases: VetCase[] = [
     { name: "both parties passed", expected: true },
+    ...["mocked", "disabled", "failed"].map((availability) => ({ name: `unusable recipe ${availability}`, policy: [{ availability }] })),
+    { name: "recipe forbids result method", policy: [{ methods: ["other"] }] },
+    { name: "recipe has no trusted signer", policy: [{ trustedResultSigners: [] }] },
+    { name: "recipe trusts another signer", policy: [{ trustedResultSigners: [dids[SELLER]] }] },
+    { name: "missing recipe even with explicit expiry", policy: [] },
+    { name: "other recipe version even with explicit expiry", policy: [{ recipeVersion: 2 }] },
+    { name: "unknown recipe availability", policy: [{ availability: "unknown" }] },
+    { name: "trusted gated recipe", policy: [{ availability: "operator_gated" }], expected: true },
+    { name: "trusted closed-data recipe", policy: [{ availability: "closed_data" }], expected: true },
+    { name: "trusted bilateral recipe", policy: [{ availability: "bilateral" }], expected: true },
+    { name: "malformed recipe JSON", rawPolicy: "{invalid", result: { validUntil: undefined } },
+    { name: "other scheme policy", policy: [{ scheme: "domain" }], result: { validUntil: undefined } },
+    { name: "nonnumeric recipe lifetime", policy: [{ defaultMaxAgeSec: "1" }], result: { validUntil: undefined } },
+    { name: "authority evidence hash mismatch", badAuthority: true },
+    { name: "callback resolves presented identity", callback: true, graphOnly: true, expected: true },
+    { name: "callback identity wrong hash", callback: true, badHash: true, graphOnly: true },
+    { name: "callback identity invalid presentation", callback: true, badPresentation: true, graphOnly: true },
+    { name: "verified selected primary with independent required claim", primaryProof: true, requirement: { ...requirement, primaryClaimSelector: "did" }, expected: true },
+    { name: "only oneOf still requires vet pipeline", noVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] } },
+    { name: "only oneOf still requires vet execution", omittedVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] } },
+    { name: "only selector still requires vet pipeline", noVet: true, primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
+    { name: "only selector still requires vet execution", omittedVet: true, primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
+    { name: "only oneOf successful proof", requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] }, expected: true },
+    { name: "only selector successful proof", primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" }, expected: true },
+    { name: "empty oneOf permits no vet pipeline", noVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [] }, expected: true },
+    { name: "nonrequired composite malformed freshness", malformedFreshness: true, requirement: { requirementVersion: "1", required: [] } },
     { name: "passing composite pointer", pointer: "composite", expected: true },
     { name: "passing VerifyResult pointer", pointer: "result", expected: true },
     { name: "failed VerifyResult pointer beside valid proof", pointer: "failed-result" },
@@ -368,23 +395,34 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "empty required verification", records: "empty" },
     { name: "supplementary cannot satisfy required verification", records: "supplementary" },
     { name: "missing IdentityBundle", noIdentity: true },
+    { name: "missing presentation timestamp", buyer: { presentedAt: undefined } },
+    { name: "presentation timestamp must be numeric", buyer: { presentedAt: "1" } },
+    { name: "presentation timestamp cannot be null", buyer: { presentedAt: null } },
     { name: "wrong IdentityBundle hash", badHash: true },
     { name: "invalid IdentityBundle presentation", badPresentation: true },
     { name: "IdentityBundle belongs to another party", buyer: { presentedBy: dids[OUTSIDER] } },
     { name: "required scheme absent from IdentityBundle", noClaim: true },
+    { name: "claim trailing newline cannot alias required identity", claim: { ref: "lei:5493001KJTIIGC8Y1R12\n" } },
     { name: "result identifies another claim", claim: { ref: "lei:11111111111111111111" } },
     { name: "missing verifiedBy", claim: { verifiedBy: undefined } },
     { name: "verifiedBy points to another locator", claim: { verifiedBy: { anchor: { kind: "storage-program", locator: at(82) }, contentHash: "0".repeat(64), recipeVersion: 1 } } },
+    { name: "verifiedBy locator cannot borrow another result hash", wrongLocator: true },
+    { name: "prefixed uppercase verifiedBy hash", hashPrefix: "sha256:", expected: true },
+    { name: "result scheme must match required presented claim", result: { scheme: "did" }, policy: [{ scheme: "did" }] },
     { name: "verifiedBy has wrong content hash", claim: { verifiedBy: { anchor: { kind: "storage-program", locator: at(81) }, contentHash: "0".repeat(64), recipeVersion: 1 } } },
     { name: "verifiedBy has wrong recipe version", verifiedByVersion: 2 },
     { name: "result fails", result: { decision: "fail" } },
     { name: "result stale at vet time", result: { validUntil: 29 } },
     { name: "wrapper cannot extend authority expiry", result: { validUntil: 29 }, claim: { issuedAt: 30, expiresAt: 1000 } },
     { name: "wrapper narrows authority expiry", claim: { expiresAt: 29 } },
+    { name: "authority expiry must be numeric", result: { validUntil: "100" } },
+    { name: "wrapper expiry must be numeric", claim: { expiresAt: "100" } },
+    { name: "zero-length authority and listing windows", generatedAt: 20, result: { validUntil: 20 }, requirement: { ...requirement, required: [{ scheme: "lei", verificationRequired: true, maxAge: 0 }] }, expected: true },
+    { name: "zero-length fallback window", generatedAt: 20, result: { validUntil: undefined }, policy: [{ defaultMaxAgeSec: 0 }], expected: true },
     { name: "freshness boundary is inclusive", result: { validUntil: 30 }, expected: true },
     { name: "future verification", result: { verifiedAt: 31 } },
     { name: "invalid authority window", result: { validUntil: 19 } },
-    { name: "missing authority window and pinned recipe", result: { validUntil: undefined } },
+    { name: "missing authority window and pinned recipe", result: { validUntil: undefined }, policy: [] },
     { name: "pinned recipe fallback", result: { validUntil: undefined }, policy: [{ scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1 }], expected: true },
     { name: "another recipe version cannot supply freshness", result: { validUntil: undefined }, policy: [{ scheme: "lei", recipeVersion: 2, defaultMaxAgeSec: 1 }] },
     { name: "stale recipe fallback", result: { validUntil: undefined }, policy: [{ scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 0 }] },
@@ -411,7 +449,7 @@ test("required vet execution binds presented claims, verification and phase poin
   try {
     for (const c of cases) await t.test(c.name, async () => {
       store.clear(); for (const [key, raw] of original) store.set(key, raw);
-      process.env.DACS_RECIPE_POLICIES = JSON.stringify(c.policy ?? []);
+      process.env.DACS_RECIPE_POLICIES = c.rawPolicy ?? JSON.stringify([...(c.policy ?? [{}]).map((policy) => ({ ...livePolicy, ...policy })), ...(c.primaryProof ? [{ ...livePolicy, scheme: "did" }] : [])]);
       const req = c.requirement ?? requirement;
       const pipeline = [...(c.noVet ? [] : [{ kind: "vet-credentials" }]), { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }];
       const phaseIndex = pipeline.length - 1;
@@ -429,22 +467,29 @@ test("required vet execution binds presented claims, verification and phase poin
       const resultRef = { ...refTo(at(81), result, "verify-result"), recipeVersion: 1 };
       const claim: Obj = { ref: "lei:5493001KJTIIGC8Y1R12", verifiedBy: { ...resultRef, recipeVersion: c.verifiedByVersion ?? 1 }, ...c.claim };
       for (const key of Object.keys(claim)) if (claim[key] === undefined) delete claim[key];
-      const buyerScope = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1,
-        claims: [{ ref: dids[BUYER] }, ...(c.noClaim ? [] : [claim])], ...c.buyer };
+      if (c.wrongLocator) (claim.verifiedBy as Obj).anchor = { kind: "storage-program", locator: at(82) };
+      if (c.hashPrefix) (claim.verifiedBy as Obj).contentHash = c.hashPrefix + String(resultRef.contentHash).toUpperCase();
+      const primaryScope: Obj = { ...resultScope, scheme: "did", identifier: dids[BUYER].slice(4) };
+      const primaryResult = { ...primaryScope, signature: signedWith(primaryScope, "verify-result", OUTSIDER) };
+      const primaryRef = { ...refTo(at(85), primaryResult, "verify-result"), recipeVersion: 1 };
+      store.set(at(85), primaryResult);
+      const buyerScope: Obj = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1,
+        claims: [{ ref: dids[BUYER], ...(c.primaryProof ? { verifiedBy: primaryRef } : {}) }, ...(c.noClaim ? [] : [claim])], ...c.buyer };
+      for (const key of Object.keys(buyerScope)) if (buyerScope[key] === undefined) delete buyerScope[key];
       const sellerScope = { ...identity };
       const buyerIdentity = presented(BUYER, buyerScope);
       if (c.badPresentation) buyerIdentity.presentation.signatures[0].signature = "00".repeat(64);
       const sellerIdentity = presented(SELLER, sellerScope);
       const parties: Obj[] = [BUYER, SELLER].map((party) => ({ role: party === BUYER ? "buyer" : "seller", primaryClaim: dids[party],
         bundleHash: contentHash(party === BUYER ? buyerScope : sellerScope), identityBundle: party === BUYER ? buyerIdentity : sellerIdentity }));
-      if (c.noIdentity) delete parties[BUYER].identityBundle;
+      if (c.noIdentity || c.callback) delete parties[BUYER].identityBundle;
       if (c.sellerFromListing) delete parties[SELLER].identityBundle;
       if (c.badHash) parties[BUYER].bundleHash = "a".repeat(64);
       if (c.identityRef) { delete parties[BUYER].identityBundle; parties[BUYER].identityBundleRef = { anchor: { kind: "storage-program", locator: at(83) }, contentHash: c.badAnchorHash ? "0".repeat(64) : parties[BUYER].bundleHash }; store.set(at(83), buyerIdentity); }
       const composite = (party: number): Obj => {
         const scope = { recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: parties[party].bundleHash,
           requirementHash: contentHash(party === BUYER ? req : { requirementVersion: "1", required: [] }),
-          freshness: party === BUYER ? [resultRef] : [], dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: c.generatedAt ?? 30 } as Obj;
+          freshness: party === BUYER ? [resultRef, ...(c.primaryProof ? [primaryRef] : [])] : (c.malformedFreshness ? [{ contentHash: "0".repeat(64) }] : []), dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: c.generatedAt ?? 30 } as Obj;
         if (party === BUYER) {
           if (c.records === "wrong-requirement") scope.requirementHash = "0".repeat(64);
           if (c.records === "failed") scope.overallDecision = "fail";
@@ -454,7 +499,7 @@ test("required vet execution binds presented claims, verification and phase poin
         return { ...scope, signature: signedWith(scope, "composite", OUTSIDER) };
       };
       const records = c.records === "none" ? [] : c.records === "buyer" ? [composite(BUYER)] : c.records === "seller" ? [composite(SELLER)] : [composite(BUYER), composite(SELLER)];
-      store.set(at(1), listed).set(at(2), agreed).set(at(80), attestation).set(at(81), result);
+      store.set(at(1), listed).set(at(2), agreed).set(at(80), c.badAuthority ? { ...attestation, decision: "fail" } : attestation).set(at(81), result);
       if (c.pointer === "failed-result") {
         const failedScope = { ...resultScope, decision: "fail" }; const failed = { ...failedScope, signature: signedWith(failedScope, "verify-result", OUTSIDER) };
         store.set(at(82), failed);
@@ -471,6 +516,7 @@ test("required vet execution binds presented claims, verification and phase poin
       const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
+        resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
         read: async (locator) => store.get(locator) ?? null,
         readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:pay-dem:${phaseIndex}` }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
@@ -547,4 +593,62 @@ test("failure-only payment reference fields stay optional without establishing s
     assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "failure", paymentTxRefs: [ref] }), true);
     assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "success", paymentTxRefs: [ref] }), false);
   }
+});
+
+test("repeated deliveries require every evidence outcome to succeed before graph and catalog admission", async () => {
+  const original = new Map(store);
+  try {
+    for (const failure of [false, true]) {
+      const pipeline = [...listingScope.pipeline as Obj[], { kind: "deliver-attested-payload" }, { kind: "deliver-attested-payload" }];
+      const listedScope = { ...listingScope, pipeline };
+      const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
+      const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
+      const agreedScope = { ...agreementScope, listingRef: pinned };
+      const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
+      const deliveryRefs = [0, 1].map((i) => {
+        const raw: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-attested-payload", outcome: failure && i === 1 ? "failure" : "success", observedAt: 101 + i };
+        const signed = { ...raw, signature: signedWith(raw, "evidence", SELLER) };
+        store.set(at(50 + i), signed); return refTo(at(50 + i), signed, "evidence");
+      });
+      const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"),
+        phaseSummary: pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })),
+        settlementEvidence: [refTo(at(3), evidence, "evidence"), ...deliveryRefs] });
+      store.set(at(1), listed).set(at(2), agreed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+      const graph = await buildCurrentEvidenceGraph(at(20), { read: async (ref) => store.get(ref) ?? null,
+        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }), resolveListing: async () => ({ locator: at(1), raw: listed }) });
+      assert.equal(graph.signaturesVerified, true);
+      assert.equal(graph.ok, !failure, graph.reason);
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+      assert.equal(seller.deals[0].refsVerified, !failure);
+      assert.equal(seller.deals[0].reputationEligible, !failure);
+      assert.equal(seller.reputation.completed, failure ? 0 : 1);
+      assert.deepEqual(seller.reputation.observedTransactionalVolume, failure ? [] : [{ currency: "DEM", amount: "2" }]);
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("legal phase error classes retain signed failed-session graph and catalog standing", async () => {
+  const original = new Map(store);
+  try {
+    for (const errorClass of ["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]) {
+      const failedScope: Obj = { ...evidenceScope, outcome: "failure" }; delete failedScope.settlementFinality;
+      const failed = { ...failedScope, signature: signedWith(failedScope, "evidence", SELLER) };
+      const scope = bundleScope({ outcome: "failed-perm", phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" },
+        { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "fail", errorClass }], settlementEvidence: [refTo(at(50), failed, "evidence")] });
+      store.set(at(1), listing).set(at(2), agreement).set(at(50), failed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", { ...scope, outcome: "failed-counterparty" }));
+      const graph = await buildCurrentEvidenceGraph(at(20), { read: async (ref) => store.get(ref) ?? null,
+        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }), resolveListing: async () => ({ locator: at(1), raw: listing }) });
+      assert.equal(graph.ok, true, `${errorClass}: ${graph.reason}`);
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+      assert.equal(seller.deals[0].refsVerified, true, errorClass);
+      assert.equal(seller.deals[0].fullSignatureStanding, true, errorClass);
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("HTLC success rejects a foreign kind even with a hash under the undefined lookup key", () => {
+  const hash = "ab".repeat(32);
+  const refs = [["htlc-lock", "lockTxHash"], ["htlc-reveal", "revealTxHash"], ["htlc-claim", "claimTxHash"]].map(([kind, field]) => ({ kind, chainId: 0, contractAddress: "contract", [field]: hash }));
+  assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "success", paymentTxRefs: refs }), true);
+  assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "success", paymentTxRefs: [...refs, { kind: "foreign", chainId: 0, contractAddress: "contract", undefined: hash }] }), false);
 });

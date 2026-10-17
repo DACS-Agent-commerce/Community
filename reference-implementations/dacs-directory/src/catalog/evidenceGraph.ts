@@ -5,6 +5,7 @@ import { verifyIdentityPresentation, verifyListing } from "./listingVerification
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
 import { matchesVetRequirement } from "./vetClaimRules.js";
+import { validateRecipeResult } from "./recipePolicy.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -801,7 +802,7 @@ async function verifyCurrentEvidenceGraph(
       identity ??= await deps.resolveIdentityBundle?.(party) ?? null;
       if (!identity || !withinArtifactLimit(identity)) return failSigned("party IdentityBundle is unavailable");
       const scope = { ...identity }; delete scope.presentation;
-      if (identity.bundleVersion !== "1" || contentHash(scope) !== normalizedHash(party.bundleHash) ||
+      if (identity.bundleVersion !== "1" || typeof identity.presentedAt !== "number" || !Number.isFinite(identity.presentedAt) || contentHash(scope) !== normalizedHash(party.bundleHash) ||
           !sameSigningIdentity(identity.presentedBy, party.primaryClaim) || !Array.isArray(identity.claims) ||
           arr(identity.claims).length !== identity.claims.length || !arr(identity.claims).some((claim) =>
             sameSigningIdentity(claim.ref, party.primaryClaim)) ||
@@ -815,14 +816,17 @@ async function verifyCurrentEvidenceGraph(
     const seller = parties.find((party) => party.role === "seller")!;
     const counterpartyRole = sameSigningIdentity(seller.primaryClaim, verifiedListing.sellerClaim) ? "buyer" : "seller";
     const counterparty = parties.find((party) => party.role === counterpartyRole)!;
-    const provesRequirement = (record: ResolvedEvidence): boolean => {
+    const provesRequirement = async (record: ResolvedEvidence): Promise<boolean> => {
       const results = [...arr(record.raw.freshness), ...arr(record.raw.dealSpecific)]
         .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)).filter((value): value is ResolvedEvidence => Boolean(value));
-      return matchesVetRequirement(identities.get(counterpartyRole)!, requirement, results,
-        record.raw.generatedAt, raw.finalisedAt);
+      // A correctly signed pass decision is usable only under its pinned deployment policy.
+      const eligible = await Promise.all(results.map(async (result) =>
+        await validateRecipeResult(result.raw, undefined, resolveKey) ? result : null));
+      return matchesVetRequirement(identities.get(counterpartyRole)!, requirement,
+        eligible.filter((result): result is ResolvedEvidence => result !== null), record.raw.generatedAt, raw.finalisedAt);
     };
-    if (!composites.some((record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
-        record.raw.overallDecision === "pass" && provesRequirement(record))) {
+    if (!(await Promise.all(composites.map(async (record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
+        record.raw.overallDecision === "pass" && await provesRequirement(record)))).some(Boolean)) {
       return failSigned("committed vet lacks passing verification evidence for the listing's requirements");
     }
   }

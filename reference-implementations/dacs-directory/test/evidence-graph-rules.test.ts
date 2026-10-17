@@ -1058,7 +1058,7 @@ test("commitment-time bounds reject wrong types and include the exact listing ex
 
 test("payee bindings independently validate rail and destination types and allow phase index zero", async () => {
   const valid = { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[SELLER] };
-  for (const change of [{}, { railId: 1 }, { railId: "" }, { payeeAddress: 1 }, { payeeAddress: "" }]) {
+  for (const change of [{}, { railId: 1 }, { railId: "" }, { payeeAddress: 1 }, { payeeAddress: [dids[SELLER]] }, { payeeAddress: "" }]) {
     const graph = await evaluate({ listing: payeeBoundListing, scopes: (scopes) => {
       delete scopes.agreement.agreementVersion; scopes.agreement.payeeBoundAgreementVersion = "1";
       (scopes.agreement.terms as Obj).payoutBindings = [{ ...valid, ...change }];
@@ -1085,6 +1085,9 @@ test("fault counterparty attribution rejects non-string parties under valid bund
 });
 
 test("procurement vet requirements bind the seller counterparty rather than the buyer publisher", async () => {
+  const oldPolicies = process.env.DACS_RECIPE_POLICIES;
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: dids }]);
+  try {
   const identity: Obj = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1, claims: [{ ref: dids[BUYER] }] };
   const presentation = Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[BUYER]))).toString("hex");
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
@@ -1115,5 +1118,36 @@ test("procurement vet requirements bind the seller counterparty rather than the 
       },
     });
     assert.equal(graph.ok, resultParty === SELLER, `${resultParty}: ${graph.reason}`);
+  }
+  } finally { if (oldPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = oldPolicies; }
+});
+
+test("payout helper rejects malformed entries with false and preserves its valid control", () => {
+  const agreement: Obj = { payeeBoundAgreementVersion: "1", terms: { payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[SELLER] }] } };
+  const listed = { pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-payee-bound-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }] };
+  assert.equal(agreementMatchesListing(agreement, listed), true);
+  for (const payoutBindings of [[{ railId: "pay-dem", phaseIndex: 2, payeeAddress: [dids[SELLER]] }], undefined, null, {}, [null], [[]]]) {
+    assert.equal(agreementMatchesListing({ ...agreement, terms: { payoutBindings } }, listed), false);
+  }
+  assert.equal(agreementMatchesListing({ ...agreement, payeeBoundAgreementVersion: "2" }, listed), false);
+  assert.equal(agreementMatchesListing({ ...agreement, terms: undefined }, listed), false);
+  assert.equal(agreementMatchesListing(agreement, { pipeline: {} }), false);
+  assert.equal(agreementMatchesListing(agreement, { pipeline: [...listed.pipeline, null] }), false);
+});
+
+test("private storage access models permit signed listing and delivery graph admission", async () => {
+  for (const accessModel of ["buyer-only", "encrypt-to-buyer"]) {
+    const deliverable = { kind: "storage-program", accessModel };
+    const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...listing.pipeline as Obj[], { kind: "deliver-storage-program" }] };
+    const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
+    const graph = await evaluate({ listing: listed, scopes: (scopes) => {
+      (scopes.agreement.terms as Obj).deliverable = { deliverableType: "storage-program", hash: contentHash(deliverable) };
+      (scopes.bundle.phaseSummary as Obj[]).push({ index: 3, kind: "deliver-storage-program", outcome: "ok" });
+    }, bundle: async (bundle, session) => {
+      const delivered = await publish(session, 50, { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101 }, "evidence", SELLER);
+      (bundle.settlementEvidence as Obj[]).push(delivered);
+    } });
+    assert.equal(graph.ok, true, `${accessModel}: ${graph.reason}`);
+    assert.equal(graph.refsVerified, true);
   }
 });
