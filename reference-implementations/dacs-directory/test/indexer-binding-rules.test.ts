@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 // The indexer resolves each side of a current-profile deal only through BundleBindings its own
@@ -17,6 +17,8 @@ const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { artifactHash, buildCurrentEvidenceGraph, paymentTxRefsOk, signedScope } = await import("../src/catalog/evidenceGraph.js");
 const { bundleBindingOverflowKey, logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
 const { loadScanState, saveScanState, loadCatalog } = await import("../src/catalog/store.js");
+const { verifyIdentityPresentation } = await import("../src/catalog/listingVerification.js");
+const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
 const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
@@ -382,7 +384,7 @@ test("each signed payment phase requires its own transaction kind and complete C
 test("required vet execution binds presented claims, verification and phase pointers before catalog admission", async (t) => {
   const original = new Map(store);
   const originalPolicies = process.env.DACS_RECIPE_POLICIES;
-  type VetCase = { challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
+  type VetCase = { firstAttempt?: "buyer" | "seller"; challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation" | "scope-only" | "legacy-marker" | "missing-digest"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
@@ -390,7 +392,14 @@ test("required vet execution binds presented claims, verification and phase poin
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
   const livePolicy = { scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [dids[OUTSIDER]] };
   const cases: VetCase[] = [
-    { name: "both parties passed", expected: true },
+    { name: "both parties passed with valid first presentation attempts", expected: true },
+    { name: "invalid buyer first attempt consumes nonce before a valid retry", firstAttempt: "buyer" },
+    { name: "invalid seller first attempt consumes nonce before a valid retry", firstAttempt: "seller" },
+    { name: "anchored valid retry cannot replace invalid first attempt", firstAttempt: "buyer", identityRef: true },
+    { name: "callback valid retry cannot replace invalid first attempt", firstAttempt: "buyer", callback: true, graphOnly: true },
+    { name: "signed scope hash cannot identify the first attempt", challenge: "scope-only" },
+    { name: "legacy bundle hash marker cannot authorize an attempt", challenge: "legacy-marker" },
+    { name: "missing complete attempt digest", challenge: "missing-digest" },
     { name: "missing authenticated historical challenge", challenge: "missing" },
     { name: "missing session nonce", buyer: { sessionNonce: undefined } },
     { name: "mismatched session nonce", buyer: { sessionNonce: "different-challenge" } },
@@ -541,6 +550,20 @@ test("required vet execution binds presented claims, verification and phase poin
       const buyerIdentity = presented(BUYER, buyerScope);
       if (c.badPresentation) buyerIdentity.presentation.signatures[0].signature = "00".repeat(64);
       const sellerIdentity = presented(SELLER, sellerScope);
+      const firstAttempts = new Map([[dids[BUYER], buyerIdentity], [dids[SELLER], sellerIdentity]]);
+      if (c.firstAttempt) {
+        const partyIndex = c.firstAttempt === "buyer" ? BUYER : SELLER;
+        const valid = partyIndex === BUYER ? buyerIdentity : sellerIdentity;
+        const invalid = structuredClone(valid);
+        invalid.presentation.signatures[0].signature = "00".repeat(64);
+        const scopeOf = (value: Obj) => { const scope = { ...value }; delete scope.presentation; return scope; };
+        // The first failed attempt and valid retry share every signed field, nonce and timestamp.
+        assert.equal(contentHash(scopeOf(invalid)), contentHash(scopeOf(valid)));
+        assert.notEqual(sha256Hex(canonicalize(invalid)), sha256Hex(canonicalize(valid)));
+        assert.equal(await verifyIdentityPresentation(invalid, dids[partyIndex], resolveDemosPrimaryClaimKey), null);
+        assert.ok(await verifyIdentityPresentation(valid, dids[partyIndex], resolveDemosPrimaryClaimKey));
+        firstAttempts.set(dids[partyIndex], invalid);
+      }
       const parties: Obj[] = [BUYER, SELLER].map((party) => ({ role: party === BUYER ? "buyer" : "seller", primaryClaim: dids[party],
         bundleHash: contentHash(party === BUYER ? buyerScope : sellerScope), identityBundle: party === BUYER ? buyerIdentity : sellerIdentity }));
       if (c.noIdentity || c.callback) delete parties[BUYER].identityBundle;
@@ -577,7 +600,23 @@ test("required vet execution binds presented claims, verification and phase poin
       const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
-        resolveSessionChallenge: async (jobId, party) => c.challenge === "missing" || c.challenge === "reused" ? null : ({ jobId: c.challenge === "foreign-job" ? "foreign-job" : jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: c.challenge === "other-presentation" ? "0".repeat(64) : String(party.bundleHash), ...c.challengeTiming }),
+        resolveSessionChallenge: async (jobId, party) => {
+          if (c.challenge === "missing" || c.challenge === "reused") return null;
+          const challenge = {
+            jobId: c.challenge === "foreign-job" ? "foreign-job" : jobId,
+            party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`,
+            issuedAt: 0, expiresAt: 120, consumedAt: 1,
+            consumedByPresentationHash: c.challenge === "other-presentation" ? "0".repeat(64)
+              : c.challenge === "scope-only" ? String(party.bundleHash)
+              : sha256Hex(canonicalize(firstAttempts.get(String(party.primaryClaim)))), ...c.challengeTiming,
+          };
+          if (c.challenge === "missing-digest" || c.challenge === "legacy-marker") {
+            delete (challenge as Obj).consumedByPresentationHash;
+          }
+          // Keep the obsolete scope marker as a decoy: it must never override the complete digest.
+          return { ...challenge, consumedByBundleHash: c.challenge === "other-presentation"
+            ? "0".repeat(64) : String(party.bundleHash) };
+        },
         resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
         readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
@@ -588,6 +627,9 @@ test("required vet execution binds presented claims, verification and phase poin
       assert.equal(graph.signaturesVerified, true, c.name);
       assert.equal(graph.ok, expected, `${c.name}: ${graph.reason}`);
       assert.equal(graph.refsVerified, expected, c.name);
+      if (c.firstAttempt || ["scope-only", "legacy-marker", "missing-digest"].includes(c.challenge ?? "")) {
+        assert.match(graph.reason ?? "", /authenticated historical challenge is unavailable or mismatched/);
+      }
       if (c.graphOnly) return;
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "demos-native:DEM", phaseIndex);
       const indexed = expected && c.noVet;

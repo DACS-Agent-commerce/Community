@@ -51,14 +51,18 @@ export interface HistoricalSessionChallenge {
   expiresAt: number;
   /** Authenticated time of the first consuming attempt; presentedAt is diagnostic only. */
   consumedAt: number;
-  /** Hash of the first presentation attempt consuming this challenge, even if that attempt failed. */
-  consumedByBundleHash: string;
+  /** sha256Hex(canonicalize(identity)) of the complete first attempted IdentityBundle,
+   * including presentation and its signatures, even if verification failed. The signed bundle
+   * scope hash (which omits presentation) cannot identify the consuming attempt. */
+  consumedByPresentationHash: string;
 }
 export interface EvidenceGraphDeps {
   readSettlementNode?: SettlementNodeRead;
   /** Authenticate verifier issuance, job binding, bounded lifetime and the first consuming
-   * presentation attempt (CORE SN-1..4). Historical reads are idempotent; they never issue
-   * or consume a challenge. Return null for unavailable evidence or a replay attempt. */
+   * presentation attempt (CORE SN-1..4). Record its complete digest before verification,
+   * including on failure; do not derive it from the requested party's signed scope hash.
+   * Historical reads are idempotent; they never issue or consume a challenge.
+   * Return null for unavailable evidence or a replay attempt. */
   resolveSessionChallenge?: (jobId: string, party: Record<string, unknown>) => Promise<HistoricalSessionChallenge | null>;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
@@ -866,7 +870,7 @@ async function verifyCurrentEvidenceGraph(
       const challenge: HistoricalSessionChallenge | null | undefined = await deps.resolveSessionChallenge?.(String(raw.jobId), party);
       if (!challenge || challenge.jobId !== raw.jobId || !sameSigningIdentity(challenge.party, party.primaryClaim) ||
           typeof challenge.nonce !== "string" || challenge.nonce.length === 0 || identity.sessionNonce !== challenge.nonce ||
-          normalizedHash(challenge.consumedByBundleHash) !== normalizedHash(party.bundleHash) ||
+          normalizedHash(challenge.consumedByPresentationHash) !== sha256Hex(canonicalize(identity)) ||
           !Number.isFinite(challenge.issuedAt) || !Number.isFinite(challenge.expiresAt) || !Number.isFinite(challenge.consumedAt) ||
           challenge.consumedAt < challenge.issuedAt || challenge.consumedAt > challenge.expiresAt ||
           challenge.consumedAt > Number(raw.finalisedAt)) {

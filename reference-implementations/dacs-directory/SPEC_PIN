@@ -27,8 +27,10 @@
 #     EvidenceGraphDeps.resolveIdentityBundle. Publication self-bindings cannot supply session identity.
 #     IdentityBundle hashes omit presentation per DACS-1. Session Vet additionally requires a trusted
 #     resolveSessionChallenge adapter authenticating verifier issuance, job/party/nonce, challenge
-#     lifetime, authenticated consumedAt and the hash of the first consuming presentation attempt
-#     (CORE SN-1..4). IdentityBundle.presentedAt is schema-checked but informational.
+#     lifetime, authenticated consumedAt and consumedByPresentationHash: sha256Hex(canonicalize(identity))
+#     of the complete first attempted IdentityBundle including presentation/signatures, even on failure (CORE SN-1..4).
+#     A signed-scope bundle hash is insufficient; historical adapters must supply the complete digest.
+#     IdentityBundle.presentedAt is schema-checked but informational.
 #     No production historical-challenge resolver is installed: those sessions remain indeterminate.
 #     Listing publication continues to accept a nonce-free signed self-binding.
 #   Required credential matching uses the signed composite generatedAt (unix ms) as the historical

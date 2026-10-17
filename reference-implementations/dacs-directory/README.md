@@ -351,8 +351,10 @@ well-known index, skills, seller API and sitemap advertise executable offers onl
 
 Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
 verifier-issued nonce against its job, party, issuance window, authenticated first consumption
-time (`consumedAt`) and consuming presentation hash. The signed `presentedAt` timestamp is
-informational. This deployment does not install that resolver, so sessions requiring Vet remain
-indeterminate for completion and volume. Listing publication uses its signed self-binding.
+time (`consumedAt`) and `consumedByPresentationHash`, `sha256Hex(canonicalize(identity))` of the complete
+first attempted IdentityBundle including `presentation` and its signatures, even when that attempt
+failed. The signed bundle scope hash omits `presentation` and cannot identify an attempt. The signed
+`presentedAt` timestamp is informational. This deployment does not install that resolver, so sessions
+requiring Vet remain indeterminate for completion and volume. Listing publication uses its signed self-binding.
 Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
 attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.
