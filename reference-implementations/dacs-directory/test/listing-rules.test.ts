@@ -83,7 +83,7 @@ test("DACS-1 §6.3.2: identity, offering, pricing, pipeline and validity rules a
     "metered pricing with a minimum total in its currency": pricedWith({ kind: "metered", unitPrice: { amount: "1", currency: "DEM" }, unit: "u".repeat(64), minTotal: { amount: "2", currency: "DEM" } }, { kind: "negotiate-fixed-price" }),
     "an auction with a reserve price": pricedWith({ ...auction, reservePrice: { amount: "2", currency: "DEM" } }, { kind: "negotiate-sealed-envelope", parameters: SEALED }),
     "an intake-only pipeline without rails": (scope) => { scope.pipeline = [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-attested-payload" }]; delete scope.acceptedRails; },
-    "a vet phase before negotiation": (scope) => { scope.pipeline = [{ kind: "vet-credentials", parameters: {} }, { kind: "negotiate-fixed-price" }, ...tail]; },
+    "a vet phase before negotiation": (scope) => { scope.pipeline = [{ kind: "vet-credentials" }, { kind: "negotiate-fixed-price" }, ...tail]; },
     "notAfter equal to notBefore": set("validity", { notBefore: 5, notAfter: 5 }),
   };
   const rejected: Record<string, (scope: Obj) => void> = {
@@ -347,7 +347,7 @@ test("further listing rules: band floor, step order, claim binding and every-mem
     (scope.seller as Obj).identity = { ...identity, presentation: perClaim(identity, 1) };
   };
   const twoPays = (scope: Obj) => { scope.pipeline = [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
-    { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }]; };
+    { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-attested-payload" }]; };
   const claim = { scheme: "lei", verificationRequired: true };
   const accepted = {
     "a minPct of 0": pricedWith({ ...negotiable, minPct: 0 }, { kind: "negotiate-rfq", parameters: RFQ }),
@@ -396,4 +396,68 @@ test("RB-3 retention carries forward only this listing version's own revoked rec
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("PIPE-1/VPC and required listing schema reject correctly signed deficient listings", async () => {
+  const bad: Record<string, (scope: Obj) => void> = {
+    "missing delivery": (s) => { s.pipeline = (s.pipeline as Obj[]).filter((p) => !String(p.kind).startsWith("deliver-")); },
+    "vet after negotiation": (s) => { (s.pipeline as Obj[]).splice(1, 0, { kind: "vet-credentials" }); },
+    "vet after payment": (s) => { (s.pipeline as Obj[]).push({ kind: "vet-credentials" }); },
+    "identity version 2": set("seller.identity.bundleVersion", "2"),
+    "missing presentedAt": set("seller.identity.presentedAt", undefined),
+    "nonnumeric presentedAt": set("seller.identity.presentedAt", "1"),
+    "malformed claim among valid claims": (s) => { (at(s, "seller.identity").claims as unknown[]).push(null); },
+    "malformed ref among valid claims": (s) => { (at(s, "seller.identity").claims as unknown[]).push({ ref: 7 }); },
+    "missing tags": set("offering.tags", undefined),
+    "non-array tags": set("offering.tags", {}),
+  };
+  for (const kind of ["vet-credentials", "negotiate-fixed-price", "commit-agreement", "commit-payee-bound-agreement", "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload"]) {
+    for (const parameters of [{}, { authorization: "skip" }]) bad[`${kind} with ${JSON.stringify(parameters)}`] = (s) => {
+      const pipeline = s.pipeline as Obj[];
+      const index = pipeline.findIndex((p) => p.kind === kind);
+      if (index >= 0) pipeline[index] = { kind, parameters };
+      else if (kind === "vet-credentials") pipeline.unshift({ kind, parameters });
+      else if (kind.startsWith("commit-")) pipeline[1] = { kind, parameters };
+      else pipeline[3] = { kind, parameters };
+    };
+  }
+  for (const [name, change] of Object.entries(bad)) {
+    const raw = listing((scope) => {
+      change(scope);
+      // Keep both signature layers valid, so a stale presentation cannot mask a missing schema gate.
+      const identity = at(scope, "seller.identity");
+      const identityScope = { ...identity }; delete identityScope.presentation;
+      identity.presentation = perClaim(identityScope);
+    });
+    assert.equal(await verifyListing(raw), null, name);
+  }
+});
+
+test("a discovered revocation marker withheld before first verification never becomes active", async () => {
+  const { admitRevocationCandidates, hasPendingRevocationCandidates } = await import("../src/catalog/store.js");
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const status of [403, 404]) {
+      const listed = listing((s) => { s.listingId = `unread-revocation-${status}`; });
+      const listingAt = `stor-${String(status).padStart(40, "0")}`;
+      const markerAt = `stor-${String(status + 1).padStart(40, "0")}`;
+      const hash = contentHash((({ signature: _, ...scope }) => scope)(listed));
+      admitRevocationCandidates(hash, [{ locator: markerAt }]);
+      globalThis.fetch = async (input) => String(input).endsWith(listingAt)
+        ? Response.json({ success: true, owner: `0x${keys[0]}`, data: listed })
+        : Response.json({ success: false, errorCode: status === 403 ? "PERMISSION_DENIED" : "NOT_FOUND" }, { status });
+      for (let pass = 0; pass < 2; pass++) {
+        const record = await indexRegistration({ primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [listingAt] }, undefined,
+          async () => { throw new Error("offline"); });
+        assert.deepEqual(record.listings, []); assert.equal(hasPendingRevocationCandidates(hash), true);
+      }
+      // Successfully read invalid bytes can be rejected, completing the pending check.
+      globalThis.fetch = async (input) => Response.json({ success: true, owner: `0x${keys[0]}`, data: String(input).endsWith(listingAt) ? listed : "invalid marker bytes" });
+      const realNow = Date.now; Date.now = () => realNow() + 60_000;
+      let resolved;
+      try { resolved = await indexRegistration({ primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [listingAt] }, undefined,
+        async () => { throw new Error("offline"); }); } finally { Date.now = realNow; }
+      assert.equal(resolved.listings[0].status, "active");
+    }
+  } finally { globalThis.fetch = originalFetch; }
 });

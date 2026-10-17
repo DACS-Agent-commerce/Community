@@ -40,7 +40,8 @@ test("well-known, seller API and sitemap share executable offer filtering", asyn
     assert.equal(response.status, 200);
     const { files } = await response.json();
     const index = JSON.parse(files["/.well-known/dacs/listings.json"]);
-    const card = JSON.parse(files["/.well-known/agent.json"]);
+    const card = JSON.parse(files["/.well-known/agent-card.json"]);
+    assert.equal(files["/.well-known/agent-card.json"], files["/.well-known/agent.json"]);
     assert.deepEqual(index.listings.map((l: ListingSummary) => l.listingId), ["native", "x402"]);
     assert.deepEqual(card.skills.map((s: { id: string }) => s.id), ["native", "x402"]);
     assert.equal(card.dacs.listings.indexHash, `sha256-${sha256Hex(files["/.well-known/dacs/listings.json"])}`);

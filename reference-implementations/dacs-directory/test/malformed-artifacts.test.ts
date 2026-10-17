@@ -95,7 +95,7 @@ globalThis.fetch = async (input, init) => {
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));
     return new Response(
-      `{"success":true,"owner":${owner},"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${reread?.(at, count) ?? entry.data}}`,
+      `{"success":true,"acl":{"mode":"public"},"owner":${owner},"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${reread?.(at, count) ?? entry.data}}`,
       { headers: { "content-type": "application/json" } },
     );
   }
@@ -269,7 +269,7 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const buyerBundle = { data: '{"any":1}', name: "dacs5:bundle:job-attribution", owner: ownerOf(buyer) };
   const scope = { agreementVersion: "1", jobId: "job-attribution", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "demos-native:DEM" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
   const program = (sellerClaim: string, member?: string) => {
     const raw = sellerClaim === seller ? validAgreement : { seller: sellerClaim };
@@ -336,10 +336,10 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "storage-program" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "demos-native:DEM" }], terms: {}, validity: { notBefore: 1 },
   };
   const identity = (listingRaw.seller as Obj).identity as Obj;
   const identityScope = { ...identity };
@@ -350,17 +350,21 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const agreementScope: Obj = {
     agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" },
-      deliverable: { deliverableType: "attested-payload", hash: contentHash((listingRaw.offering as Obj).deliverable as Obj) } },
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "demos-native:DEM" },
+      deliverable: { deliverableType: "storage-program", hash: contentHash((listingRaw.offering as Obj).deliverable as Obj) } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", outcome: "success", paymentTxRefs,
     paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
   const evidence = { ...evidenceScope, signature: await signArtifact(evidenceScope, "evidence", 1) };
+  const payload = { report: jobId };
+  const deliveryScope: Obj = { evidenceVersion: "1", jobId, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
+    deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(61) } };
+  const delivered = { ...deliveryScope, signature: await signArtifact(deliveryScope, "evidence", 1) };
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
-    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
+    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind: "deliver-storage-program", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence"), ref(at(60), delivered, "evidence")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];
@@ -369,10 +373,11 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   return {
     listingAnchor: at(1),
     programs: {
+      [at(60)]: { data: JSON.stringify(delivered) }, [at(61)]: { data: JSON.stringify(payload), name: `dacs4:deliverable:${jobId}` },
       [at(1)]: { data: JSON.stringify(currentListing) }, [at(2)]: { data: JSON.stringify(agreement) },
-      [at(3)]: { data: JSON.stringify(evidence), name: `dacs4:payment:${jobId}:pay-dem:2` }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
+      [at(3)]: { data: JSON.stringify(evidence), name: `dacs4:payment:${jobId}:demos-native%3ADEM:2` }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
     },
-    deal: { jobId, rail: "pay-dem", buyerBundleRef: at(5), sellerBundleRef: at(6), owners: { buyer, seller } } as RegisteredDeal,
+    deal: { jobId, rail: "demos-native:DEM", buyerBundleRef: at(5), sellerBundleRef: at(6), owners: { buyer, seller } } as RegisteredDeal,
     bindings: [
       await signedBinding(jobId, "buyer", at(5), artifactHash(buyerCopy, "bundle"), 0),
       await signedBinding(jobId, "seller", at(6), artifactHash(sellerCopy, "bundle"), 1),
@@ -393,8 +398,8 @@ test("malformed bundles and malformed payment references stay unverified and nev
     [legacyBundle]: { data: '{"futureField":1e400}' },
     [currentBundle]: { data: withMember({ bundleVersion: "1", jobId: "job-current-malformed", parties: [], anchoredByRole: "buyer", signatures: [] }, "1e400") },
   });
-  const legacyDeal: RegisteredDeal = { jobId: "job-legacy-malformed", rail: "pay-dem", buyerBundleRef: legacyBundle, owners: { buyer, seller } };
-  const currentMalformedDeal: RegisteredDeal = { jobId: "job-current-malformed", rail: "pay-dem", buyerBundleRef: currentBundle, owners: { buyer, seller } };
+  const legacyDeal: RegisteredDeal = { jobId: "job-legacy-malformed", rail: "demos-native:DEM", buyerBundleRef: legacyBundle, owners: { buyer, seller } };
+  const currentMalformedDeal: RegisteredDeal = { jobId: "job-current-malformed", rail: "demos-native:DEM", buyerBundleRef: currentBundle, owners: { buyer, seller } };
 
   const registration = {
     primaryClaim: seller,
@@ -458,7 +463,9 @@ test("identity tier skips claims whose verification artifacts have no canonical 
 
 test("reindex drops malformed carried bindings and still indexes every later seller", async () => {
   const listingAnchor = locator(81);
-  chain({ [listingAnchor]: { data: JSON.stringify(listing) } }, [listingAnchor]);
+  const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
+  chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
   assert.throws(() => contentHash(carried), RangeError);
@@ -478,7 +485,9 @@ test("reindex drops malformed carried bindings and still indexes every later sel
 
 test("a seller whose record cannot be indexed is logged and omitted while later sellers are indexed", async () => {
   const listingAnchor = locator(91);
-  chain({ [listingAnchor]: { data: JSON.stringify(listing) } }, [listingAnchor]);
+  const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
+  chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   // Legacy or hand-edited registration JSON is untrusted carriage too.
   const broken = { primaryClaim: buyer, displayName: "Broken", listingAnchors: null } as unknown as Registration;
   resetIndex([broken, { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 44);

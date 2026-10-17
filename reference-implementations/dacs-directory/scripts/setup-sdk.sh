@@ -35,7 +35,7 @@ else
   (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.

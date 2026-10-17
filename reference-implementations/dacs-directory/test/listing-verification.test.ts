@@ -22,7 +22,7 @@ function signedCurrentListing(
   signingClaim = claim,
 ): Record<string, unknown> {
   const identity: Record<string, unknown> = {
-    presentedBy: signingClaim,
+    bundleVersion: "1", presentedAt: 1, presentedBy: signingClaim,
     claims: [{ ref: signingClaim, kind: "signing-key" }],
   };
   identity.presentation = {

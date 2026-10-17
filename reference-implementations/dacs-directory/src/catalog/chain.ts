@@ -10,7 +10,7 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
+import { boundedJson, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { gcrAuthHeaders } from "./gcr.js";
 
@@ -53,6 +53,7 @@ export interface AnchorRecord {
 export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
+  | { status: "invalid" }
   | { status: "unavailable" };
 
 export async function readAnchorResult(address: string): Promise<AnchorRead> {
@@ -67,13 +68,13 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
     return { status: "unavailable" };
   }
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
-  // or PERMISSION_DENIED on a 403 (kynesyslabs/node storageprogram routes). Any other 4xx, such as a
+  // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
   // proxy's or a wrong route's, leaves the read incomplete (RB-6).
   if (res.status === 404 || res.status === 403) {
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
       const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
-      return answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
+      return res.status === 404 && answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
     } catch {
       return { status: "unavailable" };
     }
@@ -82,14 +83,14 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   let json: { success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown };
   try {
     json = (await storageResponseJson(res)) as typeof json;
-  } catch (error) {
-    return { status: error instanceof StorageResponseTooLarge ? "absent" : "unavailable" };
+  } catch {
+    return { status: "unavailable" };
   }
   if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
   const data = json.data;
-  return data != null && typeof data === "object" && !Array.isArray(data) && boundedJson(data) !== null
-    ? { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } }
-    : { status: "absent" };
+  if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
+  if (boundedJson(data) === null) return { status: "unavailable" };
+  return { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } };
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {

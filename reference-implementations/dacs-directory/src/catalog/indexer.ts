@@ -137,15 +137,10 @@ function legacySettlementClaims(artifacts: ResolvedArtifact[]): SettlementTxIds 
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
-/**
- * Only a transport failure leaves a revocation candidate unread (RB-6). A
- * locator the node answers for with no readable object holds no marker, so it
- * is rejected; otherwise deleting or hiding a queued candidate would keep the
- * listing's check incomplete for good.
- */
+/** A discovered candidate stays unresolved until its bytes can be verified (RB-5/6). */
 async function readRevocationCandidate(locator: string): Promise<Record<string, unknown> | null> {
   const read = await readAnchorResult(locator);
-  return read.status === "present" ? read.record.data : read.status === "absent" ? {} : null;
+  return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
 }
 
 export function listingBindingRejection(
@@ -431,12 +426,12 @@ export async function indexRegistration(
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
       const settlement = currentSettlementClaims(authoritative?.settlement ?? []);
-      const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
-        .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
-      const cancellationNeutral = isNeutralCancellation(
-        sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
-        authoritative?.bundle.agreementRef,
-      );
+      // ST-10: either verified copy can establish neutral cancellation. A refuted
+      // marker on one copy must not hide an established marker on the other.
+      const cancellationNeutral = [sellerOk ? sellerGraph : undefined, buyerOk ? buyerGraph : undefined]
+        .some((graph) => graph && isNeutralCancellation(sellerOutcome,
+          graph.bundle.cancellation as Record<string, unknown> | undefined,
+          graph.listing?.terms, graph.bundle.phaseSummary, graph.bundle.agreementRef));
       dealCandidates.push({
         ...resolvedDeal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
         rail: agreementRail(authoritative?.agreement) ?? "unknown",

@@ -8,6 +8,7 @@ import { matchesVetRequirement } from "./vetClaimRules.js";
 import { validateRecipeResult, type RecipePolicy } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
+import { nativeRailAdmission } from "./railPolicy.js";
 import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
@@ -42,8 +43,21 @@ export interface EvidenceGraph {
   /** DACS-4 AMEND-4: amendments that fail AMEND-1..3 are flagged, kept for audit, and never an unwind. */
   flaggedAmendments: Array<{ locator: string; reason: string }>;
 }
+export interface HistoricalSessionChallenge {
+  jobId: string;
+  party: string;
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
+  /** Hash of the first presentation attempt consuming this challenge, even if that attempt failed. */
+  consumedByBundleHash: string;
+}
 export interface EvidenceGraphDeps {
   readSettlementNode?: SettlementNodeRead;
+  /** Authenticate verifier issuance, job binding, bounded lifetime and the first consuming
+   * presentation attempt (CORE SN-1..4). Historical reads are idempotent; they never issue
+   * or consume a challenge. Return null for unavailable evidence or a replay attempt. */
+  resolveSessionChallenge?: (jobId: string, party: Record<string, unknown>) => Promise<HistoricalSessionChallenge | null>;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
@@ -65,8 +79,8 @@ const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substr
 const MAX_GRAPH_ARTIFACTS = 64;
 const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= MAX_DACS_ARTIFACT_BYTES;
 const priceTermOk = (value: unknown): boolean => {
-  const price = rec(value); const amount = String(price?.amount ?? "");
-  return Boolean(price && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
+  const price = rec(value); const amount = price?.amount;
+  return Boolean(price && typeof amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
@@ -433,7 +447,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const supplementary = arr(raw.supplementary);
     return raw.recordVersion === "1" && typeof raw.jobId === "string" && typeof raw.evaluatedParty === "string" && /^[0-9a-f]{64}$/.test(normalizedHash(raw.bundleHash)) && /^[0-9a-f]{64}$/.test(normalizedHash(raw.requirementHash)) && typeof raw.generatedAt === "number" && ["pass", "fail", "indeterminate", "error"].includes(String(raw.overallDecision)) && Array.isArray(raw.freshness) && Array.isArray(raw.dealSpecific) && Array.isArray(raw.supplementary) && supplementary.length === raw.supplementary.length && supplementary.every((signal) => typeof signal.source === "string" && typeof signal.signalType === "string" && (typeof signal.value === "number" || typeof signal.value === "string") && typeof signal.observedAt === "number" && (signal.attestation === undefined ? signal.source !== "external" : isCurrentRef(signal.attestation)));
   }
-  if (kind === "rating") return raw.ratingVersion === "1" && typeof raw.jobId === "string" && typeof raw.rater === "string" && typeof raw.target === "string" && (raw.targetRole === "buyer" || raw.targetRole === "seller") && Number.isInteger(raw.value) && Number(raw.value) >= 1 && Number(raw.value) <= 5 && typeof raw.ratedAt === "number" && (typeof raw.freeText !== "string" || raw.freeText.length <= 1000);
+  if (kind === "rating") return raw.ratingVersion === "1" && typeof raw.jobId === "string" && typeof raw.rater === "string" && typeof raw.target === "string" && (raw.targetRole === "buyer" || raw.targetRole === "seller") && Number.isInteger(raw.value) && Number(raw.value) >= 1 && Number(raw.value) <= 5 && typeof raw.ratedAt === "number" && (raw.freeText === undefined || (typeof raw.freeText === "string" && raw.freeText.length <= 1000));
   return true;
 }
 async function signatureOk(
@@ -563,7 +577,21 @@ async function verifyCurrentEvidenceGraph(
     const resolved = await resolveRef("agreement", raw.agreementRef, deps); if (!resolved) return failSigned("agreement reference failed");
     if (resolved.raw.jobId !== raw.jobId) return failSigned("agreement belongs to another job");
     artifacts.push(resolved); agreement = resolved.raw;
-  } else if (!abort) return failSigned("non-abort bundle has no agreement");
+  }
+  // Agreement refs become mandatory only after successful commitment. Earlier terminal
+  // failures still belong in reputation denominators (DACS-5 §10.3/§10.4).
+  const committed = phases.some((phase) => String(phase.kind).startsWith("commit-") && phase.outcome === "ok");
+  const settled = phases.some((phase) => settlesPhase(phase.kind));
+  if (agreement && phases.some((phase) => String(phase.kind).startsWith("commit-") && phase.outcome === "fail")) {
+    return failSigned("agreement contradicts failed commitment");
+  }
+  if (!agreement && (raw.outcome === "completed" || committed || settled || raw.settlementEvidence.length > 0)) {
+    return failSigned("committed or settled bundle has no agreement");
+  }
+  if (!agreement && !abort && (!terminalPhase || terminalPhase.outcome !== "fail" ||
+      !["vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "negotiate-sealed-envelope-procurement", "commit-agreement", "commit-payee-bound-agreement"].includes(String(terminalPhase.kind)))) {
+    return failSigned("pre-commit failure has no failed terminal phase");
+  }
   const topLevelEvidence: ResolvedEvidence[] = [];
   for (const [kind, refs] of [["evidence", raw.settlementEvidence], ["composite", raw.vetRecords], ["rating", raw.ratingRefs], ["amendment", raw.amendments]] as Array<[ArtifactKind, unknown]>) {
     for (const ref of Array.isArray(refs) ? refs : []) {
@@ -823,9 +851,6 @@ async function verifyCurrentEvidenceGraph(
         }
         identity = await deps.read(party.identityBundleRef.anchor.locator);
       }
-      if (!identity && sameSigningIdentity(party.primaryClaim, verifiedListing.sellerClaim)) {
-        identity = rec(rec(listed.raw.seller)?.identity);
-      }
       identity ??= await deps.resolveIdentityBundle?.(party) ?? null;
       if (!identity || !withinArtifactLimit(identity)) return failSigned("party IdentityBundle is unavailable");
       const scope = { ...identity }; delete scope.presentation;
@@ -835,6 +860,15 @@ async function verifyCurrentEvidenceGraph(
             sameSigningIdentity(claim.ref, party.primaryClaim)) ||
           !(await verifyIdentityPresentation(identity, String(party.primaryClaim), resolveKey))) {
         return failSigned("party IdentityBundle hash or presentation failed");
+      }
+      const challenge: HistoricalSessionChallenge | null | undefined = await deps.resolveSessionChallenge?.(String(raw.jobId), party);
+      if (!challenge || challenge.jobId !== raw.jobId || !sameSigningIdentity(challenge.party, party.primaryClaim) ||
+          typeof challenge.nonce !== "string" || challenge.nonce.length === 0 || identity.sessionNonce !== challenge.nonce ||
+          normalizedHash(challenge.consumedByBundleHash) !== normalizedHash(party.bundleHash) ||
+          !Number.isFinite(challenge.issuedAt) || !Number.isFinite(challenge.expiresAt) ||
+          Number(identity.presentedAt) < challenge.issuedAt || Number(identity.presentedAt) > challenge.expiresAt ||
+          Number(identity.presentedAt) > Number(raw.finalisedAt)) {
+        return failSigned("session authorization is indeterminate: authenticated historical challenge is unavailable or mismatched");
       }
       identities.set(String(party.role), identity);
     }
@@ -882,6 +916,9 @@ async function verifyCurrentEvidenceGraph(
     if (!agreement || canonicalize(evidence.raw.paymentAmount) !== canonicalize(rec(agreement.terms)?.price)) {
       return failSigned("payment amount does not match the agreement price");
     }
+    const rail = rec(rec(agreement.terms)?.rail);
+    const railCheck = nativeRailAdmission(raw.railRegistryVersion, rail, evidence.raw.phase, rec(agreement.terms)?.price);
+    if (railCheck) return failSigned(railCheck);
     if (evidence.raw.phase === "pay-ap2" || evidence.raw.phase === "pay-x402") {
       return failSigned("payment verification is indeterminate: authenticated provider receipt is unavailable");
     }
@@ -896,7 +933,10 @@ async function verifyCurrentEvidenceGraph(
   // DV-1..3: a signed success assertion alone does not establish storage delivery.
   // Use the hash-bound listing specification, never self-described payload access metadata.
   for (const evidence of topLevelEvidence) {
-    if (evidence.raw.phase !== "deliver-storage-program" || evidence.raw.outcome !== "success") continue;
+    if (!DELIVERY_PHASES.has(String(evidence.raw.phase)) || evidence.raw.outcome !== "success") continue;
+    if (evidence.raw.phase !== "deliver-storage-program") {
+      return failSigned("delivery verification is indeterminate: authoritative attestation or entitlement adapter is unavailable");
+    }
     const deliverable = rec(rec(listed.raw.offering)?.deliverable);
     if (!agreement || deliverable?.kind !== "storage-program") return failSigned("storage delivery does not match the agreement");
     const accessModel = deliverable.accessModel ?? "public";

@@ -123,6 +123,7 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
+| `DACS_RAIL_SNAPSHOTS` | For positive payment verdicts | Operator-authenticated PA-1 registry snapshots (`registryVersion`, `rails` with exact `railId`, `railVersion`, `phaseHandler`, `railType`, `asset`, `network`, `parameters`, `availability`); absent/unknown versions remain indeterminate. Provision only after authenticating the registry index and definitions. Only live native DEM definitions have a settlement adapter. |
 | `DACS_RECIPE_POLICIES` | For tier elevation and session vetting | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and included vet results indeterminate for session admission |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
@@ -347,3 +348,10 @@ All other current payment rails and paid SDK legacy sessions remain indeterminat
 authoritative settlement adapters are available. They contribute no completion or volume.
 Historical listings remain available on explicitly archival seller and service pages; the
 well-known index, skills, seller API and sitemap advertise executable offers only.
+
+Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
+verifier-issued nonce against its job, party, issuance window and first consuming presentation
+hash. This deployment does not install that resolver, so sessions requiring Vet remain
+indeterminate for completion and volume. Listing publication uses its signed self-binding.
+Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
+attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.

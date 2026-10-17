@@ -185,7 +185,7 @@ test("a storage read separates a definitive answer from a transport failure (RB-
     ["object data", () => body({ success: true, owner, programName, data: { marker: 1 } }), "present"],
     // The node's own answers are definitive.
     ["not found", () => nodeError(404, "NOT_FOUND"), "absent"],
-    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "absent"],
+    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "unavailable"],
     // A 4xx without the node's matching errorCode is a proxy, a route or a mismatch: incomplete (RB-6).
     ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable"],
     ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable"],
@@ -196,8 +196,8 @@ test("a storage read separates a definitive answer from a transport failure (RB-
     ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable"],
     ["invalid request", () => new Response(null, { status: 400 }), "unavailable"],
     ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable"],
-    ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "absent"],
-    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "absent"],
+    ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "invalid"],
+    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable"],
     ["node failure", () => new Response(null, { status: 503 }), "unavailable"],
     ["rate limited", () => new Response(null, { status: 429 }), "unavailable"],
     ["unsuccessful body", () => body({ success: false }), "unavailable"],

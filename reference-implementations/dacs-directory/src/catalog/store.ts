@@ -133,6 +133,14 @@ db.exec(`
     state TEXT NOT NULL DEFAULT 'pending',
     PRIMARY KEY(listing_hash, locator)
   );
+  CREATE TABLE IF NOT EXISTS revocation_candidate_retries (
+    listing_hash TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    retry_after INTEGER NOT NULL,
+    PRIMARY KEY(listing_hash, locator),
+    FOREIGN KEY(listing_hash, locator) REFERENCES revocation_candidates(listing_hash, locator) ON DELETE CASCADE
+  );
   CREATE INDEX IF NOT EXISTS revocation_candidates_seq_idx ON revocation_candidates(seq);
   CREATE INDEX IF NOT EXISTS revocation_candidates_pending_idx
     ON revocation_candidates(listing_hash, seq) WHERE state = 'pending';
@@ -282,9 +290,15 @@ db.transaction(() => {
 }).immediate();
 
 const pendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
-  WHERE listing_hash = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+  WHERE listing_hash = ? AND state = 'pending' AND NOT EXISTS (
+    SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
+      AND r.locator = revocation_candidates.locator AND r.retry_after > ?
+  ) ORDER BY seq LIMIT ?`);
 const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candidates
-  WHERE listing_hash = ? AND owner = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' AND NOT EXISTS (
+    SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
+      AND r.locator = revocation_candidates.locator AND r.retry_after > ?
+  ) ORDER BY seq LIMIT ?`);
 /**
  * The next `limit` candidates to verify for a listing: those anchored by the
  * listing's owner first, then the rest in arrival order. Two indexed queries
@@ -293,8 +307,9 @@ const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candid
 export function nextRevocationCandidates(listingHash: string, listingOwner: string | null, limit: number): string[] {
   const rows = (statement: Database.Statement, ...params: unknown[]) =>
     (statement.all(...params) as Array<{ locator: string }>).map((row) => row.locator);
-  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
-  return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
+  const now = Date.now();
+  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), now, limit) : [];
+  return [...new Set([...owned, ...rows(pendingCandidates, listingHash, now, limit)])].slice(0, limit);
 }
 const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND state = 'pending' LIMIT 1`);
@@ -304,12 +319,21 @@ export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
-/** Apply one verification batch: rejected candidates leave the queue, unreadable ones move to its back. */
+const retryAttempts = db.prepare("SELECT attempts FROM revocation_candidate_retries WHERE listing_hash = ? AND locator = ?");
+const scheduleRevocationRetry = db.prepare(`INSERT INTO revocation_candidate_retries(listing_hash,locator,attempts,retry_after)
+  SELECT listing_hash,locator,?,? FROM revocation_candidates WHERE listing_hash=? AND locator=? AND state='pending'
+  ON CONFLICT(listing_hash,locator) DO UPDATE SET attempts=excluded.attempts,retry_after=excluded.retry_after`);
+const clearRevocationRetry = db.prepare("DELETE FROM revocation_candidate_retries WHERE listing_hash=? AND locator=?");
+/** Unread candidates stay pending, move to the back, and retry with exponential 1–60 second backoff. */
 export const recordRevocationProgress = db.transaction(
   (listingHash: string, progress: { unread: readonly string[]; rejected: readonly string[] }): void => {
-    for (const locator of progress.rejected) rejectCandidate.run(listingHash, locator);
+    for (const locator of progress.rejected) { rejectCandidate.run(listingHash, locator); clearRevocationRetry.run(listingHash, locator); }
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
-    for (const locator of progress.unread) requeueCandidate.run(seq++, listingHash, locator);
+    for (const locator of progress.unread) {
+      requeueCandidate.run(seq++, listingHash, locator);
+      const attempts = (retryAttempts.get(listingHash, locator) as { attempts: number } | undefined)?.attempts ?? 0;
+      scheduleRevocationRetry.run(Math.min(attempts + 1, 7), Date.now() + Math.min(60_000, 1_000 * 2 ** attempts), listingHash, locator);
+    }
   },
 );
 

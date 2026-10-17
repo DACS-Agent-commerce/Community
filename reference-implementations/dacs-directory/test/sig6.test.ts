@@ -84,7 +84,7 @@ test("SIG-6: a current listing signature and a revocation marker accept only the
     seller: { identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: did, signature: presentation }] } }, displayName: "Agent" },
     offering: { title: "Service", description: "Description", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }],
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } }, terms: {}, validity: { notBefore: 1 },
   };
   const listingBytes = await signBytes(`dacs-listing:v1:${contentHash(scope)}`);

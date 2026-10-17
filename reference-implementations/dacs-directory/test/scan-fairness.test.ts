@@ -322,7 +322,8 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   assert.equal(publishedListing(), undefined, "an incomplete check publishes no active record");
   scanOnly.clear();
   transactions = [];
-  await reindex();
+  const realNow = Date.now; Date.now = () => realNow() + 60_000;
+  try { await reindex(); } finally { Date.now = realNow; }
   assert.equal(publishedListing()?.status, "revoked");
 
   // Unexamined: the valid marker queues behind more bogus candidates than one pass verifies.
@@ -339,7 +340,7 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
 
-  // A candidate deleted after discovery holds no marker: it is rejected, so it cannot keep the check open.
+  // A candidate deleted after discovery has not completed hash/signature verification.
   resetIndex([sellerRegistration, later], 34);
   chain({
     [locator(1)]: { data: JSON.stringify(listing) },
@@ -347,8 +348,8 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   }, [locator(1), locator(8)]);
   vanishing.add(locator(8));
   await reindex();
-  assert.equal(publishedListing()?.status, "active");
-  assert.deepEqual(pending(listingHash), []);
+  assert.equal(publishedListing(), undefined);
+  assert.deepEqual(pending(listingHash), [locator(8)]);
 
   // Every candidate examined and rejected: absent, and an active record carries no binding.
   resetIndex([sellerRegistration, later], 33);

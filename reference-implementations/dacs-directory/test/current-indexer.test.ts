@@ -24,7 +24,7 @@ const maps = new Map<string, Obj>();
 const readNativeFixture = nativeNodeFixture(() => maps.values());
 const paymentAnchorRecord = async (at: string) => {
   const data = maps.get(at);
-  return data ? { data, programName: `dacs4:payment:${data.jobId}:pay-dem:2` } : null;
+  return data ? { data, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:${maps.get(locator(1))?.pipeline && (maps.get(locator(1))!.pipeline as Obj[])[0].kind === "vet-credentials" ? 3 : 2}`, acl: { mode: "public" } } : null;
 };
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
@@ -38,7 +38,7 @@ const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rati
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 // §8.5.2 check 4: the agreement names the canonical DeliverableRef of the listed DeliverableSpec.
-const deliverableRef = { deliverableType: "attested-payload", hash: contentHash({ kind: "attested-payload", payloadFormat: "application/json" }) };
+const deliverableRef = { deliverableType: "storage-program", hash: contentHash({ kind: "storage-program", accessModel: "public" }) };
 const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
@@ -50,10 +50,10 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "storage-program", accessModel: "public" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, ...(withVet ? [{ kind: "vet-credentials" }] : [])],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+    pipeline: [...(withVet ? [{ kind: "vet-credentials" }] : []), { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "demos-native:DEM" }], terms: {}, validity: { notBefore: 1 },
   };
   // Listing verifier requires a presentation signature for the seller claim.
   const identity = (listingScope.seller as Obj).identity as Obj;
@@ -66,7 +66,7 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
     parties: [{ role: "buyer", primaryClaim: dids[buyerIndex] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "pay-dem" },
+      rail: { railId: "demos-native:DEM" },
       deliverable: deliverableRef,
     } };
   const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", buyerIndex, true), await sign(agreementScope, "agreement", sellerIndex, true)] }; maps.set(at(2), agreement);
@@ -75,17 +75,22 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
   const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", sellerIndex) }; maps.set(at(3), evidence);
   const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[buyerIndex], target: dids[sellerIndex], targetRole: "seller", value: 5, ratedAt: 110 };
   const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", buyerIndex) }; maps.set(at(4), rating);
+  const payload = { report: jobId };
+  maps.set(at(61), payload);
+  const deliveryScope: Obj = { evidenceVersion: "1", jobId, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
+    deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(61) } };
+  const delivery = { ...deliveryScope, signature: await sign(deliveryScope, "evidence", sellerIndex) }; maps.set(at(60), delivery);
   const bundleScope: Obj = { bundleVersion: "1", jobId, outcome: "completed", listingRef,
     agreementRef: ref(at(2), agreement, "agreement"), parties: [
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[buyerIndex] },
       { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
     ],
-    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
-    settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
+    phaseSummary: (listingScope.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })), vetRecords: [],
+    settlementEvidence: [ref(at(3), evidence, "evidence"), ref(at(60), delivery, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
   if (withVet) {
     bundleScope.parties = await Promise.all([buyerIndex, sellerIndex].map(async (party, index) => {
-      const scope = { bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, claims: [{ ref: dids[party] }] };
+      const scope = { bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, sessionNonce: `challenge-${dids[party]}`, claims: [{ ref: dids[party] }] };
       const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[party]))).toString("hex");
       return { role: index === 0 ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(scope),
         identityBundle: { ...scope, presentation: { kind: "per-claim", signatures: [{ ref: dids[party], signature }] } } };
@@ -170,9 +175,9 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "pay-dem" },
+      rail: { railId: "demos-native:DEM" },
       deliverable: deliverableRef,
-      payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
+      payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] }],
     },
   };
 
@@ -190,13 +195,13 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
 
 async function graphAt(at: string, listing: Obj, listingLocator: string) {
   return buildCurrentEvidenceGraph(at, {
-    readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (locatorValue) => maps.get(locatorValue) ?? null,
+    resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (locatorValue) => maps.get(locatorValue) ?? null,
     resolveListing: async () => ({ locator: listingLocator, raw: listing }),
   });
 }
 
 function registeredDeal(jobId: string, buyer: string, seller: string): RegisteredDeal {
-  return { jobId, rail: "pay-dem", buyerBundleRef: buyer, sellerBundleRef: seller, owners: { buyer: dids[0], seller: dids[1] } };
+  return { jobId, rail: "demos-native:DEM", buyerBundleRef: buyer, sellerBundleRef: seller, owners: { buyer: dids[0], seller: dids[1] } };
 }
 
 test("listing Gate-2 binding failures have stable rejection classes", () => {
@@ -268,18 +273,18 @@ const resignBundle = async (scope: Obj): Promise<Obj> => ({
 test("current evidence graph verifies full references and rejects cross-job ratings", async () => {
   const { listing, buyerBundle: bundle, agreement, evidence, rating, locators } = await vector();
   assert.ok(await verifyListing(listing), "listing fixture must verify");
-  assert.equal(agreementRail(agreement), "pay-dem");
+  assert.equal(agreementRail(agreement), "demos-native:DEM");
   assert.equal(agreementRail({
     terms: { rail: { railId: "ap2:stripe-paymentintents" } },
   }), "ap2:stripe-paymentintents");
   assert.equal(agreementRail({ terms: { rail: { railId: "" } } }), null);
-  assert.equal(agreementRail({ terms: { rail: "pay-dem" } }), null);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  assert.equal(agreementRail({ terms: { rail: "demos-native:DEM" } }), null);
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, true, graph.reason); assert.equal(graph.ratings.length, 1);
   const ratingScope = signedScope(rating, "rating");
   maps.set(locator(4), { ...ratingScope, signature: await sign(ratingScope, "rating", 1) });
-  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(forgedRater.ok, false);
 
@@ -292,7 +297,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const wrongTargetRoleBundle = signedScope(bundle, "bundle");
   wrongTargetRoleBundle.ratingRefs = [ref(locator(4), wrongTargetRole, "rating")];
   maps.set(locator(5), await resignBundle(wrongTargetRoleBundle));
-  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(mismatchedTargetRole.ok, false);
   maps.set(locator(4), rating);
@@ -303,33 +308,33 @@ test("current evidence graph verifies full references and rejects cross-job rati
     kind: "pay-dem",
     outcome: "ok",
     attestationRef: (bundle.settlementEvidence as unknown[])[0],
-  }];
+  }, { index: 3, kind: "deliver-storage-program", outcome: "ok" }];
   maps.set(locator(5), await resignBundle(linkedPhase));
-  const linked = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const linked = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(linked.ok, true, linked.reason);
 
   maps.set(locator(5), { ...bundle, signatures: [...(bundle.signatures as unknown[]), null] });
-  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedSignature.ok, false);
 
   maps.set(locator(5), { ...bundle, signature: null });
-  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousBundleSignature.ok, false);
 
   const wrongAlgorithmSignatures = (bundle.signatures as Obj[]).map((signature, index) =>
     index === 0 ? { ...signature, algorithm: "ecdsa-secp256k1" } : signature);
   maps.set(locator(5), { ...bundle, signatures: wrongAlgorithmSignatures });
-  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(wrongAlgorithm.ok, false);
 
   const missingRequiredArray = signedScope(bundle, "bundle");
   delete missingRequiredArray.settlementEvidence;
   maps.set(locator(5), await resignBundle(missingRequiredArray));
-  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(missingRefs.ok, false);
   assert.equal(missingRefs.reason, "invalid current DACS-5 bundle shape");
@@ -337,7 +342,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const unsupportedAmendment = signedScope(bundle, "bundle");
   unsupportedAmendment.amendments = [{}];
   maps.set(locator(5), await resignBundle(unsupportedAmendment));
-  const amendment = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const amendment = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(amendment.ok, false);
   assert.equal(amendment.reason, "duplicate or invalid top-level reference", "an amendments entry must be a reference");
@@ -345,7 +350,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const invalidRatingRefs = signedScope(bundle, "bundle");
   invalidRatingRefs.ratingRefs = "not-an-array";
   maps.set(locator(5), await resignBundle(invalidRatingRefs));
-  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(invalidRatings.ok, false);
 
@@ -355,7 +360,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     (bundle.ratingRefs as unknown[])[0],
   ];
   maps.set(locator(5), await resignBundle(duplicateTopLevel));
-  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(duplicateRefs.ok, true, duplicateRefs.reason);
   assert.equal(duplicateRefs.ratings.length, 1);
@@ -371,7 +376,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     },
   }];
   maps.set(locator(5), await resignBundle(orphanedPhase));
-  const orphaned = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const orphaned = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(orphaned.ok, false);
   assert.equal(orphaned.reason, "phase attestation reference is outside the verified graph");
@@ -386,7 +391,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedEvidenceBundle = signedScope(bundle, "bundle");
   malformedEvidenceBundle.settlementEvidence = [ref(locator(3), malformedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(malformedEvidenceBundle));
-  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badEvidenceRefs.ok, false);
 
@@ -400,7 +405,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const ambiguousEvidenceBundle = signedScope(bundle, "bundle");
   ambiguousEvidenceBundle.settlementEvidence = [ref(locator(3), ambiguousEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(ambiguousEvidenceBundle));
-  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousContainers.ok, false);
 
@@ -417,7 +422,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const conflictingNestedBundle = signedScope(bundle, "bundle");
   conflictingNestedBundle.settlementEvidence = [ref(locator(3), conflictingNestedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(conflictingNestedBundle));
-  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(conflictingNested.ok, false);
   assert.equal(conflictingNested.reason, "settlement evidence chain failed");
@@ -439,7 +444,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedCompositeBundle = signedScope(bundle, "bundle");
   malformedCompositeBundle.vetRecords = [ref(locator(6), malformedComposite, "composite")];
   maps.set(locator(5), await resignBundle(malformedCompositeBundle));
-  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badCompositeRefs.ok, false);
 
@@ -455,19 +460,19 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const crossJobAgreementBundle = signedScope(bundle, "bundle");
   crossJobAgreementBundle.agreementRef = ref(locator(2), crossJobAgreement, "agreement");
   maps.set(locator(5), await resignBundle(crossJobAgreementBundle));
-  const crossJob = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const crossJob = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(crossJob.ok, false);
   assert.equal(crossJob.reason, "agreement belongs to another job");
 
   maps.set(locator(5), bundle);
   maps.set(locator(2), { ...agreement, signatures: [...(agreement.signatures as unknown[]), null] });
-  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedAgreementSignature.ok, false);
   maps.set(locator(2), agreement);
   maps.set(locator(4), { ...rating, jobId: "replayed" });
-  const replay = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const replay = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(replay.ok, false);
 });
@@ -543,7 +548,7 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
     {
       name: "duplicate payout key",
       mutate: (scope) => {
-        const binding = { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] };
+        const binding = { railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] };
         (scope.terms as Obj).payoutBindings = [binding, { ...binding }];
       },
     },
@@ -561,7 +566,7 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
   const legacy = await vector("legacy-with-payout-binding", 300);
   const legacyScope = signedScope(legacy.agreement, "agreement");
   (legacyScope.terms as Obj).payoutBindings = [
-    { railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] },
+    { railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] },
   ];
   await installAgreement(legacy, legacyScope);
   const legacyGraph = await graphAt(legacy.locators.buyer, legacy.listing, legacy.locators.listing);
@@ -582,15 +587,15 @@ test("payee-bound agreements fail closed on discriminator, domain and payout cov
 });
 
 test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, rail, deliverable, pattern and role direction", () => {
-  const offered = { kind: "attested-payload", payloadFormat: "application/json" };
-  const pays = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }];
+  const offered = { kind: "storage-program", accessModel: "public" };
+  const pays = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }];
   const listing = (pricing: Obj, negotiation: Obj = { kind: "negotiate-fixed-price" }, pipeline: Obj[] = pays): Obj => ({
-    offering: { deliverable: offered }, pricing, pipeline: [negotiation, ...pipeline], acceptedRails: [{ railId: "pay-dem" }],
+    offering: { deliverable: offered }, pricing, pipeline: [negotiation, ...pipeline], acceptedRails: [{ railId: "demos-native:DEM" }],
   });
   const agreement = (terms: Obj = {}, extra: Obj = {}): Obj => ({
     agreementVersion: "1", derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
-    terms: { price: { amount: "10", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: deliverableRef, ...terms }, ...extra,
+    terms: { price: { amount: "10", currency: "DEM" }, rail: { railId: "demos-native:DEM" }, deliverable: deliverableRef, ...terms }, ...extra,
   });
   const check = (deal: Obj, offer: Obj) => agreementListingConformance(deal, offer, dids[1]);
   const price = (amount: string, currency = "DEM") => ({ price: { amount, currency } });
@@ -628,15 +633,15 @@ test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, r
   assert.equal(check(agreement(), listing({ kind: "subscription", price: { amount: "10", currency: "DEM" } })), "unrecognized-pricing-kind");
   // 3. Rail: present exactly when the pipeline pays, and accepted by the listing.
   assert.equal(check(agreement({ rail: undefined }), fixed), "rail");
-  assert.equal(check(agreement({ rail: "pay-dem" }), fixed), "rail");
+  assert.equal(check(agreement({ rail: "demos-native:DEM" }), fixed), "rail");
   assert.equal(check(agreement({ rail: { railId: "pay-x402" } }), fixed), "rail");
-  assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 2 } }), fixed), "rail");
-  assert.equal(check(agreement({ rail: { railId: "pay-dem", railVersion: 1 } }), { ...fixed, acceptedRails: [{ railId: "pay-dem", railVersion: 1 }] }), null);
+  assert.equal(check(agreement({ rail: { railId: "demos-native:DEM", railVersion: 2 } }), fixed), "rail");
+  assert.equal(check(agreement({ rail: { railId: "demos-native:DEM", railVersion: 1 } }), { ...fixed, acceptedRails: [{ railId: "demos-native:DEM", railVersion: 1 }] }), null);
   const intakeOnly = listing({ kind: "fixed", price: { amount: "10", currency: "DEM" } }, undefined, [{ kind: "commit-agreement" }]);
   assert.equal(check(agreement({ rail: undefined }), intakeOnly), null);
   assert.equal(check(agreement(), intakeOnly), "rail");
   // 4. Deliverable.
-  for (const deliverable of [undefined, { ...deliverableRef, hash: "0".repeat(64) }, { ...deliverableRef, deliverableType: "storage-program" },
+  for (const deliverable of [undefined, { ...deliverableRef, hash: "0".repeat(64) }, { ...deliverableRef, deliverableType: "attested-payload" },
     { ...deliverableRef, schemaUrl: "https://schema.example" }]) {
     assert.equal(check(agreement({ deliverable }), fixed), "deliverable", JSON.stringify(deliverable));
   }
@@ -713,15 +718,10 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   const buyerComposite = { ...buyerScope, signature: await sign(buyerScope, "composite", 1) };
   maps.set(locator(19), buyerComposite);
   scope.vetRecords = [ref(locator(6), composite, "composite"), ref(locator(19), buyerComposite, "composite")];
-  scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, {
-    index: 3,
-    kind: "vet-credentials",
-    outcome: "ok",
-    attestationRef: (scope.vetRecords as unknown[])[0],
-  }, { index: 2, kind: "pay-dem", outcome: "ok" }];
+  scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 ? { attestationRef: (scope.vetRecords as unknown[])[0] } : {}) }));
   maps.set(locator(5), await resignBundle(scope));
 
-  const graph = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const graph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(graph.ok, true, graph.reason);
 });
@@ -735,7 +735,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...extra,
   });
   const graphWith = async (records: Obj[], vetPhase: number | null) => {
-    const refs = [];
+    const refs: Obj[] = [];
     for (const [index, scope] of records.entries()) {
       const signed = { ...scope, signature: await sign(scope, "composite", 1) };
       maps.set(locator(20 + index), signed);
@@ -743,9 +743,9 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     }
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = refs;
-    scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 3, kind: "vet-credentials", outcome: "ok", ...(vetPhase === null ? {} : { attestationRef: refs[vetPhase] }) }, { index: 2, kind: "pay-dem", outcome: "ok" }];
+    scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 && vetPhase !== null ? { attestationRef: refs[vetPhase] } : {}) }));
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
   // The buyer is vetted against the listing's buyerRequirement; the publisher against requirements the listing omits.
@@ -767,11 +767,11 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   const signedFailing = { ...failing, signature: await sign(failing, "composite", 1) };
   maps.set(locator(20), signedFailing);
   aborted.vetRecords = [ref(locator(20), signedFailing, "composite")];
-  aborted.phaseSummary = [{ index: 3, kind: "vet-credentials", outcome: "fail", errorClass: "counterparty", attestationRef: (aborted.vetRecords as unknown[])[0] }];
+  aborted.phaseSummary = [{ index: 0, kind: "vet-credentials", outcome: "fail", errorClass: "counterparty", attestationRef: (aborted.vetRecords as unknown[])[0] }];
   aborted.settlementEvidence = [];
   aborted.ratingRefs = [];
   maps.set(locator(5), await resignBundle(aborted));
-  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
@@ -821,7 +821,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = [ref(locator(6), signed, "composite")];
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
 
@@ -856,7 +856,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(tampered.ok, false);
   assert.equal(tampered.reason, "VerifyResult attestation reference failed");
@@ -871,7 +871,7 @@ test("current evidence graph caps attacker-controlled transitive work", async ()
   }));
   const oversized = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "buyer" };
   maps.set(locators.buyer, oversized);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? rating,
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? rating,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, false);
   assert.equal(graph.reason, "evidence graph exceeds size limit");
@@ -1017,7 +1017,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1039,7 +1039,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
     assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
-    assert.equal(record.deals[0].rail, "pay-dem");
+    assert.equal(record.deals[0].rail, "demos-native:DEM");
     assert.equal(record.reputation.bundleCount, 1);
     // The listing's hint is scoped to its own category and counts the deal made under it (DACS-1 §6.3.6).
     // A listing IdentityBundle with no verified claim leaves the seller self-declared (IT-3).
@@ -1080,7 +1080,7 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   let omitted = 0;
@@ -1113,7 +1113,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1167,7 +1167,7 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
     reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1229,7 +1229,7 @@ test("current bundle shape requires registry pins, party hashes and valid unique
 });
 
 test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction uniqueness", () => {
-  const base: DealRecord = { jobId: "a", rail: "pay-dem", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
+  const base: DealRecord = { jobId: "a", rail: "demos-native:DEM", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: "a".repeat(64), agreementPrice: { amount: "1.25", currency: "DEM" },
     settlementTxIds: [{ id: "tx", observedAt: 10, phaseIndex: 2 }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
@@ -1241,7 +1241,7 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
 
 test("SB-2: a settlement id cited at the same time by two jobs counts for the lower evidence hash", () => {
   const deal = (jobId: string, evidenceHash: string, amount: string): DealRecord => ({
-    jobId, rail: "pay-dem", buyerBundleRef: locator(jobId === "a" ? 160 : 161), owners: { buyer: dids[0], seller: dids[1] },
+    jobId, rail: "demos-native:DEM", buyerBundleRef: locator(jobId === "a" ? 160 : 161), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: jobId.repeat(64), agreementPrice: { amount, currency: "DEM" },
     settlementTxIds: [{ id: "demos:tx", observedAt: 10, phaseIndex: 2, evidenceHash }],
@@ -1256,7 +1256,7 @@ test("SB-2: a settlement id cited at the same time by two jobs counts for the lo
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {
   const record = (jobId: string, values: Partial<DealRecord>): DealRecord => ({
-    jobId, rail: "pay-dem", buyerBundleRef: locator(150 + Number(jobId)),
+    jobId, rail: "demos-native:DEM", buyerBundleRef: locator(150 + Number(jobId)),
     owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true,
     refsVerified: true, reputationEligible: true, sellerOutcome: "completed",
     verifiedAt: 1, bundleContentHash: jobId.repeat(64).slice(0, 64), ...values,
@@ -1318,7 +1318,7 @@ test("a mixed pair indexes the fault copy's advisory fields and hash even when i
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1373,7 +1373,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
   for (const [key, value] of laterStore) maps.set(key, value);
   const registration = async (fixture: Awaited<ReturnType<typeof vector>>, jobId: string, seller: number) => ({
     primaryClaim: dids[seller], displayName: `seller-${seller}`, listingAnchors: [fixture.locators.listing],
-    deals: [{ jobId, rail: "pay-dem", buyerBundleRef: fixture.locators.buyer, sellerBundleRef: fixture.locators.seller,
+    deals: [{ jobId, rail: "demos-native:DEM", buyerBundleRef: fixture.locators.buyer, sellerBundleRef: fixture.locators.seller,
       owners: { buyer: dids[1 - seller], seller: dids[seller] } }],
     bundleBindings: [await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 1 - seller),
       await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, seller)],
@@ -1484,7 +1484,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
         const native = path.split("/").pop() ?? "";
         const data = maps.get(native);
         const owner = native === fixture.locators.listing ? dids[1] : data?.anchoredByRole === "buyer" ? dids[0] : dids[1];
-        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
           : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
       };
       await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
@@ -1512,7 +1512,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
   const originalFetch = globalThis.fetch;
   const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
   const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH; process.env.DACS_SCAN_FINALITY_DEPTH = "0";
-  const deal = { jobId: "cached-legacy", rail: "pay-dem", buyerBundleRef: locator(3001), sellerBundleRef: locator(3002),
+  const deal = { jobId: "cached-legacy", rail: "demos-native:DEM", buyerBundleRef: locator(3001), sellerBundleRef: locator(3002),
     owners: { buyer: dids[0], seller: dids[1] }, sellerFromAgreement: dids[1] };
   const key = discoveredDealKey(dids[0], deal.jobId);
   try {
@@ -1569,7 +1569,7 @@ test("indexer persists authoritative orchestrator neutrality from a verified FAB
       return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:pay-dem:2`, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {

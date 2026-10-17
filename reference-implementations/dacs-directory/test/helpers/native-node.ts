@@ -1,3 +1,8 @@
+// Authenticated operator fixture; never obtained from a listing or an RPC reply.
+process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, rails: [{
+  railId: "demos-native:DEM", railVersion: 1, railType: "demos-native", phaseHandler: "pay-dem",
+  availability: "live", asset: { kind: "native-dem", symbol: "DEM", decimals: 9 }, network: { kind: "demos" },
+}] }]);
 import type { SettlementNodeRead } from "../../src/catalog/nativePayment.js";
 type Obj = Record<string, any>;
 /** Offline confirmed native sends, separate from the signed success assertions under test. */

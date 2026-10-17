@@ -132,7 +132,7 @@ function validPhaseParameters(step: Record<string, unknown>, pricing: Record<str
       optional(parameters.channelSubnet, isString);
   }
   if (step.kind === "rate") return optional(parameters.required, (required) => typeof required === "boolean");
-  return true;
+  return String(step.kind).startsWith("pay-");
 }
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
@@ -193,6 +193,12 @@ function currentListing(scope: Record<string, unknown>): {
   const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
   const negotiationOk = negotiationKinds.length === 1 && typeof pricing?.kind === "string" &&
     Boolean(NEGOTIATION_PRICING[negotiationKinds[0] as string]?.has(pricing.kind));
+  // PIPE-1 and VPC-1/2: delivery is mandatory, and vet authorization precedes negotiation.
+  const pipelineOk = pipeline.some((step) => String(step.kind).startsWith("deliver-")) &&
+    pipeline.every((step, index) => step.kind !== "vet-credentials" || index < negotiationIndex);
+  const identityOk = identity?.bundleVersion === "1" && typeof identity.presentedAt === "number" &&
+    Number.isFinite(identity.presentedAt) && Array.isArray(identity.claims) && claims.length === identity.claims.length &&
+    claims.every((claim) => typeof claim.ref === "string" && claim.ref.length > 0);
   const signer = typeof signature?.signer === "string" ? signature.signer : "";
   const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
   const signerIdentity = canonicalSigningIdentity(signer);
@@ -207,9 +213,9 @@ function currentListing(scope: Record<string, unknown>): {
     !claims.some((claim) => typeof claim.ref === "string" &&
       canonicalSigningIdentity(claim.ref) === signerIdentity) ||
     typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
-    typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) ||
+    typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || !Array.isArray(offering.tags) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) ||
     pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || !negotiationOk || !commitmentOk || !schemaOk ||
+    !pricingOk || !negotiationOk || !commitmentOk || !pipelineOk || !identityOk || !schemaOk ||
     (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || typeof validity?.notBefore !== "number" ||
     (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
   ) return null;

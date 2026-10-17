@@ -97,9 +97,10 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     files: {
+      "/.well-known/agent-card.json": agentJson,
       "/.well-known/agent.json": agentJson,
       "/.well-known/dacs/listings.json": listingsJson,
     },
-    note: "Host both files byte-exact (the indexHash binds listings.json), then register the domain on this page.",
+    note: "Host these files byte-exact (the indexHash binds listings.json), then register the domain on this page.",
   });
 }
