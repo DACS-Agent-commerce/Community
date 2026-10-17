@@ -259,8 +259,11 @@ export async function verifyListing(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
-  const current = currentListing(raw);
-  if (current) {
+  // Select the profile before validating it. A failed current artifact must
+  // never acquire the looser legacy contract by adding draft SDK fields.
+  if ("dacsVersion" in raw) {
+    const current = currentListing(raw);
+    if (!current) return null;
     const scope = { ...raw };
     delete scope.signature;
     if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;

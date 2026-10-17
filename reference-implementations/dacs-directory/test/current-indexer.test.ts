@@ -195,7 +195,7 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
 
 async function graphAt(at: string, listing: Obj, listingLocator: string) {
   return buildCurrentEvidenceGraph(at, {
-    resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (locatorValue) => maps.get(locatorValue) ?? null,
+    resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (locatorValue) => maps.get(locatorValue) ?? null,
     resolveListing: async () => ({ locator: listingLocator, raw: listing }),
   });
 }
@@ -279,12 +279,12 @@ test("current evidence graph verifies full references and rejects cross-job rati
   }), "ap2:stripe-paymentintents");
   assert.equal(agreementRail({ terms: { rail: { railId: "" } } }), null);
   assert.equal(agreementRail({ terms: { rail: "demos-native:DEM" } }), null);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, true, graph.reason); assert.equal(graph.ratings.length, 1);
   const ratingScope = signedScope(rating, "rating");
   maps.set(locator(4), { ...ratingScope, signature: await sign(ratingScope, "rating", 1) });
-  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const forgedRater = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(forgedRater.ok, false);
 
@@ -297,7 +297,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const wrongTargetRoleBundle = signedScope(bundle, "bundle");
   wrongTargetRoleBundle.ratingRefs = [ref(locator(4), wrongTargetRole, "rating")];
   maps.set(locator(5), await resignBundle(wrongTargetRoleBundle));
-  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const mismatchedTargetRole = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(mismatchedTargetRole.ok, false);
   maps.set(locator(4), rating);
@@ -310,31 +310,31 @@ test("current evidence graph verifies full references and rejects cross-job rati
     attestationRef: (bundle.settlementEvidence as unknown[])[0],
   }, { index: 3, kind: "deliver-storage-program", outcome: "ok" }];
   maps.set(locator(5), await resignBundle(linkedPhase));
-  const linked = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const linked = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(linked.ok, true, linked.reason);
 
   maps.set(locator(5), { ...bundle, signatures: [...(bundle.signatures as unknown[]), null] });
-  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const malformedSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedSignature.ok, false);
 
   maps.set(locator(5), { ...bundle, signature: null });
-  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const ambiguousBundleSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousBundleSignature.ok, false);
 
   const wrongAlgorithmSignatures = (bundle.signatures as Obj[]).map((signature, index) =>
     index === 0 ? { ...signature, algorithm: "ecdsa-secp256k1" } : signature);
   maps.set(locator(5), { ...bundle, signatures: wrongAlgorithmSignatures });
-  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const wrongAlgorithm = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(wrongAlgorithm.ok, false);
 
   const missingRequiredArray = signedScope(bundle, "bundle");
   delete missingRequiredArray.settlementEvidence;
   maps.set(locator(5), await resignBundle(missingRequiredArray));
-  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const missingRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(missingRefs.ok, false);
   assert.equal(missingRefs.reason, "invalid current DACS-5 bundle shape");
@@ -342,7 +342,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const unsupportedAmendment = signedScope(bundle, "bundle");
   unsupportedAmendment.amendments = [{}];
   maps.set(locator(5), await resignBundle(unsupportedAmendment));
-  const amendment = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const amendment = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(amendment.ok, false);
   assert.equal(amendment.reason, "duplicate or invalid top-level reference", "an amendments entry must be a reference");
@@ -350,7 +350,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const invalidRatingRefs = signedScope(bundle, "bundle");
   invalidRatingRefs.ratingRefs = "not-an-array";
   maps.set(locator(5), await resignBundle(invalidRatingRefs));
-  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const invalidRatings = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(invalidRatings.ok, false);
 
@@ -360,7 +360,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     (bundle.ratingRefs as unknown[])[0],
   ];
   maps.set(locator(5), await resignBundle(duplicateTopLevel));
-  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const duplicateRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(duplicateRefs.ok, true, duplicateRefs.reason);
   assert.equal(duplicateRefs.ratings.length, 1);
@@ -376,7 +376,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
     },
   }];
   maps.set(locator(5), await resignBundle(orphanedPhase));
-  const orphaned = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const orphaned = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(orphaned.ok, false);
   assert.equal(orphaned.reason, "phase attestation reference is outside the verified graph");
@@ -391,7 +391,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedEvidenceBundle = signedScope(bundle, "bundle");
   malformedEvidenceBundle.settlementEvidence = [ref(locator(3), malformedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(malformedEvidenceBundle));
-  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const badEvidenceRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badEvidenceRefs.ok, false);
 
@@ -405,7 +405,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const ambiguousEvidenceBundle = signedScope(bundle, "bundle");
   ambiguousEvidenceBundle.settlementEvidence = [ref(locator(3), ambiguousEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(ambiguousEvidenceBundle));
-  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const ambiguousContainers = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(ambiguousContainers.ok, false);
 
@@ -422,7 +422,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const conflictingNestedBundle = signedScope(bundle, "bundle");
   conflictingNestedBundle.settlementEvidence = [ref(locator(3), conflictingNestedEvidence, "evidence")];
   maps.set(locator(5), await resignBundle(conflictingNestedBundle));
-  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const conflictingNested = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(conflictingNested.ok, false);
   assert.equal(conflictingNested.reason, "settlement evidence chain failed");
@@ -444,7 +444,7 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const malformedCompositeBundle = signedScope(bundle, "bundle");
   malformedCompositeBundle.vetRecords = [ref(locator(6), malformedComposite, "composite")];
   maps.set(locator(5), await resignBundle(malformedCompositeBundle));
-  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const badCompositeRefs = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(badCompositeRefs.ok, false);
 
@@ -460,19 +460,19 @@ test("current evidence graph verifies full references and rejects cross-job rati
   const crossJobAgreementBundle = signedScope(bundle, "bundle");
   crossJobAgreementBundle.agreementRef = ref(locator(2), crossJobAgreement, "agreement");
   maps.set(locator(5), await resignBundle(crossJobAgreementBundle));
-  const crossJob = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const crossJob = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(crossJob.ok, false);
   assert.equal(crossJob.reason, "agreement belongs to another job");
 
   maps.set(locator(5), bundle);
   maps.set(locator(2), { ...agreement, signatures: [...(agreement.signatures as unknown[]), null] });
-  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const malformedAgreementSignature = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(malformedAgreementSignature.ok, false);
   maps.set(locator(2), agreement);
   maps.set(locator(4), { ...rating, jobId: "replayed" });
-  const replay = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const replay = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(replay.ok, false);
 });
@@ -721,7 +721,7 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 ? { attestationRef: (scope.vetRecords as unknown[])[0] } : {}) }));
   maps.set(locator(5), await resignBundle(scope));
 
-  const graph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const graph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(graph.ok, true, graph.reason);
 });
@@ -745,7 +745,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     scope.vetRecords = refs;
     scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 && vetPhase !== null ? { attestationRef: refs[vetPhase] } : {}) }));
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
   // The buyer is vetted against the listing's buyerRequirement; the publisher against requirements the listing omits.
@@ -771,7 +771,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   aborted.settlementEvidence = [];
   aborted.ratingRefs = [];
   maps.set(locator(5), await resignBundle(aborted));
-  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
@@ -821,7 +821,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
     const scope = signedScope(bundle, "bundle");
     scope.vetRecords = [ref(locator(6), signed, "composite")];
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
 
@@ -856,7 +856,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(tampered.ok, false);
   assert.equal(tampered.reason, "VerifyResult attestation reference failed");
@@ -871,7 +871,7 @@ test("current evidence graph caps attacker-controlled transitive work", async ()
   }));
   const oversized = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "buyer" };
   maps.set(locators.buyer, oversized);
-  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? rating,
+  const graph = await buildCurrentEvidenceGraph(locators.buyer, { resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? rating,
     resolveListing: async () => ({ locator: locators.listing, raw: listing }) });
   assert.equal(graph.ok, false);
   assert.equal(graph.reason, "evidence graph exceeds size limit");

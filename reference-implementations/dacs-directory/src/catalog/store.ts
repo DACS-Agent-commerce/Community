@@ -243,6 +243,28 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   setJson("sr2-anchor-schema-version", 2);
 })();
 
+// Earlier releases persisted unreadable (403/404) candidates as rejected without
+// a trustworthy reason. Reverify those decisions once, and withhold affected
+// active catalog entries immediately, before the first reindex can run.
+db.transaction(() => {
+  if (getJson("revocation-read-schema-version", 0) >= 1) return;
+  const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
+    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
+  db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
+    SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
+      AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
+  )`).run();
+  db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
+  if (affected.size) {
+    const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
+      ...seller, listings: seller.listings.filter((listing) =>
+        listing.status === "revoked" || !affected.has(listing.contentHash)),
+    })) });
+  }
+  setJson("revocation-read-schema-version", 1);
+}).immediate();
+
 /**
  * Revocation candidates, per listing content hash. Each locator is admitted
  * once and stays pending until it is read and fails RB-4; a rejected locator

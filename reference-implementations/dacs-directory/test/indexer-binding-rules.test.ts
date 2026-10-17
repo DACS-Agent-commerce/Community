@@ -382,7 +382,7 @@ test("each signed payment phase requires its own transaction kind and complete C
 test("required vet execution binds presented claims, verification and phase pointers before catalog admission", async (t) => {
   const original = new Map(store);
   const originalPolicies = process.env.DACS_RECIPE_POLICIES;
-  type VetCase = { challenge?: "missing" | "foreign-job" | "reused" | "other-presentation"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
+  type VetCase = { challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
@@ -397,7 +397,15 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "challenge belongs to another job", challenge: "foreign-job" },
     { name: "challenge consumed by another job", challenge: "reused" },
     { name: "same-job challenge consumed by a different presentation", challenge: "other-presentation" },
-    { name: "presentation outside issuance window", buyer: { presentedAt: 121 } },
+    { name: "diagnostic timestamp before challenge issuance", buyer: { presentedAt: -100 }, expected: true },
+    { name: "diagnostic timestamp after expiry and finalisation", buyer: { presentedAt: 121 }, expected: true },
+    { name: "first consuming attempt before issuance", challengeTiming: { consumedAt: -1 } },
+    { name: "first consuming attempt after expiry", challengeTiming: { consumedAt: 121 } },
+    { name: "first consuming attempt after finalisation", challengeTiming: { expiresAt: 200, consumedAt: 121 } },
+    { name: "missing authenticated consumption time", challengeTiming: { consumedAt: undefined } },
+    { name: "nonfinite authenticated consumption time", challengeTiming: { consumedAt: Number.NaN } },
+    { name: "first consuming attempt exactly at issuance", challengeTiming: { consumedAt: 0 }, expected: true },
+    { name: "first consuming attempt exactly at expiry", challengeTiming: { consumedAt: 120 }, expected: true },
     ...["mocked", "disabled", "failed"].map((availability) => ({ name: `unusable recipe ${availability}`, policy: [{ availability }] })),
     { name: "recipe forbids result method", policy: [{ methods: ["other"] }] },
     { name: "recipe has no trusted signer", policy: [{ trustedResultSigners: [] }] },
@@ -569,7 +577,7 @@ test("required vet execution binds presented claims, verification and phase poin
       const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
-        resolveSessionChallenge: async (jobId, party) => c.challenge === "missing" || c.challenge === "reused" ? null : ({ jobId: c.challenge === "foreign-job" ? "foreign-job" : jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: c.challenge === "other-presentation" ? "0".repeat(64) : String(party.bundleHash) }),
+        resolveSessionChallenge: async (jobId, party) => c.challenge === "missing" || c.challenge === "reused" ? null : ({ jobId: c.challenge === "foreign-job" ? "foreign-job" : jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: c.challenge === "other-presentation" ? "0".repeat(64) : String(party.bundleHash), ...c.challengeTiming }),
         resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
         readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
@@ -852,6 +860,53 @@ test("PIPE-1/VPC deficient signed listings never establish graph or catalog comp
       const graph = await currentGraph(listed);
       assert.equal(graph.ok, false); assert.match(graph.reason!, /listing reference failed/);
       await assertUncounted();
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("hybrid and legacy listings cannot bypass current graph and catalog admission", async () => {
+  const original = new Map(store);
+  const compatibility = { agentId: dids[SELLER], serviceId: "binding-rules", name: "legacy", description: "legacy",
+    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["demos-native:DEM"], supportedDelivery: ["deliver-storage-program"] };
+  try {
+    const control = installListedCase((scope) => Object.assign(scope, compatibility));
+    assert.equal((await currentGraph(control)).ok, true);
+    assert.equal((await indexSeller(holders())).reputation.completed, 1);
+    for (const change of [
+      (scope: Obj) => { scope.pipeline = (scope.pipeline as Obj[]).slice(0, 3); },
+      (scope: Obj) => { (scope.pipeline as Obj[]).push({ kind: "vet-credentials" }); },
+      (scope: Obj) => { ((scope.seller as Obj).identity as Obj).bundleVersion = "2"; },
+      (scope: Obj) => { (scope.pipeline as Obj[])[0].parameters = {}; },
+      (scope: Obj) => { (scope.pipeline as Obj[])[1].parameters = { unexpected: true }; },
+      (scope: Obj) => { delete scope.dacsVersion; },
+    ]) {
+      const listed = installListedCase((scope) => { Object.assign(scope, compatibility); change(scope); });
+      const graph = await currentGraph(listed);
+      assert.equal(graph.ok, false);
+      assert.equal(graph.reason, "listing reference failed");
+      await assertUncounted();
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("payment phase, metadata, agreement and admitted policy must choose the same rail", async () => {
+  const original = new Map(store);
+  try {
+    for (const phaseRail of ["demos-native:DEM", "x402:default"]) {
+      const listed = installListedCase((scope) => {
+        scope.acceptedRails = [{ railId: "demos-native:DEM" }, { railId: "x402:default" }];
+        (scope.pipeline as Obj[])[2].parameters = { rail: phaseRail };
+      });
+      const graph = await currentGraph(listed);
+      const expected = phaseRail === "demos-native:DEM";
+      assert.equal(graph.ok, expected, graph.reason);
+      if (!expected) assert.equal(graph.reason, "payment phase rail does not match the agreement rail");
+      const seller = await indexSeller(holders(), [], "demos-native:DEM", 2, {
+        [at(3)]: { programName: `dacs4:payment:${JOB}:${encodeURIComponent(phaseRail)}:2` },
+      });
+      assert.equal(seller.deals[0].refsVerified, expected);
+      assert.equal(seller.reputation.completed, expected ? 1 : 0);
+      assert.deepEqual(seller.reputation.observedTransactionalVolume, expected ? [{ currency: "DEM", amount: "2" }] : []);
     }
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });

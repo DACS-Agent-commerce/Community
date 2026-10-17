@@ -49,6 +49,8 @@ export interface HistoricalSessionChallenge {
   nonce: string;
   issuedAt: number;
   expiresAt: number;
+  /** Authenticated time of the first consuming attempt; presentedAt is diagnostic only. */
+  consumedAt: number;
   /** Hash of the first presentation attempt consuming this challenge, even if that attempt failed. */
   consumedByBundleHash: string;
 }
@@ -783,7 +785,7 @@ async function verifyCurrentEvidenceGraph(
     Number.isSafeInteger(pinnedVersion) && listed.raw.listingVersion === pinnedVersion;
   const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
     ? await verifyListing(listed.raw, resolveKey) : null;
-  if (!listed || !verifiedListing) return failSigned("listing reference failed");
+  if (!listed || verifiedListing?.profile !== "dacs-v0.1") return failSigned("listing reference failed");
   // A summary entry is an invocation of the signed pipeline at this exact index. A completed
   // session executed every mandatory phase. ST-5 permits rate to be declined.
   const pipeline = arr(listed.raw.pipeline);
@@ -865,9 +867,9 @@ async function verifyCurrentEvidenceGraph(
       if (!challenge || challenge.jobId !== raw.jobId || !sameSigningIdentity(challenge.party, party.primaryClaim) ||
           typeof challenge.nonce !== "string" || challenge.nonce.length === 0 || identity.sessionNonce !== challenge.nonce ||
           normalizedHash(challenge.consumedByBundleHash) !== normalizedHash(party.bundleHash) ||
-          !Number.isFinite(challenge.issuedAt) || !Number.isFinite(challenge.expiresAt) ||
-          Number(identity.presentedAt) < challenge.issuedAt || Number(identity.presentedAt) > challenge.expiresAt ||
-          Number(identity.presentedAt) > Number(raw.finalisedAt)) {
+          !Number.isFinite(challenge.issuedAt) || !Number.isFinite(challenge.expiresAt) || !Number.isFinite(challenge.consumedAt) ||
+          challenge.consumedAt < challenge.issuedAt || challenge.consumedAt > challenge.expiresAt ||
+          challenge.consumedAt > Number(raw.finalisedAt)) {
         return failSigned("session authorization is indeterminate: authenticated historical challenge is unavailable or mismatched");
       }
       identities.set(String(party.role), identity);
@@ -917,6 +919,9 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("payment amount does not match the agreement price");
     }
     const rail = rec(rec(agreement.terms)?.rail);
+    if (rec(pipeline[evidence.phaseIndex!]?.parameters)?.rail !== rail?.railId) {
+      return failSigned("payment phase rail does not match the agreement rail");
+    }
     const railCheck = nativeRailAdmission(raw.railRegistryVersion, rail, evidence.raw.phase, rec(agreement.terms)?.price);
     if (railCheck) return failSigned(railCheck);
     if (evidence.raw.phase === "pay-ap2" || evidence.raw.phase === "pay-x402") {

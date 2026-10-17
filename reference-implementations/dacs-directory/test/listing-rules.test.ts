@@ -262,6 +262,32 @@ const legacyScope = {
 };
 const legacyValue = (signer = 0, scope: Obj = legacyScope) => sign(`dacs-listing:v1:${contentHash(scope)}`, signer, "hex");
 
+test("current discriminators cannot fall back to the signed legacy listing profile", async () => {
+  assert.equal((await verifyListing({ ...legacyScope, signature: legacyValue() }))?.profile, "legacy-sdk-v0.1");
+  for (const dacsVersion of ["1", "2", null, 1]) {
+    const scope = { ...legacyScope, dacsVersion };
+    assert.equal(await verifyListing({ ...scope, signature: legacyValue(0, scope) }), null, String(dacsVersion));
+  }
+  const hybrids: Record<string, (scope: Obj) => void> = {
+    "no delivery": (scope) => { (scope.pipeline as Obj[]).pop(); },
+    "late Vet": (scope) => { (scope.pipeline as Obj[]).push({ kind: "vet-credentials" }); },
+    "invalid identity version": set("seller.identity.bundleVersion", "2"),
+    "missing tags": set("offering.tags", undefined),
+    "forbidden empty parameters": (scope) => { (scope.pipeline as Obj[])[0].parameters = {}; },
+    "forbidden nonempty parameters": (scope) => { (scope.pipeline as Obj[])[1].parameters = { unexpected: true }; },
+  };
+  const hybrid = (change: (scope: Obj) => void) => listing((scope) => {
+    const { listingId: _id, listingVersion: _version, ...compatibility } = legacyScope;
+    Object.assign(scope, compatibility);
+    scope.pipeline = structuredClone(scope.pipeline);
+    change(scope);
+  });
+  assert.equal((await verifyListing(hybrid(() => {})))?.profile, "dacs-v0.1");
+  for (const [name, change] of Object.entries(hybrids)) {
+    assert.equal(await verifyListing(hybrid(change)), null, name);
+  }
+});
+
 test("legacy-sdk-v0.1 listings: an Ed25519 envelope by the agentId's own key", async () => {
   const envelope = (change: Obj = {}) => ({ algorithm: "ed25519", signer: dids[0], value: legacyValue(), ...change });
   const verdict = async (raw: Obj) => (await verifyListing(raw))?.profile ?? null;

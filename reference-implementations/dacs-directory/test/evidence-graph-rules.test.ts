@@ -1165,7 +1165,7 @@ test("procurement vet requirements bind the seller counterparty rather than the 
     buyerRequirement: requirement, pipeline, pricing: { kind: "auction", selectionRule: "lowest-price" } };
   const procurement = { ...scope, signature: await envelope(scope, "listing", BUYER) };
   for (const resultParty of [SELLER, BUYER]) {
-    const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedByBundleHash: String(party.bundleHash) }), listing: procurement, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
+    const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash) }), listing: procurement, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
       scopes: (scopes) => {
         scopes.agreement.derivedFromPattern = "sealed-envelope";
         scopes.bundle.phaseSummary = pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));

@@ -2,10 +2,8 @@ Align directory publishing and verification with the pinned DACS profiles
 
 Head: <HEAD>
 
-Current listings validate complete pipelines, identity schemas and phase parameters. Catalog rail filters preserve canonical asset-symbol case. Well-known exports include the A2A 0.3 agent-card path and its DACS compatibility alias.
+Current listings validate complete pipelines, identity schemas and phase parameters under their declared profile. Session admission consistently binds the listing, agreement, payment rail and provisioned policy. Historical Vet adapters provide authenticated consumption timing; presentation timestamps remain informational.
 
-Session admission requires verified delivery and explicitly provisioned versioned rail policies. Native DEM verification checks confirmed transaction/block inclusion and exact OS amounts. Unsupported delivery/payment adapters and unavailable historical Vet challenge context remain indeterminate and contribute no completion or volume.
+Catalog upgrades preserve pending verification status and retained revocation records across restarts. Catalog rail filters preserve canonical asset-symbol case, and well-known exports include the A2A 0.3 agent-card path and its compatibility alias. Unsupported adapters remain indeterminate for completion and volume.
 
-Discovered unreadable revocations remain pending with persistent bounded retry backoff. Signed pre-commit failures enter completion denominators without volume, and cancellation neutrality is reconciled across both copies. Existing signed historical artifacts remain available under their declared profiles.
-
-Validation: focused directory tests, captured unsigned RPC diagnostics, TypeScript checking and the supplied main baseline comparison. Loopback-dependent tests and changed-line mutation await the coordinator's CPU run. No transactions, authentication, publishing or deployment were performed.
+Validation: focused directory tests and historical regression counterchecks, TypeScript checking, and the supplied main baseline comparison. Local-server tests and changed-line mutation await the coordinator's CPU run.
