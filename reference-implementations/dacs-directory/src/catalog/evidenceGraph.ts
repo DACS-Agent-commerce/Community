@@ -5,7 +5,9 @@ import { verifyIdentityPresentation, verifyListing } from "./listingVerification
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
 import { matchesVetRequirement } from "./vetClaimRules.js";
-import { validateRecipeResult } from "./recipePolicy.js";
+import { validateRecipeResult, type RecipePolicy } from "./recipePolicy.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
+import type { AnchorRecord } from "./chain.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -40,7 +42,7 @@ export interface EvidenceGraph {
   flaggedAmendments: Array<{ locator: string; reason: string }>;
 }
 export interface EvidenceGraphDeps {
-  readAnchorRecord?: (locator: string) => Promise<{ data: Record<string, unknown>; programName?: string } | null>;
+  readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
@@ -400,8 +402,13 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
   }
   if (kind === "evidence") {
     const payment = PAYMENT_PHASES.has(String(raw.phase));
+    const storageDelivery = raw.phase === "deliver-storage-program" && raw.outcome === "success";
+    const deliveryAnchor = rec(raw.deliverableAnchor);
     return raw.evidenceVersion === "1" && typeof raw.jobId === "string" && typeof raw.phase === "string" && settlesPhase(raw.phase) &&
       (raw.outcome === "success" || raw.outcome === "failure") && typeof raw.observedAt === "number" &&
+      (!storageDelivery || (/^[0-9a-f]{64}$/.test(normalizedHash(raw.deliverableContentHash)) &&
+        deliveryAnchor?.kind === "storage-program" && typeof deliveryAnchor.locator === "string" &&
+        /^stor-[0-9a-f]{40}$/.test(deliveryAnchor.locator))) &&
       (raw.paymentTxRefs === undefined || Array.isArray(raw.paymentTxRefs)) &&
       (!payment || (raw.paymentTxRefs === undefined ? raw.outcome === "failure" : paymentTxRefsOk(raw))) &&
       (raw.amendmentRefs === undefined || Array.isArray(raw.amendmentRefs)) && (raw.attestationRef === undefined || isCurrentRef(raw.attestationRef)) &&
@@ -520,6 +527,14 @@ async function verifyCurrentEvidenceGraph(
   const failSigned = (reason: string): EvidenceGraph => ({ ...fail(reason), signaturesVerified, signedParties });
 
   const abort = raw.outcome === "aborted-by-self" || raw.outcome === "aborted-by-other";
+  // ST-7 / §10.3.1: an unrecovered substrate failure is neutral in both copies,
+  // regardless of which party anchors. A recovered earlier failure is not terminal.
+  const terminalPhase = phases.filter((phase) => phase.kind !== "rate")
+    .sort((a, b) => Number(b.index) - Number(a.index))[0];
+  if (!abort && terminalPhase?.outcome === "fail" && terminalPhase.errorClass !== undefined &&
+      ((terminalPhase.errorClass === "substrate") !== (raw.outcome === "failed-substrate"))) {
+    return failSigned("terminal substrate classification contradicts the bundle outcome");
+  }
 
   const artifacts: ResolvedEvidence[] = [];
   const topLevelLocators = new Map<string, { kind: ArtifactKind; hash: string }>();
@@ -639,6 +654,14 @@ async function verifyCurrentEvidenceGraph(
     (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
   const composites = artifacts.filter((artifact) => artifact.kind === "composite");
+  const recipePolicies = new Map<ResolvedEvidence, RecipePolicy | null>();
+  for (const result of artifacts.filter((artifact) => artifact.kind === "verify-result")) {
+    const policy = await validateRecipeResult(result.raw, undefined, resolveKey);
+    recipePolicies.set(result, policy);
+    // RAV-2: until per-result availability is disclosed, even optional non-live
+    // vet results cannot give the graph an undifferentiated verified verdict.
+    if (policy && policy.availability !== "live") return failSigned(`vet recipe availability is indeterminate: ${policy.availability}`);
+  }
   const vetDecisions = new Map(artifacts.filter((artifact) => artifact.kind === "composite" || artifact.kind === "verify-result").map((artifact) => [
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`,
     artifact.kind === "composite" ? artifact.raw.overallDecision : artifact.raw.decision,
@@ -820,10 +843,11 @@ async function verifyCurrentEvidenceGraph(
       const results = [...arr(record.raw.freshness), ...arr(record.raw.dealSpecific)]
         .map((ref) => seen.get(`verify-result\n${rec(ref.anchor)?.locator}`)).filter((value): value is ResolvedEvidence => Boolean(value));
       // A correctly signed pass decision is usable only under its pinned deployment policy.
-      const eligible = await Promise.all(results.map(async (result) =>
-        await validateRecipeResult(result.raw, undefined, resolveKey) ? result : null));
+      // RAV-2: this catalog does not yet disclose per-result availability. Non-live
+      // policies therefore remain indeterminate rather than granting verified standing.
+      const eligible = results.filter((result) => recipePolicies.get(result)?.availability === "live");
       return matchesVetRequirement(identities.get(counterpartyRole)!, requirement,
-        eligible.filter((result): result is ResolvedEvidence => result !== null), record.raw.generatedAt, raw.finalisedAt);
+        eligible, record.raw.generatedAt, raw.finalisedAt);
     };
     if (!(await Promise.all(composites.map(async (record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && await provesRequirement(record)))).some(Boolean)) {
@@ -846,6 +870,37 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("agreement listing conformance is indeterminate: checks 5 and 6 need the commitment's committedAt");
     }
     if (nonconforming) return failSigned(`agreement fails listing conformance check: ${nonconforming}`);
+  }
+  // DV-1..3: a signed success assertion alone does not establish storage delivery.
+  // Use the hash-bound listing specification, never self-described payload access metadata.
+  for (const evidence of topLevelEvidence) {
+    if (evidence.raw.phase !== "deliver-storage-program" || evidence.raw.outcome !== "success") continue;
+    const deliverable = rec(rec(listed.raw.offering)?.deliverable);
+    if (!agreement || deliverable?.kind !== "storage-program") return failSigned("storage delivery does not match the agreement");
+    const accessModel = deliverable.accessModel ?? "public";
+    // Anonymous catalog verification cannot open a buyer's sealed payload or verify its cleartext hash/key binding.
+    if (accessModel === "encrypt-to-buyer") return failSigned("storage delivery is indeterminate: encrypted cleartext is unavailable");
+    const anchor = rec(evidence.raw.deliverableAnchor)!;
+    const delivered = await deps.readAnchorRecord?.(String(anchor.locator));
+    if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
+    if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
+    if (delivered.programName !== `dacs4:deliverable:${raw.jobId}` || !withinArtifactLimit(delivered.data) ||
+        contentHash(delivered.data) !== normalizedHash(evidence.raw.deliverableContentHash)) {
+      return failSigned("storage delivery payload binding failed");
+    }
+    const acl = rec(delivered.acl);
+    if (!acl || !["public", "restricted", "owner"].includes(String(acl.mode))) {
+      return failSigned("storage delivery is indeterminate: access metadata is unavailable");
+    }
+    if (accessModel === "buyer-only") {
+      const buyer = arr(agreement.parties).find((party) => party.role === "buyer");
+      const claim = typeof buyer?.primaryClaim === "string" ? canonicalDemosAgentClaim(buyer.primaryClaim) : null;
+      const buyerAddress = claim ? `0x${claim.slice(-64)}` : null;
+      if (acl.mode !== "restricted" || !buyerAddress || !Array.isArray(acl.allowed) || acl.allowed.length !== 1 ||
+          typeof acl.allowed[0] !== "string" || acl.allowed[0].toLowerCase() !== buyerAddress) {
+        return failSigned("storage delivery is indeterminate: buyer-only access binding failed");
+      }
+    }
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };

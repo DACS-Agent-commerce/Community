@@ -255,8 +255,14 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
   present in `DACS_RECIPE_POLICIES`; missing policy fails closed. Required session vetting
-  uses the same policy: the exact scheme/version must be operational, permit the result method,
-  and trust its authenticated signer, including results with an explicit expiry.
+  uses the same policy: the exact scheme/version must be live, permit the result method,
+  and trust its authenticated signer, including results with an explicit expiry. Non-live
+  recipes remain indeterminate until the catalog can disclose each result's availability.
+- **Storage delivery is verified from readable cleartext and node access metadata.**
+  Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
+  The payload must match that hash and the job's program name; `buyer-only` requires a
+  restricted ACL naming the agreement-bound buyer. Unreadable payloads, encrypted payloads
+  and external pointers remain indeterminate and contribute no completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or

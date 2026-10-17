@@ -54,7 +54,9 @@ test("an institutional scheme verified under a live recipe gives the institution
   assert.equal(await tier(), "institutional");
   assert.equal(await tier({ scheme: "domain" }), "verified");
   assert.equal(await tier({ claim: { ref: { scheme: "lei", identifier: LEI } } }), "institutional", "a structured claim reference");
-  assert.equal(await tier({ recipe: policy({ availability: "operator_gated" }) }), "institutional");
+  for (const availability of ["operator_gated", "closed_data", "bilateral"] as const) {
+    assert.equal(await tier({ recipe: policy({ availability }) }), "self-declared", `${availability} needs consumer disclosure`);
+  }
   assert.equal(await deriveIdentityTier(undefined), "self-declared");
   assert.equal(await deriveIdentityTier({ claims: "lei" }), "self-declared");
   assert.equal(await deriveIdentityTier({ claims: [null, "lei"] }), "self-declared");

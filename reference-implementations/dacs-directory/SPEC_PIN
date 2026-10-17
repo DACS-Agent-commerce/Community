@@ -30,10 +30,15 @@
 #     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
 #     validUntil governs; without it, DACS_RECIPE_POLICIES must supply defaultMaxAgeSec for the exact
 #     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
-#     operational exact-version recipe policy, an allowed method and a trusted authenticated signer.
+#     live exact-version recipe policy, an allowed method and a trusted authenticated signer.
+#     RAV-2: the catalog does not disclose per-result availability yet. Non-live vet results
+#     remain indeterminate; non-live recipes cannot elevate identity tiers either.
 #     Wrapper expiry and listing maxAge only narrow that authority window.
 #     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
 #     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
+#   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. Unreadable payloads,
+#     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
+#     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
 # Skipped vector sets at this pin:
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;

@@ -76,14 +76,16 @@ async function index(bindings: Obj[], overflow: string[] = []) {
   return (await indexSeller(bindings, overflow)).deals[0];
 }
 
-async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "pay-dem", phaseIndex = 2) {
+async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "pay-dem", phaseIndex = 2, metadata: Record<string, Obj> = {}) {
   const state = loadScanState();
   state.bundleBindingOverflow = overflow;
   saveScanState(state);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
-    const data = store.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:${data.phase ?? "pay-dem"}:${phaseIndex}`, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    const locator = String(input).split("/").pop() ?? "";
+    const data = store.get(locator);
+    if (metadata[locator]?.unreadable) return Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:${data.phase ?? "pay-dem"}:${phaseIndex}`, data, ...metadata[locator] }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1)],
@@ -358,9 +360,10 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "missing recipe even with explicit expiry", policy: [] },
     { name: "other recipe version even with explicit expiry", policy: [{ recipeVersion: 2 }] },
     { name: "unknown recipe availability", policy: [{ availability: "unknown" }] },
-    { name: "trusted gated recipe", policy: [{ availability: "operator_gated" }], expected: true },
-    { name: "trusted closed-data recipe", policy: [{ availability: "closed_data" }], expected: true },
-    { name: "trusted bilateral recipe", policy: [{ availability: "bilateral" }], expected: true },
+    { name: "trusted gated recipe", policy: [{ availability: "operator_gated" }] },
+    { name: "trusted closed-data recipe", policy: [{ availability: "closed_data" }] },
+    { name: "trusted bilateral recipe", policy: [{ availability: "bilateral" }] },
+    { name: "optional gated vet result also needs disclosure", policy: [{ availability: "operator_gated" }], requirement: { requirementVersion: "1", required: [] } },
     { name: "malformed recipe JSON", rawPolicy: "{invalid", result: { validUntil: undefined } },
     { name: "other scheme policy", policy: [{ scheme: "domain" }], result: { validUntil: undefined } },
     { name: "nonnumeric recipe lifetime", policy: [{ defaultMaxAgeSec: "1" }], result: { validUntil: undefined } },
@@ -627,22 +630,54 @@ test("repeated deliveries require every evidence outcome to succeed before graph
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
-test("legal phase error classes retain signed failed-session graph and catalog standing", async () => {
+test("terminal failure classification preserves neutral substrate standing in both signed copies", async (t) => {
   const original = new Map(store);
   try {
-    for (const errorClass of ["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]) {
+    for (const errorClass of ["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]) await t.test(errorClass, async () => {
       const failedScope: Obj = { ...evidenceScope, outcome: "failure" }; delete failedScope.settlementFinality;
       const failed = { ...failedScope, signature: signedWith(failedScope, "evidence", SELLER) };
-      const scope = bundleScope({ outcome: "failed-perm", phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" },
+      const neutral = errorClass === "substrate";
+      const counterparty = errorClass === "counterparty" || errorClass === "settlement-atomicity";
+      const scope = bundleScope({ outcome: neutral ? "failed-substrate" : counterparty ? "failed-counterparty" : "failed-perm", phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" },
         { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "fail", errorClass }], settlementEvidence: [refTo(at(50), failed, "evidence")] });
-      store.set(at(1), listing).set(at(2), agreement).set(at(50), failed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", { ...scope, outcome: "failed-counterparty" }));
+      store.set(at(1), listing).set(at(2), agreement).set(at(50), failed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", { ...scope, outcome: neutral ? "failed-substrate" : counterparty ? "failed-perm" : "failed-counterparty" }));
       const graph = await buildCurrentEvidenceGraph(at(20), { read: async (ref) => store.get(ref) ?? null,
         readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }), resolveListing: async () => ({ locator: at(1), raw: listing }) });
       assert.equal(graph.ok, true, `${errorClass}: ${graph.reason}`);
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
       assert.equal(seller.deals[0].refsVerified, true, errorClass);
       assert.equal(seller.deals[0].fullSignatureStanding, true, errorClass);
-    }
+      if (neutral) {
+        assert.equal(seller.deals[0].sellerOutcome, "failed-substrate");
+        assert.equal(seller.reputation.completionRate, null);
+        assert.equal(seller.reputation.counterpartyAdjustedCompletionRate, null);
+        // Replay the reviewer's mutually consistent, party-attributed substrate copies.
+        const goodBuyer = store.get(at(20))!, goodSeller = store.get(at(21))!;
+        store.set(at(20), copy("buyer", { ...scope, outcome: "failed-perm" }));
+        store.set(at(21), copy("seller", { ...scope, outcome: "failed-counterparty" }));
+        const misattributed = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+        assert.equal(misattributed.deals[0].refsVerified, false);
+        assert.equal(misattributed.deals[0].reputationEligible, false);
+        store.set(at(20), goodBuyer).set(at(21), goodSeller);
+      }
+      for (const badRole of ["buyer", "seller"] as const) {
+        const badOutcome = neutral ? (badRole === "buyer" ? "failed-perm" : "failed-counterparty") : "failed-substrate";
+        const good = store.get(at(badRole === "buyer" ? 20 : 21))!;
+        store.set(at(badRole === "buyer" ? 20 : 21), copy(badRole, { ...signedScope(good, "bundle"), outcome: badOutcome }));
+        // Check the single graph too: differing copies must not be the reason this is rejected.
+        const badGraph = await buildCurrentEvidenceGraph(at(badRole === "buyer" ? 20 : 21), {
+          read: async (ref) => store.get(ref) ?? null,
+          readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }),
+          resolveListing: async () => ({ locator: at(1), raw: listing }),
+        });
+        assert.equal(badGraph.signaturesVerified, true);
+        assert.equal(badGraph.ok, false, `${errorClass}: ${badRole} graph misclassification`);
+        const rejected = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+        assert.equal(rejected.deals[0].refsVerified, false, `${errorClass}: ${badRole} misclassification`);
+        assert.equal(rejected.deals[0].reputationEligible, false);
+        store.set(at(badRole === "buyer" ? 20 : 21), good);
+      }
+    });
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
@@ -651,4 +686,47 @@ test("HTLC success rejects a foreign kind even with a hash under the undefined l
   const refs = [["htlc-lock", "lockTxHash"], ["htlc-reveal", "revealTxHash"], ["htlc-claim", "claimTxHash"]].map(([kind, field]) => ({ kind, chainId: 0, contractAddress: "contract", [field]: hash }));
   assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "success", paymentTxRefs: refs }), true);
   assert.equal(paymentTxRefsOk({ phase: "pay-cross-chain-htlc", outcome: "success", paymentTxRefs: [...refs, { kind: "foreign", chainId: 0, contractAddress: "contract", undefined: hash }] }), false);
+});
+
+test("storage payload and ACL verification gates catalog completion and volume", async (t) => {
+  const original = new Map(store);
+  const payload = { report: "catalog delivery" };
+  const cases: Array<{ name: string; accessModel?: string; evidence?: Obj; metadata?: Obj; expected?: boolean }> = [
+    { name: "verified public payload", expected: true },
+    { name: "verified buyer-only payload", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64)}`] } }, expected: true },
+    { name: "missing hash", evidence: { deliverableContentHash: undefined } },
+    { name: "wrong hash", evidence: { deliverableContentHash: "0".repeat(64) } },
+    { name: "absent anchor", evidence: { deliverableAnchor: undefined } },
+    { name: "private delivery downgraded to public", accessModel: "buyer-only" },
+    { name: "private delivery allows another buyer", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[OUTSIDER].slice(-64)}`] } } },
+    { name: "node denies private read", accessModel: "buyer-only", metadata: { unreadable: true } },
+    { name: "sealed payload cannot be publicly verified", accessModel: "encrypt-to-buyer" },
+  ];
+  try {
+    for (const c of cases) await t.test(c.name, async () => {
+      store.clear(); for (const [key, raw] of original) store.set(key, raw);
+      const deliverable = { kind: "storage-program", accessModel: c.accessModel ?? "public" };
+      const pipeline = [...listingScope.pipeline as Obj[], { kind: "deliver-storage-program" }];
+      const listedScope = { ...listingScope, offering: { ...listingScope.offering as Obj, deliverable }, pipeline };
+      const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
+      const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
+      const agreedScope = { ...agreementScope, listingRef: pinned, terms: { ...agreementScope.terms as Obj,
+        deliverable: { deliverableType: "storage-program", hash: contentHash(deliverable) } } };
+      const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
+      const deliveredScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
+        deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(51) }, ...c.evidence };
+      for (const key of Object.keys(deliveredScope)) if (deliveredScope[key] === undefined) delete deliveredScope[key];
+      const delivered = { ...deliveredScope, signature: signedWith(deliveredScope, "evidence", SELLER) };
+      const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"),
+        phaseSummary: pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })),
+        settlementEvidence: [refTo(at(3), evidence, "evidence"), refTo(at(50), delivered, "evidence")] });
+      store.set(at(1), listed).set(at(2), agreed).set(at(50), delivered).set(at(51), payload).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+      const metadata = { [at(51)]: { programName: `dacs4:deliverable:${JOB}`, acl: { mode: "public" }, ...c.metadata } };
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "pay-dem", 2, metadata);
+      assert.equal(seller.deals[0].refsVerified, c.expected ?? false);
+      assert.equal(seller.deals[0].reputationEligible, c.expected ?? false);
+      assert.equal(seller.reputation.completed, c.expected ? 1 : 0);
+      assert.deepEqual(seller.reputation.observedTransactionalVolume, c.expected ? [{ currency: "DEM", amount: "2" }] : []);
+    });
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });

@@ -41,7 +41,8 @@ async function verifiedClaim(
   const signature = obj(raw.signature);
   if (!signature || !(await verifyComponentSignature(raw, "verify-result", signature, resolveKey))) return null;
   const recipe = await validateRecipeResult(raw, resolveRecipe, resolveKey);
-  if (!recipe) return null;
+  // A tier has no per-result availability disclosure, so only live recipes can elevate it (RAV-2).
+  if (!recipe || recipe.availability !== "live") return null;
   const authorityExpiry = typeof raw.validUntil === "number" ? raw.validUntil : raw.verifiedAt + recipe.defaultMaxAgeSec * 1000;
   const wrapperExpiry = typeof claim.expiresAt === "number" ? claim.expiresAt : Infinity;
   if (authorityExpiry < raw.verifiedAt || now > Math.min(authorityExpiry, wrapperExpiry)) return null;

@@ -1135,19 +1135,59 @@ test("payout helper rejects malformed entries with false and preserves its valid
   assert.equal(agreementMatchesListing(agreement, { pipeline: [...listed.pipeline, null] }), false);
 });
 
-test("private storage access models permit signed listing and delivery graph admission", async () => {
-  for (const accessModel of ["buyer-only", "encrypt-to-buyer"]) {
-    const deliverable = { kind: "storage-program", accessModel };
+// Signed storage deliveries resolve the actual cleartext and node ACL, not an assertion of success.
+test("storage delivery requires hash-bound payload and agreement-bound access", async (t) => {
+  const payload = { report: "delivered cleartext" };
+  const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
+  type DeliveryCase = { accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
+    payload?: Obj; programName?: string; expected?: boolean; indeterminate?: boolean };
+  const cases: Record<string, DeliveryCase> = {
+    "public cleartext": { expected: true },
+    "buyer-only readable cleartext with buyer ACL": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
+    "public declaration permits private delivery": { acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
+    "buyer-only success without hash or anchor (review probe)": { accessModel: "buyer-only", evidence: { deliverableContentHash: undefined, deliverableAnchor: undefined } },
+    "encrypted success without hash or anchor (review probe)": { accessModel: "encrypt-to-buyer", evidence: { deliverableContentHash: undefined, deliverableAnchor: undefined } },
+    "missing cleartext hash": { evidence: { deliverableContentHash: undefined } },
+    "malformed cleartext hash": { evidence: { deliverableContentHash: "not-a-hash" } },
+    "wrong cleartext hash": { evidence: { deliverableContentHash: "c".repeat(64) } },
+    "missing anchor": { evidence: { deliverableAnchor: undefined } },
+    "unsupported anchor kind": { evidence: { deliverableAnchor: { kind: "http", locator: at(51) } } },
+    "invalid storage locator": { evidence: { deliverableAnchor: { kind: "storage-program", locator: "stor-bad" } } },
+    "absent anchored payload": { unreadable: true, indeterminate: true },
+    "changed payload bytes": { payload: { report: "different cleartext" } },
+    "payload from another job": { programName: "dacs4:deliverable:other-job" },
+    "missing ACL": { acl: null, indeterminate: true },
+    "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true },
+    "private declaration with public ACL": { accessModel: "buyer-only", indeterminate: true },
+    "buyer-only wrong buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [`0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
+    "buyer-only missing allowed list": { accessModel: "buyer-only", acl: { mode: "restricted" }, indeterminate: true },
+    "buyer-only extra reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress, `0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
+    "buyer-only unreadable": { accessModel: "buyer-only", unreadable: true, indeterminate: true },
+    "sealed payload cannot establish its cleartext hash": { accessModel: "encrypt-to-buyer", payload: { ciphertext: "sealed", recipient: buyerAddress }, indeterminate: true },
+    "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true },
+  };
+  for (const [name, c] of Object.entries(cases)) await t.test(name, async () => {
+    const deliverable = { kind: "storage-program", accessModel: c.accessModel ?? "public" };
     const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...listing.pipeline as Obj[], { kind: "deliver-storage-program" }] };
     const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
+    let stored: Map<string, Obj>;
     const graph = await evaluate({ listing: listed, scopes: (scopes) => {
       (scopes.agreement.terms as Obj).deliverable = { deliverableType: "storage-program", hash: contentHash(deliverable) };
       (scopes.bundle.phaseSummary as Obj[]).push({ index: 3, kind: "deliver-storage-program", outcome: "ok" });
+    }, artifacts: (session) => { stored = session.store; if (!c.unreadable) stored.set(at(51), c.payload ?? payload); },
+    readAnchorRecord: async (locator) => {
+      const data = stored.get(locator);
+      return data ? { data, programName: locator === at(51) ? c.programName ?? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:pay-dem:2`, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
     }, bundle: async (bundle, session) => {
-      const delivered = await publish(session, 50, { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101 }, "evidence", SELLER);
+      const evidence: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
+        deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(51) }, ...c.evidence };
+      for (const key of Object.keys(evidence)) if (evidence[key] === undefined) delete evidence[key];
+      const delivered = await publish(session, 50, evidence, "evidence", SELLER);
       (bundle.settlementEvidence as Obj[]).push(delivered);
     } });
-    assert.equal(graph.ok, true, `${accessModel}: ${graph.reason}`);
-    assert.equal(graph.refsVerified, true);
-  }
+    assert.equal(graph.signaturesVerified, true, graph.reason);
+    assert.equal(graph.ok, c.expected ?? false, graph.reason);
+    assert.equal(graph.refsVerified, c.expected ?? false);
+    if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
+  });
 });

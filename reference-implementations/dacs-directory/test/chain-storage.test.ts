@@ -214,3 +214,19 @@ test("a storage read separates a definitive answer from a transport failure (RB-
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("storage reads retain node ACL separately from payload assertions", async () => {
+  const originalFetch = globalThis.fetch;
+  const acl = { mode: "restricted", allowed: [owner] };
+  const data = { acl: { mode: "public" }, report: "cleartext" };
+  globalThis.fetch = async () => Response.json({ success: true, owner, programName, data, acl });
+  try {
+    const read = await readAnchorResult(`stor-${"7".repeat(40)}`);
+    assert.equal(read.status, "present");
+    if (read.status === "present") {
+      assert.deepEqual(read.record.acl, acl);
+      assert.deepEqual(read.record.data, data);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});

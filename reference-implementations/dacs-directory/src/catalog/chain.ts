@@ -40,6 +40,8 @@ export interface AnchorRecord {
   data: Record<string, unknown>;
   owner?: string;
   programName?: string;
+  /** Node-enforced access metadata; payload fields cannot substitute for this. */
+  acl?: unknown;
 }
 
 /**
@@ -77,7 +79,7 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
     }
   }
   if (!res.ok) return { status: "unavailable" };
-  let json: { success?: boolean; data?: unknown; owner?: string; programName?: string };
+  let json: { success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown };
   try {
     json = (await storageResponseJson(res)) as typeof json;
   } catch (error) {
@@ -86,7 +88,7 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
   const data = json.data;
   return data != null && typeof data === "object" && !Array.isArray(data) && boundedJson(data) !== null
-    ? { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName } }
+    ? { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } }
     : { status: "absent" };
 }
 
