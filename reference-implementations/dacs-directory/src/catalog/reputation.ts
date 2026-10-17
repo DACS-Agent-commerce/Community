@@ -105,8 +105,8 @@ export function deriveSellerReputation(
     return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
   });
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
-  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral).length;
-  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral &&
+  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral || deal.orchestratorFaultNeutral).length;
+  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral && !deal.orchestratorFaultNeutral &&
     (deal.sellerOutcome === "failed-counterparty" || deal.sellerOutcome === "aborted-by-other")).length;
   const partyFaultDenominator = scoped.length - neutral;
   const blameDenominator = partyFaultDenominator - counterpartyFault;

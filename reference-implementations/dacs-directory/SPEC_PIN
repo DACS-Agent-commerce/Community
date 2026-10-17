@@ -42,7 +42,31 @@
 #     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
 #     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
 #     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
+#   Native pay-dem: success requires blockNumber and unauthenticated getTxByHash/getBlockByNumber
+#     reads establishing confirmed inclusion, native-send endpoints and the exact DEM price in OS.
+#     Numeric legacy whole-DEM and string OS wire amounts are supported; ambiguous numeric amounts
+#     and unavailable reads never count. The node source calls terminal inclusion "confirmed".
+#   AP2 and x402 success is indeterminate: this profile has no authenticated provider-receipt
+#     resolver. A signed receipt pointer/hash alone cannot establish provider or HTTP settlement.
+#   Current publisher rail IDs are demos-native:DEM and x402:default. Historical signed phase-name
+#     aliases remain readable for evidence, but public discovery excludes those current offers;
+#     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
+#   Anonymous restricted-program reads on node ac8f45f are denied: buyer-only is indeterminate
+#     on that deployment. ACL-success tests model a hypothetical readable metadata contract.
+#   Revocation candidate policy: a node NOT_FOUND/PERMISSION_DENIED reply rejects that candidate
+#     as unreadable rather than proving global absence. Transport failures retry. This liveness
+#     deviation from DEMOS-MAPPING authoritative-absence semantics needs bounded-backoff follow-up.
+#   Per-claim PresentationSignature.signature retains the SDK auto-detected legacy encoding;
+#     strict SIG-6 value-envelope decoding is enforced separately.
 # Skipped vector sets at this pin:
+#   private-deliverables-v0.1: projected cci/40-byte buyer addresses and encryption/entitlement
+#     gates do not map directly to this agent profile; signed local graph cases pin DV-1..3.
+#   verifyresult-acceptance-v0.1: recipe-registry steward signatures and cci claims are outside
+#     the deployment-policy recipe adapter; local vet/recipe tests pin the supported profile.
+#   fab-bundle-extended-pointer-v0.3: no external extended-pointer resolver.
+#   settlement-finalization-propagation-v0.3 and receipt-rederivation-v0.3: handler-side
+#     finalization/receipt emission, not this read-only catalog consumer.
+#   commitment-anchor-authority-v0.3: no CommitmentRecord locator is exposed by current bundles.
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
 #     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
@@ -62,3 +86,5 @@
 #   conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78) demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
 #   conformance/vectors/security/unresolved-vs-absent-v0.3.json 8a543319798cb60073631a9a2431f45e866f89db8b136a76b679780718a15b91
 #   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
+#   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
+#   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e

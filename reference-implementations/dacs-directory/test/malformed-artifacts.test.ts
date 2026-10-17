@@ -1,3 +1,4 @@
+import { nativeNodeFixture } from "./helpers/native-node.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,6 +100,7 @@ globalThis.fetch = async (input, init) => {
     );
   }
   const call = JSON.parse(String(init?.body)).params?.[0];
+  if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await nativeNodeFixture(() => Object.values(storage).map((p) => JSON.parse(p.data)))(call.message, call.data) });
   return Response.json({ result: 200, response: call?.message === "getTransactions" && call.data?.start === "latest" ? transactions : [] });
 };
 function chain(programs: Record<string, StoredProgram>, referenced: string[] = []) {
@@ -329,7 +331,7 @@ test("current evidence graph fails closed on malformed bundles without hashing t
 });
 
 // Current-profile deal: listing, agreement, evidence and both bundle copies with BundleBindings.
-async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: contentHash({ settlement: jobId }) }]) {
+async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [{ kind: "demos", blockNumber: 1, txHash: contentHash({ settlement: jobId }) }]) {
   const at = (n: number) => locator(offset + n);
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],

@@ -8,6 +8,7 @@ import { matchesVetRequirement } from "./vetClaimRules.js";
 import { validateRecipeResult, type RecipePolicy } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
+import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -42,6 +43,7 @@ export interface EvidenceGraph {
   flaggedAmendments: Array<{ locator: string; reason: string }>;
 }
 export interface EvidenceGraphDeps {
+  readSettlementNode?: SettlementNodeRead;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
@@ -92,7 +94,8 @@ export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
     const ref = rec(value);
     if (!ref) return false;
     switch (raw.phase) {
-      case "pay-dem": return ref.kind === "demos" && hash(ref.txHash);
+      case "pay-dem": return ref.kind === "demos" && hash(ref.txHash) &&
+        (raw.outcome !== "success" || Number.isSafeInteger(ref.blockNumber) && Number(ref.blockNumber) > 0);
       case "pay-evm-erc20": return ref.kind === "evm" && chain(ref.chainId) && hash(ref.txHash);
       case "pay-solana-spl": return ref.kind === "solana" && settlementTxId({ ...ref, instructionIndex: 0 }) !== null;
       case "pay-x402": return ref.kind === "x402" && text(ref.httpResource) &&
@@ -262,19 +265,20 @@ export function agreementListingConformance(
     if (!lower || !upper || lower.units <= 0n || compareDecimals(amount, lower) < 0 || compareDecimals(amount, upper) > 0) return "price";
   } else if (pricing.kind === "metered") {
     const metered = rec(terms.meteredQuantity);
-    if (!listed || !metered || metered.unit !== pricing.unit ||
+    if (!listed || !metered || typeof pricing.unit !== "string" || !pricing.unit.trim() ||
+        (rec(pricing.minTotal) && rec(pricing.minTotal)!.currency !== listed.currency) || metered.unit !== pricing.unit ||
         typeof metered.quantity !== "string" || !/^(?:0|[1-9]\d*)$/.test(metered.quantity)) return "price";
     const unitPrice = decimal(listed.amount);
     const total = { units: unitPrice.units * BigInt(metered.quantity), scale: unitPrice.scale };
     const minimum = rec(pricing.minTotal) ? decimal(rec(pricing.minTotal)!.amount) : null;
     if (compareDecimals(amount, minimum && compareDecimals(minimum, total) > 0 ? minimum : total) !== 0) return "price";
   } else return "unrecognized-pricing-kind";
+  if (pricing.kind !== "metered" && terms.meteredQuantity !== undefined) return "price";
   // 3. Rail: present exactly when the pipeline pays, and one the listing accepts.
   const rail = rec(terms.rail);
   const pays = pipeline.some((phase) => typeof phase.kind === "string" && phase.kind.startsWith("pay-"));
   if (pays ? !rail : terms.rail !== undefined) return "rail";
-  if (rail && !arr(listing.acceptedRails).some((accepted) => accepted.railId === rail.railId &&
-      (accepted.railVersion === undefined || rail.railVersion === undefined || accepted.railVersion === rail.railVersion))) return "rail";
+  if (rail && !arr(listing.acceptedRails).some((accepted) => canonicalize(accepted) === canonicalize(rail))) return "rail";
   // 4. Deliverable: the canonical DeliverableRef of the listed DeliverableSpec.
   const deliverable = rec(terms.deliverable);
   const offered = rec(rec(listing.offering)?.deliverable);
@@ -854,7 +858,7 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("committed vet lacks passing verification evidence for the listing's requirements");
     }
   }
-  if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return failSigned("agreement listing binding failed");
+  if (agreement && canonicalize(agreement.listingRef) !== canonicalize(raw.listingRef)) return failSigned("agreement listing binding failed");
   if (agreement) {
     const agreementParties = arr(agreement.parties);
     if (!["buyer", "seller"].every((role) => agreementParties.some((candidate) =>
@@ -870,6 +874,21 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("agreement listing conformance is indeterminate: checks 5 and 6 need the commitment's committedAt");
     }
     if (nonconforming) return failSigned(`agreement fails listing conformance check: ${nonconforming}`);
+  }
+  // Success assertions must settle this agreement's price. Receipt-only rails stay
+  // indeterminate until this profile can authenticate their authoritative responses.
+  for (const evidence of topLevelEvidence) {
+    if (!PAYMENT_PHASES.has(String(evidence.raw.phase)) || evidence.raw.outcome !== "success") continue;
+    if (!agreement || canonicalize(evidence.raw.paymentAmount) !== canonicalize(rec(agreement.terms)?.price)) {
+      return failSigned("payment amount does not match the agreement price");
+    }
+    if (evidence.raw.phase === "pay-ap2" || evidence.raw.phase === "pay-x402") {
+      return failSigned("payment verification is indeterminate: authenticated provider receipt is unavailable");
+    }
+    if (evidence.raw.phase === "pay-dem") for (const ref of arr(evidence.raw.paymentTxRefs)) {
+      const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
+      if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
+    }
   }
   // DV-1..3: a signed success assertion alone does not establish storage delivery.
   // Use the hash-bound listing specification, never self-described payload access metadata.

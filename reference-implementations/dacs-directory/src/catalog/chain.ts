@@ -110,6 +110,14 @@ type ProgramCandidate = { storageAddress?: unknown; programName?: unknown };
 
 /** kynesyslabs/node manageNodeCall's answer to a message it does not know (ac8f45f, manageNodeCall.ts:996-1000). */
 export const UNKNOWN_NODE_CALL = '{ error: "Unknown message"}';
+/** Pinned ac8f45f literal and node2's dated 2026-10-17 structured reply. */
+export function isUnknownNodeCall(body: { result?: unknown; response?: unknown }): boolean {
+  const response = body.response;
+  return body.result === 200 && response === UNKNOWN_NODE_CALL ||
+    body.result === 404 && Boolean(response && typeof response === "object" && !Array.isArray(response) &&
+      (response as Record<string, unknown>).error === "Unknown message");
+}
+
 
 type RpcCall =
   | { status: "ok"; body: { result?: unknown; response?: unknown } }
@@ -173,7 +181,7 @@ export async function resolveOwnedAnchorByName(
   // The pinned node revision (README "Pinned upstreams") has no searchStoragePrograms nodeCall: it
   // answers an unknown message with result 200 and this literal, and serves the same exact-name
   // search as a read-authenticated gcr_routine. A deployment with the nodeCall answers it directly.
-  if (search.status === "ok" && search.body.result === 200 && search.body.response === UNKNOWN_NODE_CALL) {
+  if (search.status === "ok" && isUnknownNodeCall(search.body)) {
     search = await rpcCall(await gcrAuthHeaders(), {
       method: "gcr_routine",
       params: [{ method: "searchStoragePrograms", params: [programName, options] }],
@@ -236,4 +244,12 @@ export async function resolveOwnedAnchorByName(
   return records[0]
     ? { status: "present", address: records[0].address, record: records[0].record }
     : { status: "absent" };
+}
+
+/** Unauthenticated, bounded settlement reads; never signs or submits a transaction. */
+export async function readSettlementNode(message: "getTxByHash" | "getBlockByNumber", data: Record<string, unknown>): Promise<unknown> {
+  const result = await rpcCall({ "content-type": "application/json" }, {
+    method: "nodeCall", params: [{ type: "nodeCall", message, data, sender: "", signature: "", extra: "" }],
+  });
+  return result.status === "ok" && result.body.result === 200 ? result.body.response : null;
 }

@@ -5,7 +5,7 @@
  * Each search observation is dated runtime evidence, not a pin.
  */
 import { storageResponseJson } from "./artifactLimits.js";
-import { UNKNOWN_NODE_CALL } from "./chain.js";
+import { isUnknownNodeCall } from "./chain.js";
 import { gcrAuthHeaders } from "./gcr.js";
 
 export interface NodeContractReport {
@@ -54,7 +54,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
   const viaNodeCall = addresses(nodeCall);
   const viaGcr = addresses(gcr);
   const nodeCallSearch = viaNodeCall ? "supported"
-    : (nodeCall as { result?: unknown; response?: unknown } | null)?.result === 200 && (nodeCall as { response?: unknown }).response === UNKNOWN_NODE_CALL
+    : nodeCall !== null && isUnknownNodeCall(nodeCall as { result?: unknown; response?: unknown })
       ? "unknown-message" : "failed";
   const searchesAgree = viaNodeCall && viaGcr ? JSON.stringify(viaNodeCall) === JSON.stringify(viaGcr) : null;
   return {

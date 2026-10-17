@@ -87,3 +87,15 @@ test("selector requires the exact verified primary beside unrelated and malforme
   assert.equal(await check([primary.claim], "lei"), false);
   assert.equal(await check([primary.claim], 1), false);
 }));
+
+test("vet freshness selects the exact scheme AND recipe version among unequal windows", async () => withPolicies(async () => {
+  const p = proof("lei", "ABC", { validUntil: undefined });
+  delete p.result.raw.validUntil;
+  const check = () => matchesVetRequirement({ claims: [p.claim] }, requirement("lei"), [p.result], 2021, 2021);
+  for (const foreign of [{ ...policy("lei"), recipeVersion: 2 }, policy("ofac-clear")]) {
+    process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...foreign, defaultMaxAgeSec: 1000000 }, policy("lei")]);
+    assert.equal(check(), false, JSON.stringify(foreign));
+  }
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...policy("lei"), defaultMaxAgeSec: 1000000 }]);
+  assert.equal(check(), true, "the matching long window can admit the result");
+}));

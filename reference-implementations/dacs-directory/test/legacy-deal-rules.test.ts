@@ -243,12 +243,13 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
   assert.deepEqual({ ...record.deals[0], verifiedAt: 0, anchorTimestamp: undefined }, {
     jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] },
     signatureVerified: true, refsVerified: true, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
-    bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: true, cancellationNeutral: false,
+    bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: true, cancellationNeutral: false, orchestratorFaultNeutral: false,
     finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", verifiedAt: 0,
     // SB-1 on the legacy profile: a pay-dem TxRef keys as demos:{hash}, under the evidence's own phaseIndex.
     settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 0, evidenceHash: contentHash(evidenceScope) }],
   });
   assert.equal(record.reputation.completed, 1);
+  assert.equal((await run(base, { orchestratorFaultNeutral: true })).deals[0].orchestratorFaultNeutral, false, "registration cannot grant FAB neutrality to a legacy copy");
   const verdict = async (stored: Record<string, Obj>, registered: Obj = {}) => {
     const deal = (await run(stored, registered)).deals[0];
     return `${deal.refsVerified ? "verified" : "unverified"} ${deal.reputationEligible ? "eligible" : "ineligible"} ${deal.sellerOutcome}`;
@@ -349,7 +350,7 @@ test("an SDK-profile deal verifies end to end on the labelled legacy path, and e
     assert.equal((await run(complete)).deals[0].refsVerified, false, "indeterminate program names never fall back");
   } finally { store.saveScanState(priorState); }
 
-  for (const change of [{ phaseIndex: -1 }, { phaseIndex: "0" }, { paymentTxRefs: [] },
+  for (const change of [{ phase: "pay-evm-erc20" }, { phaseIndex: -1 }, { phaseIndex: "0" }, { paymentTxRefs: [] },
     { paymentTxRefs: [{ rail: "foreign", txHash: "ab".repeat(32), kind: "payment" }] },
     { paymentTxRefs: [{ rail: "demos", txHash: "ab".repeat(32), kind: "refund" }] }]) {
     const scope = { ...evidenceScope, ...change };

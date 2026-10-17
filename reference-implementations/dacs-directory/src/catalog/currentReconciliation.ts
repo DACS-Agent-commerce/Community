@@ -134,6 +134,7 @@ export function reconcileCurrentCopies(
     divergent,
     refsVerified,
     sellerOutcome,
+    orchestratorFaultNeutral: authoritative.bundle.faultBundleVersion === "1" && authoritative.bundle.faultedParty === "orchestrator",
     selectedLocator,
   };
 }

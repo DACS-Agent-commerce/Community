@@ -1,3 +1,4 @@
+import { nativeNodeFixture } from "./helpers/native-node.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -69,7 +70,7 @@ function baseScopes(forListing = listing) {
       terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: { deliverableType: "attested-payload", hash: contentHash(offered) } },
     } as Obj,
     evidence: {
-      evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: "ab".repeat(32) }],
+      evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", blockNumber: 1, txHash: "ab".repeat(32) }],
       paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100,
     } as Obj,
     rating: { ratingVersion: "1", jobId: JOB, rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 5, ratedAt: 110 } as Obj,
@@ -118,6 +119,7 @@ async function evaluate(c: Case = {}) {
   c.stored?.(signed, session);
   store.set(at(5), signed);
   return buildCurrentEvidenceGraph(at(5), {
+    readSettlementNode: nativeNodeFixture(() => store.values()),
     read: async (locator) => store.get(locator) ?? null,
     readAnchorRecord: c.noAnchorMetadata ? undefined : c.readAnchorRecord ?? (async (locator) => {
       const data = store.get(locator);
@@ -214,7 +216,7 @@ test("DACS-5 §10.4.1: the bundle's own shape, parties and signatures", async ()
   });
   // An empty amendments list and a self-aborted session signed by its anchor alone are valid.
   assert.equal((await evaluate({ bundle: (bundle) => { bundle.amendments = []; } })).ok, true);
-  assert.equal((await evaluate({ bundleSigners: [BUYER], bundle: (bundle) => { bundle.outcome = "aborted-by-self"; delete bundle.agreementRef; } })).ok, true);
+  assert.equal((await evaluate({ bundleSigners: [BUYER], bundle: (bundle) => { bundle.outcome = "aborted-by-self"; delete bundle.agreementRef; bundle.settlementEvidence = []; bundle.phaseSummary = []; } })).ok, true);
 });
 
 test("DACS-5 FaultAttributionBundle: faultedParty agrees with the outcome and the anchoring role", async () => {
@@ -223,7 +225,7 @@ test("DACS-5 FaultAttributionBundle: faultedParty agrees with the outcome and th
     bundle: (bundle) => {
       delete bundle.bundleVersion;
       Object.assign(bundle, { faultBundleVersion: "1", outcome, faultedParty });
-      if (outcome.startsWith("aborted")) delete bundle.agreementRef;
+      if (outcome.startsWith("aborted")) { delete bundle.agreementRef; bundle.settlementEvidence = []; bundle.phaseSummary = []; }
     },
   });
   const ok = "ok"; const bad = "invalid fault attribution";
@@ -271,7 +273,7 @@ test("DACS-5 §10.4.3: top-level references are current, unique, hash-bound and 
     "a rating by an outsider": { ratingSigner: OUTSIDER, scopes: (scopes) => { scopes.rating.rater = dids[OUTSIDER]; } },
     "a rating of an outsider": { scopes: (scopes) => { scopes.rating.target = dids[OUTSIDER]; } },
     "a rating naming the wrong target role": { scopes: (scopes) => { scopes.rating.targetRole = "buyer"; } },
-    "a second evidence at a fresh locator": { artifacts: other(6, { ...baseScopes().evidence, phaseIndex: 3, paymentTxRefs: [{ kind: "demos", txHash: "ac".repeat(32) }] }, "evidence", SELLER) },
+    "a second evidence at a fresh locator": { artifacts: other(6, { ...baseScopes().evidence, phaseIndex: 3, paymentTxRefs: [{ kind: "demos", blockNumber: 1, txHash: "ac".repeat(32) }] }, "evidence", SELLER) },
     "the agreement's sha256-prefixed hash": { bundle: (bundle) => { bundle.agreementRef = { ...(bundle.agreementRef as Obj), contentHash: `sha256:${(bundle.agreementRef as Obj).contentHash}` }; } },
   }), {
     "an agreementRef with another content hash": "agreement reference failed",
@@ -609,7 +611,7 @@ test("bundle signatures: every presented signature must verify, and standing com
   assert.deepEqual(extra.signedParties, []);
   const graph = await evaluate();
   assert.deepEqual([...graph.signedParties].sort(), [dids[BUYER], dids[SELLER]].sort());
-  const aborted = await evaluate({ bundleSigners: [BUYER], bundle: (bundle) => { bundle.outcome = "aborted-by-self"; delete bundle.agreementRef; bundle.settlementEvidence = []; bundle.phaseSummary = []; } });
+  const aborted = await evaluate({ bundleSigners: [BUYER], bundle: (bundle) => { bundle.outcome = "aborted-by-self"; delete bundle.agreementRef; bundle.settlementEvidence = []; bundle.phaseSummary = []; bundle.settlementEvidence = []; bundle.phaseSummary = []; } });
   assert.equal(aborted.ok, true, aborted.reason);
   assert.deepEqual(aborted.signedParties, [dids[BUYER]]);
 });
@@ -746,10 +748,10 @@ test("DACS-3 §8.5.2: terms, pricing kinds and the band's inputs are checked bef
   for (const [minPct, maxPct] of [["10", 10], [10, "10"], [-1, 10], [10, 1e-7], [10, Number.NaN]] as const) {
     assert.equal(check(quoted, band(minPct, maxPct)), "price", `${String(minPct)} ${String(maxPct)}`);
   }
-  // Rail versions bind only when both sides state one; another rail id never matches.
+  // Complete canonical PaymentRailRef membership binds version and parameters.
   const railed = (rail: Obj, accepted: Obj[]) => check({ ...base, terms: { ...(base.terms as Obj), rail } }, withListing(listing.pricing, listing.pipeline, { acceptedRails: accepted }));
-  assert.equal(railed({ railId: "pay-dem", railVersion: 2 }, [{ railId: "pay-dem" }]), null);
-  assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-dem", railVersion: 2 }]), null);
+  assert.equal(railed({ railId: "pay-dem", railVersion: 2 }, [{ railId: "pay-dem" }]), "rail");
+  assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-dem", railVersion: 2 }]), "rail");
   assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-x402" }, { railId: "pay-dem" }]), null);
   assert.equal(railed({ railId: "pay-dem" }, [{ railId: "pay-x402" }]), "rail");
   // A listing whose offering has no deliverable, or whose pipeline has no negotiation step, cannot conform.
@@ -972,10 +974,10 @@ test("payment and agreement currency bounds, and failed payment refs, are indepe
   for (const length of [64, 65]) {
     const currency = "C".repeat(length);
     const graph = await evaluate({ scopes: (scopes) => { scopes.evidence.paymentAmount = { amount: "1.25", currency }; } });
-    assert.equal(graph.ok, length === 64, graph.reason);
+    assert.equal(graph.ok, false, graph.reason); // A different currency cannot settle the DEM agreement, even within the bound.
     assert.deepEqual(agreementPrice({ terms: { price: { amount: "1.25", currency } } }), length === 64 ? { amount: "1.25", currency } : null);
   }
-  for (const refs of [undefined, [], [{ kind: "demos", txHash: "ab".repeat(32) }]]) {
+  for (const refs of [undefined, [], [{ kind: "demos", blockNumber: 1, txHash: "ab".repeat(32) }]]) {
     const graph = await evaluate({ scopes: (scopes) => {
       scopes.bundle.outcome = "failed-perm";
       scopes.bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "fail", errorClass: "permanent" }];
@@ -1189,17 +1191,20 @@ test("payout helper rejects malformed entries with false and preserves its valid
   assert.equal(agreementMatchesListing(agreement, { pipeline: [...listed.pipeline, null] }), false);
 });
 
-// Signed storage deliveries resolve the actual cleartext and node ACL, not an assertion of success.
+// Signed storage deliveries resolve the actual cleartext and node ACL. Readable restricted
+// records below model a hypothetical node contract; ac8f45f denies these anonymous reads.
 test("storage delivery requires hash-bound payload and agreement-bound access", async (t) => {
   const payload = { report: "delivered cleartext" };
   const signedPayload = { ...payload, signature: "original", signatures: ["original"] };
   // These keys are already in canonical order; hash every byte independently of the SDK artifact helper.
   const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
-  type DeliveryCase = { accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
+  type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
     payload?: Obj; programName?: string; expected?: boolean; indeterminate?: boolean };
   const cases: Record<string, DeliveryCase> = {
     "public cleartext": { expected: true },
+    "buyer role is independent of agreement party order": { sellerFirst: true, accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
+    "attested payload cannot satisfy storage delivery": { kind: "attested-payload" },
     "complete payload includes both signature fields": { payload: signedPayload, evidence: { deliverableContentHash: signedPayloadHash }, expected: true },
     "changed signature at fixed payload hash": { payload: { ...signedPayload, signature: "tampered" }, evidence: { deliverableContentHash: signedPayloadHash } },
     "changed signatures at fixed payload hash": { payload: { ...signedPayload, signatures: ["tampered"] }, evidence: { deliverableContentHash: signedPayloadHash } },
@@ -1220,6 +1225,7 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "payload from another job": { programName: "dacs4:deliverable:other-job" },
     "missing ACL": { acl: null, indeterminate: true },
     "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true },
+    "public ACL with allowed buyer is still a downgrade": { accessModel: "buyer-only", acl: { mode: "public", allowed: [buyerAddress] }, indeterminate: true },
     "private declaration with public ACL": { accessModel: "buyer-only", indeterminate: true },
     "buyer-only wrong buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [`0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
     "buyer-only missing allowed list": { accessModel: "buyer-only", acl: { mode: "restricted" }, indeterminate: true },
@@ -1229,12 +1235,13 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true },
   };
   for (const [name, c] of Object.entries(cases)) await t.test(name, async () => {
-    const deliverable = { kind: "storage-program", accessModel: c.accessModel ?? "public" };
+    const deliverable = c.kind === "attested-payload" ? { kind: c.kind, payloadFormat: "application/json" } : { kind: "storage-program", accessModel: c.accessModel ?? "public" };
     const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...listing.pipeline as Obj[], { kind: "deliver-storage-program" }] };
     const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
     let stored: Map<string, Obj>;
     const graph = await evaluate({ listing: listed, scopes: (scopes) => {
-      (scopes.agreement.terms as Obj).deliverable = { deliverableType: "storage-program", hash: contentHash(deliverable) };
+      (scopes.agreement.terms as Obj).deliverable = { deliverableType: deliverable.kind, hash: contentHash(deliverable) };
+      if (c.sellerFirst) (scopes.agreement.parties as Obj[]).reverse();
       (scopes.bundle.phaseSummary as Obj[]).push({ index: 3, kind: "deliver-storage-program", outcome: "ok" });
     }, artifacts: (session) => { stored = session.store; if (!c.unreadable) stored.set(at(51), c.payload ?? payload); },
     readAnchorRecord: async (locator) => {
@@ -1252,4 +1259,35 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     assert.equal(graph.refsVerified, c.expected ?? false);
     if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
   });
+});
+
+test("each signed payment must match the agreed amount and currency", async () => {
+  for (const paymentAmount of [{ amount: "0.25", currency: "DEM" }, { amount: "1.25", currency: "USD" }, { amount: "2", currency: "DEM" }]) {
+    const graph = await evaluate({ scopes: (s) => { s.evidence.paymentAmount = paymentAmount; } });
+    assert.equal(graph.signaturesVerified, true);
+    assert.equal(graph.refsVerified, false);
+    assert.match(graph.reason!, /payment amount does not match/);
+  }
+});
+
+test("complete rail terms include parameters and version, independent of key order", () => {
+  const base = baseScopes().agreement;
+  const check = (rail: Obj, accepted: Obj[]) => agreementListingConformance({ ...base, terms: { ...base.terms as Obj, rail } }, { ...listing, acceptedRails: accepted }, dids[SELLER], null);
+  const rail = { railId: "pay-dem", railVersion: 1, parameters: { network: "testnet", recipient: "alice" } };
+  assert.equal(check(rail, [{ parameters: { recipient: "alice", network: "testnet" }, railVersion: 1, railId: "pay-dem" }]), null);
+  for (const accepted of [{ ...rail, railVersion: 2 }, { ...rail, railVersion: undefined }, { ...rail, parameters: { network: "mainnet", recipient: "alice" } }, { railId: "pay-dem", railVersion: 1 }]) {
+    const clean = JSON.parse(JSON.stringify(accepted));
+    assert.equal(check(rail, [clean]), "rail");
+    assert.equal(check(clean, [rail]), "rail");
+  }
+  assert.equal(agreementListingConformance({ ...base, terms: { ...base.terms as Obj, meteredQuantity: { unit: "call", quantity: "1" } } }, listing, dids[SELLER], null), "price");
+});
+
+test("agreement and bundle listing-reference bindings ignore JSON key order", async () => {
+  const graph = await evaluate({ scopes: (scopes) => {
+    const ref = scopes.agreement.listingRef as Obj;
+    scopes.agreement.listingRef = { contentHash: ref.contentHash, version: ref.version, listingId: ref.listingId };
+  } });
+  assert.equal(graph.ok, true, graph.reason);
+  assert.equal(graph.refsVerified, true);
 });

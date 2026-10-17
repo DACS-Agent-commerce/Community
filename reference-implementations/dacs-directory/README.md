@@ -263,7 +263,9 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
   fields. The payload must match that hash and the job's program name; `buyer-only` requires a
-  restricted ACL naming the agreement-bound buyer. Unreadable payloads, encrypted payloads
+  restricted ACL naming the agreement-bound buyer. The pinned node denies anonymous reads of
+  restricted programs, so buyer-only delivery is indeterminate for this anonymous catalog. The
+  readable restricted-ACL tests describe a hypothetical node metadata contract. Unreadable payloads, encrypted payloads
   and external pointers remain indeterminate and contribute no completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
@@ -331,3 +333,12 @@ when they disagree; its output is dated runtime evidence, not a pin. Run it when
 
 MIT. This in-tree submission is covered by the Community repository's root
 [`LICENSE`](../../LICENSE).
+
+Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, paired with
+`pay-dem` and `pay-x402` phase kinds. Historical current-profile listings signed with phase
+names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
+a new signed listing version to make those offers executable.
+
+Native DEM success requires public transaction and block reads confirming inclusion, the payer
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). AP2 and x402 success remains
+indeterminate until an authenticated authoritative-receipt adapter is available in this profile.

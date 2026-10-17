@@ -207,6 +207,8 @@ export interface DealRecord extends RegisteredDeal {
   settlementRejected?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
+  /** Authoritative FAB faults the orchestrator; retained in bundleCount, neutral in party rates. */
+  orchestratorFaultNeutral?: boolean;
   /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */
   anchorTimestamp?: number;
   /** Verified agreement price; only completed sessions contribute to volume. */

@@ -29,7 +29,7 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 // barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
 // reach into the vendored build until the pin moves.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
-import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
+import { readAnchor, readAnchorRecord, readAnchorResult, readSettlementNode } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
@@ -347,7 +347,7 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing, readSettlementNode });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -418,7 +418,7 @@ export async function indexRegistration(
       };
       const buyerGraph = buyerResolution.inspected.value;
       const sellerGraph = sellerResolution.inspected.value;
-      const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
+      const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, orchestratorFaultNeutral, selectedLocator } =
         reconcileCurrentCopies(resolvedDeal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
       const ratings = (authoritative?.ratings ?? []).filter((rating) =>
@@ -445,7 +445,7 @@ export async function indexRegistration(
         fullSignatureStanding: (authoritative === sellerGraph ? sellerResolution : buyerResolution).inspected.fullSignatureStanding,
         // SB-1: a settlement the deal cites without a canonical key is `error`, so the deal is not counted.
         reputationEligible: refsVerified && settlement !== null,
-        cancellationNeutral,
+        cancellationNeutral, orchestratorFaultNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
@@ -534,6 +534,7 @@ export async function indexRegistration(
       fullSignatureStanding: legacyFullSignatureStanding(authoritative.verification),
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? "") && settlement !== null,
       cancellationNeutral,
+      orchestratorFaultNeutral: false,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       settlementTxIds: settlement ?? [],

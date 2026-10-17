@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
   }
   if (
     !Array.isArray(body.rails) || body.rails.length > 16 ||
-    !body.rails.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v)) ||
+    !body.rails.every((v) => typeof v === "string" && /^[A-Za-z0-9:-]{1,128}$/.test(v)) ||
     !Array.isArray(body.delivery) || body.delivery.length > 16 ||
     !body.delivery.every((v) => typeof v === "string" && /^[a-z0-9:-]{1,128}$/.test(v))
   ) {

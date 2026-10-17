@@ -8,6 +8,7 @@ import {
   readAnchorResult,
   resolveOwnedAnchorByName,
   UNKNOWN_NODE_CALL,
+  isUnknownNodeCall,
 } from "../src/catalog/chain.js";
 
 const owner = `0x${"12".repeat(32)}`;
@@ -70,7 +71,7 @@ test("producer resume lookup uses the pinned node's gcr_routine search when the 
       const request = JSON.parse(String(init.body)) as { method: string; params: Array<Record<string, unknown>> };
       calls.push({ method: request.method, params: request.params[0], identity: new Headers(init.headers).get("identity") });
       // kynesyslabs/node ac8f45f: an unknown nodeCall message is result 200 with this literal.
-      if (request.method === "nodeCall") return Response.json({ result: 200, response: UNKNOWN_NODE_CALL, require_reply: false, extra: null });
+      if (request.method === "nodeCall") return Response.json({ result: 200, response: '{ error: "Unknown message"}', require_reply: false, extra: null });
       return Response.json({ result: 200, response: [{ storageAddress: honest, programName }] });
     }
     return Response.json({ success: true, data: { listingId: "service" }, owner, programName });
@@ -229,4 +230,27 @@ test("storage reads retain node ACL separately from payload assertions", async (
       assert.deepEqual(read.record.data, data);
     }
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("node2 2026-10-17 structured unknown-message reply is recognized precisely", async () => {
+  assert.equal(UNKNOWN_NODE_CALL, '{ error: "Unknown message"}');
+  assert.equal(isUnknownNodeCall({ result: 200, response: '{ error: "Unknown message"}' }), true);
+  assert.equal(isUnknownNodeCall({ result: 404, response: { error: "Unknown message", message: "searchStoragePrograms" } }), true);
+  assert.equal(isUnknownNodeCall({ result: 404, response: { error: "Rate limited" } }), false);
+  assert.equal(isUnknownNodeCall({ result: 500, response: { error: "Unknown message" } }), false);
+  const original = globalThis.fetch;
+  const methods: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)); methods.push(call.method);
+      return call.method === "nodeCall" ? Response.json({ result: 404, response: { error: "Unknown message" } })
+        : Response.json({ result: 200, response: [] });
+    }
+    throw new Error("unexpected storage read");
+  };
+  try {
+    assert.equal((await resolveOwnedAnchorByName(programName, owner)).status, "absent");
+    assert.deepEqual(methods, ["nodeCall", "gcr_routine"]);
+  } finally { globalThis.fetch = original; }
 });

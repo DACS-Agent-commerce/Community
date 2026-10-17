@@ -235,3 +235,30 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("publisher emits canonical DEM and x402 registry IDs and rejects phase-name aliases", async () => {
+  for (const alias of ["pay-dem", "pay-x402"]) {
+    const response = await POST(request({ ...base, rails: [alias] }));
+    assert.equal(response.status, 400);
+  }
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try {
+    for (const [railId, phaseKind, currency] of [["demos-native:DEM", "pay-dem", "DEM"], ["x402:default", "pay-x402", "USDC"]]) {
+      const body = { ...base, rails: [railId], pricing: { kind: "fixed", amount: "1", currency } };
+      const stage = await POST(request(body));
+      assert.equal(stage.status, 200);
+      const identity = await stage.json() as { identityMessage: string; identityPresentedAt: number };
+      const response = await POST(request({ ...body, identityPresentedAt: identity.identityPresentedAt,
+        identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") }));
+      assert.equal(response.status, 200, await response.clone().text());
+      const built = await response.json() as { listing: { acceptedRails: unknown; pipeline: unknown[] } };
+      assert.deepEqual(built.listing.acceptedRails, [{ railId }]);
+      assert.deepEqual(built.listing.pipeline[2], { kind: phaseKind, parameters: { rail: railId } });
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});

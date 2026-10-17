@@ -1,3 +1,4 @@
+import { nativeNodeFixture } from "./helpers/native-node.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -49,7 +50,7 @@ const agreementScope: Obj = { agreementVersion: "1", jobId: JOB, listingRef, der
   parties: [{ role: "buyer", primaryClaim: dids[BUYER] }, { role: "seller", primaryClaim: dids[SELLER] }],
   terms: { price: { amount: "2", currency: "DEM" }, rail: { railId: "pay-dem" }, deliverable: { deliverableType: "attested-payload", hash: contentHash({ kind: "attested-payload", payloadFormat: "application/json" }) } } };
 const agreement = { ...agreementScope, signatures: [signedWith(agreementScope, "agreement", BUYER, "party"), signedWith(agreementScope, "agreement", SELLER, "party")] };
-const evidenceScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: `0x${"AB".repeat(32)}` }],
+const evidenceScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: "pay-dem", outcome: "success", paymentTxRefs: [{ kind: "demos", blockNumber: 1, txHash: `0x${"AB".repeat(32)}` }],
   paymentAmount: { amount: "2", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
 const evidence = { ...evidenceScope, signature: signedWith(evidenceScope, "evidence", SELLER) };
 const ratingScope: Obj = { ratingVersion: "1", jobId: JOB, rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 4, ratedAt: 110 };
@@ -77,12 +78,16 @@ async function index(bindings: Obj[], overflow: string[] = []) {
   return (await indexSeller(bindings, overflow)).deals[0];
 }
 
-async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "pay-dem", phaseIndex = 2, metadata: Record<string, Obj> = {}) {
+async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "pay-dem", phaseIndex = 2, metadata: Record<string, Obj> = {}, nodeRead = nativeNodeFixture(() => store.values())) {
   const state = loadScanState();
   state.bundleBindingOverflow = overflow;
   saveScanState(state);
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await nodeRead(call.message, call.data) });
+    }
     const locator = String(input).split("/").pop() ?? "";
     const data = store.get(locator);
     if (metadata[locator]?.unreadable) return Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
@@ -175,7 +180,7 @@ test("§10.4.1 full standing needs every declared party, a distinct orchestrator
   assert.equal(fullSignatureStanding(parties(dids[BUYER]), [dids[BUYER], dids[SELLER]]), true, "an orchestrator who is also the buyer adds no signer");
   assert.equal(fullSignatureStanding([{ role: "buyer", primaryClaim: dids[BUYER] }], [dids[BUYER]]), false);
   // An asymmetric abort pair: the seller's own copy is authoritative, so its standing is the one recorded.
-  const aborted = (outcome: string) => { const scope = bundleScope({ outcome }); delete scope.agreementRef; return scope; };
+  const aborted = (outcome: string) => { const scope = bundleScope({ outcome }); delete scope.agreementRef; scope.settlementEvidence = []; scope.phaseSummary = []; return scope; };
   store.set(at(13), copy("buyer", aborted("aborted-by-self"), [BUYER]));
   store.set(at(14), copy("seller", aborted("aborted-by-other"), [BUYER, SELLER]));
   const sellerFull = await index([binding("buyer", at(13), BUYER), binding("seller", at(14), SELLER)]);
@@ -187,7 +192,7 @@ test("§10.4.1 full standing needs every declared party, a distinct orchestrator
 });
 
 test("a session aborted before commitment verifies with each copy signed by its anchor alone, without full standing", async () => {
-  const aborted = (outcome: string) => { const scope = bundleScope({ outcome }); delete scope.agreementRef; return scope; };
+  const aborted = (outcome: string) => { const scope = bundleScope({ outcome }); delete scope.agreementRef; scope.settlementEvidence = []; scope.phaseSummary = []; return scope; };
   store.set(at(11), copy("buyer", aborted("aborted-by-self"), [BUYER]));
   store.set(at(12), copy("seller", aborted("aborted-by-other"), [SELLER]));
   const deal = await index([binding("buyer", at(11), BUYER), binding("seller", at(12), SELLER)]);
@@ -231,6 +236,7 @@ test("completed sessions reject failed mandatory phases and retain the non-fatal
       const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary, settlementEvidence });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
+        readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
         readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
@@ -251,7 +257,7 @@ test("completed sessions reject failed mandatory phases and retain the non-fatal
 test("each signed payment phase requires its own transaction kind and complete ChainTxRef fields", async (t) => {
   const hash = "ab".repeat(32);
   const rails: Array<{ phase: string; ref: Obj; finality: Obj; required: string[] }> = [
-    { phase: "pay-dem", ref: { kind: "demos", txHash: hash }, finality: { model: "bft-final" }, required: ["txHash"] },
+    { phase: "pay-dem", ref: { kind: "demos", blockNumber: 1, txHash: hash }, finality: { model: "bft-final" }, required: ["txHash", "blockNumber"] },
     { phase: "pay-evm-erc20", ref: { kind: "evm", chainId: 8453, txHash: hash, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["chainId", "txHash"] },
     { phase: "pay-solana-spl", ref: { kind: "solana", cluster: "devnet", signature: "1".repeat(64), instructionIndex: 0 }, finality: { model: "commitment-level", finalityCommitmentLevel: "finalized" }, required: ["cluster", "signature"] },
     { phase: "pay-x402", ref: { kind: "x402", httpResource: "https://example.com/resource", paymentReceiptHash: hash, protocolVersion: "2", settlementTxHash: hash, chainId: 8453, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["httpResource", "paymentReceiptHash", "protocolVersion", "chainId"] },
@@ -259,6 +265,13 @@ test("each signed payment phase requires its own transaction kind and complete C
     { phase: "pay-cross-chain-htlc", ref: { kind: "htlc-claim", chainId: 8453, contractAddress: `0x${"12".repeat(20)}`, claimTxHash: hash }, finality: { model: "htlc-reveal" }, required: ["chainId", "contractAddress", "claimTxHash"] },
     { phase: "pay-cross-chain-liquidity-tank", ref: { kind: "liquidity-tank", bridgeId: "bridge", sourceChainId: 1, destChainId: 2, lockTxHash: hash, releaseTxHash: hash }, finality: { model: "liquidity-tank" }, required: ["bridgeId", "sourceChainId", "destChainId", "lockTxHash", "releaseTxHash"] },
   ];
+  const receiptCases: Record<string, Obj> = {
+    "captured provider receipt without authenticated authority": { status: "captured", amount: "2", currency: "DEM", metadata: { jobId: JOB } },
+    "declined provider receipt": { status: "declined", amount: "2", currency: "DEM", metadata: { jobId: JOB } },
+    "provider receipt amount mismatch": { status: "captured", amount: "1", currency: "DEM", metadata: { jobId: JOB } },
+    "provider receipt currency mismatch": { status: "captured", amount: "2", currency: "USD", metadata: { jobId: JOB } },
+    "provider receipt job mismatch": { status: "captured", amount: "2", currency: "DEM", metadata: { jobId: "other-job" } },
+  };
   const original = new Map(store);
   try {
     for (const rail of rails) {
@@ -296,9 +309,15 @@ test("each signed payment phase requires its own transaction kind and complete C
         const refund = { kind: "htlc-refund", chainId: 1, contractAddress: "lock", refundTxHash: hash };
         variants.push(["refund alone", [refund], false], ["refund beside successful stages", [...full, refund], false]);
       }
+      if (rail.phase === "pay-ap2") for (const [name, body] of Object.entries(receiptCases)) {
+        variants.push([name, [{ ...rail.ref, receiptAttestation: { anchor: { kind: "storage-program", locator: at(60) }, contentHash: contentHash(body) } }], true]);
+      }
       if (rail.phase === "pay-x402") {
         const receiptOnly = { ...rail.ref }; delete receiptOnly.settlementTxHash; delete receiptOnly.chainId;
         variants.push(["provider receipt", [receiptOnly], true]);
+        variants.push(["receipt hash without a matching preimage", [{ ...rail.ref, paymentReceiptHash: "cd".repeat(32) }], true]);
+        variants.push(["receipt network mismatch without authenticated response", [{ ...rail.ref, chainId: 1 }], true]);
+        variants.push(["receipt transaction mismatch without authenticated response", [{ ...rail.ref, settlementTxHash: "cd".repeat(32) }], true]);
         variants.push(["uppercase receipt hash", [{ ...rail.ref, paymentReceiptHash: hash.toUpperCase() }], false]);
         variants.push(["prefixed receipt hash", [{ ...rail.ref, paymentReceiptHash: `0x${hash}` }], false]);
         for (const version of ["0", "3", "12", "999", "02", ["2"], 2])
@@ -306,10 +325,14 @@ test("each signed payment phase requires its own transaction kind and complete C
         variants.push(["version 1", [{ ...rail.ref, protocolVersion: "1" }], true]);
         variants.push(["orphan chainId", [Object.fromEntries(Object.entries(rail.ref).filter(([key]) => key !== "settlementTxHash"))], false]);
       }
+      if (rail.phase === "pay-evm-erc20") {
+        const ref = { ...rail.ref }; delete ref.logIndex;
+        variants.push(["upstream ref without logIndex", [ref], true]);
+      }
       for (const [name, refs, expected] of variants) {
         await t.test(`${rail.phase}: ${name}`, async () => {
         store.clear(); for (const [key, raw] of original) store.set(key, raw);
-        store.set(at(60), { receipt: true });
+        store.set(at(60), receiptCases[name] ?? { receipt: true });
         const listedScope = { ...listingScope, pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail.phase, parameters: { rail: rail.phase } }], acceptedRails: [{ railId: rail.phase }] };
         const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
         store.set(at(1), listed);
@@ -323,16 +346,18 @@ test("each signed payment phase requires its own transaction kind and complete C
         const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: rail.phase, outcome: "ok" }], settlementEvidence: [refTo(at(3), paid, "evidence")] });
         store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
         const graph = await buildCurrentEvidenceGraph(at(20), {
-          read: async (locator) => store.get(locator) ?? null,
+          readSettlementNode: nativeNodeFixture(() => store.values()),
+        read: async (locator) => store.get(locator) ?? null,
           readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:${rail.phase}:2` }),
           resolveListing: async () => ({ locator: at(1), raw: listed }),
         });
         assert.equal(graph.signaturesVerified, true, `${rail.phase}: ${name}`);
-        assert.equal(graph.refsVerified, expected, `${rail.phase}: ${name}: ${graph.reason}`);
+        const verified = expected && !["pay-ap2", "pay-x402"].includes(rail.phase);
+        assert.equal(graph.refsVerified, verified, `${rail.phase}: ${name}: ${graph.reason}`);
         const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], rail.phase);
         // AP2, HTLC, tank and receipt-only x402 intentionally have no supported SB-1 key.
-        const counted = expected && ["pay-dem", "pay-evm-erc20", "pay-solana-spl", "pay-x402"].includes(rail.phase) && name !== "provider receipt";
-        assert.equal(seller.deals[0].refsVerified, expected, `${rail.phase}: ${name}: catalog reference status`);
+        const counted = verified && name !== "upstream ref without logIndex" && ["pay-dem", "pay-evm-erc20", "pay-solana-spl", "pay-x402"].includes(rail.phase) && name !== "provider receipt";
+        assert.equal(seller.deals[0].refsVerified, verified, `${rail.phase}: ${name}: catalog reference status`);
         assert.equal(seller.deals[0].reputationEligible, counted, `${rail.phase}: ${name}`);
         assert.equal(seller.reputation.completed, counted ? 1 : 0, `${rail.phase}: ${name}`);
         assert.deepEqual(seller.reputation.observedTransactionalVolume, counted ? [{ currency: "DEM", amount: "2" }] : [], `${rail.phase}: ${name}`);
@@ -526,6 +551,7 @@ test("required vet execution binds presented claims, verification and phase poin
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
         resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
+        readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
         readAnchorRecord: async (locator) => ({ data: store.get(locator)!, programName: `dacs4:payment:${JOB}:pay-dem:${phaseIndex}` }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
@@ -623,7 +649,7 @@ test("repeated deliveries require every evidence outcome to succeed before graph
         phaseSummary: pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })),
         settlementEvidence: [refTo(at(3), evidence, "evidence"), ...deliveryRefs] });
       store.set(at(1), listed).set(at(2), agreed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
-      const graph = await buildCurrentEvidenceGraph(at(20), { read: async (ref) => store.get(ref) ?? null,
+      const graph = await buildCurrentEvidenceGraph(at(20), { readSettlementNode: nativeNodeFixture(() => store.values()), read: async (ref) => store.get(ref) ?? null,
         readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }), resolveListing: async () => ({ locator: at(1), raw: listed }) });
       assert.equal(graph.signaturesVerified, true);
       assert.equal(graph.ok, !failure, graph.reason);
@@ -647,7 +673,7 @@ test("terminal failure classification preserves neutral substrate standing in bo
       const scope = bundleScope({ outcome: neutral ? "failed-substrate" : counterparty ? "failed-counterparty" : "failed-perm", phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" },
         { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "fail", errorClass }], settlementEvidence: [refTo(at(50), failed, "evidence")] });
       store.set(at(1), listing).set(at(2), agreement).set(at(50), failed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", { ...scope, outcome: neutral ? "failed-substrate" : counterparty ? "failed-perm" : "failed-counterparty" }));
-      const graph = await buildCurrentEvidenceGraph(at(20), { read: async (ref) => store.get(ref) ?? null,
+      const graph = await buildCurrentEvidenceGraph(at(20), { readSettlementNode: nativeNodeFixture(() => store.values()), read: async (ref) => store.get(ref) ?? null,
         readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:pay-dem:2` }), resolveListing: async () => ({ locator: at(1), raw: listing }) });
       assert.equal(graph.ok, true, `${errorClass}: ${graph.reason}`);
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
@@ -742,4 +768,25 @@ test("storage payload and ACL verification gates catalog completion and volume",
       assert.deepEqual(seller.reputation.observedTransactionalVolume, c.expected ? [{ currency: "DEM", amount: "2" }] : []);
     });
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+
+test("native transaction and block reads gate reference verification, completion and volume", async (t) => {
+  const fixture = nativeNodeFixture(() => store.values());
+  const cases: Record<string, (message: string, value: any) => any> = {
+    "nonexistent transaction": (m, v) => m === "getTxByHash" ? null : v,
+    "pending transaction": (m, v) => m === "getTxByHash" ? { ...v, status: "pending" } : v,
+    "wrong block number": (m, v) => m === "getTxByHash" ? { ...v, blockNumber: 2 } : v,
+    "wrong recipient": (m, v) => m === "getTxByHash" ? { ...v, content: { ...v.content, to: `0x${"9".repeat(64)}` } } : v,
+    "wrong amount": (m, v) => m === "getTxByHash" ? { ...v, content: { ...v.content, amount: "1" } } : v,
+    "missing block membership": (m, v) => m === "getBlockByNumber" ? { ...v, content: { ordered_transactions: [] } } : v,
+    "unavailable block": (m, v) => m === "getBlockByNumber" ? null : v,
+  };
+  for (const [name, change] of Object.entries(cases)) await t.test(name, async () => {
+    const seller = await indexSeller(holders(), [], "pay-dem", 2, {}, async (m, d) => change(m, await fixture(m, d)));
+    assert.equal(seller.deals[0].refsVerified, false);
+    assert.equal(seller.deals[0].reputationEligible, false);
+    assert.equal(seller.reputation.completed, 0);
+    assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+  });
 });
