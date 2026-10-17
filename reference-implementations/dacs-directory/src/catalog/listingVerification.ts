@@ -255,6 +255,7 @@ export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
 export interface RevocationCandidateProgress {
   unread: string[];
   rejected: string[];
+  unexamined?: string[];
 }
 
 /**
@@ -272,8 +273,12 @@ export async function findValidListingRevocation(
   progress: RevocationCandidateProgress = { unread: [], rejected: [] },
   limit = REVOCATION_VERIFICATIONS_PER_PASS,
 ): Promise<RevocationBinding | null> {
-  for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
-    const candidate = await readCandidate(ref);
+  const refs = [...new Set(candidateRefs)];
+  progress.unexamined = refs.slice(limit);
+  for (const ref of refs.slice(0, limit)) {
+    let candidate: Record<string, unknown> | null;
+    try { candidate = await readCandidate(ref); }
+    catch { progress.unread.push(ref); continue; }
     if (!candidate) {
       progress.unread.push(ref);
       continue;

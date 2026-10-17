@@ -45,10 +45,12 @@ import {
   artifactAnchorTime,
   clearListingRejection,
   nextRevocationCandidates,
+  admitRevocationCandidates,
   resolveProgramAddress,
   loadScanState,
   recordListingRejection,
   recordRevocationProgress,
+  hasPendingRevocationCandidates,
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
@@ -117,6 +119,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  listingChecks: Map<string, ListingSummary> = new Map(),
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -180,24 +183,30 @@ export async function indexRegistration(
       : 1;
     const validity = scope.validity as { notAfter?: unknown } | undefined;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
-    // Verification work is bounded per pass: markers already verified come first (even when
-    // an older snapshot omitted them from the queue), then the next pending candidates,
-    // those anchored by the listing's own owner first. Only one batch is ever selected.
+    const cacheKey = JSON.stringify([canonicalDemosAgentClaim(reg.primaryClaim), listingId, version, verified.contentHash]);
+    if (listings.some((row) => row.listingId === listingId && row.version === version && row.contentHash === verified.contentHash)) continue;
+    const cached = listingChecks.get(cacheKey);
+    if (cached) {
+      listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, {locator: anchor, raw: anchored.data});
+      listings.push({ ...cached, anchor: {kind: "storage-program", locator: anchor},
+        seller: {primaryClaim: reg.primaryClaim, displayName: reg.displayName} });
+      continue;
+    }
+    // Import every historical locator into the durable queue before selecting a batch.
+    // Rejected entries stay rejected; unread ones rotate and unexamined ones stay pending.
+    admitRevocationCandidates(verified.contentHash, (verifiedRevocations[verified.contentHash] ?? [])
+      .map((locator) => ({locator, owner: anchored.owner})));
     const limit = REVOCATION_VERIFICATIONS_PER_PASS;
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const revocationBinding = await findValidListingRevocation(
-      [
-        ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
-        ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
-      ],
-      verified,
-      version,
-      readAnchor,
-      undefined,
-      progress,
-      limit,
+      nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
+      verified, version, readAnchor, undefined, progress, limit,
     );
     recordRevocationProgress(verified.contentHash, progress);
+    const complete = Boolean(revocationBinding) || (progress.unread.length === 0 &&
+      (progress.unexamined?.length ?? 0) === 0 && !hasPendingRevocationCandidates(verified.contentHash));
+    const previous = prior?.listings.find((item) => item.contentHash === verified.contentHash &&
+      item.listingId === listingId && item.version === version);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -230,10 +239,13 @@ export async function indexRegistration(
         ? scope.buyerRequirement as Record<string, unknown> : undefined,
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
-      status: revocationBinding ? "revoked" : "active",
+      status: revocationBinding ? "revoked" : complete ? "active" : "unverified",
+      revocationCheck: complete ? "complete" : "incomplete",
+      lastVerifiedAt: complete ? Date.now() : previous?.lastVerifiedAt ?? null,
       ...(revocationBinding ? { revocationBinding } : {}),
       catalogObservedAt: now,
     });
+    listingChecks.set(cacheKey, listings[listings.length - 1]!);
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
   }
 

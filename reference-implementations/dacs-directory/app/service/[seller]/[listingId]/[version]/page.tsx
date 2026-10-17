@@ -49,7 +49,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const identity = tierMeta(evidence.identityTier);
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const inspectHref = inspectServicePath(listing);
-  const engagementEndpoint = evidence.endpoint.url;
+  const engagementEndpoint = listing.status === "active" ? evidence.endpoint.url : undefined;
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
@@ -64,7 +64,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
     description: listing.offering.description,
     identifier: `${listing.listingId}@${listing.version}`,
     provider: { "@type": "Organization", name: seller.displayName },
-    offers: listing.pricing.priceHint ? {
+    offers: listing.status === "active" && listing.pricing.priceHint ? {
       "@type": "Offer",
       price: listing.pricing.priceHint,
       priceCurrency: listing.pricing.currency,
@@ -78,6 +78,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
       <section className="service-hero">
         <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
         <h1 className="h1">{listing.offering.title}</h1>
+        <p role="status">Catalog status: {listing.status}{listing.revocationCheck === "incomplete" ? " — revocation check incomplete; not purchasable" : ""}</p>
         <p className="hero-sub">{listing.offering.description || "This seller has not supplied a service description."}</p>
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>

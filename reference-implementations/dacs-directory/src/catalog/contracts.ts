@@ -2,6 +2,13 @@ import { publicDemosRpcUrl } from "./substrateDiscovery.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
+export const scanProgressSchema = {
+  type: "object", additionalProperties: false,
+  required: ["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"],
+  properties: Object.fromEntries(["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"]
+    .map((key) => [key, { type: ["integer", "null"], minimum: 0 }])),
+} as const;
+
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
@@ -48,7 +55,9 @@ export const listingSummarySchema = {
         maxPct: { type: "number" }, selectionRule: { type: "string" }, minTotalHint: { type: "string" },
       },
     },
-    status: { enum: ["active", "revoked"] },
+    status: { enum: ["active", "revoked", "unverified"] },
+    revocationCheck: { enum: ["complete", "incomplete"] },
+    lastVerifiedAt: { type: ["integer", "null"], minimum: 0, description: "Last complete listing/candidate verification; null if never verified. Not catalogObservedAt." },
     revocationBinding: {
       type: "object",
       required: [
@@ -87,6 +96,16 @@ export const listingSummarySchema = {
     then: { required: ["revocationBinding"] },
     else: { not: { required: ["revocationBinding"] } },
   }],
+} as const;
+
+export const listingPageSchema = {
+  type: "object", required: ["listings", "total", "scanProgress"],
+  properties: {
+    listings: { type: "array", items: listingSummarySchema },
+    total: { type: "integer", minimum: 0 },
+    cursor: { type: "string", description: "Pagination offset; not the chain scan cursor." },
+    scanProgress: scanProgressSchema,
+  },
 } as const;
 
 export const deadLetterDiagnosticSchema = {
@@ -147,6 +166,7 @@ export const catalogStatusSchema = {
   ],
   properties: {
     generatedAt: { type: "integer" },
+    scanProgress: scanProgressSchema,
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },
@@ -274,7 +294,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs": { get: { summary: "API index", responses: { "200": { description: "Linked API capabilities" } } } },
     "/api/dacs/listings": {
       get: {
-        summary: "Search active services",
+        summary: "Search active services; incomplete revocation checks are excluded",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
@@ -290,7 +310,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated active-only page with persisted scan progress", content: { "application/json": { schema: { $ref: "#/components/schemas/ListingPage" } } } }, "400": { description: "Invalid pagination" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -345,6 +365,8 @@ export const openApiDocument = (origin: string) => ({
   },
   components: { schemas: {
     ListingSummary: listingSummarySchema,
+    ListingPage: listingPageSchema,
+    ScanProgress: scanProgressSchema,
     DeadLetterDiagnostic: deadLetterDiagnosticSchema,
     ListingRejectionDiagnostic: listingRejectionDiagnosticSchema,
     IndexerScanRun: indexerScanRunSchema,

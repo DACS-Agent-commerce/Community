@@ -25,7 +25,7 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
-  saveCatalog,
+  commitCatalogScan,
   saveScanState,
   beginScanRun,
   finishScanRun,
@@ -38,7 +38,7 @@ import {
   recordConsensusAnchors,
   throwIfInfrastructureError,
 } from "./store";
-import type { BundleBinding, Registration } from "./types";
+import type { BundleBinding, Registration, ListingSummary } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
 
 export interface ReindexSummary {
@@ -271,7 +271,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
     // Seed upgraded state once so an already-frozen cursor becomes diagnosable
     // after the configured interval instead of remaining "unknown" forever.
-    else state.cursorAdvancedAt ??= Date.now();
+    // No observed increase means no new advancement timestamp.
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
     state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
@@ -363,6 +363,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
+    const listingChecks = new Map<string, ListingSummary>();
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -370,7 +371,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }).catch((error: unknown) => {
+      }, listingChecks).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
@@ -408,9 +409,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
-    finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
-      artifacts: scan.observations.length, rejected: scan.failures.length });
+    const completedAt = Date.now();
+    commitCatalogScan({ catalogVersion: "1", generatedAt: completedAt, sellers: catalogSellers,
+      scanProgress: { cursor: state.lastSeenTxId, tip: scan.chainTip,
+        lag: Math.max(0, scan.chainTip - state.lastSeenTxId),
+        cursorAdvancedAt: state.cursorAdvancedAt ?? null,
+        lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, runId,
+      { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
+        artifacts: scan.observations.length, rejected: scan.failures.length });
 
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };

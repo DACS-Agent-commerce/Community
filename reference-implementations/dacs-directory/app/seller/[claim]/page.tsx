@@ -106,6 +106,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
             <h3>
               <Link className="card-title-link" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>{l.offering.title}</Link>{" "}
               {l.status === "revoked" && <span className="badge err">revoked</span>}
+              {l.status === "unverified" && <span className="badge err">unverified — revocation check incomplete; not purchasable</span>}
               <span className={`badge ${l.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{l.artifactProfile === "dacs-v0.1" ? "current DACS" : "legacy SDK"}</span>
             </h3>
             {l.offering.description && (
