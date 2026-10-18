@@ -1,5 +1,6 @@
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
+import { deliverableAnchorBinding, paymentAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -366,6 +367,8 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
     phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind: "deliver-storage-program", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence"), ref(at(60), delivered, "evidence")],
+    anchorBindings: [await paymentAnchorBinding(seeds[1], jobId, "demos-native:DEM", 2, at(3), artifactHash(evidence, "evidence")),
+      await deliverableAnchorBinding(seeds[1], jobId, at(61), contentHash(payload))],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];
@@ -374,9 +377,9 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   return {
     listingAnchor: at(1),
     programs: {
-      [at(60)]: { data: JSON.stringify(delivered) }, [at(61)]: { data: JSON.stringify(payload), name: `dacs4:deliverable:${jobId}` },
+      [at(60)]: { data: JSON.stringify(delivered) }, [at(61)]: { data: JSON.stringify(payload) },
       [at(1)]: { data: JSON.stringify(currentListing) }, [at(2)]: { data: JSON.stringify(agreement) },
-      [at(3)]: { data: JSON.stringify(evidence), name: `dacs4:payment:${jobId}:demos-native%3ADEM:2` }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
+      [at(3)]: { data: JSON.stringify(evidence) }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
     },
     deal: { jobId, rail: "demos-native:DEM", buyerBundleRef: at(5), sellerBundleRef: at(6), owners: { buyer, seller } } as RegisteredDeal,
     bindings: [

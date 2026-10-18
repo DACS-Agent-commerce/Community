@@ -222,9 +222,11 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    sessions include every listed settle phase, with one evidence record per invocation.
    A successful payment states its amount, rail-specific finality and observation time,
    and transactions. Its amount and currency must equal the agreed price; the optional
-   PriceTerm `unit` constrains it only when both terms state one. Payment phase indices
-   are recovered independently from the SR-2 program name and checked against the
-   evidence hash and the listing rail. Settlements
+   PriceTerm `unit` constrains it only when both terms state one. A Demos StorageProgram
+   name is an opaque write input and is never read. Payment phase indices are recovered
+   independently from a signed logical→native AnchorBinding that the evidence's own signer
+   publishes for the record's native address and content hash, carried in the bundle's
+   `anchorBindings`, and checked against the listing rail. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
@@ -275,7 +277,8 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **Storage delivery is verified from readable cleartext and node access metadata.**
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
-  fields. The payload must match that hash and the job's program name; `buyer-only` requires a
+  fields. The payload must match that hash, and the delivery signer's AnchorBinding must bind
+  its anchor to the job's `dacs4:deliverable` address; `buyer-only` requires a
   restricted ACL naming the agreement-bound buyer. The pinned node denies anonymous reads of
   restricted programs, so buyer-only delivery is indeterminate for this anonymous catalog. The
   readable restricted-ACL tests describe a hypothetical node metadata contract. Unreadable payloads, encrypted payloads

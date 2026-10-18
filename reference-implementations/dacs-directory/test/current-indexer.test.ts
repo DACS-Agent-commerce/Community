@@ -1,5 +1,6 @@
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority, fixtureRecipeSnapshot } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
+import { deliverableAnchorBinding, OPAQUE_PROGRAM_NAME, paymentAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
@@ -25,7 +26,7 @@ const maps = new Map<string, Obj>();
 const readNativeFixture = nativeNodeFixture(() => maps.values());
 const paymentAnchorRecord = async (at: string) => {
   const data = maps.get(at);
-  return data ? { data, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:${maps.get(locator(1))?.pipeline && (maps.get(locator(1))!.pipeline as Obj[])[0].kind === "vet-credentials" ? 3 : 2}`, acl: { mode: "public" } } : null;
+  return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" } } : null;
 };
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
@@ -88,6 +89,10 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
     ],
     phaseSummary: (listingScope.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })), vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence"), ref(at(60), delivery, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
+    anchorBindings: [
+      await paymentAnchorBinding(seeds[sellerIndex], jobId, "demos-native:DEM", withVet ? 3 : 2, at(3), artifactHash(evidence, "evidence")),
+      await deliverableAnchorBinding(seeds[sellerIndex], jobId, at(61), contentHash(payload)),
+    ],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
   if (withVet) {
     bundleScope.parties = await Promise.all([buyerIndex, sellerIndex].map(async (party, index) => {
@@ -1023,7 +1028,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1086,7 +1091,7 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   let omitted = 0;
@@ -1119,7 +1124,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1173,7 +1178,7 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
     reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1324,7 +1329,7 @@ test("a mixed pair indexes the fault copy's advisory fields and hash even when i
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1367,6 +1372,8 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
       scope.listingRef = agreement.listingRef;
       scope.phaseSummary = (scope.phaseSummary as Obj[]).map((p) => p.kind === "pay-dem" ? { ...p, kind: "pay-evm-erc20" } : p);
       scope.settlementEvidence = [ref(fixture.locators.evidence, fixture.evidence, "evidence")];
+      scope.anchorBindings = [await paymentAnchorBinding(seeds[seller], String(scope.jobId), "evm-test", 2,
+        fixture.locators.evidence, artifactHash(fixture.evidence, "evidence"))];
       fixture[field] = { ...scope, anchoredByRole: role };
     }
     await installAgreement(fixture, agreement);
@@ -1396,7 +1403,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
     if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
     const data = maps.get(path.split("/").pop() ?? "");
     const seller = data === later.listing ? 1 : data === earlier.listing ? 0 : 1;
-    return data ? Response.json({ success: true, owner: `0x${dids[seller].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:evm-test:2`, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[seller].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1490,7 +1497,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
         const native = path.split("/").pop() ?? "";
         const data = maps.get(native);
         const owner = native === fixture.locators.listing ? dids[1] : data?.anchoredByRole === "buyer" ? dids[0] : dids[1];
-        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
           : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
       };
       await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
@@ -1575,7 +1582,7 @@ test("indexer persists authoritative orchestrator neutrality from a verified FAB
       return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1596,7 +1603,7 @@ test("DV-1 rejects malformed Unicode substitution against a valid replacement-ch
   for (const report of ["\ud800", "\ud801"]) {
     const graph = await buildCurrentEvidenceGraph(locator(5), { ...deps,
       readAnchorRecord: async (at) => at === locator(61)
-        ? { data: { report }, programName: "dacs4:deliverable:\ufffd", acl: { mode: "public" } }
+        ? { data: { report }, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" } }
         : paymentAnchorRecord(at) });
     assert.equal(graph.ok, false);
     assert.equal(graph.refsVerified, false);
@@ -1616,7 +1623,7 @@ test("PB-2 withholds completion and volume when a confirmed bound payout bypasse
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1631,3 +1638,4 @@ test("PB-2 withholds completion and volume when a confirmed bound payout bypasse
     assert.deepEqual(record.reputation.observedTransactionalVolume, []);
   } finally { globalThis.fetch = originalFetch; }
 });
+

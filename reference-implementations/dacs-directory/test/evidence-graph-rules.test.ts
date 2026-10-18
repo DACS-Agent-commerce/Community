@@ -1,5 +1,6 @@
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority, fixtureRecipeSnapshot } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
+import { OPAQUE_PROGRAM_NAME, signAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -13,12 +14,14 @@ import {
   buildCurrentEvidenceGraph,
   COMMITTED_AT_INDETERMINATE,
   isCurrentRef,
+  normalizedHash,
   paymentFinalityOk,
   paymentTxRefsOk,
   verifiedDiscoveryAgreement,
   type ArtifactKind,
   type EvidenceGraphDeps,
 } from "../src/catalog/evidenceGraph.js";
+import { deliverableLogicalAddress, paymentLogicalAddress } from "../src/catalog/anchorBinding.js";
 
 // Each DACS rule the current-profile evidence graph enforces, one case per rule. Every mutated
 // artifact is signed again, so only the rule under test can reject it.
@@ -90,7 +93,12 @@ interface Case {
   listing?: Obj;
   defaultDelivery?: boolean;
   resolveSessionChallenge?: EvidenceGraphDeps["resolveSessionChallenge"];
-  anchorNames?: Record<string, string>;
+  /** The logical address each default AnchorBinding publishes, by native locator. */
+  anchorAddresses?: Record<string, string>;
+  /** Replaces the carried default bindings: one per settlement anchor, signed by its evidence's signer. */
+  anchorBindings?: (bindings: Obj[], session: Session) => Obj[] | Promise<Obj[]>;
+  /** StorageProgram names the default reader reports, by locator; otherwise OPAQUE_PROGRAM_NAME. */
+  programNames?: Record<string, string>;
   readAnchorRecord?: EvidenceGraphDeps["readAnchorRecord"];
   noAnchorMetadata?: boolean;
   scopes?: (scopes: Scopes) => void;
@@ -125,6 +133,9 @@ async function evaluate(c: Case = {}) {
       deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(61) } }, "evidence", SELLER);
     (bundle.settlementEvidence as Obj[]).push(delivered);
   }
+  const defaults = await defaultAnchorBindings(bundle, session, c.anchorAddresses);
+  const carried = c.anchorBindings ? await c.anchorBindings(defaults, session) : defaults;
+  if (carried.length > 0) bundle.anchorBindings = carried;
   const signed: Obj = { ...bundle, signatures: await Promise.all((c.bundleSigners ?? [BUYER, SELLER])
     .map((signer) => envelope(bundle, "bundle", signer, signer, "party"))), anchoredByRole: c.anchoredByRole ?? "buyer" };
   c.stored?.(signed, session);
@@ -134,10 +145,11 @@ async function evaluate(c: Case = {}) {
     readSettlementNode: nativeNodeFixture(() => store.values()),
     read: async (locator) => store.get(locator) ?? null,
     readAnchorRecord: c.noAnchorMetadata ? undefined : (async (locator) => {
-      if (c.defaultDelivery !== false && locator === at(61)) return { data: store.get(locator)!, acl: { mode: "public" }, programName: `dacs4:deliverable:${JOB}` };
+      const programName = c.programNames?.[locator] ?? OPAQUE_PROGRAM_NAME;
+      if (c.defaultDelivery !== false && locator === at(61)) return { data: store.get(locator)!, acl: { mode: "public" }, programName };
       if (c.readAnchorRecord) return c.readAnchorRecord(locator);
       const data = store.get(locator);
-      return data ? { data, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : c.anchorNames?.[locator] ?? `dacs4:payment:${JOB}:demos-native%3ADEM:${locator === at(42) ? 3 : 2}` } : null;
+      return data ? { data, acl: { mode: "public" }, programName } : null;
     }),
     resolveListing: async () => ({ locator: at(1), raw: forListing }),
   });
@@ -148,6 +160,28 @@ async function publish(session: Session, n: number, scope: Obj, kind: ArtifactKi
   const raw = { ...scope, signature: await envelope(scope, kind, signer) };
   session.store.set(at(n), raw);
   return refTo(at(n), raw, kind);
+}
+
+/** The binding each settlement anchor's publisher carries: the evidence signer binds its payment record
+ * (by default phase 2, or 3 at at(42)) and, for storage delivery, the payload anchor. */
+async function defaultAnchorBindings(bundle: Obj, session: Session, addresses: Record<string, string> = {}): Promise<Obj[]> {
+  const bindings: Obj[] = [];
+  for (const ref of Array.isArray(bundle.settlementEvidence) ? bundle.settlementEvidence as Obj[] : []) {
+    const locator = String((ref?.anchor as Obj | undefined)?.locator);
+    const evidence = session.store.get(locator);
+    const seed = seeds[dids.indexOf(String((evidence?.signature as Obj | undefined)?.signer))];
+    if (!evidence || !seed) continue;
+    if (String(evidence.phase).startsWith("pay-")) {
+      bindings.push(await signAnchorBinding(seed, { jobId: JOB, nativeAddress: locator, contentHash: normalizedHash(ref.contentHash),
+        logicalAddress: addresses[locator] ?? paymentLogicalAddress(JOB, "demos-native:DEM", locator === at(42) ? 3 : 2) }));
+    }
+    const payloadAt = (evidence.deliverableAnchor as Obj | undefined)?.locator;
+    if (evidence.phase === "deliver-storage-program" && typeof payloadAt === "string" && typeof evidence.deliverableContentHash === "string") {
+      bindings.push(await signAnchorBinding(seed, { jobId: JOB, nativeAddress: payloadAt, contentHash: normalizedHash(evidence.deliverableContentHash),
+        logicalAddress: addresses[payloadAt] ?? deliverableLogicalAddress(JOB) }));
+    }
+  }
+  return bindings;
 }
 const SHAPE = "invalid current DACS-5 bundle shape";
 
@@ -613,7 +647,7 @@ test("DACS-5 §10.4.3 and DACS-4 §9.7: settlement evidence covers each executed
   // SB-1: the phase index comes from the bundle's phase entry, by pointer or as the only entry of its kind.
   const single = await evaluate();
   assert.deepEqual(single.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [2]);
-  const twoPays = await evaluate({ listing: repeatedListing, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3`, [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }, bundle: async (bundle, session) => {
+  const twoPays = await evaluate({ listing: repeatedListing, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3`, [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }, bundle: async (bundle, session) => {
     const second = await publish(session, 42, { ...session.scopes.evidence, observedAt: 102 }, "evidence", SELLER);
     bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, phase({ attestationRef: second }), phase({ index: 3, attestationRef: session.refs.evidence }), { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
     bundle.settlementEvidence = [session.refs.evidence, second];
@@ -625,7 +659,7 @@ test("DACS-5 §10.4.3 and DACS-4 §9.7: settlement evidence covers each executed
     bundle.settlementEvidence = [session.refs.evidence, await publish(session, 42, { ...session.scopes.evidence, observedAt: 102 }, "evidence", SELLER)];
   } });
   assert.equal(unpointed.ok, true, unpointed.reason);
-  assert.deepEqual(unpointed.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [2, 3], "SB-1 recovers repeated invocation indices from anchor metadata");
+  assert.deepEqual(unpointed.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [2, 3], "SB-1 recovers repeated invocation indices from anchor bindings");
 });
 
 test("DACS-4 AMEND-1..4: an amendment that fails its rules is flagged, kept for audit, and never an unwind", async () => {
@@ -989,29 +1023,80 @@ test("payment finality records require observation time and the rail's own model
   assert.equal(paymentTxRefsOk({ phase: "pay-x402", outcome: "success", paymentTxRefs: [{ ...receipt, chainId: 8453 }] }), false);
 });
 
-test("SB-1 recovers job, encoded rail and index independently from payment anchor metadata", async () => {
-  for (const name of ["opaque", `dacs4:payment:other:demos-native%3ADEM:2`, `dacs4:payment:${JOB}:other:2`,
+test("SB-1 recovers job, encoded rail and index independently from the payment anchor's binding", async () => {
+  for (const address of ["opaque", `dacs4:payment:other:demos-native%3ADEM:2`, `dacs4:payment:${JOB}:other:2`,
     `dacs4:payment:${JOB}:demos-native%3ADEM:3`, `dacs4:payment:${JOB}:demos-native%3ADEM:02`, `dacs4:payment:${JOB}:demos-native%3ADEM:9007199254740992`]) {
-    const graph = await evaluate({ anchorNames: { [at(3)]: name } });
-    assert.equal(graph.ok, false, name);
-    assert.equal(graph.reason, "payment evidence anchor binding failed", name);
+    const graph = await evaluate({ anchorAddresses: { [at(3)]: address } });
+    assert.equal(graph.ok, false, address);
+    assert.equal(graph.reason, "payment evidence anchor binding failed", address);
   }
-  const resolved = await evaluate({ anchorNames: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2:resolved` } });
+  const resolved = await evaluate({ anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2:resolved` } });
   assert.equal(resolved.ok, true, resolved.reason);
   assert.equal(resolved.settlement[0].phaseIndex, 2);
 });
 
-test("payment metadata is required, hash-bound to its reread and unique per invocation", async () => {
-  for (const c of [
-    { noAnchorMetadata: true },
-    { readAnchorRecord: async () => null },
-    { readAnchorRecord: async () => ({ data: { ...baseScopes().evidence, observedAt: 999 }, programName: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }) },
-  ] satisfies Case[]) {
-    const graph = await evaluate(c);
-    assert.equal(graph.reason, "payment evidence anchor binding failed");
+// DEMOS-MAPPING §A.2 / DACS-1 §6.3.4: a StorageProgram name is an opaque write input. Every default
+// fixture anchor already uses OPAQUE_PROGRAM_NAME; only the carried binding names its logical address.
+test("an opaque-named payment or delivery anchor counts only when its signer's binding authenticates it", async () => {
+  const bound = await evaluate();
+  assert.equal(bound.ok, true, bound.reason);
+  assert.deepEqual(bound.settlement.map((entry) => entry.phaseIndex), [2, 3]);
+  // The payment anchor's own record and name are never consulted; delivery still reads its payload.
+  const unread = await evaluate({ readAnchorRecord: async () => null });
+  assert.equal(unread.ok, true, unread.reason);
+
+  const isPayment = (binding: Obj) => String(binding.logicalAddress).startsWith("dacs4:payment:");
+  const PAYMENT = "payment evidence anchor binding failed";
+  const DELIVERY = "storage delivery payload binding failed";
+  const resign = (binding: Obj, signer: number, change: Obj) =>
+    signAnchorBinding(seeds[signer], { jobId: JOB, logicalAddress: String(binding.logicalAddress),
+      nativeAddress: String(binding.nativeAddress), contentHash: String(binding.contentHash) }, (scope) => Object.assign(scope, change));
+  for (const [target, select] of [[PAYMENT, isPayment], [DELIVERY, (binding: Obj) => !isPayment(binding)]] as const) {
+    const edit = (change: (binding: Obj) => Obj | Promise<Obj> | null): Case => ({
+      anchorBindings: async (bindings) => (await Promise.all(bindings.map((binding) => select(binding) ? change(binding) : binding)))
+        .filter((binding): binding is Obj => binding !== null),
+    });
+    const refused: Record<string, Case> = {
+      "missing binding": edit(() => null),
+      "a literal dacs4 program name without a binding": { ...edit(() => null),
+        programNames: { [at(3)]: paymentLogicalAddress(JOB, "demos-native:DEM", 2), [at(61)]: deliverableLogicalAddress(JOB) } },
+      // Each tampered binding would otherwise match; only its signature check refuses it.
+      "member added after signing": edit((binding) => ({ ...binding, anchorTx: "ab".repeat(32) })),
+      "signature copied from another binding": edit(async (binding) => ({ ...binding,
+        signature: (await resign(binding, SELLER, { anchorTx: "ab".repeat(32) })).signature })),
+      "binding for another native address": edit((binding) => resign(binding, SELLER, { nativeAddress: at(99) })),
+      "binding for another content hash": edit((binding) => resign(binding, SELLER, { contentHash: "c".repeat(64) })),
+      "binding for another job": edit((binding) => resign(binding, SELLER, { jobId: "other-job" })),
+      "binding for another job's logical address": edit((binding) => resign(binding, SELLER, {
+        logicalAddress: isPayment(binding) ? paymentLogicalAddress("other-job", "demos-native:DEM", 2) : deliverableLogicalAddress("other-job") })),
+      "binding signed by the counterparty, not the evidence signer": edit((binding) => resign(binding, BUYER, {})),
+      "binding signed by an outsider": edit((binding) => resign(binding, OUTSIDER, {})),
+    };
+    for (const [name, c] of Object.entries(refused)) {
+      const graph = await evaluate(c);
+      assert.equal(graph.signaturesVerified, true, `${target}: ${name}`);
+      assert.equal(graph.ok, false, `${target}: ${name}`);
+      assert.equal(graph.reason, target, `${target}: ${name}`);
+    }
+    // Two authenticated bindings for one anchor that disagree leave it unbound.
+    const equivocal = await evaluate({ anchorBindings: async (bindings) => [...bindings,
+      ...await Promise.all(bindings.filter(select).map((binding) => resign(binding, SELLER, {
+        logicalAddress: isPayment(binding) ? paymentLogicalAddress(JOB, "demos-native:DEM", 3) : deliverableLogicalAddress("other-job") })))] });
+    assert.equal(equivocal.reason, target);
+    // An outsider's or the counterparty's extra binding is inert beside the signer's own.
+    const crowded = await evaluate({ anchorBindings: async (bindings) => [...bindings,
+      ...await Promise.all(bindings.filter(select).flatMap((binding) => [resign(binding, BUYER, { logicalAddress: paymentLogicalAddress(JOB, "demos-native:DEM", 3) }),
+        resign(binding, OUTSIDER, { logicalAddress: deliverableLogicalAddress("other-job") })]))] });
+    assert.equal(crowded.ok, true, `${target}: ${crowded.reason}`);
   }
+  assert.equal((await evaluate({ stored: (bundle) => { bundle.anchorBindings = {}; } })).reason, SHAPE);
+  const flooded = await evaluate({ anchorBindings: (bindings) => [...bindings, ...Array.from({ length: 64 }, () => bindings[0])] });
+  assert.equal(flooded.reason, "evidence graph exceeds size limit");
+});
+
+test("payment bindings are unique per invocation and CF-4 encode the rail", async () => {
   const repeated = await evaluate({ listing: await listingFor("commit-agreement", "pay-dem"),
-    anchorNames: { [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` },
+    anchorAddresses: { [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` },
     bundle: async (bundle, session) => {
       bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind: "pay-dem", outcome: "ok" }, { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
       bundle.settlementEvidence = [session.refs.evidence, await publish(session, 42, { ...session.scopes.evidence, observedAt: 102 }, "evidence", SELLER)];
@@ -1022,10 +1107,10 @@ test("payment metadata is required, hash-bound to its reread and unique per invo
   (scope.pipeline as Obj[])[2] = { kind: "pay-dem", parameters: { rail: "dem:native" } };
   scope.acceptedRails = [{ railId: "dem:native" }];
   const encodedListing = { ...scope, signature: await envelope(scope, "listing", SELLER) };
-  const encoded: Case = { listing: encodedListing, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:dem%3Anative:2` },
+  const encoded: Case = { listing: encodedListing, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem%3Anative:2` },
     scopes: (scopes) => { (scopes.agreement.terms as Obj).rail = { railId: "dem:native" }; } };
   assert.match((await evaluate(encoded)).reason!, /authenticated pinned rail definition is unavailable/);
-  assert.equal((await evaluate({ ...encoded, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:dem:native:2` } })).reason, "payment evidence anchor binding failed");
+  assert.equal((await evaluate({ ...encoded, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem:native:2` } })).reason, "payment evidence anchor binding failed");
 });
 
 test("payment and agreement currency bounds, and failed payment refs, are independently enforced", async () => {
@@ -1210,7 +1295,7 @@ test("procurement vet requirements bind the seller counterparty rather than the 
     buyerRequirement: requirement, pipeline, pricing: { kind: "auction", selectionRule: "lowest-price" } };
   const procurement = { ...scope, signature: await envelope(scope, "listing", BUYER) };
   for (const resultParty of [SELLER, BUYER]) {
-    const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), listing: procurement, anchorNames: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
+    const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), listing: procurement, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
       scopes: (scopes) => {
         scopes.agreement.derivedFromPattern = "sealed-envelope";
         scopes.bundle.phaseSummary = pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
@@ -1258,7 +1343,7 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
   const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
   type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
-    payload?: Obj; programName?: string; expected?: boolean; indeterminate?: boolean };
+    payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean };
   const cases: Record<string, DeliveryCase> = {
     "public cleartext": { expected: true },
     "buyer role is independent of agreement party order": { sellerFirst: true, accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
@@ -1280,7 +1365,7 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "invalid storage locator": { evidence: { deliverableAnchor: { kind: "storage-program", locator: "stor-bad" } } },
     "absent anchored payload": { unreadable: true, indeterminate: true },
     "changed payload bytes": { payload: { report: "different cleartext" } },
-    "payload from another job": { programName: "dacs4:deliverable:other-job" },
+    "payload bound to another job": { logicalAddress: "dacs4:deliverable:other-job" },
     "missing ACL": { acl: null, indeterminate: true },
     "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true },
     "public ACL with allowed buyer is still a downgrade": { accessModel: "buyer-only", acl: { mode: "public", allowed: [buyerAddress] }, indeterminate: true },
@@ -1297,14 +1382,14 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...(listing.pipeline as Obj[]).slice(0, -1), { kind: "deliver-storage-program" }] };
     const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
     let stored: Map<string, Obj>;
-    const graph = await evaluate({ defaultDelivery: false, listing: listed, scopes: (scopes) => {
+    const graph = await evaluate({ defaultDelivery: false, listing: listed, anchorAddresses: c.logicalAddress ? { [at(51)]: c.logicalAddress } : undefined, scopes: (scopes) => {
       (scopes.agreement.terms as Obj).deliverable = { deliverableType: deliverable.kind, hash: contentHash(deliverable) };
       if (c.sellerFirst) (scopes.agreement.parties as Obj[]).reverse();
       scopes.bundle.phaseSummary = [...(scopes.bundle.phaseSummary as Obj[]).filter((phase) => phase.kind !== "deliver-storage-program"), { index: 3, kind: "deliver-storage-program", outcome: "ok" }];
     }, artifacts: (session) => { stored = session.store; if (!c.unreadable) stored.set(at(51), c.payload ?? payload); },
     readAnchorRecord: async (locator) => {
       const data = stored.get(locator);
-      return data ? { data, programName: locator === at(51) ? c.programName ?? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:demos-native%3ADEM:2`, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
+      return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
     }, bundle: async (bundle, session) => {
       const evidence: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
         deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(51) }, ...c.evidence };

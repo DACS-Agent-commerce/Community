@@ -75,6 +75,12 @@
 #     Only successfully read invalid content can reject a candidate; verified revocation is retained.
 #   Per-claim PresentationSignature.signature retains the SDK auto-detected legacy encoding;
 #     strict SIG-6 value-envelope decoding is enforced separately.
+#   DEMOS-MAPPING §A.2 write-input mapping defines no binding object for PC-2 payment evidence or
+#     §9.6.1 storage deliverables. This profile reads a BundleBinding-shaped AnchorBinding
+#     (src/catalog/anchorBinding.ts; SIG-4 domain "dacs-x-anchor-binding:v1:") signed by the anchored
+#     record's own signer and carried in the bundle's `anchorBindings` member. StorageProgram names
+#     are never read; a missing, unauthenticated or conflicting binding leaves the session uncounted.
+#     Well-known, catalog and chain-scan carriage of AnchorBindings is not implemented.
 # Skipped vector sets at this pin:
 #   private-deliverables-v0.1: projected cci/40-byte buyer addresses and encryption/entitlement
 #     gates do not map directly to this agent profile; signed local graph cases pin DV-1..3.

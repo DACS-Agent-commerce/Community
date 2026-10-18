@@ -21,6 +21,8 @@ const { loadScanState, saveScanState, loadCatalog } = await import("../src/catal
 const { verifyIdentityPresentation } = await import("../src/catalog/listingVerification.js");
 const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
 const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
+const { ANCHOR_BINDING_DOMAIN, deliverableLogicalAddress, paymentLogicalAddress } = await import("../src/catalog/anchorBinding.js");
+const { OPAQUE_PROGRAM_NAME } = await import("./helpers/anchor-binding.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 type Obj = Record<string, unknown>;
@@ -70,8 +72,40 @@ const bundleScope = (change: Obj = {}): Obj => ({
   phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind: "deliver-storage-program", outcome: "ok" }], vetRecords: [], settlementEvidence: [refTo(at(3), evidence, "evidence"), refTo(at(60), delivery, "evidence")],
   ratingRefs: [refTo(at(4), rating, "rating")], recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120, ...change,
 });
-const copy = (anchoredByRole: string, scope = bundleScope(), signers = [BUYER, SELLER]) =>
-  ({ ...scope, signatures: signers.map((signer) => signedWith(scope, "bundle", signer, "party")), anchoredByRole });
+/** A signed AnchorBinding: the anchoring party binds a native settlement anchor to its logical address. */
+const anchorBinding = (jobId: string, logicalAddress: string, nativeAddress: string, hash: string, signer: number): Obj => {
+  const scope: Obj = { anchorBindingVersion: "1", jobId, logicalAddress, nativeAddress, contentHash: hash, signer: dids[signer] };
+  return { ...scope, signature: { algorithm: "ed25519", signer: dids[signer], value: value(ANCHOR_BINDING_DOMAIN + contentHash(scope), signer) } };
+};
+/** The bindings a conforming publisher carries: each evidence signer binds its payment record to the
+ * PC-2 address of its phase (by pointer, else the only entry of its kind) and its storage payload to the job. */
+function anchorBindingsFor(scope: Obj): Obj[] {
+  const phases = Array.isArray(scope.phaseSummary) ? scope.phaseSummary as Obj[] : [];
+  const pipeline = (store.get(at(1))?.pipeline ?? []) as Obj[];
+  const jobId = String(scope.jobId);
+  return (Array.isArray(scope.settlementEvidence) ? scope.settlementEvidence as Obj[] : []).flatMap((ref) => {
+    const locator = String((ref?.anchor as Obj | undefined)?.locator);
+    const evidence = store.get(locator);
+    const signer = dids.indexOf(String((evidence?.signature as Obj | undefined)?.signer));
+    if (!evidence || signer < 0) return [];
+    if (String(evidence.phase).startsWith("pay-")) {
+      const same = phases.filter((phase) => phase.kind === evidence.phase);
+      const phase = phases.find((entry) => ((entry.attestationRef as Obj | undefined)?.anchor as Obj | undefined)?.locator === locator) ??
+        (same.length === 1 ? same[0] : undefined);
+      const index = Number(phase?.index ?? 2);
+      const rail = String((pipeline[index]?.parameters as Obj | undefined)?.rail ?? "demos-native:DEM");
+      return [anchorBinding(jobId, paymentLogicalAddress(jobId, rail, index), locator, String(ref.contentHash), signer)];
+    }
+    const payloadAt = (evidence.deliverableAnchor as Obj | undefined)?.locator;
+    return evidence.phase === "deliver-storage-program" && typeof payloadAt === "string" && typeof evidence.deliverableContentHash === "string"
+      ? [anchorBinding(jobId, deliverableLogicalAddress(jobId), payloadAt, evidence.deliverableContentHash, signer)] : [];
+  });
+}
+const copy = (anchoredByRole: string, scope = bundleScope(), signers = [BUYER, SELLER]) => {
+  const bindings = scope.anchorBindings === undefined ? anchorBindingsFor(scope) : [];
+  const carried = bindings.length > 0 ? { ...scope, anchorBindings: bindings } : scope;
+  return { ...carried, signatures: signers.map((signer) => signedWith(carried, "bundle", signer, "party")), anchoredByRole };
+};
 store.set(at(5), copy("buyer")).set(at(6), copy("seller"));
 store.set(at(7), copy("seller", bundleScope({ jobId: "another-job" })));
 store.set(at(8), copy("seller", bundleScope(), [SELLER]));
@@ -86,7 +120,7 @@ async function index(bindings: Obj[], overflow: string[] = []) {
   return (await indexSeller(bindings, overflow)).deals[0];
 }
 
-async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "demos-native:DEM", phaseIndex = 2, metadata: Record<string, Obj> = {}, nodeRead = nativeNodeFixture(() => store.values())) {
+async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "demos-native:DEM", metadata: Record<string, Obj> = {}, nodeRead = nativeNodeFixture(() => store.values())) {
   const state = loadScanState();
   state.bundleBindingOverflow = overflow;
   saveScanState(state);
@@ -99,7 +133,7 @@ async function indexSeller(bindings: Obj[], overflow: string[] = [], rail = "dem
     const locator = String(input).split("/").pop() ?? "";
     const data = store.get(locator);
     if (metadata[locator]?.unreadable) return Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
-    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${data.jobId}:${rail === "demos-native:DEM" ? "demos-native%3ADEM" : rail}:${phaseIndex}`, data, ...metadata[locator] }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME, data, ...metadata[locator] }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const record = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1)],
@@ -247,7 +281,7 @@ test("completed sessions reject failed mandatory phases and retain the non-fatal
       const graph = await buildCurrentEvidenceGraph(at(20), {
         readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
-        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:demos-native%3ADEM:2` }),
+        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
       });
       assert.equal(graph.signaturesVerified, true, kind);
@@ -363,7 +397,7 @@ test("each signed payment phase requires its own transaction kind and complete C
         const graph = await buildCurrentEvidenceGraph(at(20), {
           readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
-          readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:${encodeURIComponent(railId)}:2` }),
+          readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
           resolveListing: async () => ({ locator: at(1), raw: listed }),
         });
         assert.equal(graph.signaturesVerified, true, `${rail.phase}: ${name}`);
@@ -530,7 +564,6 @@ test("required vet execution binds presented claims, verification and phase poin
       try { process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: c.snapshotPolicies ? c.snapshotPolicies.map((policy) => ({ ...livePolicy, ...policy })) : JSON.parse(process.env.DACS_RECIPE_POLICIES!) }]); } catch { process.env.DACS_RECIPE_SNAPSHOTS = "[]"; }
       const req = c.requirement ?? requirement;
       const pipeline = [...(c.noVet ? [] : [{ kind: "vet-credentials" }]), { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }];
-      const phaseIndex = pipeline.length - 2;
       const listedScope = { ...listingScope, buyerRequirement: req, pipeline };
       const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
       const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
@@ -629,7 +662,7 @@ test("required vet execution binds presented claims, verification and phase poin
         resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
         readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
-        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:demos-native%3ADEM:${phaseIndex}` }),
+        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
       });
       if (c.snapshotControl) {
@@ -656,7 +689,7 @@ test("required vet execution binds presented claims, verification and phase poin
         assert.match(graph.reason ?? "", /authenticated historical challenge is unavailable or mismatched/);
       }
       if (c.graphOnly) return;
-      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "demos-native:DEM", phaseIndex);
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
       // Production has no authority-proof adapter, including for optional included results.
       const indexed = expected && c.noVet && records.every((record) =>
         (record.freshness as unknown[]).length === 0 && (record.dealSpecific as unknown[]).length === 0);
@@ -749,7 +782,7 @@ test("repeated deliveries require every evidence outcome to succeed before graph
         settlementEvidence: [refTo(at(3), evidence, "evidence"), ...deliveryRefs] });
       store.set(at(1), listed).set(at(2), agreed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), { readSettlementNode: nativeNodeFixture(() => store.values()), read: async (ref) => store.get(ref) ?? null,
-        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }), resolveListing: async () => ({ locator: at(1), raw: listed }) });
+        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: OPAQUE_PROGRAM_NAME }), resolveListing: async () => ({ locator: at(1), raw: listed }) });
       assert.equal(graph.signaturesVerified, true);
       assert.equal(graph.ok, false, graph.reason);
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
@@ -773,7 +806,7 @@ test("terminal failure classification preserves neutral substrate standing in bo
         { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "fail", errorClass }], settlementEvidence: [refTo(at(50), failed, "evidence")] });
       store.set(at(1), listing).set(at(2), agreement).set(at(50), failed).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", { ...scope, outcome: neutral ? "failed-substrate" : counterparty ? "failed-perm" : "failed-counterparty" }));
       const graph = await buildCurrentEvidenceGraph(at(20), { readSettlementNode: nativeNodeFixture(() => store.values()), read: async (ref) => store.get(ref) ?? null,
-        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }), resolveListing: async () => ({ locator: at(1), raw: listing }) });
+        readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: OPAQUE_PROGRAM_NAME }), resolveListing: async () => ({ locator: at(1), raw: listing }) });
       assert.equal(graph.ok, true, `${errorClass}: ${graph.reason}`);
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
       assert.equal(seller.deals[0].refsVerified, true, errorClass);
@@ -798,7 +831,7 @@ test("terminal failure classification preserves neutral substrate standing in bo
         // Check the single graph too: differing copies must not be the reason this is rejected.
         const badGraph = await buildCurrentEvidenceGraph(at(badRole === "buyer" ? 20 : 21), {
           read: async (ref) => store.get(ref) ?? null,
-          readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }),
+          readAnchorRecord: async (ref) => ({ data: store.get(ref)!, programName: OPAQUE_PROGRAM_NAME }),
           resolveListing: async () => ({ locator: at(1), raw: listing }),
         });
         assert.equal(badGraph.signaturesVerified, true);
@@ -859,8 +892,8 @@ test("storage payload and ACL verification gates catalog completion and volume",
         phaseSummary: pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })),
         settlementEvidence: [refTo(at(3), evidence, "evidence"), refTo(at(50), delivered, "evidence")] });
       store.set(at(1), listed).set(at(2), agreed).set(at(50), delivered).set(at(51), c.payload ?? payload).set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
-      const metadata = { [at(51)]: { programName: `dacs4:deliverable:${JOB}`, acl: { mode: "public" }, ...c.metadata } };
-      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "demos-native:DEM", 2, metadata);
+      const metadata = { [at(51)]: { acl: { mode: "public" }, ...c.metadata } };
+      const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "demos-native:DEM", metadata);
       assert.equal(seller.deals[0].refsVerified, c.expected ?? false);
       assert.equal(seller.deals[0].reputationEligible, c.expected ?? false);
       assert.equal(seller.reputation.completed, c.expected ? 1 : 0);
@@ -882,7 +915,7 @@ test("native transaction and block reads gate reference verification, completion
     "unavailable block": (m, v) => m === "getBlockByNumber" ? null : v,
   };
   for (const [name, change] of Object.entries(cases)) await t.test(name, async () => {
-    const seller = await indexSeller(holders(), [], "pay-dem", 2, {}, async (m, d) => change(m, await fixture(m, d)));
+    const seller = await indexSeller(holders(), [], "pay-dem", {}, async (m, d) => change(m, await fixture(m, d)));
     assert.equal(seller.deals[0].refsVerified, false);
     assert.equal(seller.deals[0].reputationEligible, false);
     assert.equal(seller.reputation.completed, 0);
@@ -908,7 +941,7 @@ async function currentGraph(listed: Obj) {
   return buildCurrentEvidenceGraph(at(5), { readSettlementNode: nativeNodeFixture(() => store.values()),
     read: async (locator) => store.get(locator) ?? null,
     readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" },
-      programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:${encodeURIComponent(String(((listed.pipeline as Obj[])[2].parameters as Obj).rail))}:2` }),
+      programName: OPAQUE_PROGRAM_NAME }),
     resolveListing: async () => ({ locator: at(1), raw: listed }) });
 }
 async function assertUncounted() {
@@ -959,7 +992,7 @@ test("hybrid and legacy listings cannot bypass current graph and catalog admissi
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
-test("payment phase, metadata, agreement and admitted policy must choose the same rail", async () => {
+test("payment phase, anchor binding, agreement and admitted policy must choose the same rail", async () => {
   const original = new Map(store);
   try {
     for (const phaseRail of ["demos-native:DEM", "x402:default"]) {
@@ -971,9 +1004,7 @@ test("payment phase, metadata, agreement and admitted policy must choose the sam
       const expected = phaseRail === "demos-native:DEM";
       assert.equal(graph.ok, expected, graph.reason);
       if (!expected) assert.equal(graph.reason, "payment phase rail does not match the agreement rail");
-      const seller = await indexSeller(holders(), [], "demos-native:DEM", 2, {
-        [at(3)]: { programName: `dacs4:payment:${JOB}:${encodeURIComponent(phaseRail)}:2` },
-      });
+      const seller = await indexSeller(holders());
       assert.equal(seller.deals[0].refsVerified, expected);
       assert.equal(seller.reputation.completed, expected ? 1 : 0);
       assert.deepEqual(seller.reputation.observedTransactionalVolume, expected ? [{ currency: "DEM", amount: "2" }] : []);

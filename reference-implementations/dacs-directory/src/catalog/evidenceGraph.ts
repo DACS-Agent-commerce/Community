@@ -1,4 +1,5 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
+import { boundLogicalAddress, deliverableLogicalAddress, parsePaymentLogicalAddress } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
@@ -22,7 +23,7 @@ export type ArtifactKind = "agreement" | "evidence" | "amendment" | "verify-resu
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
 export interface ResolvedEvidence {
   kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string;
-  /** SB-1 pipeline index independently recovered from the payment-evidence anchor. */
+  /** SB-1 pipeline index independently recovered from the payment-evidence anchor's published binding. */
   phaseIndex?: number;
 }
 export interface EvidenceGraph {
@@ -539,7 +540,7 @@ async function verifyCurrentEvidenceGraph(
   const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
-  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && !Array.isArray(raw.amendments)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && !Array.isArray(raw.amendments)) || (raw.anchorBindings !== undefined && !Array.isArray(raw.anchorBindings)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
@@ -822,21 +823,24 @@ async function verifyCurrentEvidenceGraph(
       topLevelEvidence.some((evidence) => evidence.raw.outcome !== "success"))) {
     return failSigned("completed session contains a failed mandatory phase");
   }
-  // SB-1 / PC-2: native Demos locators are opaque. Recover the tuple from fresh SR-2 program
-  // metadata, checking the reread's hash so metadata can never be borrowed from another record.
+  // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
+  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). The logical dacs4 address comes only from a carried binding
+  // its record's own signer published for this native address and content hash; the name is never read.
+  const anchorBindings = Array.isArray(raw.anchorBindings) ? raw.anchorBindings as unknown[] : [];
+  if (anchorBindings.length > MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
+  const boundAddress = (evidence: ResolvedEvidence, nativeAddress: string, hash: string) => boundLogicalAddress(anchorBindings,
+    { jobId: String(raw.jobId), nativeAddress, contentHash: hash, signer: rec(evidence.raw.signature)?.signer }, resolveKey);
   const recoveredPayments = new Set<number>();
   for (const evidence of topLevelEvidence) {
     if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
-    const anchor = await deps.readAnchorRecord?.(evidence.locator);
-    const match = anchor?.programName?.match(/^dacs4:payment:([^:]+):([^:]+):(0|[1-9]\d*)(?::resolved)?$/);
-    if (!anchor || !match || artifactHash(anchor.data, "evidence") !== evidence.contentHash) {
-      return failSigned("payment evidence anchor binding failed");
-    }
-    const index = Number(match[3]);
+    const logical = await boundAddress(evidence, evidence.locator, evidence.contentHash);
+    const tuple = logical === null ? null : parsePaymentLogicalAddress(logical);
+    if (!tuple) return failSigned("payment evidence anchor binding failed");
+    const index = tuple.phaseIndex;
     const phase = phases.find((entry) => entry.index === index);
     const rail = rec(pipeline[index]?.parameters)?.rail;
-    if (!Number.isSafeInteger(index) || recoveredPayments.has(index) || match[1] !== raw.jobId || typeof rail !== "string" ||
-        match[2] !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
+    if (recoveredPayments.has(index) || tuple.jobId !== raw.jobId || typeof rail !== "string" ||
+        tuple.encodedRail !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
         (paired.has(evidence) && paired.get(evidence) !== index) || !phase || !outcomesAgree(phase, evidence)) {
       return failSigned("payment evidence anchor binding failed");
     }
@@ -968,12 +972,16 @@ async function verifyCurrentEvidenceGraph(
     // Anonymous catalog verification cannot open a buyer's sealed payload or verify its cleartext hash/key binding.
     if (accessModel === "encrypt-to-buyer") return failSigned("storage delivery is indeterminate: encrypted cleartext is unavailable");
     const anchor = rec(evidence.raw.deliverableAnchor)!;
+    const deliverableHash = normalizedHash(evidence.raw.deliverableContentHash);
+    // The payload anchor is resolved through the delivery signer's binding before it is read.
+    if (await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
+      return failSigned("storage delivery payload binding failed");
+    }
     const delivered = await deps.readAnchorRecord?.(String(anchor.locator));
     if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
     if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
     // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
-    if (delivered.programName !== `dacs4:deliverable:${raw.jobId}` || !withinArtifactLimit(delivered.data) ||
-        sha256Hex(canonicalize(delivered.data)) !== normalizedHash(evidence.raw.deliverableContentHash)) {
+    if (!withinArtifactLimit(delivered.data) || sha256Hex(canonicalize(delivered.data)) !== deliverableHash) {
       return failSigned("storage delivery payload binding failed");
     }
     const acl = rec(delivered.acl);
