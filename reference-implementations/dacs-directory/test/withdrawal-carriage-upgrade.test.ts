@@ -16,6 +16,7 @@ db.exec(`CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, 
     content_hash TEXT, seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator));`);
 const put = db.prepare("INSERT INTO kv_state VALUES (?, ?, 0)");
 put.run("schema-version", "1"); put.run("sr2-anchor-schema-version", "2"); put.run("revocation-read-schema-version", "1");
+put.run("withdrawal-carriage-schema-version", "1");
 put.run("scan-state", JSON.stringify({ schemaVersion: 10, lastSeenTxId: 100, listings: {}, deals: {} }));
 put.run("catalog", JSON.stringify({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim,
   listings: [{ contentHash: hash, status: "active" }, { contentHash: chainHash, status: "revoked" }] }] }));
@@ -26,7 +27,7 @@ db.close();
 const store = await import("../src/catalog/store.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
-test("upgrade removes unauthenticated old carriage and requires a full discovery replay", () => {
+test("upgrade removes publisher-ambiguous v1 carriage and requires a full discovery replay", () => {
   assert.equal(store.hasPendingRevocationCandidates(hash), false, "fabricated unread carriage cannot survive upgrade");
   assert.equal(store.hasPendingRevocationCandidates(chainHash), true, "chain observations remain pending");
   assert.equal(store.loadScanState().schemaVersion, 0, "next successful scan must replay genesis");

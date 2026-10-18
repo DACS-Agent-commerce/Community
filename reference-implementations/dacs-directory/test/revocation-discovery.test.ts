@@ -72,10 +72,32 @@ test("authenticated withdrawal discovery survives incomplete bindings and full r
       hosted = documents(forgery, "attacker.example", signer);
       const forged = await crawl("attacker.example");
       assert.equal(forged.withdrawalAuthenticated, false);
-      ingestWellKnownRevocations(forged);
+      await ingestWellKnownRevocations(forged);
       assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
       assert.deepEqual((await indexRegistration(reg, active, offline)).listings.map((l) => l.status), ["active", "active"]);
     }
+    // A valid signature by a foreign index seller cannot poison a victim hash.
+    const attackerSeed = new Uint8Array(32).fill(95);
+    const attackerClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(attackerSeed))).toString("hex")}`;
+    const foreign = structuredClone(index);
+    foreign.seller = attackerClaim;
+    foreign.listings[0].revocation.sellerPrimaryClaim = attackerClaim;
+    const { revocationLogicalAddress } = await import("../src/catalog/listingVerification.js");
+    foreign.listings[0].revocation.logicalAddress = revocationLogicalAddress(attackerClaim, "svc", 1);
+    foreign.listings[0].revocation.markerAnchor.locator = at(99);
+    hosted = documents(foreign, "attacker.example", attackerSeed);
+    const authenticatedForeign = await crawl("attacker.example");
+    assert.equal(authenticatedForeign.withdrawalAuthenticated, true, "positive control: attacker authenticates as themselves");
+    await ingestWellKnownRevocations(authenticatedForeign);
+    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
+    store.saveRegistrations([reg]); store.saveDomains(["attacker.example"]);
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [active] });
+    await reindexAll({ log: () => {}, resolveIdentities: offline, crawlWellKnown: (domains) => crawlDomains(domains, deps) });
+    assert.deepEqual(store.loadCatalog().sellers.find((s) => s.primaryClaim === claim)?.listings.map((l) => [l.listingId, l.status]), [["svc", "active"], ["sibling", "active"]]);
+    const { spawnSync: restart } = await import("node:child_process");
+    const restarted = restart(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+      `const s=await import('./src/catalog/store.ts'); if(s.hasPendingRevocationCandidates(${JSON.stringify(verified.contentHash)})) process.exit(1); if(s.loadCatalog().sellers.find(x=>x.primaryClaim===${JSON.stringify(claim)}).listings.length!==2) process.exit(2)`], { encoding: "utf8" });
+    assert.equal(restarted.status, 0, restarted.stderr);
     const olderActive = structuredClone(index); olderActive.listings[0].status = "active"; delete olderActive.listings[0].revocation;
     const oldActiveDocuments = documents(olderActive);
     hosted = documents(index);

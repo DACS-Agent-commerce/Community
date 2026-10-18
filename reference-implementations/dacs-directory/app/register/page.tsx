@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useDemosWallet } from "@/src/components/useDemosWallet";
+import { WithdrawalSigningInstructions, type WithdrawalSigning } from "@/src/components/withdrawal-signing";
 import {
   clearPendingListingPublication,
   readPendingListingPublication,
@@ -510,14 +511,15 @@ function Progress({ label, state }: { label: string; state: ProgressState }) {
 function WellKnownFiles({ claim }: { claim: string | null }) {
   const [domain, setDomain] = useState("");
   const [files, setFiles] = useState<Record<string, string> | null>(null);
+  const [signing, setSigning] = useState<WithdrawalSigning | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const generate = async () => {
     if (!claim) return;
-    setBusy(true); setError(null); setFiles(null);
+    setBusy(true); setError(null); setFiles(null); setSigning(null);
     const response = await fetch(`/api/dacs/wellknown-files?claim=${encodeURIComponent(claim)}&domain=${encodeURIComponent(domain.trim())}`);
     const body = await response.json();
-    if (!response.ok) setError(body.error); else setFiles(body.files);
+    if (!response.ok) setError(body.error); else { setFiles(body.files); setSigning(body.withdrawalSigning); }
     setBusy(false);
   };
   return (
@@ -527,6 +529,7 @@ function WellKnownFiles({ claim }: { claim: string | null }) {
       <div className="form-field"><label htmlFor="agent-domain">Agent domain</label><input id="agent-domain" className="form-control mono" placeholder="agent.example.com" value={domain} onChange={(event) => setDomain(event.target.value)} /></div>
       <button className="btn" type="button" onClick={generate} disabled={busy || !claim || !domain.trim()}>{busy ? "Generating…" : "Generate .well-known files"}</button>
       {error && <p className="verdict err" role="alert">{error}</p>}
+      {signing && <WithdrawalSigningInstructions signing={signing} />}
       {files && Object.entries(files).map(([path, content]) => <details className="technical-disclosure" key={path}><summary className="mono">{path}</summary><pre className="artifact">{content}</pre></details>)}
     </section>
   );

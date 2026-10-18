@@ -29,7 +29,7 @@ export interface WellKnownAgent {
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
   revocations: RevocationBinding[];
-  /** Only a seller signature authorizes withdrawal discovery, not an index hash alone. */
+  /** Authenticates this index's seller/domain; listing ownership is checked separately. */
   withdrawalAuthenticated?: boolean;
   withdrawalHashes?: string[];
   incompleteWithdrawalHashes?: string[];

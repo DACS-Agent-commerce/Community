@@ -265,11 +265,11 @@ db.transaction(() => {
   setJson("revocation-read-schema-version", 1);
 }).immediate();
 
-// Older well-known ingestion queued locators without publisher authentication or
-// chain observations. Discard that carriage and replay chain discovery once;
+// Older well-known ingestion queued locators without binding their publisher to
+// the listing's signed bytes. Discard ambiguous carriage and replay discovery once;
 // until the replay completes, neither index-now nor cached reads assert absence.
 db.transaction(() => {
-  if (getJson("withdrawal-carriage-schema-version", 0) >= 1) return;
+  if (getJson("withdrawal-carriage-schema-version", 0) >= 2) return;
   const ambiguous = db.prepare("SELECT 1 FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL LIMIT 1").get();
   if (ambiguous) {
     db.prepare("DELETE FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL").run();
@@ -280,7 +280,7 @@ db.transaction(() => {
     setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({ ...seller,
       listings: seller.listings.filter((listing) => listing.status === "revoked") })) });
   }
-  setJson("withdrawal-carriage-schema-version", 1);
+  setJson("withdrawal-carriage-schema-version", 2);
 }).immediate();
 
 /**

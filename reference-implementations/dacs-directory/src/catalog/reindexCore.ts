@@ -8,7 +8,9 @@ import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERS
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
-import { indexRegistration, type ResolveIdentities } from "./indexer";
+import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
+import { readAnchorRecord } from "./chain";
+import { findValidListingRevocation, verifyListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -348,7 +350,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         log(`well-known: ${e.domain} — ${e.error}`);
       }
       for (const agent of crawl.agents) {
-        ingestWellKnownRevocations(agent);
+        await ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -443,16 +445,55 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
 }
 
-/** Discovery carriage enters the same RB-4 queue as passive marker discovery. */
-export function ingestWellKnownRevocations(agent: WellKnownAgent): void {
+/** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
+export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
   const domain = normalizeSubmittedDomain(agent.domain);
-  if (!agent.withdrawalAuthenticated) {
-    recordWellKnownWithdrawalCheck(domain);
-    return;
+  if (agent.withdrawalAuthenticated) {
+    if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
+      agent.incompleteWithdrawalHashes, agent.withdrawalIndex)) return;
+  } else recordWellKnownWithdrawalCheck(domain);
+
+  const domainHashes = new Set<string>();
+  const candidates: Array<{ hash: string; locator: string; independentlyVerified: boolean }> = [];
+  for (const anchor of agent.listingAnchors) {
+    const anchored = await readAnchorRecord(anchor);
+    if (!anchored) continue;
+    const listing = await verifyListing(anchored.data).catch(() => null);
+    if (!listing || listingBindingRejection(listing.sellerClaim, anchored.owner, agent.seller) ||
+        listing.contentHash !== agent.contentHashes[anchor]) continue;
+    const id = listing.scope.listingId ?? listing.scope.serviceId;
+    const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
+    const seller = listing.scope.seller as { publicEndpoint?: unknown } | undefined;
+    // A self-declared index seller is not domain ownership. Only the signed
+    // listing's own endpoint (or the index signature) authorizes unresolved hints.
+    let domainBound = false;
+    if (typeof seller?.publicEndpoint === "string") {
+      try { domainBound = new URL(seller.publicEndpoint).origin === domain; } catch { /* invalid endpoint */ }
+    }
+    if (domainBound) domainHashes.add(listing.contentHash);
+    for (const binding of agent.revocations) {
+      if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
+          binding.listingId !== id || binding.listingVersion !== version) continue;
+      if (agent.withdrawalAuthenticated || domainBound) {
+        candidates.push({ hash: listing.contentHash, locator: binding.markerAnchor.locator, independentlyVerified: false });
+      } else {
+        // Standard indexes need no extension signature to discover an actual
+        // seller-signed tombstone. Unowned hints cannot create pending work.
+        const found = await findValidListingRevocation([binding.markerAnchor.locator], listing, Number(version),
+          async (locator) => (await readAnchorRecord(locator))?.data ?? null);
+        if (found && found.markerContentHash === binding.markerContentHash && found.logicalAddress === binding.logicalAddress) {
+          candidates.push({ hash: listing.contentHash, locator: binding.markerAnchor.locator, independentlyVerified: true });
+        }
+      }
+    }
   }
-  if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
-    agent.incompleteWithdrawalHashes, agent.withdrawalIndex)) return;
-  for (const binding of agent.revocations) {
-    admitRevocationCandidates(binding.listingContentHash, [{ locator: binding.markerAnchor.locator }]);
+  const domainAccepted = !agent.withdrawalAuthenticated && domainHashes.size > 0 &&
+    recordWellKnownWithdrawalCheck(domain, agent.seller, [...domainHashes],
+      (agent.incompleteWithdrawalHashes ?? []).flatMap((hash) => hash === "*" ? [...domainHashes] : domainHashes.has(hash) ? [hash] : []),
+      agent.withdrawalIndex);
+  for (const candidate of candidates) {
+    if (agent.withdrawalAuthenticated || domainAccepted || candidate.independentlyVerified) {
+      admitRevocationCandidates(candidate.hash, [{ locator: candidate.locator }]);
+    }
   }
 }
