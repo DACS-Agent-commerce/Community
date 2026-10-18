@@ -1328,6 +1328,32 @@ test("each signed payment must match the agreed amount and currency", async () =
   }
 });
 
+// DACS-4 §9.3 PriceTerm.unit is an optional qualifier; §9.7 paymentAmount is the settled transfer.
+test("an optional PriceTerm unit constrains a settled payment only when both terms state it", async () => {
+  const settle = (agreed: string | undefined, paid: string | undefined, paidAmount = "1.25") => evaluate({ scopes: (s) => {
+    (s.agreement.terms as Obj).price = { amount: "1.25", currency: "DEM", ...(agreed === undefined ? {} : { unit: agreed }) };
+    s.evidence.paymentAmount = { amount: paidAmount, currency: "DEM", ...(paid === undefined ? {} : { unit: paid }) };
+  } });
+  for (const [name, agreed, paid] of [
+    ["present on both", "per-job", "per-job"],
+    ["absent from the evidence", "per-job", undefined],
+    ["absent from the agreement", undefined, "per-job"],
+  ] as const) {
+    const graph = await settle(agreed, paid);
+    assert.equal(graph.ok, true, `${name}: ${graph.reason}`);
+    assert.equal(graph.refsVerified, true, name);
+  }
+  for (const [name, graph] of [
+    ["mismatched units", await settle("per-job", "per-call")],
+    ["a matching unit cannot rescue a different amount", await settle("per-job", "per-job", "2")],
+    ["an absent unit cannot rescue a different amount", await settle("per-job", undefined, "2")],
+  ] as const) {
+    assert.equal(graph.signaturesVerified, true, name);
+    assert.equal(graph.ok, false, name);
+    assert.equal(graph.reason, "payment amount does not match the agreement price", name);
+  }
+});
+
 test("complete rail terms include parameters and version, independent of key order", () => {
   const base = baseScopes().agreement;
   const check = (rail: Obj, accepted: Obj[]) => agreementListingConformance({ ...base, terms: { ...base.terms as Obj, rail } }, { ...listing, acceptedRails: accepted }, dids[SELLER], null);

@@ -225,6 +225,14 @@ const compareDecimals = (left: Decimal, right: Decimal): number => {
   const b = right.units * 10n ** BigInt(scale - right.scale);
   return a < b ? -1 : a > b ? 1 : 0;
 };
+/** DACS-4 §9.7: paymentAmount is the actual settled amount, so it must equal the agreed CD-1 amount in the
+ * agreed currency. PriceTerm.unit is an optional qualifier (§9.3) and binds only when both terms state it. */
+const settlesAgreedPrice = (paid: unknown, agreed: unknown): boolean => {
+  const settled = rec(paid); const price = rec(agreed);
+  return Boolean(settled && price && priceTermOk(settled) && priceTermOk(price) && settled.currency === price.currency &&
+    compareDecimals(decimal(settled.amount), decimal(price.amount)) === 0 &&
+    (settled.unit === undefined || price.unit === undefined || settled.unit === price.unit));
+};
 /** bandCenter × (100 ± pct) / 100, rounded half-up to the centre's fractional digits (§8.5.2 check 2). */
 function bandBound(center: unknown, pct: unknown, direction: 1n | -1n): Decimal | null {
   if (typeof pct !== "number" || !/^\d+(?:\.\d+)?$/.test(String(pct))) return null;
@@ -927,7 +935,7 @@ async function verifyCurrentEvidenceGraph(
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
     if (!PAYMENT_PHASES.has(String(evidence.raw.phase)) || evidence.raw.outcome !== "success") continue;
-    if (!agreement || canonicalize(evidence.raw.paymentAmount) !== canonicalize(rec(agreement.terms)?.price)) {
+    if (!agreement || !settlesAgreedPrice(evidence.raw.paymentAmount, rec(agreement.terms)?.price)) {
       return failSigned("payment amount does not match the agreement price");
     }
     const rail = rec(rec(agreement.terms)?.rail);

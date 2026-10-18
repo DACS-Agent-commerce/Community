@@ -221,8 +221,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    records, and ratings. The signed listing fixes every phase kind and index; completed
    sessions include every listed settle phase, with one evidence record per invocation.
    A successful payment states its amount, rail-specific finality and observation time,
-   and transactions. Payment phase indices are recovered independently from the SR-2
-   program name and checked against the evidence hash and the listing rail. Settlements
+   and transactions. Its amount and currency must equal the agreed price; the optional
+   PriceTerm `unit` constrains it only when both terms state one. Payment phase indices
+   are recovered independently from the SR-2 program name and checked against the
+   evidence hash and the listing rail. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
