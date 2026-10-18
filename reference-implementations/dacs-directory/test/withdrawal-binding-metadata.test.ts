@@ -97,7 +97,7 @@ test("verified withdrawal bindings survive incomplete discovery metadata without
       assert.ok(markerReads > 0, "the marker was actually read");
       if (tampered) {
         assert.equal(store.retainedListingRevocation(verified.contentHash), null, "unverified bytes cannot establish revocation");
-        assert.equal(listings.some(activeOffer), !pinned, "only authenticated incomplete sources can leave a hold");
+        assert.equal(listings.some(activeOffer), false, "unverified withdrawal carriage cannot introduce an active offer");
         assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), pinned);
         return;
       }

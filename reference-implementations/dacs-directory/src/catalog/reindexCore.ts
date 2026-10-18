@@ -29,6 +29,7 @@ import {
   loadScanState,
   admitRevocationCandidates,
   retainListingRevocation,
+  retainedListingRevocation,
   recordWellKnownWithdrawalCheck,
   loadWithdrawalCursor,
   saveWithdrawalCursor,
@@ -356,9 +357,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
-          // Discovery is a hint; the indexer independently verifies the anchor,
-          // publisher, owner and declared hash. Withdrawal authority is separate.
+          // A revoked or incomplete row can carry a marker, but cannot introduce an
+          // active offer. Authenticated unresolved sources create holds; unsigned
+          // carriage must first resolve a verified tombstone. Independent active
+          // registrations, chain observations and complete mirrors remain usable.
           if (!reg.listingAnchors.includes(anchor)) {
+            const retained = retainedListingRevocation(agent.contentHashes[anchor]);
+            if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
+                retained?.sellerPrimaryClaim !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {

@@ -26,6 +26,8 @@ export interface WellKnownAgent {
   seller: string;
   displayName?: string;
   listingAnchors: string[];
+  /** Complete active rows that may introduce offers; other anchors are withdrawal carriage only. */
+  activeListingAnchors: string[];
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
   revocations: RevocationBinding[];
@@ -179,6 +181,8 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
       Buffer.from(signature, "base64url"), seller, "ed25519"));
 
   const listingAnchors: string[] = [];
+  const activeListingAnchors: string[] = [];
+  const withdrawalOnlyAnchors = new Set<string>();
   const revocations: RevocationBinding[] = [];
   const withdrawalHashes: string[] = [];
   const incompleteWithdrawalHashes: string[] = [];
@@ -189,12 +193,16 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
       ? entry.contentHash.toLowerCase() : null;
     if (hash) withdrawalHashes.push(hash);
     const locator = entry.anchor?.locator;
+    const complete = listingIndexEntryIsComplete(entry, seller);
+    // Conflicting rows in one index cannot lend active eligibility to each other.
+    if (typeof locator === "string" && (!complete || entry.status !== "active")) withdrawalOnlyAnchors.add(locator);
     if (
       typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) || !hash
     ) { incompleteWithdrawalHashes.push(hash ?? "*"); continue; }
-    if (!listingIndexEntryIsComplete(entry, seller)) incompleteWithdrawalHashes.push(hash);
-    // Completeness controls absence/holds, never whether a valid marker can be resolved.
+    if (!complete) incompleteWithdrawalHashes.push(hash);
+    if (complete && entry.status === "active") activeListingAnchors.push(locator);
+    // Completeness gates active discovery and absence/holds, never marker resolution.
     // Ingest still verifies the listing publisher, owner, tuple, marker hash and signature.
     const binding = listingIndexRevocation(entry, seller);
     if (binding) revocations.push(binding);
@@ -204,7 +212,8 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
-  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)], contentHashes,
+  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)],
+    activeListingAnchors: [...new Set(activeListingAnchors)].filter(anchor => !withdrawalOnlyAnchors.has(anchor)), contentHashes,
     revocations: [...new Map(revocations.map((binding) => [revocationBindingKey(binding), binding])).values()], bundleBindings,
     withdrawalAuthenticated, withdrawalHashes: [...new Set(withdrawalHashes)], incompleteWithdrawalHashes: [...new Set(incompleteWithdrawalHashes)],
     withdrawalIndex: { generatedAt: Number(idx.generatedAt), hash: actual } };

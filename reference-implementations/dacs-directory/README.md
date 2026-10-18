@@ -198,9 +198,13 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    Every candidate locator is queued once per listing hash; each pass fully verifies
    at most 16 per listing — markers that already passed RB-4 first, then those
    anchored by the listing owner, then arrival order. The queue itself has no cap.
-   While any candidate is unread or not yet examined the RB-4 check is incomplete
-   (`indeterminate`, RB-5), so the listing is withheld from the catalog rather than
-   published `active`. Once a marker verifies, the listing stays `revoked` with its
+   An incomplete withdrawal check from a publisher-authenticated or operator-pinned
+   well-known source is `indeterminate` (RB-5), so its listing is withheld from new
+   discovery. Unauthenticated chain hints cannot create holds on independently
+   discovered active listings. An unsigned revoked or incomplete index row cannot
+   introduce an active offer; its binding must first resolve a verified marker, or
+   a separate complete active source must establish discovery eligibility.
+   Once a marker verifies, the listing stays `revoked` with its
    binding even if the marker later cannot be read (RB-3).
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
@@ -250,10 +254,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   required signer, validator roster/epoch and proof. The result signer's signature does not replace
   this check. No production authority adapter is installed, so these proofs remain indeterminate
   for sessions and do not elevate identity tiers.
-- **Canonical input uses Unicode scalar values.** Server and browser reject lone UTF-16 surrogates
-  in string values and property names before canonical hashing. This publisher's pinned serializer
-  supports integer negotiation percentages; fractional percentages receive HTTP 400. This is a
-  narrower publication profile than the Standard's fractional-percentage inputs.
+- **Listing publication and listing/revocation verification use Unicode scalar values.**
+  These paths reject lone UTF-16 surrogates in string values and property names before
+  canonical hashing. The pinned serializer supports integer JSON numbers only:
+  publication rejects fractional negotiation percentages with HTTP 400, and readers
+  reject fractional signed inputs too. This is a narrower profile than the Standard.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or

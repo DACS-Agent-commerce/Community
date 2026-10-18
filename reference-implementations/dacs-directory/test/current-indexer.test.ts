@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
+
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { loadScanState, saveScanState } from "../src/catalog/store.js";
+
 import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
+
+const directory = mkdtempSync(join(tmpdir(), "dacs-current-indexer-"));
+process.env.DACS_DIRECTORY_DATA = directory;
+const { indexRegistration, listingBindingRejection } = await import("../src/catalog/indexer.js");
+const { loadScanState, saveScanState } = await import("../src/catalog/store.js");
+test.after(() => rmSync(directory, { recursive: true, force: true }));
 
 type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -1276,4 +1285,69 @@ test("RFQ fixed-price fallback cannot select a center from metered pricing", asy
       }
     }
   }
+});
+
+test("authenticated indeterminate withdrawal hides discovery but retains a committed completed deal", async t => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const { activeOffer } = await import("../src/catalog/discovery.js");
+  const { findValidListingRevocation } = await import("../src/catalog/listingVerification.js");
+  const { recordWellKnownWithdrawalCheck, retainListingRevocation } = await import("../src/catalog/store.js");
+  const fixture = await vector("withdrawal-history-job", 800);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.acceptedRails = [{ railId: "demos-native:DEM" }];
+  scope.pipeline = (scope.pipeline as Obj[]).map(phase => phase.kind === "pay-dem"
+    ? { ...phase, parameters: { rail: "demos-native:DEM" } } : phase);
+  fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) bundle.listingRef = listingRef;
+  const agreementScope = signedScope(fixture.agreement, "agreement");
+  agreementScope.listingRef = listingRef;
+  agreementScope.terms = { ...(agreementScope.terms as Obj), rail: { railId: "demos-native:DEM" } };
+  await installAgreement(fixture, agreementScope);
+  const deal = registeredDeal("withdrawal-history-job", locator(990), locator(991));
+  const reg = {
+    primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal],
+    bundleBindings: [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ],
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    const resolve = async () => { throw new Error("identity unavailable"); };
+    const before = await indexRegistration(reg, undefined, resolve);
+    assert.equal(before.listings.some(activeOffer), true, "canonical rail makes the control discoverable");
+    assert.equal(before.deals[0].refsVerified, true);
+    assert.equal(before.deals[0].buyerBundleRef, fixture.locators.buyer);
+    assert.equal(before.deals[0].sellerBundleRef, fixture.locators.seller);
+    assert.equal(before.reputation.completed, 1);
+    assert.equal(before.reputation.bundleCount, 1);
+    recordWellKnownWithdrawalCheck("https://history.example", dids[1], [listingRef.contentHash],
+      [listingRef.contentHash], { generatedAt: 1, hash: "c".repeat(64) }, [], "publisher-signature");
+    const held = await indexRegistration(reg, before, resolve);
+    assert.deepEqual(held.listings, [], "authenticated incomplete withdrawal suppresses new discovery");
+    assert.equal(held.deals[0].refsVerified, true, "historical listing remains available to the evidence graph");
+    assert.deepEqual(held.reputation, before.reputation, "committed completion and reputation are unchanged");
+
+    const verified = await verifyListing(fixture.listing); assert.ok(verified);
+    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 1 };
+    const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: dids[1],
+      value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(markerScope)}`),
+        privateKeyFromSeed(seeds[1]))).toString("base64url") } };
+    const binding = await findValidListingRevocation([locator(807)], verified, 1, async () => marker);
+    assert.ok(binding); retainListingRevocation(binding, marker);
+    const revoked = await indexRegistration(reg, held, resolve);
+    assert.equal(revoked.listings.some(activeOffer), false);
+    assert.equal(revoked.listings[0].status, "revoked");
+    assert.deepEqual(revoked.listings[0].revocation, binding);
+    assert.equal(revoked.deals[0].refsVerified, true);
+    assert.deepEqual(revoked.reputation, before.reputation, "verified revocation preserves committed history too");
+  } finally { globalThis.fetch = originalFetch; }
 });
