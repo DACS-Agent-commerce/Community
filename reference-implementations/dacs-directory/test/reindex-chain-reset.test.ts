@@ -33,14 +33,18 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
     lastChainTip: 5,
     listings: { [`stor-${"a".repeat(40)}`]: `0x${"b".repeat(64)}` },
     publisherListingDiscoveries: {
-      "old.example": { publisherClaim: `did:demos:agent:${"b".repeat(64)}`, listingAnchors: [`stor-${"a".repeat(40)}`] },
+      "https://old.example": { publisherClaim: `did:demos:agent:${"b".repeat(64)}`, listingAnchors: [`stor-${"a".repeat(40)}`] },
     },
     deals: {},
   });
   store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "old chain", 1);
+  store.saveDomains(["old.example"]);
   const logs: string[] = [];
 
-  const result = await reindexAll({ log: (line) => logs.push(line) });
+  const result = await reindexAll({ log: (line) => logs.push(line), crawlWellKnown: async (domains) => {
+    assert.deepEqual(domains, ["old.example"]);
+    return { agents: [], errors: [{ domain: "old.example", error: "simulated crawl outage" }] };
+  } });
 
   assert.equal(result.cursor, 3, "finality depth leaves the newest two transactions for replay");
   assert.equal(store.loadScanState().schemaVersion, 10);

@@ -1756,6 +1756,7 @@ test("a buyer-published procurement listing credits its supplier's verified comp
   const supplierRegistration = { primaryClaim: dids[1], displayName: "supplier", listingAnchors: [],
     deals: [registeredDeal("procurement-job", procurementAgain.locators.buyer, procurementAgain.locators.seller)], bundleBindings };
   let listingOwner = 0;
+  const requestedAnchors: string[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     if (init?.method === "POST") {
@@ -1764,6 +1765,7 @@ test("a buyer-published procurement listing credits its supplier's verified comp
       return Response.json({ result: 200, response: [] });
     }
     const at = new URL(String(input)).pathname.split("/").pop() ?? "";
+    requestedAnchors.push(at);
     const data = maps.get(at);
     return data ? Response.json({ success: true, owner: `0x${dids[at === procurementAgain.locators.listing ? listingOwner : 1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
@@ -1780,13 +1782,49 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     const squatter = { primaryClaim: dids[0], displayName: "squatter", listingAnchors: others };
     assert.equal(parseRegistration(squatter).ok, true);
     store.saveRegistrations([squatter, supplierRegistration]);
+    requestedAnchors.length = 0;
     credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter before batch");
+    assert.equal(requestedAnchors.some((anchor) => others.includes(anchor)), false, "trusted tuple resolves without reading unsigned candidates");
     await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
     credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "unsigned squatter after batch");
     credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter after immediate refresh");
     store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
     uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "no discovered publisher anchors");
     const buyerRegistration = { primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] };
+    // Unsigned registration is a supported discovery path when the passive scan
+    // has missed the buyer. The listing itself still has to bind to its owner.
+    assert.equal(parseRegistration(buyerRegistration).ok, true);
+    store.saveRegistrations([buyerRegistration, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned registered-only publisher before batch");
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    const unsignedSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(unsignedSupplier, "unsigned registered-only publisher after batch");
+    credited(await indexRegistration(supplierRegistration, unsignedSupplier, async () => []), "unsigned registered-only publisher after immediate refresh");
+    assert.deepEqual(Object.keys(store.loadScanState().listings), [], "no passive discovery supplies the registered-only listing");
+
+    listingOwner = 1;
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with a different chain owner");
+    listingOwner = 0;
+    maps.set(procurementAgain.locators.listing, { ...procurementAgain.listing, listingId: "changed" });
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with tampered bytes");
+    const unrelated = { ...signedScope(procurementAgain.listing, "listing"), listingId: "unrelated" };
+    maps.set(procurementAgain.locators.listing, { ...unrelated, signature: await sign(unrelated, "listing", 0) });
+    assert.notEqual(await verifyListing(maps.get(procurementAgain.locators.listing)!), null);
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with a different signed tuple");
+    maps.set(procurementAgain.locators.listing, procurementAgain.listing);
+
+    store.saveScanState({ ...store.loadScanState(), listings: { [others[0]]: `0x${dids[0].slice(-64)}` } });
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "trusted candidates miss the pinned tuple before unsigned fallback");
+    store.saveScanState({ ...store.loadScanState(), listings: {} });
+    store.saveRegistrations([{ ...buyerRegistration, listingAnchors: [...others, procurementAgain.locators.listing] }, supplierRegistration]);
+    requestedAnchors.length = 0;
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidates over the fallback read bound");
+    assert.equal(requestedAnchors.some((anchor) => others.includes(anchor) || anchor === procurementAgain.locators.listing), false,
+      "over-budget unsigned candidates cause no listing reads");
+    store.saveRegistrations([{ ...buyerRegistration, listingAnchors: [...others.slice(1), procurementAgain.locators.listing] }, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidates at the fallback read bound");
+
+    // Keep the signed-registration control and combined trusted-source budget.
     const signedAt = Date.now();
     const message = registrationMessage(buyerRegistration, signedAt);
     const signature = Buffer.from(await ed25519Sign(Buffer.from(message), privateKeyFromSeed(seeds[0]))).toString("base64url");
@@ -1887,9 +1925,12 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     // Successful domain indexes replace old hints rather than accumulating
     // withdrawn anchors; removing a domain retires its hints too.
     store.saveScanState({ ...store.loadScanState(), publisherListingDiscoveries: {
-      "buyer.example": { publisherClaim: dids[0], listingAnchors: others },
+      "https://buyer.example": { publisherClaim: dids[0], listingAnchors: others },
     } });
     await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    assert.deepEqual(store.loadScanState().publisherListingDiscoveries?.["https://buyer.example"], {
+      publisherClaim: dids[0], listingAnchors: [procurementAgain.locators.listing],
+    }, "successful crawl replaces the retained domain's hints");
     credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "fresh authenticated index replaces old hints");
 
     // A cached discovery never substitutes for current owner/signature/hash checks.

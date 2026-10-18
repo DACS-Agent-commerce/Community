@@ -228,10 +228,13 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    publishes for the record's native address and content hash, carried in the bundle's
    `anchorBindings`, and checked against the listing rail. A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
-   own owner-bound listing anchors (at most 32 read per publisher), never as one of the
-   supplier's offers, and the graph checks the publisher's role. Batch indexing and
+   own owner-bound listing anchors (at most 32 reads per publisher in each discovery
+   tier), never as one of the supplier's offers, and the graph checks the publisher's role. Batch indexing and
    immediate refresh share owner-signed registrations, chain discoveries and persisted
    authenticated well-known discovery hints independently of visible catalog rows.
+   If these sources miss the pinned listing tuple, unsigned registration candidates
+   provide a separate fallback of at most 32 reads, with the same owner, signature
+   and tuple checks. Unsigned candidates cannot consume the trusted sources' budget.
    Hints survive transient crawl failures; a successful domain crawl replaces that
    domain's hints, and domain removal or chain replacement clears them. Every use
    rechecks the current listing owner, signature and pinned tuple. Settlements

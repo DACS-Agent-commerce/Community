@@ -30,11 +30,30 @@ test("authenticated publisher discovery persists without a registration or publi
   assert.deepEqual(publisherListingAnchors()(claim), [anchor]);
 });
 
-test("unsigned registration candidates do not spend a discovered publisher's read budget", () => {
+test("unsigned registration candidates have a separate fallback from discovered publisher anchors", () => {
   const bogus = Array.from({ length: 32 }, (_, n) => `stor-${n.toString(16).padStart(40, "0")}`);
   store.saveRegistrations([{ primaryClaim: claim, displayName: "candidate", listingAnchors: bogus }]);
   store.saveScanState({ ...emptyState, listings: { [anchor]: `0x${claim.slice(-64)}` } });
-  assert.deepEqual(publisherListingAnchors()(claim), [anchor]);
+  const resolve = publisherListingAnchors();
+  assert.deepEqual(resolve(claim), [anchor]);
+  assert.deepEqual(resolve.unsigned?.(claim), bogus);
+});
+
+test("unsigned registered-only publishers remain available as fallback candidates", () => {
+  store.saveRegistrations([{ primaryClaim: claim, displayName: "buyer", listingAnchors: [anchor, anchor] }]);
+  const resolve = publisherListingAnchors();
+  assert.deepEqual(resolve(claim), []);
+  assert.deepEqual(resolve.unsigned?.(claim), [anchor]);
+  assert.deepEqual(resolve.unsigned?.(`did:demos:agent:${"c".repeat(64)}`), []);
+});
+
+test("signed registration anchors stay in the trusted tier", () => {
+  store.saveRegistrations([{ primaryClaim: claim, displayName: "buyer", listingAnchors: [anchor],
+    ownerSignature: { message: "ingress-verified", signature: "ingress-verified", signedAt: 1 } }]);
+  store.saveScanState({ ...emptyState, listings: { [anchor]: `0x${claim.slice(-64)}` } });
+  const resolve = publisherListingAnchors();
+  assert.deepEqual(resolve(claim), [anchor]);
+  assert.deepEqual(resolve.unsigned?.(claim), []);
 });
 
 test("persisted publisher discovery normalizes dictionaries and ignores malformed rows", () => {

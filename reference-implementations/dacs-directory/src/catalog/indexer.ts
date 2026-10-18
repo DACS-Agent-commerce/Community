@@ -165,7 +165,7 @@ export function listingBindingRejection(
 
 export type { ResolvePublisherListingAnchors } from "./publisherListings.js";
 
-/** Work bound per publisher whose listings are read to resolve another registration's sessions. */
+/** Work bound per publisher and discovery tier when resolving another registration's sessions. */
 export const MAX_PUBLISHER_LISTING_READS = 32;
 
 /**
@@ -348,15 +348,20 @@ export async function indexRegistration(
   // DACS-3 SE-8: a procurement session pins a listing its buyer published, so the agreement seller
   // scored here does not hold it. Its publisher's own owner-bound current listings resolve it, apart
   // from this seller's; the graph then checks the publisher's role (§8.5.2 check 8). Over the read
-  // bound, the listing stays unresolved and the session uncounted.
+  // bound, that discovery tier stays unresolved. Unsigned registrations have a separate
+  // bounded fallback, tried only when trusted candidates miss the session's pinned tuple.
   const publisherListings = new Map<string, Promise<Map<string, { locator: string; raw: Record<string, unknown> }> | null>>();
-  const listingsPublishedBy = (claim: string) => {
+  const listingsPublishedBy = (claim: string, unsigned = false) => {
     const publisher = canonicalDemosAgentClaim(claim);
     if (publisher === null) return Promise.resolve(null);
-    let pending = publisherListings.get(publisher);
+    const cacheKey = `${publisher}\n${unsigned ? "unsigned" : "trusted"}`;
+    let pending = publisherListings.get(cacheKey);
     if (!pending) {
       pending = (async () => {
-        const anchors = [...new Set(listingAnchorsFor(publisher))];
+        const trusted = new Set(listingAnchorsFor(publisher));
+        const anchors = unsigned
+          ? [...new Set(listingAnchorsFor.unsigned?.(publisher) ?? [])].filter((anchor) => !trusted.has(anchor))
+          : [...trusted];
         if (anchors.length > MAX_PUBLISHER_LISTING_READS) return null;
         const found = new Map<string, { locator: string; raw: Record<string, unknown> }>();
         for (const anchor of anchors) {
@@ -368,7 +373,7 @@ export async function indexRegistration(
         }
         return found;
       })();
-      publisherListings.set(publisher, pending);
+      publisherListings.set(cacheKey, pending);
     }
     return pending;
   };
@@ -387,7 +392,8 @@ export async function indexRegistration(
       const version = Number(ref.version ?? ref.listingVersion ?? 0);
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       const key = `${id}\n${version}\n${hash}`;
-      return listingArtifacts.get(key) ?? (await listingsPublishedBy(deal.owners.buyer))?.get(key) ?? null;
+      return listingArtifacts.get(key) ?? (await listingsPublishedBy(deal.owners.buyer))?.get(key)
+        ?? (await listingsPublishedBy(deal.owners.buyer, true))?.get(key) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing, readSettlementNode });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
