@@ -58,6 +58,18 @@ interface ListingIndex {
   }>;
 }
 
+/** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
+function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
+  const hash = entry.contentHash.toLowerCase();
+  const binding = entry.revocation;
+  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
+    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
+    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
+    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
+    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
+    /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
+}
+
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
 export function listingIndexEntryIsComplete(value: unknown, seller: string): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -75,13 +87,7 @@ export function listingIndexEntryIsComplete(value: unknown, seller: string): boo
       (summary.priceHint !== undefined && typeof summary.priceHint !== "string")) return false;
   if (entry.status === "active") return entry.revocation === undefined;
   if (entry.status !== "revoked") return false;
-  const binding = entry.revocation;
-  return Boolean(binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
-    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
-    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
-    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
-    /^[0-9a-f]{64}$/.test(binding.markerContentHash));
+  return listingIndexRevocation(entry, seller) !== null;
 }
 
 export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
@@ -188,7 +194,10 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
       typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) || !hash
     ) { incompleteWithdrawalHashes.push(hash ?? "*"); continue; }
     if (!listingIndexEntryIsComplete(entry, seller)) incompleteWithdrawalHashes.push(hash);
-    else if (entry.status === "revoked" && entry.revocation) revocations.push(entry.revocation);
+    // Completeness controls absence/holds, never whether a valid marker can be resolved.
+    // Ingest still verifies the listing publisher, owner, tuple, marker hash and signature.
+    const binding = listingIndexRevocation(entry, seller);
+    if (binding) revocations.push(binding);
     listingAnchors.push(locator);
     contentHashes[locator] = hash;
   }

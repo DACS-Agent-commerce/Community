@@ -329,7 +329,9 @@ server-side JSON object mapping normalized HTTPS origins to canonical seller DID
 Verify that seller/domain relationship independently before adding a pin. Public
 domain submissions and listing endpoints do not create pins. An unsigned, unpinned
 index can introduce independently verified offers and carry verified tombstones
-for known listings. A pinned unsigned index retains incomplete withdrawal
+for independently verified listings. Carried bindings are checked independently of
+display metadata and status; a verified tombstone takes precedence over incomplete
+index metadata. A pinned unsigned index retains incomplete withdrawal
 checks until a completed check from that same source or a verified revocation.
 
 Before queuing a carried marker, the crawler independently verifies the listing's

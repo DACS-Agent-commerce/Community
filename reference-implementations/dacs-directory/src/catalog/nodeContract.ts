@@ -33,7 +33,8 @@ async function post(rpc: string, headers: Record<string, string>, payload: unkno
 
 const addresses = (body: unknown, programName: string): string[] | null => {
   const value = body as { result?: unknown; response?: unknown } | null;
-  if (value?.result !== 200 || !Array.isArray(value.response) || value.response.length > 32) return null;
+  // A full page cannot establish completeness, matching resolveOwnedAnchorByName.
+  if (value?.result !== 200 || !Array.isArray(value.response) || value.response.length >= 32) return null;
   const found: string[] = [];
   for (const entry of value.response) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.programName !== programName ||
