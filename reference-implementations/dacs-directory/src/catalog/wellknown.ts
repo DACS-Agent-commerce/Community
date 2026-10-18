@@ -58,6 +58,11 @@ interface ListingIndex {
   }>;
 }
 
+export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
+  binding.sellerPrimaryClaim, binding.listingId, binding.listingVersion, binding.listingContentHash,
+  binding.logicalAddress, binding.markerAnchor.kind, binding.markerAnchor.locator, binding.markerContentHash,
+]);
+
 export function normalizeSubmittedDomain(domain: string): string {
   const raw = domain.includes("://") ? domain : `https://${domain}`;
   const url = new URL(raw);
@@ -159,8 +164,9 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
-  const agent = { domain: base, seller, displayName, listingAnchors, contentHashes, revocations, bundleBindings,
-    withdrawalAuthenticated, withdrawalHashes, incompleteWithdrawalHashes,
+  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)], contentHashes,
+    revocations: [...new Map(revocations.map((binding) => [revocationBindingKey(binding), binding])).values()], bundleBindings,
+    withdrawalAuthenticated, withdrawalHashes: [...new Set(withdrawalHashes)], incompleteWithdrawalHashes: [...new Set(incompleteWithdrawalHashes)],
     withdrawalIndex: { generatedAt: Number(idx.generatedAt), hash: actual } };
   if (dacs.bundleBindings?.indexUrl) {
     const bindingIndex = await fetchDocument(dacs.bundleBindings.indexUrl);

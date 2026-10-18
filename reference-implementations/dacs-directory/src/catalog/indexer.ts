@@ -47,6 +47,8 @@ import {
   clearListingRejection,
   hasPendingRevocationCandidates,
   hasIncompleteWellKnownWithdrawal,
+  boundWellKnownRevocations,
+  admitRevocationCandidates,
   nextRevocationCandidates,
   resolveProgramAddress,
   loadScanState,
@@ -242,6 +244,12 @@ export async function indexRegistration(
     // an older snapshot omitted them from the queue), then the next pending candidates,
     // those anchored by the listing's own owner first. Only one batch is ever selected.
     const limit = REVOCATION_VERIFICATIONS_PER_PASS;
+    // Resolve authenticated carriage against this very same verified listing
+    // read. An earlier discovery pre-read failure cannot discard a withdrawal,
+    // and a foreign publisher cannot create globally hash-scoped pending work.
+    admitRevocationCandidates(verified.contentHash,
+      boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version)
+        .map((binding) => ({ locator: binding.markerAnchor.locator })));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const found = await findValidListingRevocation(
       [

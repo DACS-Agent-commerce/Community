@@ -73,20 +73,27 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
     crawled = complete;
     store.saveDomains(['seller.example']);
+    await run();
+    assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
+      'a hostname alone does not distinguish an authorized seller from an unsigned third party');
+    assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
+    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
     if (domainBound) {
       const incomplete = structuredClone(complete);
       incomplete.revocations = [];
       incomplete.incompleteWithdrawalHashes = [verified.contentHash];
       crawled = incomplete;
       await run();
-      assert.deepEqual(store.loadCatalog().sellers[0].listings, [], 'unsigned publisher domain retains incomplete binding');
-      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), true);
+      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
+        'a self-claimed endpoint does not authorize a malformed unsigned withdrawal');
+      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
       crawled = complete;
       await run();
-      assert.deepEqual(store.loadCatalog().sellers[0].listings, [], 'unread marker at publisher domain remains indeterminate');
-      assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), true);
+      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
+        'an unread unsigned marker has no seller authority, including at a self-claimed endpoint');
+      assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
       const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
-        `const s=await import('./src/catalog/store.ts'); if(!s.hasPendingRevocationCandidates(${JSON.stringify(verified.contentHash)})) process.exit(1); if(s.loadCatalog().sellers[0].listings.length) process.exit(2)`], { encoding: 'utf8' });
+        `const s=await import('./src/catalog/store.ts'); if(s.hasPendingRevocationCandidates(${JSON.stringify(verified.contentHash)})) process.exit(1); if(!s.loadCatalog().sellers[0].listings.length) process.exit(2)`], { encoding: 'utf8' });
       assert.equal(child.status, 0, child.stderr);
     }
     readable = true;

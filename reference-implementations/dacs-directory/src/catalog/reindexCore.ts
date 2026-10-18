@@ -9,7 +9,7 @@ import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registrat
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
-import { readAnchorRecord } from "./chain";
+import { readAnchorResult, type AnchorRead } from "./chain";
 import { findValidListingRevocation, verifyListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
@@ -19,7 +19,7 @@ import {
   type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { crawlDomains, normalizeSubmittedDomain, type WellKnownAgent } from "./wellknown";
+import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
@@ -30,6 +30,8 @@ import {
   loadScanState,
   admitRevocationCandidates,
   recordWellKnownWithdrawalCheck,
+  loadWithdrawalCursor,
+  saveWithdrawalCursor,
   finishWithdrawalCarriageReplay,
   saveCatalog,
   saveScanState,
@@ -445,55 +447,85 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
 }
 
+/** Total node reads spent resolving one domain's withdrawal carriage per pass. */
+export const WELL_KNOWN_WITHDRAWAL_READS_PER_PASS = 32;
+
 /** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
 export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
   const domain = normalizeSubmittedDomain(agent.domain);
   if (agent.withdrawalAuthenticated) {
+    // Binding resolution has not happened yet. Keep it seller-scoped until a
+    // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
-      agent.incompleteWithdrawalHashes, agent.withdrawalIndex)) return;
+      [...(agent.incompleteWithdrawalHashes ?? []), ...agent.revocations.map((binding) => binding.listingContentHash)],
+      agent.withdrawalIndex, agent.revocations)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
-  const domainHashes = new Set<string>();
-  const candidates: Array<{ hash: string; locator: string; independentlyVerified: boolean }> = [];
-  for (const anchor of agent.listingAnchors) {
-    const anchored = await readAnchorRecord(anchor);
-    if (!anchored) continue;
-    const listing = await verifyListing(anchored.data).catch(() => null);
-    if (!listing || listingBindingRejection(listing.sellerClaim, anchored.owner, agent.seller) ||
-        listing.contentHash !== agent.contentHashes[anchor]) continue;
-    const id = listing.scope.listingId ?? listing.scope.serviceId;
-    const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
-    const seller = listing.scope.seller as { publicEndpoint?: unknown } | undefined;
-    // A self-declared index seller is not domain ownership. Only the signed
-    // listing's own endpoint (or the index signature) authorizes unresolved hints.
-    let domainBound = false;
-    if (typeof seller?.publicEndpoint === "string") {
-      try { domainBound = new URL(seller.publicEndpoint).origin === domain; } catch { /* invalid endpoint */ }
+  const byHash = new Map<string, typeof agent.revocations>();
+  for (const binding of new Map(agent.revocations.map((binding) => [revocationBindingKey(binding), binding])).values()) {
+    const group = byHash.get(binding.listingContentHash) ?? [];
+    group.push(binding);
+    byHash.set(binding.listingContentHash, group);
+  }
+  const jobs = [...new Set(agent.listingAnchors)].flatMap((anchor) => {
+    const bindings = byHash.get(agent.contentHashes[anchor]) ?? [];
+    return bindings.map((binding) => ({ anchor, binding }));
+  });
+  if (!jobs.length) return;
+  const indexHash = agent.withdrawalIndex?.hash ?? "";
+  let cursor = loadWithdrawalCursor(domain, agent.seller, indexHash) % jobs.length;
+  let reads = 0;
+  const exhausted = Symbol("withdrawal read budget exhausted");
+  const cache = new Map<string, AnchorRead>();
+  const read = async (locator: string): Promise<AnchorRead> => {
+    const cached = cache.get(locator);
+    if (cached) return cached;
+    if (reads >= WELL_KNOWN_WITHDRAWAL_READS_PER_PASS) throw exhausted;
+    reads++;
+    let result = await readAnchorResult(locator);
+    // One transient read may recover within the pass. Missing unsigned markers
+    // cannot authenticate an alleged publisher and never create pending work.
+    if (result.status === "unavailable" && reads < WELL_KNOWN_WITHDRAWAL_READS_PER_PASS) {
+      reads++;
+      result = await readAnchorResult(locator);
     }
-    if (domainBound) domainHashes.add(listing.contentHash);
-    for (const binding of agent.revocations) {
+    cache.set(locator, result);
+    return result;
+  };
+  const listings = new Map<string, Awaited<ReturnType<typeof verifyListing>>>();
+  const markers = new Map<string, Awaited<ReturnType<typeof findValidListingRevocation>>>();
+  let examined = 0;
+  try {
+    for (; examined < jobs.length; examined++, cursor = (cursor + 1) % jobs.length) {
+      const { anchor, binding } = jobs[cursor];
+      const anchored = await read(anchor);
+      if (anchored.status !== "present") continue;
+      if (!listings.has(anchor)) listings.set(anchor, await verifyListing(anchored.record.data).catch(() => null));
+      const listing = listings.get(anchor);
+      if (!listing || listingBindingRejection(listing.sellerClaim, anchored.record.owner, agent.seller) ||
+          listing.contentHash !== agent.contentHashes[anchor]) continue;
+      const id = listing.scope.listingId ?? listing.scope.serviceId;
+      const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
       if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
           binding.listingId !== id || binding.listingVersion !== version) continue;
-      if (agent.withdrawalAuthenticated || domainBound) {
-        candidates.push({ hash: listing.contentHash, locator: binding.markerAnchor.locator, independentlyVerified: false });
+      if (agent.withdrawalAuthenticated) {
+        admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
       } else {
-        // Standard indexes need no extension signature to discover an actual
-        // seller-signed tombstone. Unowned hints cannot create pending work.
-        const found = await findValidListingRevocation([binding.markerAnchor.locator], listing, Number(version),
-          async (locator) => (await readAnchorRecord(locator))?.data ?? null);
+        // publicEndpoint is a self-claim, never authority over unresolved hints.
+        // Standard unsigned indexes can still carry independently verified markers.
+        const key = JSON.stringify([listing.contentHash, binding.markerAnchor.locator]);
+        if (!markers.has(key)) markers.set(key,
+          await findValidListingRevocation([binding.markerAnchor.locator], listing, Number(version),
+            async (locator) => { const result = await read(locator); return result.status === "present" ? result.record.data : null; }));
+        const found = markers.get(key);
         if (found && found.markerContentHash === binding.markerContentHash && found.logicalAddress === binding.logicalAddress) {
-          candidates.push({ hash: listing.contentHash, locator: binding.markerAnchor.locator, independentlyVerified: true });
+          admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
         }
       }
     }
-  }
-  const domainAccepted = !agent.withdrawalAuthenticated && domainHashes.size > 0 &&
-    recordWellKnownWithdrawalCheck(domain, agent.seller, [...domainHashes],
-      (agent.incompleteWithdrawalHashes ?? []).flatMap((hash) => hash === "*" ? [...domainHashes] : domainHashes.has(hash) ? [hash] : []),
-      agent.withdrawalIndex);
-  for (const candidate of candidates) {
-    if (agent.withdrawalAuthenticated || domainAccepted || candidate.independentlyVerified) {
-      admitRevocationCandidates(candidate.hash, [{ locator: candidate.locator }]);
-    }
+  } catch (error) {
+    if (error !== exhausted) throw error;
+  } finally {
+    saveWithdrawalCursor(domain, agent.seller, indexHash, cursor);
   }
 }

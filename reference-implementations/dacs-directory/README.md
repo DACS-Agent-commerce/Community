@@ -387,9 +387,11 @@ HTTPS domain and SHA-256 hash of that index; generate a new signature whenever e
 changes. The registration page displays this message and the completion instructions.
 Before queuing a carried marker, the crawler independently verifies the listing's
 publisher, chain owner, content hash, ID and version. Unsigned Standard indexes can
-discover independently verified seller-signed tombstones. They also authorize pending
-checks when the signed listing's `seller.publicEndpoint` identifies the hosting origin;
-an unowned hint alone cannot suppress another publisher's offer. An authenticated
+discover independently verified seller-signed tombstones. A listing's `seller.publicEndpoint`
+is a self-claim and does not authorize unresolved hints. Discovery deduplicates anchors
+and bindings and spends at most 32 node reads per domain per pass, with a persisted
+cursor for continuation. Authenticated bindings remain seller-scoped until the indexer
+verifies the listing's publisher, owner and tuple using its own listing read. An authenticated
 index with an incomplete withdrawal entry withholds that offer until a later
 complete authenticated check or a verified revocation resolves it. Failed later
 crawls retain incomplete checks; verified tombstones remain revoked.
