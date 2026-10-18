@@ -56,16 +56,19 @@
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
-# - Current listing and revocation readers enforce strict SIG-6 encoding; graph
-#   readers retain permissive legacy decoding. BundleBinding verification is strict.
+# - New current listings and revocation markers enforce strict SIG-6 encoding.
+#   Historical current hex listings require exact operator-controlled native/hash/
+#   tuple/seller import pins (DACS_HISTORICAL_LISTING_IMPORTS; README). Other graph
+#   envelopes retain legacy decoding. BundleBinding verification is strict.
 # - SDK canonicalization accepts only integer numbers. Fractional publication is
 #   unsupported; listing publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
-# - scan.ts classifies any HTTP 404 as STORAGE_NOT_FOUND without checking the node
-#   error body; missing/non-public locators are terminal until replay. This is an
-#   operational label, never authoritative BB-8 absence evidence.
+# - scan.ts requires structured errorCode NOT_FOUND on HTTP 404 before
+#   classifying STORAGE_NOT_FOUND. Proxy/bare/wrong-route 404s stay retryable
+#   STORAGE_RPC_UNAVAILABLE (test/scan-addresses.test.ts); structured permission
+#   denial is terminal until replay, never authoritative BB-8 absence evidence.
 # - Node ac8f45f02fc9c25082ce9b83595c2e3916b49c5a is a source/API reference only;
 #   no remote deployment revision is attested by an RPC URL or successful read.
 #

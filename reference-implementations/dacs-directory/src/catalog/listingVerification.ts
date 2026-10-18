@@ -10,7 +10,7 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, legacySignatureBytes } from "./signatureValue.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -327,6 +327,46 @@ export async function verifyListing(
     sellerClaim: verifiedSigner.canonicalClaim,
     profile: "legacy-sdk-v0.1",
   };
+}
+
+/**
+ * Read immutable history without weakening SIG-6 admission. Only an operator's
+ * out-of-band pre-upgrade inventory can select the old Directory hex importer;
+ * artifact fields, timestamps and a failed signature never grant that authority.
+ * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
+ * Every read still verifies the complete current schema and both signatures.
+ */
+export async function verifyStoredListing(
+  raw: Record<string, unknown>,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<VerifiedListing | null> {
+  const signature = record(raw.signature);
+  if (!("dacsVersion" in raw) || canonicalSignatureBytes(signature?.value)) {
+    return verifyListing(raw, resolveKey);
+  }
+  if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
+  const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  if (!configured || Buffer.byteLength(configured, "utf8") > 65_536) return null;
+  try {
+    const pins = record(JSON.parse(configured));
+    if (!pins || Object.keys(pins).length > 256 || !Object.hasOwn(pins, nativeAddress)) return null;
+    const pin = record(pins[nativeAddress]);
+    if (!pin || pin.encoding !== "lowercase-hex" || typeof pin.contentHash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(pin.contentHash) || typeof pin.sellerPrimaryClaim !== "string" ||
+        pin.listingId !== raw.listingId || pin.listingVersion !== raw.listingVersion) return null;
+    const value = typeof signature?.value === "string"
+      ? importLegacySignatureValue(signature.value, "lowercase-hex") : null;
+    if (!value) return null;
+    // Only the unsigned envelope changes in memory. Keep the native bytes,
+    // signed scope and pinned hash intact; never re-sign or write a replacement.
+    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    return verified && verified.contentHash === pin.contentHash &&
+      verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
+      ? verified : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A bogus candidate must never shadow another valid owner-signed marker. */

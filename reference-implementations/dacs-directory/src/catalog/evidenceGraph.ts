@@ -1,6 +1,6 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
-import { verifyListing } from "./listingVerification.js";
+import { verifyStoredListing } from "./listingVerification.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -431,7 +431,7 @@ async function verifyCurrentEvidenceGraph(
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
   if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
-      !(await verifyListing(listed.raw, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+      !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
