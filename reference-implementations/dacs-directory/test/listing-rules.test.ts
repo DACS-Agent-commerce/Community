@@ -273,8 +273,8 @@ test("current discriminators cannot fall back to the signed legacy listing profi
     "late Vet": (scope) => { (scope.pipeline as Obj[]).push({ kind: "vet-credentials" }); },
     "invalid identity version": set("seller.identity.bundleVersion", "2"),
     "missing tags": set("offering.tags", undefined),
-    "forbidden empty parameters": (scope) => { (scope.pipeline as Obj[])[0].parameters = {}; },
-    "forbidden nonempty parameters": (scope) => { (scope.pipeline as Obj[])[1].parameters = { unexpected: true }; },
+    "non-object negotiation parameters": (scope) => { (scope.pipeline as Obj[])[0].parameters = []; },
+    "non-object commitment parameters": (scope) => { (scope.pipeline as Obj[])[1].parameters = "metadata"; },
   };
   const hybrid = (change: (scope: Obj) => void) => listing((scope) => {
     const { listingId: _id, listingVersion: _version, ...compatibility } = legacyScope;
@@ -438,7 +438,7 @@ test("PIPE-1/VPC and required listing schema reject correctly signed deficient l
     "non-array tags": set("offering.tags", {}),
   };
   for (const kind of ["vet-credentials", "negotiate-fixed-price", "commit-agreement", "commit-payee-bound-agreement", "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload"]) {
-    for (const parameters of [{}, { authorization: "skip" }]) bad[`${kind} with ${JSON.stringify(parameters)}`] = (s) => {
+    for (const parameters of [null, [], "metadata", 7]) bad[`${kind} with ${JSON.stringify(parameters)}`] = (s) => {
       const pipeline = s.pipeline as Obj[];
       const index = pipeline.findIndex((p) => p.kind === kind);
       if (index >= 0) pipeline[index] = { kind, parameters };
@@ -486,4 +486,29 @@ test("unread unauthenticated revocation hints cannot suppress a verified listing
       assert.equal(resolved.listings[0].status, "active");
     }
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("parameterless phase kinds accept object parameters and bind nested extension bytes", async () => {
+  for (const kind of ["vet-credentials", "negotiate-fixed-price", "commit-agreement", "commit-payee-bound-agreement",
+    "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate"]) {
+    const change = (parameters: unknown) => (scope: Obj) => {
+      const pipeline = scope.pipeline as Obj[];
+      if (kind === "vet-credentials") pipeline.unshift({ kind, parameters });
+      else if (kind === "rate") pipeline.push({ kind, parameters });
+      else if (kind.startsWith("commit-")) pipeline[1] = { kind, parameters };
+      else if (kind.startsWith("deliver-")) pipeline[pipeline.length - 1] = { kind, parameters };
+      else pipeline[0] = { kind, parameters };
+    };
+    for (const parameters of [{}, { future: { label: "inert", values: [1, 2] } }]) {
+      const signed = listing(change(parameters));
+      assert.ok(await verifyListing(signed), `${kind}: ${JSON.stringify(parameters)}`);
+      const tampered = structuredClone(signed);
+      const phase = (tampered.pipeline as Obj[]).find(phase => phase.kind === kind)!;
+      phase.parameters = { future: { label: "changed" } };
+      assert.equal(await verifyListing(tampered), null, `${kind}: modified extension bytes`);
+    }
+    for (const parameters of [null, [], "metadata", 7]) {
+      assert.equal(await verifyListing(listing(change(parameters))), null, `${kind}: malformed parameter object`);
+    }
+  }
 });

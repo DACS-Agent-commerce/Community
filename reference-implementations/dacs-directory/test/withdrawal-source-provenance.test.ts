@@ -20,6 +20,7 @@ test("standard unsigned indexes introduce independently verified offers without 
   const raw = JSON.stringify({ indexVersion: "1", generatedAt: 1, seller, listings: [{
     listingId: fixture.data.serviceId, version: 1, contentHash: hash,
     anchor: { kind: "storage-program", locator: fixture.storageAddress }, status: "active",
+    summary: { title: "ReviewBot", category: "services.other", tags: [] },
   }] });
   const agent = await crawlDomain("seller.example", {
     validateUrl: async () => ({} as never),

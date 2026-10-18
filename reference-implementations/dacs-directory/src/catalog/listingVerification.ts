@@ -134,7 +134,9 @@ function validPhaseParameters(step: Record<string, unknown>, pricing: Record<str
       optional(parameters.channelSubnet, isString);
   }
   if (step.kind === "rate") return optional(parameters.required, (required) => typeof required === "boolean");
-  return String(step.kind).startsWith("pay-");
+  // The remaining recognized kinds have no required parameter members. Preserve
+  // object-valued additions in the signed scope; the caller checks the phase kind.
+  return true;
 }
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing

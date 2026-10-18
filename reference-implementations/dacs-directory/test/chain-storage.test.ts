@@ -115,6 +115,21 @@ test("the read-only node contract probe compares both search paths and the stora
     assert.deepEqual(await verdict(node({ result: 200, response: UNKNOWN_NODE_CALL }, found)),
       { storageNotFound: true, nodeCallSearch: "unknown-message", gcrRoutineSearch: "supported", searchesAgree: null, ok: true }, "the pinned revision");
     assert.equal((await verdict(node(found, { result: 200, response: [] }))).ok, false, "the two paths disagree");
+    for (const entry of [{}, null, [], { storageAddress: 7, programName },
+      { storageAddress: `stor-${"1".repeat(40)}` },
+      { storageAddress: `stor-${"1".repeat(40)}`, programName: `${programName}-suffix` },
+      { storageAddress: `prefix-stor-${"1".repeat(40)}`, programName }]) {
+      const malformed = { result: 200, response: [entry] };
+      assert.deepEqual(await verdict(node(malformed, malformed)),
+        { storageNotFound: true, nodeCallSearch: "failed", gcrRoutineSearch: "failed", searchesAgree: null, ok: false },
+        `malformed search entry ${JSON.stringify(entry)}`);
+    }
+    assert.equal((await verdict(node({ result: 200, response: [{}] }, found))).ok, false,
+      "a malformed nodeCall must not select a fallback the Directory would never use");
+    assert.deepEqual(await verdict(node({ result: 200, response: [] }, { result: 200, response: [] })),
+      { storageNotFound: true, nodeCallSearch: "supported", gcrRoutineSearch: "supported", searchesAgree: true, ok: true }, "empty searches are valid");
+    const oversized = { result: 200, response: Array.from({ length: 33 }, () => found.response[0]) };
+    assert.equal((await verdict(node(oversized, oversized))).ok, false, "search result count is bounded");
     assert.equal((await verdict(node(found, found, new Response(null, { status: 404 })))).ok, false, "a bare 404 is not the node's answer");
   } finally {
     globalThis.fetch = originalFetch;

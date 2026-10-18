@@ -180,9 +180,32 @@ test("upstream well-known surface vectors exercise the actual entry parser and i
       listingId: fixtures.listing.listingId, version: fixtures.listing.listingVersion,
       contentHash: fixtures.listing.listingContentHash,
       anchor: { kind: "storage-program", locator: fixtures.bindings["opaque-name"].markerAnchor.locator },
+      summary: { title: "Service", category: "services.other", tags: [] },
       status: surface.status,
       ...(surface.binding ? { revocation: fixtures.bindings[surface.binding] } : {}),
     }, fixtures.listing.sellerPrimaryClaim));
     assert.equal(complete.every(Boolean) ? "absent" : "indeterminate", vector.want.revocationCheck);
   });
+});
+
+
+test("both listing-index statuses require a complete summary before completing a withdrawal check", async () => {
+  const { listingIndexEntryIsComplete } = await import("../src/catalog/wellknown.js");
+  const binding = fixtures.bindings["opaque-name"];
+  const summary = { title: "Service", category: "services.other", tags: ["service"], priceHint: "1 DEM" };
+  for (const status of ["active", "revoked"]) {
+    const entry = { listingId: fixtures.listing.listingId, version: fixtures.listing.listingVersion,
+      contentHash: fixtures.listing.listingContentHash,
+      anchor: { kind: "storage-program", locator: binding.markerAnchor.locator },
+      summary, status, ...(status === "revoked" ? { revocation: binding } : {}) };
+    const complete = (value: unknown) => listingIndexEntryIsComplete(value, fixtures.listing.sellerPrimaryClaim);
+    assert.equal(complete(entry), true, `${status}: complete summary`);
+    for (const malformed of [undefined, null, [], "summary", {}, { ...summary, title: 7 },
+      { ...summary, category: null }, { ...summary, tags: "service" }, { ...summary, tags: [7] },
+      { ...summary, priceHint: 7 }]) {
+      assert.equal(complete({ ...entry, summary: malformed }), false, `${status}: ${JSON.stringify(malformed)}`);
+    }
+    assert.equal(complete({ ...entry, summary: { ...summary, future: { inert: true } } }), true);
+    assert.equal(complete({ ...entry, anchor: [] }), false);
+  }
 });

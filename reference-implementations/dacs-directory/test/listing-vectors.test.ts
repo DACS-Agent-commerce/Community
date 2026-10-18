@@ -31,3 +31,17 @@ for (const vector of vectors.vectors) test(`upstream SIG-5: ${vector.name}`, asy
   assert.equal(contentHash(stripSignature(listing)), vector.want.computedArtifactHash);
   assert.equal(Boolean(await verifyListing(listing, resolveKey)), vector.expected === "pass");
 });
+
+test("independently signed nested phase extensions remain readable and signature-bound", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-nested-phase-metadata.json", import.meta.url), "utf8")) as Obj;
+  const listing = fixture.listing;
+  assert.equal(contentHash(stripSignature(listing)), fixture.contentHash);
+  assert.equal((await verifyListing(listing))?.contentHash, fixture.contentHash);
+  const tampered = structuredClone(listing);
+  tampered.pipeline[2].parameters.future.label = "modified";
+  assert.notEqual(contentHash(stripSignature(tampered)), fixture.contentHash);
+  assert.equal(await verifyListing(tampered), null, "nested extension changes invalidate the stored signature");
+  const wrongSignature = structuredClone(listing);
+  wrongSignature.signature.value = Buffer.alloc(64).toString("base64url");
+  assert.equal(await verifyListing(wrongSignature), null, "signature verification is still required");
+});

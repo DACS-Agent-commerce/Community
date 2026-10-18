@@ -3,7 +3,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * §6.3.5 well-known crawler — the spec's federation mechanism.
  *
  * Give the catalog a DOMAIN; everything else is discovered and verified:
- *   https://<domain>/.well-known/agent.json          (A2A card + dacs block)
+ *   https://<domain>/.well-known/agent.json          (legacy DACS discovery profile)
  *     → dacs.listings.indexUrl + indexHash           (hash-bound index)
  *       → listings.json                              (sha256 MUST match)
  *         → per-entry on-chain anchors               (read + verified later
@@ -48,12 +48,12 @@ interface ListingIndex {
   generatedAt?: number;
   seller?: string;
   listings?: Array<{
-    listingId?: string;
-    version?: number;
-    contentHash?: string;
-    anchor?: { kind?: string; locator?: string };
-    summary?: { title?: string };
-    status?: "active" | "revoked";
+    listingId: string;
+    version: number;
+    contentHash: string;
+    anchor: { kind: string; locator: string };
+    summary: { title: string; category: string; tags: string[]; priceHint?: string };
+    status: "active" | "revoked";
     revocation?: RevocationBinding;
   }>;
 }
@@ -63,9 +63,16 @@ export function listingIndexEntryIsComplete(value: unknown, seller: string): boo
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entry = value as NonNullable<ListingIndex["listings"]>[number];
   const hash = typeof entry.contentHash === "string" ? entry.contentHash.toLowerCase() : null;
+  const summary = entry.summary;
   if (typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
-      !hash || !/^[0-9a-f]{64}$/.test(hash) || entry.anchor?.kind !== "storage-program" ||
+      !hash || !/^[0-9a-f]{64}$/.test(hash) || !entry.anchor || typeof entry.anchor !== "object" || Array.isArray(entry.anchor) ||
+      entry.anchor.kind !== "storage-program" ||
       typeof entry.anchor.locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(entry.anchor.locator)) return false;
+  // RB-6: an authenticated but malformed record cannot complete a withdrawal check.
+  // Validate both statuses against the whole ListingIndexEntry, including optional known fields.
+  if (!summary || typeof summary !== "object" || Array.isArray(summary) || typeof summary.title !== "string" ||
+      typeof summary.category !== "string" || !Array.isArray(summary.tags) || summary.tags.some(tag => typeof tag !== "string") ||
+      (summary.priceHint !== undefined && typeof summary.priceHint !== "string")) return false;
   if (entry.status === "active") return entry.revocation === undefined;
   if (entry.status !== "revoked") return false;
   const binding = entry.revocation;

@@ -14,7 +14,7 @@ const { activeOffer } = await import('../src/catalog/discovery.js');
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
-test('a newer signed index without status cannot clear an authenticated incomplete withdrawal', async () => {
+test('only a complete signed index entry can clear an authenticated incomplete withdrawal', async () => {
   const seed = new Uint8Array(32).fill(41);
   const key = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString('hex');
   const claim = `did:demos:agent:${key}`;
@@ -40,10 +40,31 @@ test('a newer signed index without status cannot clear an authenticated incomple
   globalThis.fetch = async (_input, init) => init?.body ? Response.json({ result: 200, response: [] })
     : Response.json({ success: true, owner: `0x${key}`, data: listing });
   try {
-    for (const [n, status, expectedActive] of [[1, 'revoked', false], [2, undefined, false], [3, 'invalid', false], [4, 'active', true]] as const) {
+    const summary = { title: 'Service', category: 'services.other', tags: [] };
+    const cases: Array<[string, unknown, unknown, boolean]> = [
+      ['revoked without binding', 'revoked', summary, false],
+      ['missing summary', 'active', undefined, false],
+      ['null summary', 'active', null, false],
+      ['array summary', 'active', [], false],
+      ['missing title', 'active', { category: 'services.other', tags: [] }, false],
+      ['non-string title', 'active', { ...summary, title: 7 }, false],
+      ['missing category', 'active', { title: 'Service', tags: [] }, false],
+      ['non-string category', 'active', { ...summary, category: 7 }, false],
+      ['missing tags', 'active', { title: 'Service', category: 'services.other' }, false],
+      ['non-array tags', 'active', { ...summary, tags: 'service' }, false],
+      ['non-string tag', 'active', { ...summary, tags: [7] }, false],
+      ['non-string price hint', 'active', { ...summary, priceHint: 7 }, false],
+      ['missing status', undefined, summary, false],
+      ['invalid status', 'invalid', summary, false],
+      ['complete entry with future metadata', 'active', { ...summary, priceHint: '1 DEM', future: {} }, true],
+      ['malformed update after completion', 'active', {}, false],
+      ['complete recovery', 'active', summary, true],
+    ];
+    for (const [index, [name, status, entrySummary, expectedActive]] of cases.entries()) {
+      const n = index + 1;
       const raw = JSON.stringify({ indexVersion: '1', generatedAt: n, seller: claim, listings: [{
         listingId: 'svc', version: 1, contentHash: verified.contentHash,
-        anchor: { kind: 'storage-program', locator: at(1) }, ...(status ? { status } : {}),
+        anchor: { kind: 'storage-program', locator: at(1) }, summary: entrySummary, ...(status ? { status } : {}),
       }] });
       const card = JSON.stringify({ dacs: { dacsVersion: '1', listings: {
         indexUrl: 'https://seller.example/listings.json', indexHash: `sha256-${sha256Hex(raw)}`,
@@ -55,8 +76,9 @@ test('a newer signed index without status cannot clear an authenticated incomple
       assert.ok(!('error' in agent)); assert.equal(agent.withdrawalAuthenticated, true);
       await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
         crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
-      assert.equal(store.loadCatalog().sellers.flatMap(s => s.listings).some(activeOffer), expectedActive, `status=${status}`);
-      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), !expectedActive, `status=${status}`);
+      assert.equal(store.loadCatalog().sellers.flatMap(s => s.listings).some(activeOffer), expectedActive, name);
+      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), !expectedActive, name);
+      assert.deepEqual(agent.incompleteWithdrawalHashes, expectedActive ? [] : [verified.contentHash], name);
     }
   } finally { globalThis.fetch = original; }
 });

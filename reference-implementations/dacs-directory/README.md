@@ -321,14 +321,15 @@ Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, p
 names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
 a new signed listing version to make those offers executable.
 
-Executable offers discovered through a hosted well-known index require source provenance.
-Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a
+Well-known indexes can introduce offers after the Directory independently verifies
+each listing's signature, publisher, chain owner and content hash. Source provenance
+authorizes unresolved withdrawal holds. Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a
 server-side JSON object mapping normalized HTTPS origins to canonical seller DIDs
 (for example, `{"https://agent.example":"did:demos:agent:<64 lowercase hex>"}`).
 Verify that seller/domain relationship independently before adding a pin. Public
 domain submissions and listing endpoints do not create pins. An unsigned, unpinned
-index can carry independently verified tombstones for known listings, but cannot
-introduce executable offers. A pinned unsigned index retains incomplete withdrawal
+index can introduce independently verified offers and carry verified tombstones
+for known listings. A pinned unsigned index retains incomplete withdrawal
 checks until a completed check from that same source or a verified revocation.
 
 Before queuing a carried marker, the crawler independently verifies the listing's

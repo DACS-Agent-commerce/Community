@@ -31,10 +31,16 @@ async function post(rpc: string, headers: Record<string, string>, payload: unkno
   }
 }
 
-const addresses = (body: unknown): string[] | null => {
+const addresses = (body: unknown, programName: string): string[] | null => {
   const value = body as { result?: unknown; response?: unknown } | null;
-  return value?.result === 200 && Array.isArray(value.response)
-    ? value.response.map((entry) => String((entry as { storageAddress?: unknown })?.storageAddress)).sort() : null;
+  if (value?.result !== 200 || !Array.isArray(value.response) || value.response.length > 32) return null;
+  const found: string[] = [];
+  for (const entry of value.response) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.programName !== programName ||
+        typeof entry.storageAddress !== "string" || !/^stor-[0-9a-f]{40}$/.test(entry.storageAddress)) return null;
+    found.push(entry.storageAddress);
+  }
+  return found.sort();
 };
 
 export async function probeNodeContract(rpc: string, programName: string): Promise<NodeContractReport> {
@@ -51,8 +57,8 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
     params: [{ type: "nodeCall", message: "searchStoragePrograms", sender: null, receiver: null, timestamp: null, data: { query: programName, options }, extra: "" }],
   });
   const gcr = await post(base, await gcrAuthHeaders(), { method: "gcr_routine", params: [{ method: "searchStoragePrograms", params: [programName, options] }] });
-  const viaNodeCall = addresses(nodeCall);
-  const viaGcr = addresses(gcr);
+  const viaNodeCall = addresses(nodeCall, programName);
+  const viaGcr = addresses(gcr, programName);
   const nodeCallSearch = viaNodeCall ? "supported"
     : nodeCall !== null && isUnknownNodeCall(nodeCall as { result?: unknown; response?: unknown })
       ? "unknown-message" : "failed";
@@ -60,7 +66,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
   return {
     rpc: base, observedAt: new Date().toISOString(), storageNotFound, nodeCallSearch,
     gcrRoutineSearch: viaGcr ? "supported" : "failed", searchesAgree,
-    // The Directory's resume lookup works when either search answers, and they must not disagree.
-    ok: storageNotFound && (nodeCallSearch === "supported" || viaGcr !== null) && searchesAgree !== false,
+    // Resume lookup falls back only on the recognized unknown-message reply.
+    ok: storageNotFound && (nodeCallSearch === "supported" || (nodeCallSearch === "unknown-message" && viaGcr !== null)) && searchesAgree !== false,
   };
 }

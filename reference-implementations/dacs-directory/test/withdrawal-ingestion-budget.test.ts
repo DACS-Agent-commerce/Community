@@ -39,7 +39,8 @@ for (const mode of ['duplicates', 'continuation'] as const) test(`unsigned disco
   const marker = { ...markerScope, signature: sign(markerScope, 'dacs-revocation:v1:') };
   const binding = await findValidListingRevocation([at(2)], verified, 1, async () => marker); assert.ok(binding);
   const indexRaw = JSON.stringify({ indexVersion: '1', generatedAt: 123, seller: claim, listings: [{ listingId: 'svc', version: 1,
-    contentHash: verified.contentHash, anchor: { kind: 'storage-program', locator: at(1) }, status: 'revoked', revocation: binding }] });
+    contentHash: verified.contentHash, anchor: { kind: 'storage-program', locator: at(1) },
+    summary: { title: 'Service', category: 'services.other', tags: [] }, status: 'revoked', revocation: binding }] });
   const repeated = JSON.parse(indexRaw);
   repeated.listings = Array.from({length: 200}, (_, i) => {
     const entry = structuredClone(repeated.listings[0]);
