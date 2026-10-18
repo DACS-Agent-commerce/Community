@@ -1,5 +1,11 @@
 import { resolveDemosPrimaryClaimKey, resolvePrimaryClaimKey, sameResolvedPrimaryClaim, type ResolvePrimaryClaimKey } from "./primaryClaimKey.js";
 
+/** Closed VerificationMethod registry at the DACS-2 source revision in SPEC_PIN. */
+export const VERIFICATION_METHODS = ["verifiable-credential", "tlsnotary", "zktls", "consensus-backed-proxy",
+  "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed"] as const;
+export const isVerificationMethod = (value: unknown): value is typeof VERIFICATION_METHODS[number] =>
+  typeof value === "string" && VERIFICATION_METHODS.some((method) => method === value);
+
 export interface RecipePolicy {
   scheme: string;
   recipeVersion: number;
@@ -29,7 +35,8 @@ export async function validateRecipeResult(
     const recipe = await resolveRecipe(raw.scheme.toLowerCase(), Number(raw.recipeVersion));
     if (!recipe || recipe.scheme !== raw.scheme.toLowerCase() || recipe.recipeVersion !== raw.recipeVersion ||
         recipe.availability !== "live" ||
-        typeof raw.method !== "string" || !Array.isArray(recipe.methods) || !recipe.methods.includes(raw.method) ||
+        !isVerificationMethod(raw.method) || !Array.isArray(recipe.methods) ||
+        !recipe.methods.every(isVerificationMethod) || !recipe.methods.includes(raw.method) ||
         !Array.isArray(recipe.trustedResultSigners) ||
         typeof recipe.defaultMaxAgeSec !== "number" || !Number.isFinite(recipe.defaultMaxAgeSec) || recipe.defaultMaxAgeSec < 0) return null;
     const signature = raw.signature as Record<string, unknown> | undefined;

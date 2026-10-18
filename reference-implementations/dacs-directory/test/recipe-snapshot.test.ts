@@ -29,11 +29,13 @@ test("snapshot membership, latest-at-start and freshness all use the selected re
       decision: "pass", verifiedAt: 20 } };
   const identity = { claims: [{ ref: "lei:ABC", verifiedBy: { anchor: { kind: "storage-program", locator }, contentHash, recipeVersion: 1 } }] };
   const check = (recipes: RecipePolicy[], required = { scheme: "lei", verificationRequired: true } as Record<string, unknown>, at = 30) =>
-    matchesVetRequirement(identity, { required: [required] }, [result], at, at, recipes);
+    matchesVetRequirement(identity, { requirementVersion: "1", required: [required] }, [result], at, at, recipes);
   assert.equal(await check([policy(1)]), true);
   assert.equal(await check([policy(2)]), false, "result absent from snapshot");
   assert.equal(await check([policy(1), policy(2)]), false, "unversioned requirement selects newer session-start recipe");
   assert.equal(await check([policy(1), policy(2)], { scheme: "lei", verificationRequired: true, recipeVersion: 1 }), true);
+  assert.equal(await check([policy(1), policy(2)], { scheme: "lei", verificationRequired: true, recipeVersion: 2 }), false,
+    "both versions exist, but the explicit requirement must match the result");
   assert.equal(await check([policy(1, 0)]), false, "snapshot default freshness cannot be replaced by another configured policy");
   assert.equal(await check([policy(1, 1)], { scheme: "lei", verificationRequired: true }, 1020), true);
   assert.equal(await check([policy(1, 1)], { scheme: "lei", verificationRequired: true }, 1021), false);

@@ -531,10 +531,9 @@ export async function scanChain(
     if (data?.bindingVersion === "1" && !verifiedBundleBinding) omittedBindings++;
     if (verifiedBundleBinding) {
       artifactKind = "bundle-binding";
-      const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
-      const bounded = catalogBundleBindings([...prior, verifiedBundleBinding]);
-      bundleBindings.set(verifiedBundleBinding.jobId, bounded.bindings);
-      for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
+      const values = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
+      values.push(verifiedBundleBinding);
+      bundleBindings.set(verifiedBundleBinding.jobId, values);
     } else if (isListingRevocationCandidate(data)) {
       artifactKind = "listing-revocation";
       addRevocationCandidate(revocations, String(data!.listingContentHash).toLowerCase(), address);
@@ -603,6 +602,14 @@ export async function scanChain(
       owners: { buyer: didOf(bundle.owner), seller: seller ?? "" },
       sellerFromAgreement: seller,
     });
+  }
+
+  // Hash, group and sort once per job after collection. Rebuilding the growing
+  // catalog per publication makes a same-job scan quadratic in its record count.
+  for (const [jobId, values] of bundleBindings) {
+    const catalog = catalogBundleBindings(values);
+    bundleBindings.set(jobId, catalog.bindings);
+    for (const key of catalog.overflowKeys) bundleBindingOverflow.add(key);
   }
 
   // Transactions are walked newest first; candidates queue in chain order.

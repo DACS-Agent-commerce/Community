@@ -89,3 +89,41 @@ test("binding pages reject invalid limits, cursors and job lengths", async () =>
     assert.equal((await get(query)).status, 400, query);
   for (const job of ["", "j".repeat(161)]) assert.equal((await get("", job)).status, 400);
 });
+
+test("scanner groups a large same-signer catalog with subquadratic comparison work", async (t) => {
+  const count = 160;
+  const entries = Array.from({ length: count }, (_, n) => binding(n + 1));
+  const programs = new Map(entries.map((value, n) => [native(1000 + n), value]));
+  const transactions = [...programs.keys()].map((address, n) => ({ id: n + 1, content: { memo: address } })).reverse();
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.startsWith("/storage-program/")) {
+      const data = programs.get(path.slice("/storage-program/".length));
+      assert.ok(data);
+      return Response.json({ success: true, owner: `0x${data.signer.slice(-64)}`, programName: `binding-${path.slice(-40)}`, data });
+    }
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    assert.equal(call.message, "getTransactions");
+    const start = call.data.start === "latest" ? count : call.data.start;
+    return Response.json({ result: 200, response: transactions.filter((tx) => tx.id <= start).slice(0, call.data.limit) });
+  };
+  const compare = String.prototype.localeCompare;
+  let comparisons = 0;
+  t.mock.method(String.prototype, "localeCompare", function (this: string, ...args: Parameters<typeof compare>) {
+    comparisons++;
+    return compare.apply(this, args);
+  });
+  try {
+    const scan = await scanChain(null, { maxTxs: count + 1 });
+    assert.equal(scan.complete, true);
+    assert.equal(scan.bundleBindings.get(jobId)?.length, count, "work limits must not truncate catalog carriage");
+    assert.deepEqual([...scan.bundleBindingOverflow], [`${jobId}\nbuyer\n${signers[0]}`]);
+    assert.ok(comparisons <= 8 * count * Math.ceil(Math.log2(count)),
+      `comparison work must grow at most n log n; observed ${comparisons} for ${count} records`);
+    t.mock.restoreAll();
+    assert.deepEqual(scan.bundleBindings.get(jobId), catalogBundleBindings(entries).bindings, "batching preserves deterministic catalog order");
+  } finally {
+    t.mock.restoreAll();
+    globalThis.fetch = originalFetch;
+  }
+});
