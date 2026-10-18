@@ -29,6 +29,34 @@ async function withPolicies(run: () => Promise<void>) {
   finally { if (old === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = old; }
 }
 
+test("a primary selector rejects an identity without presentedBy", async () => withPolicies(async () => {
+  const p = proof();
+  const identity = { claims: [p.claim] };
+  assert.equal(await matchesVetRequirement(identity, requirement("lei"), [p.result], 30, 30), true);
+  assert.equal(await matchesVetRequirement(identity, { ...requirement("lei"), primaryClaimSelector: "lei" },
+    [p.result], 30, 30, undefined, controlVerified), false);
+}));
+
+test("a well-formed oneOf group cannot hide a malformed later group", async () => withPolicies(async () => {
+  const lei = proof();
+  const domain = proof("domain", "example.com", { decision: "fail" });
+  const identity = { claims: [lei.claim, domain.claim] };
+  const req = { requirementVersion: "1", required: [], oneOf: [
+    [{ scheme: "lei", verificationRequired: true }],
+    [{ scheme: "domain", verificationRequired: "true" }],
+  ] };
+  assert.equal(await matchesVetRequirement(identity, { ...req, oneOf: [req.oneOf[0],
+    [{ scheme: "domain", verificationRequired: false }]] }, [lei.result, domain.result], 30, 30), true);
+  assert.equal(await matchesVetRequirement(identity, req, [lei.result, domain.result], 30, 30), false);
+}));
+
+test("a result verified after the signed vet time cannot satisfy a requirement", async () => withPolicies(async () => {
+  const p = proof("lei", "ABC", { verifiedAt: 31, fetchedAt: 30 });
+  const identity = { claims: [p.claim] };
+  assert.equal(await matchesVetRequirement(identity, requirement("lei"), [p.result], 31, 31), true);
+  assert.equal(await matchesVetRequirement(identity, requirement("lei"), [p.result], 30, 30), false);
+}));
+
 test("vet canonical claim alternatives preserve each scheme's identity rules", async () => withPolicies(async () => {
   const address = `0x${"aB".repeat(20)}`;
   const cases: Array<[string, string, string, boolean]> = [
