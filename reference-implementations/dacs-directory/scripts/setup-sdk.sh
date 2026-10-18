@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 SDK_REV="44d8ff2a07df8c951b94619d20b957b4bb5ce140"
 
-# Railway's GitHub integration can check out this repository, but it does not
-# pass its credentials through to nested private-repository clones. Supply a
-# narrowly scoped, read-only token as DACS_SDK_GITHUB_TOKEN for those builds.
+# The upstream SDK repository is public. Railway's GitHub integration does not
+# pass its credentials through to nested clones, so a build from a private
+# mirror needs a narrowly scoped, read-only token as DACS_SDK_GITHUB_TOKEN.
 # The credential is passed through Git's environment-based configuration so it
 # is never written to the checkout or embedded in the remote URL.
 git_with_sdk_auth() {
@@ -31,10 +31,11 @@ else
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
   (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
-  (cd vendor/dacs-sdk && npm install --no-audit --no-fund && npm run build)
+  # The SDK lockfile at SDK_REV is enforced, so its demosdk and crypto dependencies are the pinned ones.
+  (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.

@@ -114,7 +114,7 @@ vendor directory.
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
-| `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
+| `DACS_SDK_GITHUB_TOKEN` | No | Fine-grained, read-only token for cloning the pinned SDK from a private mirror during the build; the upstream SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
@@ -123,7 +123,8 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
-| `DACS_RECIPE_POLICIES` | For tier elevation | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy fails closed to `self-declared` |
+| `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and included vet results indeterminate for session admission |
+| `DACS_RECIPE_SNAPSHOTS` | For session vetting | Operator-authenticated JSON array of historical `{registryVersion, recipes}` snapshots; `recipes` uses the same policy shape. Session pins select exact snapshots; unversioned requirements select the latest recipe in that snapshot. Missing snapshots remain indeterminate. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 | `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
@@ -189,16 +190,14 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   Revocation discovery retains at most 16 candidates per listing hash, except for
-   locators that already passed RB-4 verification; truncation is recorded in reindex logs.
-   New scan observations precede prior unverified state in that window; within each
-   group, the first distinct locators in scan iteration order survive. A valid marker
-   outside the retained window is not evaluated. Its publisher can anchor a fresh
-   marker to re-enter discovery, but continued overflow can exclude that marker again.
-   After one marker verifies, later pruning cannot make it disappear.
-   BB-4-valid BundleBindings are also classified and accumulated under a deterministic
-   per-job/role total-work ceiling; any overflow is sticky and makes that side
-   `indeterminate`, never absent.
+   BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
+   requires a carrying catalog to serve every such record whoever signed it, and
+   `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
+   Directory's own BB-6 resolution works through at most 32 per signer of each job and
+   role; another signer's bindings never use that budget. Overflow is sticky and makes
+   that signer's side `indeterminate`, never absent. There is no total across signers,
+   so stored bindings, and the work to re-verify them each pass, grow with the number of
+   bindings published for one job.
 3. **Evidence graph and federation**: current bundle copies are reached only after
    deriving the role-specific logical address and resolving a signed BundleBinding.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
@@ -234,7 +233,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
-  present in `DACS_RECIPE_POLICIES`; missing policy fails closed.
+- **Authority proofs need a method-specific deployment verifier.** `EvidenceGraphDeps.verifyAttestation`
+  and the identity-tier verification argument must authenticate the original format's hash scope,
+  required signer, validator roster/epoch and proof. The result signer's signature does not replace
+  this check. No production authority adapter is installed, so these proofs remain indeterminate
+  for sessions and do not elevate identity tiers.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -254,6 +257,27 @@ is retained only for labelled legacy artifacts. DACS-2 tier derivation fails clo
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
+
+**Upstream source contracts.** The Directory records these source revisions:
+
+- **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
+  `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
+  with their hashes, and the recorded deviations. `test/standard-vectors.test.ts` checks
+  the hashes and runs each set through an adapter onto the Directory's own decisions. The
+  `did:demos:agent` primary-claim profile is the one deliberate addition; it comes from
+  DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
+- **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
+  Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
+- **Demos node**: the read contract is pinned to `kynesyslabs/node` `ac8f45f`.
+  `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
+  `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
+  `stor-` prefix), or `{success, owner, programName, data, ...}`; a program holds at most
+  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` is a
+  definitive absence; a 403 `PERMISSION_DENIED` or any other 4xx, such as a proxy's
+  or a wrong route's, leaves a revocation check incomplete and a scan read retryable.
+  `test/chain-storage.test.ts` pins each classification. This source pin does not
+  attest the revision running at a remote RPC. The configured live service remains
+  unpinned unless its operator supplies a verifiable deployment revision.
 
 ## License
 

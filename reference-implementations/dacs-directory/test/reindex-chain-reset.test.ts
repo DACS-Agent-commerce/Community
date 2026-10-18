@@ -1,41 +1,26 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-chain-reset-"));
-const server = createServer((req, res) => {
-  let body = "";
-  req.setEncoding("utf8");
-  req.on("data", (chunk) => { body += chunk; });
-  req.on("end", () => {
-    const message = JSON.parse(body).params?.[0]?.message;
-    res.setHeader("content-type", "application/json");
-    if (message !== "getTransactions") {
-      res.end(JSON.stringify({ result: 400, response: null }));
-      return;
-    }
-    res.end(JSON.stringify({
-      result: 200,
-      response: [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 }],
-    }));
-  });
-});
-await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-const address = server.address();
-if (!address || typeof address === "string") throw new Error("test server did not bind");
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (_input, init) => {
+  const message = JSON.parse(String(init?.body)).params?.[0]?.message;
+  assert.equal(message, "getTransactions");
+  return Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 }] });
+};
 
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
-process.env.DEMOS_RPC = `http://127.0.0.1:${address.port}`;
+process.env.DEMOS_RPC = "https://rpc.example";
 process.env.DACS_SCAN_RESET_THRESHOLD = "1000";
 
 const store = await import("../src/catalog/store.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
 
 test.after(() => {
-  server.close();
+  globalThis.fetch = originalFetch;
   rmSync(dataDirectory, { recursive: true, force: true });
 });
 

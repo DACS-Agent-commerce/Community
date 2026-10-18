@@ -24,11 +24,11 @@ import { programBindingKey } from "./store.js";
 import { discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
-  boundedBundleBindings,
+  catalogBundleBindings,
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "./types.js";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -532,7 +532,7 @@ export async function scanChain(
     if (verifiedBundleBinding) {
       artifactKind = "bundle-binding";
       const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
-      const bounded = boundedBundleBindings([...prior, verifiedBundleBinding]);
+      const bounded = catalogBundleBindings([...prior, verifiedBundleBinding]);
       bundleBindings.set(verifiedBundleBinding.jobId, bounded.bindings);
       for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
     } else if (isListingRevocationCandidate(data)) {
