@@ -31,10 +31,11 @@ else
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
   (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
-  (cd vendor/dacs-sdk && npm install --no-audit --no-fund && npm run build)
+  # The SDK lockfile at SDK_REV is enforced, so its demosdk and crypto dependencies are the pinned ones.
+  (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
 fi
 if [ "${DACS_SKIP_APP_INSTALL:-0}" != "1" ]; then
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 # Seed the (gitignored, runtime-mutated) registrations file from the example
 # so a fresh clone has demo data without the file churning in git.

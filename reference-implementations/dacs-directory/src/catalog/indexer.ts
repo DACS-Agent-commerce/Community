@@ -17,7 +17,7 @@
 import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 // verifyBundleCore is exported from the SDK's agent barrel, but that barrel
 // also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
@@ -25,8 +25,9 @@ import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-// The SDK doesn't export sessionAnchorName from its public barrel
-// (dacs-sdk#178, follow-up to #14) — reach into the vendored build.
+// The SDK at SDK_REV (2026-07-04) doesn't export sessionAnchorName from its public
+// barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
+// reach into the vendored build until the pin moves.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { readAnchor, readAnchorRecord } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
@@ -57,6 +58,7 @@ import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from ".
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
+  boundedBundleBindings,
   bundleBindingOverflowKey,
   resolveBundleSide,
   verifyBundleBinding,
@@ -249,10 +251,14 @@ export async function indexRegistration(
     .map((claim) => `${deal.jobId}\n${canonicalDemosAgentClaim(claim)}`)));
   const signedByHolder = (binding: BundleBinding) => typeof binding?.signer === "string" &&
     canonicalDemosAgentClaim(binding.signer) !== null && holders.has(`${binding.jobId}\n${canonicalDemosAgentClaim(binding.signer)}`);
-  const rawBindings = [
+  // The catalog keeps every binding; the Directory's own BB-6 work is capped per signer, and a
+  // signer over the cap leaves its side indeterminate (sticky overflow).
+  const workCapped = boundedBundleBindings([
     ...[...relevantJobs].flatMap((jobId) => ownArray(scanState.bundleBindings, jobId)),
     ...(reg.bundleBindings ?? []).filter((binding) => relevantJobs.has(binding.jobId)),
-  ].filter(signedByHolder);
+  ].filter(signedByHolder));
+  for (const key of workCapped.overflowKeys) overflowBindings.add(key);
+  const rawBindings = workCapped.bindings;
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
   onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
