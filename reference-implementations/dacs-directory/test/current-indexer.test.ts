@@ -1152,7 +1152,7 @@ test("agreement patterns must match RFQ and sealed-envelope pipelines in both ag
         const listingScope = signedScope(fixture.listing, "listing");
         (listingScope.pipeline as Obj[])[0] = pattern === "rfq"
           ? { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300 } }
-          : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price" } };
+          : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price", fixedPriceFallback: true } };
         listingScope.pricing = pattern === "rfq"
           ? { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 }
           : { kind: "auction", selectionRule: "lowest-price" };
@@ -1166,10 +1166,113 @@ test("agreement patterns must match RFQ and sealed-envelope pipelines in both ag
         agreementScope.listingRef = listingRef;
         agreementScope.derivedFromPattern = declared;
         await installAgreement(fixture, agreementScope);
-        const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
-        const label = `${profile}/${pattern}/${declared}: ${graph.reason}`;
-        assert.equal(graph.ok, declared === pattern, label);
-        assert.equal(graph.refsVerified, declared === pattern, label);
+        for (const role of ["buyer", "seller"] as const) {
+          const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+          const label = `${profile}/${role}/${pattern}/${declared}: ${graph.reason}`;
+          assert.equal(graph.ok, declared === pattern, label);
+          assert.equal(graph.refsVerified, declared === pattern, label);
+        }
+      }
+    }
+  }
+});
+
+test("RFQ fixed-price fallback remains eligible when explicitly declared", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+    const listingScope = signedScope(fixture.listing, "listing");
+    (listingScope.pipeline as Obj[])[0] = {
+      kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true },
+    };
+    listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 };
+    fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    assert.ok(await verifyListing(fixture.listing));
+    const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    fixture.buyerBundle.listingRef = listingRef;
+    fixture.sellerBundle.listingRef = listingRef;
+    const agreementScope = signedScope(fixture.agreement, "agreement");
+    agreementScope.listingRef = listingRef;
+    agreementScope.derivedFromPattern = "fixed-price";
+    await installAgreement(fixture, agreementScope);
+    for (const role of ["buyer", "seller"] as const) {
+      const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+      const label = `${profile}/${role}: ${graph.reason}`;
+      assert.equal(graph.signaturesVerified, true, label);
+      assert.equal(graph.ok, true, label);
+      assert.equal(graph.refsVerified, true, label);
+    }
+  }
+});
+
+test("RFQ fallback requires signed opt-in and the exact decimal center without restricting normal RFQ agreements", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const [fallback, pattern, amount, currency, accepted] of [
+      [true, "fixed-price", "100.000000000000000001", "USDC", true],
+      [false, "fixed-price", "100.000000000000000001", "USDC", false],
+      [undefined, "fixed-price", "100.000000000000000001", "USDC", false],
+      [true, "fixed-price", "90", "USDC", false],
+      [true, "fixed-price", "100.000000000000000002", "USDC", false],
+      [true, "fixed-price", "100.000000000000000001", "EUR", false],
+      [true, "sealed-envelope", "100.000000000000000001", "USDC", false],
+      [true, "rfq", "90", "USDC", true],
+      [false, "rfq", "90", "USDC", true],
+      [undefined, "rfq", "90", "USDC", true],
+    ] as const) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      const parameters: Obj = { maxTurns: 6, timeoutSec: 300 };
+      if (fallback !== undefined) parameters.fixedPriceFallback = fallback;
+      (listingScope.pipeline as Obj[])[0] = { kind: "negotiate-rfq", parameters };
+      listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "100.000000000000000001", currency: "USDC" }, minPct: 20, maxPct: 20 };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      assert.ok(await verifyListing(fixture.listing));
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      fixture.buyerBundle.listingRef = listingRef;
+      fixture.sellerBundle.listingRef = listingRef;
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.derivedFromPattern = pattern;
+      agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
+      // Every case has valid signatures and updated references, including rejections.
+      await installAgreement(fixture, agreementScope);
+      for (const role of ["buyer", "seller"] as const) {
+        const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${role}/${fallback}/${pattern}/${amount} ${currency}: ${graph.reason}`;
+        assert.equal(graph.signaturesVerified, true, label);
+        assert.equal(graph.ok, accepted, label);
+        assert.equal(graph.refsVerified, accepted, label);
+      }
+    }
+  }
+});
+
+test("RFQ fixed-price fallback cannot select a center from metered pricing", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of ["fixed-price", "rfq"] as const) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      (listingScope.pipeline as Obj[])[0] = {
+        kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true },
+      };
+      listingScope.pricing = { kind: "metered", unitPrice: { amount: "1.25", currency: "DEM" }, unit: "call" };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      assert.ok(await verifyListing(fixture.listing));
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      fixture.buyerBundle.listingRef = listingRef;
+      fixture.sellerBundle.listingRef = listingRef;
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.derivedFromPattern = pattern;
+      await installAgreement(fixture, agreementScope);
+      for (const role of ["buyer", "seller"] as const) {
+        const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${role}/${pattern}: ${graph.reason}`;
+        assert.equal(graph.signaturesVerified, true, label);
+        assert.equal(graph.ok, pattern === "rfq", label);
+        assert.equal(graph.refsVerified, pattern === "rfq", label);
       }
     }
   }

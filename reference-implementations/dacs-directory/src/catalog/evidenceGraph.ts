@@ -93,14 +93,19 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
 
   // DACS-3 §8.5.2 check 7: a valid pattern must also name this listing's
-  // negotiation phase; agreement signatures alone do not establish that match.
+  // negotiation phase, including an explicitly enabled RFQ fixed-price fallback.
   const negotiations = pipeline.filter((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
-  if (negotiations.length !== 1 || `negotiate-${agreement.derivedFromPattern}` !== negotiations[0].kind) return false;
+  if (negotiations.length !== 1) return false;
+  const negotiation = negotiations[0];
+  const pricing = rec(listing.pricing);
+  const fixedPriceFallback = negotiation.kind === "negotiate-rfq" &&
+    rec(negotiation.parameters)?.fixedPriceFallback === true && agreement.derivedFromPattern === "fixed-price" &&
+    pricing?.kind === "negotiable";
+  if (`negotiate-${agreement.derivedFromPattern}` !== negotiation.kind && !fixedPriceFallback) return false;
 
   // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
   // exactly its center. Canonical decimal strings avoid floating-point loss.
-  const pricing = rec(listing.pricing);
-  if (pricing?.kind === "negotiable" && pipeline.some((phase) => phase.kind === "negotiate-fixed-price")) {
+  if (pricing?.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price") {
     const center = rec(pricing.bandCenter);
     const price = rec(terms.price);
     if (!priceTermOk(center) || !priceTermOk(price) ||
