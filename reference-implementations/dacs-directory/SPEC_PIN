@@ -24,6 +24,8 @@
 #   parameters unmatched. It requires an explicit session recipe roster and
 #   pre-authenticated results; every included result needs an exact live recipe,
 #   allowed method and trusted signer, including results with validUntil.
+#   Every required/oneOf member must declare a boolean verificationRequired;
+#   VerifyResult shape is checked even when verificationRequired is false.
 #   Unversioned requirements select the latest version in the supplied roster.
 #   validUntil or exact-recipe defaultMaxAgeSec sets the authority window; wrapper
 #   expiry/maxAge can only narrow it. See test/vet-claim-rules.test.ts.

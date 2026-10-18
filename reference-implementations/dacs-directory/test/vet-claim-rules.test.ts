@@ -11,7 +11,8 @@ const seed = new Uint8Array(32).fill(17);
 const signer = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
 const locator = `stor-${"a".repeat(40)}`;
 function proof(scheme = "lei", identifier = "ABC", change: Obj = {}, claimChange: Obj = {}) {
-  const scope = { resultVersion: "1", scheme, identifier, recipeVersion: 1, method: "registry", decision: "pass", verifiedAt: 20, validUntil: 100, ...change };
+  const scope = { resultVersion: "1", scheme, identifier, recipeVersion: 1, method: "registry", decision: "pass", verifiedAt: 20, validUntil: 100, reason: "registry response", fetchedAt: 19,
+    attestation: { anchor: { kind: "storage-program", locator }, contentHash: "d".repeat(64) }, ...change };
   const contentHash = artifactHash(scope, "verify-result");
   const raw = { ...scope, signature: { signer, algorithm: "ed25519", value: Buffer.from(ed25519Sign(Buffer.from(`dacs-verifyresult:v1:${contentHash}`), privateKeyFromSeed(seed))).toString("base64url") } };
   const result: ResolvedEvidence = { kind: "verify-result", raw, contentHash, locator };
@@ -67,13 +68,13 @@ test("vet exact references, freshness boundaries and parameters are independent 
   for (const expiresAt of ["100", null, 29]) assert.equal(await check({ ...p.claim, expiresAt }), false);
   assert.equal(await check({ ...p.claim, expiresAt: 30 }), true);
   assert.equal(await check({ ...p.claim, expiresAt: 1000 }, { ...p.result.raw, validUntil: 29 }), false);
-  assert.equal(await check(p.claim, { ...p.result.raw, validUntil: 20 }, { required: [{ scheme: "lei", maxAge: 0 }] }, 20, 20), true);
-  assert.equal(await check(p.claim, { ...p.result.raw, validUntil: 20 }, { required: [{ scheme: "lei", maxAge: 0 }] }, 21, 21), false);
-  assert.equal(await check(p.claim, p.result.raw, { required: [{ scheme: "lei", parameters: {} }] }), true);
-  assert.equal(await check(p.claim, p.result.raw, { required: [{ scheme: "lei", parameters: { unknown: true } }] }), false);
+  assert.equal(await check(p.claim, { ...p.result.raw, validUntil: 20 }, { required: [{ scheme: "lei", verificationRequired: true, maxAge: 0 }] }, 20, 20), true);
+  assert.equal(await check(p.claim, { ...p.result.raw, validUntil: 20 }, { required: [{ scheme: "lei", verificationRequired: true, maxAge: 0 }] }, 21, 21), false);
+  assert.equal(await check(p.claim, p.result.raw, { required: [{ scheme: "lei", verificationRequired: true, parameters: {} }] }), true);
+  assert.equal(await check(p.claim, p.result.raw, { required: [{ scheme: "lei", verificationRequired: true, parameters: { unknown: true } }] }), false);
   process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...policy("lei"), defaultMaxAgeSec: 0 }]);
   const raw = { ...p.result.raw }; delete raw.validUntil;
-  assert.equal(await check(p.claim, raw, { required: [{ scheme: "lei", maxAge: 0 }] }, 20, 20), true);
+  assert.equal(await check(p.claim, raw, { required: [{ scheme: "lei", verificationRequired: true, maxAge: 0 }] }, 20, 20), true);
   assert.equal(await check(p.claim, raw, requirement("lei"), 21, 21), false);
 }));
 
@@ -121,7 +122,7 @@ test("required claims are conjunctive and oneOf is OR within groups and AND acro
 }));
 
 test("verificationRequired controls decision while freshness and exact-primary verification always apply", async () => withPolicies(async () => {
-  for (const decision of ["pass", "fail", "indeterminate"]) {
+  for (const decision of ["pass", "fail", "indeterminate", "error"]) {
     for (const verificationRequired of [true, false]) {
       const p = proof("lei", "ABC", { decision });
       const req = { required: [{ scheme: "lei", verificationRequired }] };
@@ -160,3 +161,80 @@ test("vet requires a live exact-version recipe, allowed method and trusted signe
   assert.equal(await evaluateVetRequirement({ claims: [p.claim] }, requirement("lei"), [p.result, optional.result], 30, 30, [live]), false,
     "every included result requires policy, including optional results");
 });
+
+
+test("vet rejects malformed verificationRequired in every required and oneOf member", async () => withPolicies(async () => {
+  const malformed = [{ scheme: "lei" }, ...[undefined, null, "true", "false", 0, 1, {}, []]
+    .map((verificationRequired) => ({ scheme: "lei", verificationRequired }))];
+  for (const decision of ["pass", "fail", "indeterminate", "error"]) {
+    const p = proof("lei", "ABC", { decision });
+    const valid = { scheme: "lei", verificationRequired: false };
+    const check = (req: Obj) => matchesVetRequirement({ claims: [p.claim] }, req, [p.result], 30, 30);
+    assert.equal(await check({ required: [valid] }), true, `explicit false/${decision}`);
+    assert.equal(await check({ required: [], oneOf: [[valid]] }), true);
+    for (const member of malformed) {
+      const label = `${decision}/${JSON.stringify(member)}`;
+      assert.equal(await check({ required: [member] }), false, `required: ${label}`);
+      assert.equal(await check({ required: [], oneOf: [[member]] }), false, `oneOf: ${label}`);
+      for (const group of [[valid, member], [member, valid]])
+        assert.equal(await check({ required: [], oneOf: [group] }), false, `all alternatives need valid shape: ${label}`);
+      assert.equal(await check({ required: [], oneOf: [[valid, { ...member, scheme: "did" }]] }), false,
+        `even an unmatched alternative needs valid shape: ${label}`);
+    }
+  }
+}));
+
+test("unverified requirements still reject malformed VerifyResult records", async () => withPolicies(async () => {
+  const attestation = { anchor: { kind: "storage-program", locator }, contentHash: "d".repeat(64) };
+  const invalid: Obj[] = [
+    { resultVersion: undefined }, { resultVersion: 1 }, { resultVersion: "2" },
+    { scheme: undefined }, { identifier: undefined }, { identifier: "" },
+    { recipeVersion: undefined }, { recipeVersion: "1" }, { recipeVersion: 0 },
+    { method: undefined }, { decision: undefined }, { decision: null }, { decision: true }, { decision: "unknown" },
+    { reason: undefined }, { reason: null }, { reason: 1 },
+    { fetchedAt: undefined }, { fetchedAt: "19" },
+    { verifiedAt: undefined }, { verifiedAt: "20" },
+    { validUntil: null }, { validUntil: "100" },
+    { attestation: undefined }, { attestation: [] }, { attestation: {} },
+    { attestation: { ...attestation, anchor: { kind: "unknown", locator } } },
+    { attestation: { ...attestation, anchor: { kind: ["storage-program"], locator } } },
+    { attestation: { ...attestation, anchor: { kind: "storage-program", locator: "" } } },
+    { attestation: { ...attestation, contentHash: "invalid" } },
+    { attestation: { ...attestation, signer: null } },
+    { data: null }, { data: [] }, { data: "extraction" },
+  ];
+  const check = (p: ReturnType<typeof proof>, verificationRequired = false) => matchesVetRequirement(
+    { claims: [p.claim] }, { required: [{ scheme: "lei", verificationRequired }] }, [p.result], 30, 30);
+  assert.equal(await check(proof("lei", "ABC", { decision: "fail" })), true, "a well-formed failed result may match explicit false");
+  assert.equal(await check(proof("lei", "ABC", { validUntil: undefined })), true, "validUntil remains optional");
+  assert.equal(await check(proof("lei", "ABC", { data: { found: false } })), true, "structured data remains optional");
+  for (const kind of ["storage-program", "ipfs", "https"])
+    assert.equal(await check(proof("lei", "ABC", { attestation: { ...attestation, anchor: { kind, locator } } })), true,
+      `supported attestation anchor: ${kind}`);
+  for (const change of invalid) {
+    // These malformed records are hash-bound and signed by the trusted fixture signer.
+    for (const decision of ["pass", "fail"])
+      assert.equal(await check(proof("lei", "ABC", { decision, ...change })), false,
+        `${decision}/${JSON.stringify(change)}`);
+  }
+  for (const field of ["fetchedAt", "verifiedAt", "validUntil"]) {
+    for (const value of [NaN, Infinity, -Infinity]) {
+      const p = proof("lei", "ABC", { decision: "fail" });
+      p.result.raw[field] = value;
+      assert.equal(await check(p), false, `${field}/${value}`);
+    }
+  }
+  for (const raw of [null, [], "result"]) {
+    const p = proof();
+    p.result.raw = raw as unknown as Obj;
+    assert.equal(await check(p), false, `raw: ${JSON.stringify(raw)}`);
+  }
+  const otherKind = proof(); otherKind.result.kind = "attestation";
+  assert.equal(await check(otherKind), false, "a different artifact kind is not a VerifyResult");
+  for (const signature of [null, [], {}, { signer, algorithm: "ed25519" },
+    { signer, algorithm: "ed25519", value: "" }, { signer, algorithm: "ed25519", value: 1 }]) {
+    const p = proof("lei", "ABC", { decision: "fail" });
+    p.result.raw.signature = signature;
+    assert.equal(await check(p), false, `signature: ${JSON.stringify(signature)}`);
+  }
+}));

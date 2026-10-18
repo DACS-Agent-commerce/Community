@@ -6,8 +6,30 @@ type Obj = Record<string, unknown>;
 const rec = (v: unknown): Obj | null => v && typeof v === "object" && !Array.isArray(v) ? v as Obj : null;
 const hash = (v: unknown) => typeof v === "string" ? v.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const nonempty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const SCHEMES = new Set(["did", "key", "domain", "erc8004", "lei", "finra-crd", "sam-uei", "fedramp", "naics", "cmmc", "ofac-clear", "stor-cred",
   "cci-xm", "cci-web2", "cci-pqc", "cci-ud", "cci-nomis", "cci-humanpassport", "cci-ethos", "cci-tlsn"]);
+
+function claimRequirementShape(value: unknown): boolean {
+  const cr = rec(value);
+  return Boolean(cr && nonempty(cr.scheme) && typeof cr.verificationRequired === "boolean");
+}
+
+/** Shape validation is independent of the caller's signature/authority authentication. */
+function verifyResultShape(value: unknown): boolean {
+  const vr = rec(value);
+  const attestation = rec(vr?.attestation); const anchor = rec(attestation?.anchor);
+  const signature = rec(vr?.signature);
+  return Boolean(vr && vr.resultVersion === "1" && nonempty(vr.scheme) && nonempty(vr.identifier) &&
+    Number.isSafeInteger(vr.recipeVersion) && Number(vr.recipeVersion) > 0 && nonempty(vr.method) &&
+    typeof vr.decision === "string" && ["pass", "fail", "indeterminate", "error"].includes(vr.decision) &&
+    typeof vr.reason === "string" && finite(vr.fetchedAt) && finite(vr.verifiedAt) &&
+    (vr.validUntil === undefined || finite(vr.validUntil)) && (vr.data === undefined || rec(vr.data)) &&
+    anchor && typeof anchor.kind === "string" && ["storage-program", "ipfs", "https"].includes(anchor.kind) && nonempty(anchor.locator) &&
+    /^[0-9a-f]{64}$/.test(hash(attestation?.contentHash)) &&
+    (attestation?.signer === undefined || nonempty(attestation.signer)) &&
+    signature && nonempty(signature.signer) && nonempty(signature.algorithm) && nonempty(signature.value));
+}
 
 /** CF-1/CF-3: parameters are qualifiers, never part of the claim identity. */
 function claimIdentity(value: unknown): { scheme: string; identifier: string } | null {
@@ -35,9 +57,15 @@ function claimIdentity(value: unknown): { scheme: string; identifier: string } |
  * Callers authenticate result signatures first and supply the session-pinned recipe roster. */
 export async function matchesVetRequirement(identity: Obj, requirement: Obj, results: ResolvedEvidence[], at: unknown, finalisedAt: unknown, recipes?: readonly RecipePolicy[]): Promise<boolean> {
   if (!finite(at) || !finite(finalisedAt) || at > finalisedAt) return false;
+  // Validate all alternatives before matching: a successful oneOf member must
+  // not hide a malformed member, and only an explicit false may relax decision.
+  if (!Array.isArray(requirement.required) || !requirement.required.every(claimRequirementShape) ||
+      (requirement.oneOf !== undefined && (!Array.isArray(requirement.oneOf) ||
+        !requirement.oneOf.every((group) => Array.isArray(group) && group.every(claimRequirementShape))))) return false;
   if (!recipes || new Set(recipes.map((recipe) => `${recipe.scheme}:${recipe.recipeVersion}`)).size !== recipes.length) return false;
   const policies = new Map<ResolvedEvidence, RecipePolicy>();
   for (const result of results) {
+    if (result.kind !== "verify-result" || !verifyResultShape(result.raw)) return false;
     const policy = await validateRecipeResult(result.raw, async (scheme, version) =>
       recipes.find((recipe) => recipe.scheme === scheme && recipe.recipeVersion === version) ?? null);
     if (!policy) return false;
