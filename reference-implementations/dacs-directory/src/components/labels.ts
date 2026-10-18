@@ -1,5 +1,7 @@
 /** Human labels for the spec's kebab-case rail / delivery / negotiation ids. */
 export const RAIL_LABELS: Record<string, string> = {
+  "demos-native:DEM": "DEM",
+  "x402:default": "USDC · x402",
   "pay-dem": "DEM",
   "pay-x402": "USDC · x402",
   "ap2:stripe-paymentintents": "Stripe PaymentIntents · AP2",

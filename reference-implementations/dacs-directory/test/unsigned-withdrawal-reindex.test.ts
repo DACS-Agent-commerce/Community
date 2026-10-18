@@ -73,6 +73,11 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
     assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
     process.env.DACS_WITHDRAWAL_SOURCE_PINS = JSON.stringify({ 'https://seller.example': claim });
+    await run();
+    assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
+      'pinning the seller domain does not authorize an attacker domain for the same seller');
+    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
+    assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
     crawled = complete;
     store.saveDomains(['seller.example']);
     await run();

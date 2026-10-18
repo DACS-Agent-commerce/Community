@@ -17,6 +17,7 @@ import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
@@ -176,9 +177,10 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
     return { domain, error: "listings.json must contain at most 200 listings" };
   }
   const signature = dacs.listings.publisherSignature;
-  const withdrawalAuthenticated = typeof signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(signature) &&
+  const signatureBytes = typeof signature === "string" && signature.length === 86 ? canonicalSignatureBytes(signature) : null;
+  const withdrawalAuthenticated = signatureBytes !== null &&
     Boolean(await verifyPrimaryClaimSignature(Buffer.from(wellKnownWithdrawalMessage(base, actual), "utf8"),
-      Buffer.from(signature, "base64url"), seller, "ed25519"));
+      signatureBytes, seller, "ed25519"));
 
   const listingAnchors: string[] = [];
   const activeListingAnchors: string[] = [];
