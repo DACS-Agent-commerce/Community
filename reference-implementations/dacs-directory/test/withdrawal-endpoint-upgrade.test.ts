@@ -29,15 +29,21 @@ db.close();
 const store = await import("../src/catalog/store.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
-test("upgrade removes endpoint-authorized v2 carriage and requires a full discovery replay", () => {
+test("upgrade removes endpoint-authorized v2 carriage and retains source-specific quarantine through a full chain replay", () => {
   assert.equal(store.hasPendingRevocationCandidates(hash), false, "fabricated unread carriage cannot survive upgrade");
   assert.equal(store.hasPendingRevocationCandidates(chainHash), true, "chain observations remain pending");
   assert.equal(store.loadScanState().schemaVersion, 0, "next successful scan must replay genesis");
   assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, hash), true, "index-now cannot assert absence before replay");
   assert.deepEqual(store.loadCatalog().sellers[0].listings.map((l) => l.status), ["revoked"]);
   const upgraded = new Database(join(directory, "directory.sqlite"));
-  assert.equal((upgraded.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string }).value_json, "[]");
+  const sources = JSON.parse((upgraded.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string }).value_json);
+  assert.equal(sources.length, 1, "an unresolved source cannot disappear during migration");
+  assert.equal(sources[0].provenance, "legacy");
+  assert.deepEqual(sources[0].incomplete, [hash]);
   upgraded.close();
   store.finishWithdrawalCarriageReplay();
-  assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, hash), false, "a successful replay releases the upgrade hold");
+  assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, hash), true, "chain replay cannot release a source hold");
+  store.recordWellKnownWithdrawalCheck("https://thirdparty.example", claim, [hash], [], { generatedAt: 2, hash });
+  store.finishWithdrawalCarriageReplay();
+  assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, hash), false, "authenticated source reconciliation releases its hold");
 });

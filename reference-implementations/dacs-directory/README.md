@@ -378,7 +378,17 @@ requiring Vet remain indeterminate for completion and volume. Listing publicatio
 Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
 attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.
 
-Unresolved withdrawal hints from a hosted well-known index require publisher authentication.
+Executable offers discovered through a hosted well-known index require source provenance.
+Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a
+server-side JSON object mapping normalized HTTPS origins to canonical seller DIDs
+(for example, `{"https://agent.example":"did:demos:agent:<64 lowercase hex>"}`).
+Verify that seller/domain relationship independently before adding a pin. Public
+domain submissions and listing endpoints do not create pins. An unsigned, unpinned
+index can carry independently verified tombstones for known listings, but cannot
+introduce executable offers. A pinned unsigned index retains incomplete withdrawal
+checks until a completed check from that same source or a verified revocation.
+
+For publisher signatures,
 The well-known file export returns `withdrawalSigning.message`: sign those exact UTF-8
 bytes with the seller's ed25519 key and place the unpadded base64url signature in
 `dacs.listings.publisherSignature` in `agent.json` (and the identical A2A alias, when
@@ -394,4 +404,7 @@ cursor for continuation. Authenticated bindings remain seller-scoped until the i
 verifies the listing's publisher, owner and tuple using its own listing read. An authenticated
 index with an incomplete withdrawal entry withholds that offer until a later
 complete authenticated check or a verified revocation resolves it. Failed later
-crawls retain incomplete checks; verified tombstones remain revoked.
+crawls retain incomplete checks; verified tombstones remain revoked. Upgrades retain
+affected seller/hash holds, including checks with no queued marker. Legacy sources
+without recorded provenance require a signature or operator pin before reconciliation;
+chain replay alone cannot release those holds.

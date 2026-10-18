@@ -74,6 +74,21 @@ export function normalizeSubmittedDomain(domain: string): string {
   return url.origin;
 }
 
+export type WithdrawalProvenance = "publisher-signature" | "operator-pin";
+
+/** Server configuration only: public domain submissions never authorize a seller. */
+export function wellKnownWithdrawalProvenance(agent: WellKnownAgent): WithdrawalProvenance | undefined {
+  if (agent.withdrawalAuthenticated) return "publisher-signature";
+  try {
+    const pins: unknown = JSON.parse(process.env.DACS_WITHDRAWAL_SOURCE_PINS ?? "{}");
+    if (!pins || typeof pins !== "object" || Array.isArray(pins)) return;
+    const domain = normalizeSubmittedDomain(agent.domain);
+    for (const [source, seller] of Object.entries(pins)) {
+      if (seller === agent.seller && normalizeSubmittedDomain(source) === domain) return "operator-pin";
+    }
+  } catch { /* Invalid configuration grants no source authority. */ }
+}
+
 /** Sign these exact UTF-8 bytes; the signature lives outside the hashed index. */
 export function wellKnownWithdrawalMessage(domain: string, indexHash: string): string {
   return `dacs-directory withdrawal-index:v1\ndomain:${normalizeSubmittedDomain(domain)}\nindex:sha256-${indexHash.replace(/^sha256-/, "").toLowerCase()}`;

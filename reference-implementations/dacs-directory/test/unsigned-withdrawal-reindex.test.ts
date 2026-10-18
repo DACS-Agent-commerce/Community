@@ -16,7 +16,7 @@ const { activeOffer } = await import('../src/catalog/discovery.js');
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
-for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (signed domain: ${domainBound})`, async (t) => {
+for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (endpoint present: ${domainBound})`, async (t) => {
   const seed = new Uint8Array(32).fill(domainBound ? 42 : 41);
   const key = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString('hex');
   const claim = `did:demos:agent:${key}`;
@@ -71,29 +71,30 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true, 'a different domain cannot authorize pending or incomplete unsigned hints');
     assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
     assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
+    process.env.DACS_WITHDRAWAL_SOURCE_PINS = JSON.stringify({ 'https://seller.example': claim });
     crawled = complete;
     store.saveDomains(['seller.example']);
     await run();
-    assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
-      'a hostname alone does not distinguish an authorized seller from an unsigned third party');
-    assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
-    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
+    assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), false,
+      'an operator-pinned source keeps an unread withdrawal indeterminate');
+    assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), true);
+    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), true);
     if (domainBound) {
       const incomplete = structuredClone(complete);
       incomplete.revocations = [];
       incomplete.incompleteWithdrawalHashes = [verified.contentHash];
       crawled = incomplete;
       await run();
-      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
-        'a self-claimed endpoint does not authorize a malformed unsigned withdrawal');
-      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
+      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), false,
+        'a pinned source retains its incomplete check when a binding is malformed');
+      assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), true);
       crawled = complete;
       await run();
-      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
-        'an unread unsigned marker has no seller authority, including at a self-claimed endpoint');
-      assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
+      assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), false,
+        'source provenance is independent of the optional endpoint');
+      assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), true);
       const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
-        `const s=await import('./src/catalog/store.ts'); if(s.hasPendingRevocationCandidates(${JSON.stringify(verified.contentHash)})) process.exit(1); if(!s.loadCatalog().sellers[0].listings.length) process.exit(2)`], { encoding: 'utf8' });
+        `const s=await import('./src/catalog/store.ts'); if(!s.hasPendingRevocationCandidates(${JSON.stringify(verified.contentHash)})) process.exit(1); if(s.loadCatalog().sellers[0].listings.length) process.exit(2)`], { encoding: 'utf8' });
       assert.equal(child.status, 0, child.stderr);
     }
     readable = true;
@@ -102,6 +103,6 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     const indexed = store.loadCatalog().sellers[0];
     assert.equal(indexed.listings.length, 1, `expected indexed listing: ${JSON.stringify(indexed)}`);
     assert.equal(indexed.listings.some(activeOffer), false, `unsigned but integrity-consistent revoked record was ignored: ${JSON.stringify(indexed.listings.map(l => l.status))}`);
-  } finally { globalThis.fetch = oldFetch; }
+  } finally { globalThis.fetch = oldFetch; delete process.env.DACS_WITHDRAWAL_SOURCE_PINS; }
 
 });

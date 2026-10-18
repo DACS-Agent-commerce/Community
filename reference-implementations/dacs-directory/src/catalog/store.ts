@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
+import type { WithdrawalProvenance } from "./wellknown.js";
 import { deriveSellerReputation, reconcileCatalogReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
@@ -265,25 +266,35 @@ db.transaction(() => {
   setJson("revocation-read-schema-version", 1);
 }).immediate();
 
-// Older well-known ingestion queued locators without binding their publisher to
-// the listing's signed bytes. Discard ambiguous carriage and replay discovery once;
-// until the replay completes, neither index-now nor cached reads assert absence.
+// Keep source-specific upgrade holds even when no candidate was queued. v2 did
+// not retain source provenance, so only an authenticated recrawl can release it.
 db.transaction(() => {
-  if (getJson("withdrawal-carriage-schema-version", 0) >= 3) return;
-  // v2 also trusted self-claimed publicEndpoint origins. They cannot retain
-  // seller authority after upgrade; signed sources will be rediscovered.
-  setJson("withdrawal-sources", []);
+  const version = getJson<number>("withdrawal-carriage-schema-version", 0);
+  if (version >= 4) return;
+  const sources = getJson<WithdrawalSource[]>("withdrawal-sources", []);
+  for (const source of sources) {
+    source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
+    source.provenance = version === 3 ? "publisher-signature" : "legacy";
+    // Legacy bindings must not create candidate authority before revalidation.
+    if (source.provenance === "legacy") delete source.bindings;
+  }
+  setJson("withdrawal-sources", sources);
   const ambiguous = db.prepare("SELECT 1 FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL LIMIT 1").get();
   if (ambiguous) {
     db.prepare("DELETE FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL").run();
     const state = getJson<ScanState>("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
     setJson("scan-state", { ...state, schemaVersion: 0 });
     setJson("withdrawal-carriage-replay-required", true);
+  }
+  if (ambiguous || sources.length) {
     const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
     setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({ ...seller,
-      listings: seller.listings.filter((listing) => listing.status === "revoked") })) });
+      listings: seller.listings.filter((listing) => listing.status === "revoked" || (!ambiguous &&
+        !sources.some((source) => source.seller === seller.primaryClaim &&
+          (source.incomplete.includes(listing.contentHash) || source.incomplete.includes("*"))))),
+    })) });
   }
-  setJson("withdrawal-carriage-schema-version", 3);
+  setJson("withdrawal-carriage-schema-version", 4);
 }).immediate();
 
 /**
@@ -446,24 +457,26 @@ export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 
 interface WithdrawalSource { domain: string; seller: string; hashes: string[]; incomplete: string[];
+  provenance?: WithdrawalProvenance | "legacy";
   bindings?: RevocationBinding[];
   index?: { generatedAt: number; hash: string } }
 const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
 /** A source can clear its own incomplete checks only with another authenticated index. */
 export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
   hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
-  bindings: NonNullable<WithdrawalSource["bindings"]> = []): boolean => {
+  bindings: NonNullable<WithdrawalSource["bindings"]> = [],
+  provenance: WithdrawalProvenance = "publisher-signature"): boolean => {
   const sources = withdrawalSources();
   for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
   if (seller) {
     const prior = sources.find((source) => source.domain === domain && source.seller === seller);
-    if (!index || (prior?.index && (index.generatedAt < prior.index.generatedAt ||
+    if (!index || (prior?.provenance !== "legacy" && prior?.index && (index.generatedAt < prior.index.generatedAt ||
         (index.generatedAt === prior.index.generatedAt && index.hash !== prior.index.hash)))) {
       setJson("withdrawal-sources", sources);
       return false;
     }
     const missing = (prior?.hashes ?? []).filter((hash) => !hashes.includes(hash));
-    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings };
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings, provenance };
     if (prior) Object.assign(prior, next); else sources.push(next);
   }
   setJson("withdrawal-sources", sources);
@@ -472,11 +485,15 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
 export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
   getJson("withdrawal-carriage-replay-required", false) || withdrawalSources().some((source) =>
     source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*")));
-export const finishWithdrawalCarriageReplay = (): void => setJson("withdrawal-carriage-replay-required", false);
+export const finishWithdrawalCarriageReplay = (): void => {
+  if (!withdrawalSources().some((source) => source.provenance === "legacy")) {
+    setJson("withdrawal-carriage-replay-required", false);
+  }
+};
 
 /** Called only after the indexer verifies the listing's signature and chain owner. */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
-  withdrawalSources().filter((source) => source.seller === seller).flatMap((source) =>
+  withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
     (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 

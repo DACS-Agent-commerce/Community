@@ -19,7 +19,7 @@ import {
   type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, type WellKnownAgent } from "./wellknown";
+import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
@@ -342,8 +342,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    let discoveryComplete = true;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
+      discoveryComplete = crawl.errors.length === 0;
       for (const e of crawl.errors) {
         let domain: string;
         try { domain = normalizeSubmittedDomain(e.domain); }
@@ -353,9 +355,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
       for (const agent of crawl.agents) {
         await ingestWellKnownRevocations(agent);
+        const sourceProvenance = wellKnownWithdrawalProvenance(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
+          // An unsigned, unpinned source cannot establish a complete withdrawal
+          // check for a new executable offer. Independently known anchors remain
+          // available, and verified tombstones can still withdraw those offers.
+          if (!sourceProvenance) continue;
           if (!reg.listingAnchors.includes(anchor)) {
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
@@ -385,7 +392,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
-    finishWithdrawalCarriageReplay();
+    if (discoveryComplete) finishWithdrawalCarriageReplay();
 
     const sellers = [];
     for (const reg of allRegs) {
@@ -453,12 +460,13 @@ export const WELL_KNOWN_WITHDRAWAL_READS_PER_PASS = 32;
 /** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
 export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
   const domain = normalizeSubmittedDomain(agent.domain);
-  if (agent.withdrawalAuthenticated) {
+  const provenance = wellKnownWithdrawalProvenance(agent);
+  if (provenance) {
     // Binding resolution has not happened yet. Keep it seller-scoped until a
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
       [...(agent.incompleteWithdrawalHashes ?? []), ...agent.revocations.map((binding) => binding.listingContentHash)],
-      agent.withdrawalIndex, agent.revocations)) return;
+      agent.withdrawalIndex, agent.revocations, provenance)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
   const byHash = new Map<string, typeof agent.revocations>();
@@ -508,7 +516,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
       const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
       if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
           binding.listingId !== id || binding.listingVersion !== version) continue;
-      if (agent.withdrawalAuthenticated) {
+      if (provenance) {
         admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
       } else {
         // publicEndpoint is a self-claim, never authority over unresolved hints.
