@@ -1,4 +1,4 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "./canonical.js";
 import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
@@ -10,6 +10,7 @@ import {
   verifyPrimaryClaimSignature,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import { legacySignatureBytes } from "./signatureValue.js";
 import type { DealRecord, RegisteredDeal } from "./types.js";
 
 // This is the legacy SDK compatibility path. Current-profile agreement artifacts,
@@ -21,17 +22,6 @@ const SEPARATORS: Record<string, string> = {
   "dacs-4-evidence": "dacs-evidence:v1:",
   "dacs-2-verifyresult": "dacs-composite:v1:",
 };
-
-function decode(value: string): Uint8Array | null {
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try {
-    const bytes = Buffer.from(value, "base64url");
-    return bytes.length === 64 ? Uint8Array.from(bytes) : null;
-  } catch {
-    return null;
-  }
-}
 
 export function hasRequiredBundleSignatures(result: BundleVerification, rawBundle: unknown): boolean {
   const bundle = result.bundle;
@@ -78,6 +68,64 @@ export function bundleMatchesRegisteredAnchor(
   return expectedRole !== null && bundle?.anchoredByRole === expectedRole;
 }
 
+/** Legacy signatures/hashes establish artifact integrity, not paid settlement.
+ * No authoritative adapter exists for this profile, including native DEM. */
+export function legacyPaymentProofUnavailable(bundle: BundleVerification["bundle"]): boolean {
+  return bundle?.outcome === "completed" || Boolean(bundle?.settlementEvidence?.length);
+}
+
+export type BrowserDealVerdict = "strict-pass" | "limited" | "fail";
+
+/**
+ * The in-browser verdict on a legacy deal copy. Strict needs the expected parties,
+ * the required signatures, strict referenced artifacts, and an anchoredByRole that
+ * matches the address the directory registered for this copy. Without a registered
+ * address-role binding, internally consistent evidence is only "limited".
+ */
+export function browserDealVerdict(input: {
+  verification: BundleVerification;
+  bundleRef: string;
+  buyerOwner: string;
+  expectedSeller?: string;
+  registered: { owners: unknown; buyerBundleRef: unknown; sellerBundleRef: unknown } | null;
+  signaturesOk: boolean;
+  refsOk: boolean;
+}): { verdict: BrowserDealVerdict; reason?: string } {
+  const { verification, bundleRef, registered } = input;
+  const buyer = verification.bundle?.parties.find((p) => p.role === "buyer")?.primaryClaim;
+  const seller = verification.bundle?.parties.find((p) => p.role === "seller")?.primaryClaim;
+  const anchorBindingAvailable = registeredAnchorRole(bundleRef, registered?.buyerBundleRef, registered?.sellerBundleRef) !== null;
+  const owners = registered?.owners && typeof registered.owners === "object" &&
+    !Array.isArray(registered.owners) ? registered.owners as Record<string, unknown> : null;
+  const registeredPartiesMatch = typeof owners?.buyer === "string" && typeof owners.seller === "string" &&
+    buyer === owners.buyer && seller === owners.seller;
+  const expectedPartiesMatch = buyer === input.buyerOwner && (!input.expectedSeller || seller === input.expectedSeller) &&
+    (!anchorBindingAvailable || registeredPartiesMatch);
+  const anchorRoleMatches = bundleMatchesRegisteredAnchor(
+    verification.bundle, bundleRef, registered?.buyerBundleRef, registered?.sellerBundleRef,
+  );
+  const internallyConsistent = verification.ok && expectedPartiesMatch && input.signaturesOk && input.refsOk;
+  const reason = !expectedPartiesMatch
+    ? "bundle parties do not match the expected buyer/seller"
+    : !input.signaturesOk
+      ? "required buyer/seller signatures are missing or invalid"
+      : !input.refsOk
+        ? "one or more referenced artifact signatures are missing or invalid"
+        : !anchorBindingAvailable
+          ? "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"
+          : !anchorRoleMatches
+            ? "bundle anchoredByRole does not match its registered buyer/seller address"
+            : verification.reason;
+  if (internallyConsistent && anchorRoleMatches && legacyPaymentProofUnavailable(verification.bundle)) {
+    return { verdict: "limited", reason: "legacy payment verification is indeterminate: authoritative settlement adapter is unavailable" };
+  }
+  return {
+    verdict: internallyConsistent && anchorRoleMatches ? "strict-pass"
+      : internallyConsistent && !anchorBindingAvailable ? "limited" : "fail",
+    reason,
+  };
+}
+
 /**
  * Bind a catalog-submitted deal pointer to the identities and job id covered by
  * the verified bundle signatures. Registration fields are routing hints only;
@@ -99,22 +147,41 @@ export function bundleMatchesRegisteredDeal(
 }
 
 /**
- * Keep at most one verified reputation record per buyer and signed job, and per
- * bundle ref. A jobId is unique only per producer, so two buyers' deals with
- * the same jobId are distinct records.
+ * DACS-5 §10.5.1 per-jobId reconciliation over one seller's verified deals.
+ * One record is kept per bundle ref, and canonically equal copies of a jobId
+ * collapse to one. Among divergent copies a lone fully signed one takes
+ * precedence; equal standing voids the jobId (BB-6), whoever the buyers are.
+ * A superseded or voided record stays listed but is never reputation-eligible.
  */
 export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
-  const jobs = new Set<string>();
   const refs = new Set<string>();
-  return deals.filter((deal) => {
+  const forms = new Set<string>();
+  const unique = deals.filter((deal) => {
     if (!deal.refsVerified) return true;
-    const job = `${demosSigningIdentity(deal.owners.buyer)}\n${deal.jobId}`;
     const ref = deal.buyerBundleRef.toLowerCase();
-    if (jobs.has(job) || refs.has(ref)) return false;
-    jobs.add(job);
+    const form = `${deal.jobId}\n${deal.bundleContentHash ?? ref}`;
+    if (refs.has(ref) || forms.has(form)) return false;
     refs.add(ref);
+    forms.add(form);
     return true;
   });
+  const byJob = new Map<string, DealRecord[]>();
+  for (const deal of unique) if (deal.refsVerified) byJob.set(deal.jobId, [...(byJob.get(deal.jobId) ?? []), deal]);
+  const authoritative = new Set<DealRecord>();
+  for (const copies of byJob.values()) {
+    const full = copies.filter((deal) => deal.fullSignatureStanding);
+    if (copies.length === 1) authoritative.add(copies[0]);
+    else if (full.length === 1) authoritative.add(full[0]);
+  }
+  return unique.map((deal) => !deal.refsVerified || authoritative.has(deal) ? deal : { ...deal, reputationEligible: false });
+}
+
+/** Every bundle party carries a valid signature in a legacy SDK verification. */
+export function legacyFullSignatureStanding(verification: BundleVerification | null | undefined): boolean {
+  const parties = verification?.bundle?.parties ?? [];
+  const valid = new Set((verification?.signatures ?? []).filter((signature) => signature.verdict === "valid")
+    .map((signature) => demosSigningIdentity(signature.party)));
+  return parties.length >= 2 && parties.every((party) => valid.has(demosSigningIdentity(party.primaryClaim)));
 }
 
 export interface ResolvedArtifact {
@@ -199,7 +266,7 @@ export async function verifyReferencedArtifactSignature(
     const s = entry as Record<string, unknown>;
     const signer = typeof s.signer === "string" ? s.signer : typeof s.party === "string" ? s.party : null;
     if (s.algorithm !== "ed25519" || !signer || typeof s.value !== "string") return false;
-    const signature = decode(s.value);
+    const signature = legacySignatureBytes(s.value);
     if (!signature) return false;
     const verified = await verifyPrimaryClaimSignature(
       message, signature, signer, s.algorithm, resolveKey,
@@ -225,6 +292,7 @@ export async function verifyReferencedArtifactSignature(
   return true;
 }
 
+/** Artifact integrity only; callers must also apply legacyPaymentProofUnavailable. */
 export async function refsPassStrictPolicy(
   verification: BundleVerification,
   artifacts: ResolvedArtifact[],

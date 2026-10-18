@@ -1,22 +1,25 @@
 /**
  * Chain scanner — PASSIVE discovery. Walks the node's transaction history,
- * spots storage-program writes, and classifies anchored DACS artifacts by
- * their self-describing program names:
+ * spots storage-program writes, and classifies anchored DACS artifacts.
+ * Current-profile artifacts are recognised by their signed content; a
+ * StorageProgram name is never a resolution key for them (DACS-5 §10.4.2).
+ * Only the legacy SDK profile is classified by its session anchor names:
  *
  *   dacs1:listing:<did>:<serviceId>   → a listing  (owner = the seller)
  *   dacs5:bundle:<jobId>              → a buyer-anchored deal bundle
  *   dacs5:bundle:seller:<jobId>       → the seller's counter-signed copy
  *
- * Deal → seller attribution: the buyer-anchored agreement at
- * `dacs3:agreement:<jobId>` (owner-scoped to the bundle's owner) names the
- * seller. So one scan discovers agents nobody registered, their listings,
- * and their verifiable deal history — the catalog grows without submissions.
+ * Deal → seller attribution: a current buyer bundle's signed agreementRef
+ * (locator and content hash) names the co-signed agreement, whose parties
+ * name the seller; a legacy bundle's agreement is the owner-scoped
+ * `dacs3:agreement:<jobId>` program. So one scan discovers agents nobody
+ * registered, their listings, and their verifiable deal history.
  *
  * Shape-defensive: the tx envelope is deep-walked for storage addresses
  * rather than assuming one schema (testnet payloads vary across versions).
  */
 import { boundedJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
-import { verifiedDiscoveryAgreement } from "./evidenceGraph.js";
+import { artifactHash, isCurrentRef, normalizedHash, verifiedDiscoveryAgreement } from "./evidenceGraph.js";
 import { isAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
@@ -39,7 +42,7 @@ export interface ScannedArtifacts {
   /** listing anchor address → owner address */
   listings: Map<string, string>;
   /** buyer owner + jobId (discoveredDealKey) → discovered deal (buyer-anchored bundle + owners) */
-  deals: Map<string, RegisteredDeal & { sellerFromAgreement?: string }>;
+  deals: Map<string, DiscoveredDeal>;
   /** owner + programName → observed native address. */
   programs: Map<string, string | null>;
   /** listing content hash → every revocation candidate seen in this window, oldest first. */
@@ -59,6 +62,12 @@ export interface ScannedArtifacts {
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
 }
+
+/**
+ * A scanned deal. `agreementLocator` is set when a current-profile bundle's
+ * signed agreementRef attributed it, so program names played no part.
+ */
+export type DiscoveredDeal = RegisteredDeal & { sellerFromAgreement?: string; agreementLocator?: string };
 
 interface StorageRead {
   success?: boolean;
@@ -485,7 +494,8 @@ export async function scanChain(
   const failures: ScannedArtifacts["failures"] = [];
   const namesByLocator = new Map<string, string>();
   let omittedBindings = 0;
-  const bundleOwners = new Map<string, { jobId: string; address: string; owner: string }>(); // owner + jobId → buyer bundle
+  // owner + jobId → buyer bundle; a current-profile bundle carries the agreementRef it signs.
+  const bundleOwners = new Map<string, { jobId: string; address: string; owner: string; current: boolean; agreementRef?: unknown }>();
   const sellerCopies = new Map<string, Array<{ address: string; owner: string }>>(); // preserve competing candidates
   const addSellerCopy = (jobId: string, address: string, owner: string) => {
     const copies = sellerCopies.get(jobId) ?? [];
@@ -545,14 +555,14 @@ export async function scanChain(
       const jobId = data!.jobId as string;
       const role = data!.anchoredByRole;
       if (role === "seller") addSellerCopy(jobId, address, read.owner);
-      else bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner });
+      else bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner, current: true, agreementRef: data!.agreementRef });
     } else if (name.startsWith("dacs5:bundle:seller:")) {
       artifactKind = "bundle";
       addSellerCopy(name.slice("dacs5:bundle:seller:".length), address, read.owner);
     } else if (name.startsWith("dacs5:bundle:")) {
       artifactKind = "bundle";
       const jobId = name.slice("dacs5:bundle:".length);
-      bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner });
+      bundleOwners.set(discoveredDealKey(read.owner, jobId), { jobId, address, owner: read.owner, current: false });
     }
     observations.push({ locator: address, kind: artifactKind, profile, owner: read.owner,
       contentHash: dataHash, observedAt: Date.now(), data });
@@ -571,17 +581,34 @@ export async function scanChain(
     // retain the honest finalisedAt fallback and will be retried by backfill.
   }
 
-  // Attribute each discovered deal to its seller via the buyer-anchored agreement.
-  const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
-  for (const [dealKey, { jobId, ...bundle }] of bundleOwners) {
-    const bundleName = namesByLocator.get(bundle.address);
-    if (bundleName && programs.get(programBindingKey(bundle.owner, bundleName)) === null) continue;
-    const agreementAddress = programs.get(programBindingKey(bundle.owner, `dacs3:agreement:${jobId}`));
+  // A current-profile bundle names its agreement by the locator and content hash it signs, and a
+  // program name is never a resolution key for a conforming consumer (DACS-5 §10.4.2).
+  const signedAgreement = async (ref: unknown, jobId: string, buyer: string): Promise<Record<string, unknown> | undefined> => {
+    if (!isCurrentRef(ref)) return undefined;
+    const read = await readStorage(ref.anchor.locator);
+    const data = read.success ? read.data : undefined;
+    return data && (data.agreementVersion !== undefined || data.payeeBoundAgreementVersion !== undefined) &&
+      storableContentHash(data) !== null && artifactHash(data, "agreement") === normalizedHash(ref.contentHash) &&
+      await validAgreementForDiscovery(data, jobId, buyer) ? data : undefined;
+  };
+  // The legacy SDK profile resolves its agreement by the owner-scoped session anchor name.
+  const namedLegacyAgreement = async (jobId: string, owner: string): Promise<Record<string, unknown> | undefined> => {
+    const agreementAddress = programs.get(programBindingKey(owner, `dacs3:agreement:${jobId}`));
     const agreement = agreementAddress ? await readStorage(agreementAddress) : null;
-    const agreementData = agreement?.success && agreement.owner && agreement.programName === `dacs3:agreement:${jobId}` &&
-      programBindingKey(agreement.owner, agreement.programName) === programBindingKey(bundle.owner, agreement.programName) &&
+    return agreement?.success && agreement.owner && agreement.programName === `dacs3:agreement:${jobId}` &&
+      programBindingKey(agreement.owner, agreement.programName) === programBindingKey(owner, agreement.programName) &&
       agreement.data && storableContentHash(agreement.data) !== null &&
-      await validAgreementForDiscovery(agreement.data, jobId, didOf(bundle.owner)) ? agreement.data : undefined;
+      await validAgreementForDiscovery(agreement.data, jobId, didOf(owner)) ? agreement.data : undefined;
+  };
+
+  // Attribute each discovered deal to its seller via the buyer-anchored agreement.
+  const deals = new Map<string, DiscoveredDeal>();
+  for (const [dealKey, { jobId, current, agreementRef, ...bundle }] of bundleOwners) {
+    const bundleName = namesByLocator.get(bundle.address);
+    if (!current && bundleName && programs.get(programBindingKey(bundle.owner, bundleName)) === null) continue;
+    const agreementData = current
+      ? await signedAgreement(agreementRef, jobId, didOf(bundle.owner))
+      : await namedLegacyAgreement(jobId, bundle.owner);
     const agreementParties = Array.isArray(agreementData?.parties) ? agreementData.parties as Array<Record<string, unknown>> : [];
     const sellerFromAgreement = agreementData?.agreementVersion !== undefined || agreementData?.payeeBoundAgreementVersion !== undefined
       ? agreementParties.find((party) => party?.role === "seller" && typeof party.primaryClaim === "string")?.primaryClaim as string | undefined
@@ -601,6 +628,7 @@ export async function scanChain(
       sellerBundleRef: sellerCopy?.address,
       owners: { buyer: didOf(bundle.owner), seller: seller ?? "" },
       sellerFromAgreement: seller,
+      ...(current && seller && isCurrentRef(agreementRef) ? { agreementLocator: agreementRef.anchor.locator } : {}),
     });
   }
 

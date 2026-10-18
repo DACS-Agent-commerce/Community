@@ -1,0 +1,47 @@
+{
+  "result": 200,
+  "response": {
+    "id": 548171,
+    "number": 548169,
+    "hash": "ac6a6bab52424d2d9a043e637461d32f26776f1e036c5de08bea63cc28527e29",
+    "content": {
+      "ordered_transactions": [
+        "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143"
+      ],
+      "encrypted_transactions_hashes": {},
+      "per_address_transactions": {},
+      "web2data": {},
+      "previousHash": "c1b2c34c5a58a9a9d38192d7018f9f33a20f5ed125491f52e8b9e76131868574",
+      "timestamp": 1792184079,
+      "peerlist": [
+        "0x62f54cefb244538498b18687dbbb7faeb607b9ea51e8d9bcb952fd038b89ece9",
+        "0xc8bc5866fecf583bc1232f04fa54fd2c5a6f7c15b91c517ac60f468cdc0b8c82",
+        "0xdad5ae081825bcf93353bb76157ae8368c33fee6fc0f692b85155bb37e4ae0ab"
+      ],
+      "l2ps_partecipating_nodes": {},
+      "l2ps_banned_nodes": {},
+      "native_tables_hashes": {
+        "native_subnets_txs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "native_tlsnotary": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      }
+    },
+    "status": "confirmed",
+    "proposer": "7755104d92fbc05eb044fe5bc000cfdf0b8379a43faf0f212fb66f90fcd248b0",
+    "next_proposer": "3c23d700193bbcd8d43777438023edb170c9521a1cf6ba5ccb5af1e57e9a0320",
+    "validation_data": {
+      "signatures": {
+        "0xc8bc5866fecf583bc1232f04fa54fd2c5a6f7c15b91c517ac60f468cdc0b8c82": "0xdf6bdce9a3cab253c86e2348fa372dd54b27505e92b4122c8d6b14e07b69072ea8d5e7c4230cf55be9686f7d18ae0535fc70595872be73f611d68e551146b703",
+        "0xdad5ae081825bcf93353bb76157ae8368c33fee6fc0f692b85155bb37e4ae0ab": "0x1326bf48ab6cc019ac3e136d15c827c59ef1879fe634b90b183501af2e913d2fd59651b2a0b5ff6c7d98348561a6c2b32ad32e04de3f4ec881afa11c616d8202"
+      }
+    },
+    "attrs": {
+      "gcrAppliedTxs": [
+        "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143"
+      ],
+      "gcrAppliedTxCount": 1,
+      "gcrAppliedTxsHash": "48b19c52fdc9d496a50865348e43ebaf4183936100af3154764a733fd8a0bf61"
+    }
+  },
+  "require_reply": false,
+  "extra": ""
+}

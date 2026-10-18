@@ -199,18 +199,24 @@ export interface DealRecord extends RegisteredDeal {
   sellerOutcome?: string;
   anchoredByRole?: "buyer" | "seller" | "orchestrator";
   bundleContentHash?: string;
-  /** True only when the outcome belongs to the current DACS-5 closed set. */
+  /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
+  fullSignatureStanding?: boolean;
+  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission. */
   reputationEligible?: boolean;
+  /** Recomputed catalog-wide SB-2 rejection; never overwrites evidence eligibility. */
+  settlementRejected?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
+  /** Authoritative FAB faults the orchestrator; retained in bundleCount, neutral in party rates. */
+  orchestratorFaultNeutral?: boolean;
   /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */
   anchorTimestamp?: number;
   /** Verified agreement price; only completed sessions contribute to volume. */
   agreementPrice?: { amount: string; currency: string };
   /** Signature/hash/session-bound DACS-5 ratings. */
   ratings?: VerifiedRating[];
-  /** Settlement ids used for the SB-2 cross-job uniqueness gate. */
-  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number }>;
+  /** Settlement ids used for the SB-2 cross-job uniqueness gate, with the content hash of the evidence citing each. */
+  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number; evidenceHash?: string }>;
 }
 
 export interface SellerRecord {

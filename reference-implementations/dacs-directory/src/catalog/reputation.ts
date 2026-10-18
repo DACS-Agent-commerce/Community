@@ -1,4 +1,5 @@
-import type { DealRecord, SellerRecord } from "./types.js";
+import { admitSettlement } from "./settlementKey.js";
+import type { DealRecord, ReputationHint, SellerRecord } from "./types.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -20,11 +21,18 @@ export function flipOutcome(outcome: string | undefined): string | undefined {
   return outcome;
 }
 
+/**
+ * DACS-5 ST-10: a cancellation marker is established only when the signed listing permits
+ * pre-commit cancellation and the session ended pre-commit: no agreementRef, and every phase it
+ * recorded is a Vet or Negotiate phase (vet-pending or negotiate-pending). A session that reached
+ * a commitment phase at all, whatever its outcome, is not pre-commit.
+ */
 export function isNeutralCancellation(
   sellerOutcome: string | undefined,
   cancellation: unknown,
   listingTerms: unknown,
   phaseSummary: unknown,
+  agreementRef: unknown,
 ): boolean {
   const marker = cancellation && typeof cancellation === "object" && !Array.isArray(cancellation)
     ? cancellation as Record<string, unknown> : undefined;
@@ -32,11 +40,44 @@ export function isNeutralCancellation(
     ? listingTerms as Record<string, unknown> : undefined;
   const phases = Array.isArray(phaseSummary) ? phaseSummary.filter((phase): phase is Record<string, unknown> =>
     Boolean(phase && typeof phase === "object" && !Array.isArray(phase))) : [];
-  const commitReached = phases.some((phase) =>
-    (phase.kind === "commit-agreement" || phase.kind === "commit-payee-bound-agreement") &&
-    phase.outcome === "ok");
+  const preCommit = Array.isArray(phaseSummary) && phases.length === phaseSummary.length &&
+    phases.every((phase) => typeof phase.kind === "string" && /^(?:vet|negotiate)-/.test(phase.kind));
   return (sellerOutcome === "aborted-by-self" || sellerOutcome === "aborted-by-other") &&
-    marker?.claimedPolicy === "pre-commit" && terms?.cancellationPolicy === "pre-commit" && !commitReached;
+    marker?.claimedPolicy === "pre-commit" && terms?.cancellationPolicy === "pre-commit" &&
+    agreementRef === undefined && preCommit;
+}
+
+/** Admit the consumer's complete evidence set before seller, category or window filtering. */
+export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
+  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && !deal.settlementRejected && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
+  // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) only. Claims are admitted in
+  // the winning order, earliest evidence observation first, then the lower evidence hash, then the
+  // jobId so the choice is deterministic; a job holding any rejected claim is not counted.
+  const claims = deals.flatMap((deal) => (deal.settlementTxIds ?? []).map((tx) => ({ deal, tx })))
+    .sort((a, b) => a.tx.observedAt - b.tx.observedAt || byteOrder(a.tx.evidenceHash ?? "", b.tx.evidenceHash ?? "") ||
+      byteOrder(a.deal.jobId, b.deal.jobId) || a.tx.phaseIndex - b.tx.phaseIndex);
+  const ledger = new Map<string, { jobId: string; phaseIndex: number }>();
+  const rejected = new Set<DealRecord>();
+  for (const { deal, tx } of claims) {
+    if (admitSettlement(ledger, { id: tx.id, jobId: deal.jobId, phaseIndex: tx.phaseIndex }) === "reject") rejected.add(deal);
+  }
+  return deals.filter((deal) => !rejected.has(deal));
+}
+
+/** Final catalog pass: one ledger for every seller, then recompute every published metric. */
+export function reconcileCatalogReputation(sellers: SellerRecord[], now: number): void {
+  // Reconsider previous losers when a winner disappears or its evidence changes.
+  for (const seller of sellers) for (const deal of seller.deals) delete deal.settlementRejected;
+  const admitted = new Set(settlementEligibleDeals(sellers.flatMap((seller) => seller.deals)));
+  for (const seller of sellers) {
+    for (const deal of seller.deals) {
+      if (deal.reputationEligible && !admitted.has(deal)) deal.settlementRejected = true;
+    }
+    seller.reputation = deriveSellerReputation(seller.deals, 0, now);
+    for (const listing of seller.listings) {
+      listing.reputationHint = categoryReputationHint(listing.offering.category, seller.deals, 0, now, now);
+    }
+  }
 }
 
 /**
@@ -49,10 +90,7 @@ export function deriveSellerReputation(
   windowStart = 0,
   windowEnd = Date.now(),
 ): SellerRecord["reputation"] {
-  const eligible = deals.filter((deal) =>
-    deal.refsVerified && deal.reputationEligible &&
-    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
-  );
+  const eligible = settlementEligibleDeals(deals);
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records
@@ -62,22 +100,13 @@ export function deriveSellerReputation(
   const timestampOf = (deal: DealRecord) => useAnchorTimestamps
     ? deal.anchorTimestamp
     : deal.finalisedAt;
-  let scoped = eligible.filter((deal) => {
+  const scoped = eligible.filter((deal) => {
     const timestamp = timestampOf(deal);
     return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
   });
-  // SB-2: a settlement transaction reused across jobs contributes once, at
-  // its earliest evidence observation. Deterministic jobId breaks exact ties.
-  const settlementOwner = new Map<string, DealRecord>();
-  for (const deal of scoped) for (const tx of deal.settlementTxIds ?? []) {
-    const prior = settlementOwner.get(tx.id);
-    const priorTime = prior?.settlementTxIds?.find((candidate) => candidate.id === tx.id)?.observedAt ?? Infinity;
-    if (!prior || tx.observedAt < priorTime || (tx.observedAt === priorTime && deal.jobId < prior.jobId)) settlementOwner.set(tx.id, deal);
-  }
-  scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
-  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral).length;
-  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral &&
+  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral || deal.orchestratorFaultNeutral).length;
+  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral && !deal.orchestratorFaultNeutral &&
     (deal.sellerOutcome === "failed-counterparty" || deal.sellerOutcome === "aborted-by-other")).length;
   const partyFaultDenominator = scoped.length - neutral;
   const blameDenominator = partyFaultDenominator - counterpartyFault;
@@ -130,6 +159,32 @@ export function deriveSellerReputation(
     windowStart,
     windowEnd,
     windowingBasis: useAnchorTimestamps ? "sr2-anchor-timestamp" : "finalisedAt",
+  };
+}
+
+/**
+ * DACS-1 §6.3.6 ReputationHint for one listing: categoryScope is the listing's own category, and
+ * the metrics come from the §10.5.1 derivation over the deals in that scope only (the category and
+ * its sub-categories), so SB-2, the window and the neutral outcomes apply exactly as for the seller.
+ */
+export function categoryReputationHint(
+  category: string,
+  deals: DealRecord[],
+  windowStart: number,
+  windowEnd: number,
+  computedAt: number,
+): ReputationHint {
+  const scoped = deriveSellerReputation(
+    settlementEligibleDeals(deals).filter((deal) => deal.category === category || deal.category?.startsWith(`${category}.`)), windowStart, windowEnd,
+  );
+  return {
+    categoryScope: category,
+    completionRate: scoped.completionRate,
+    averageSellerRating: scoped.averageSellerRating ?? null,
+    bundleCount: scoped.bundleCount ?? 0,
+    windowStart,
+    windowEnd,
+    computedAt,
   };
 }
 

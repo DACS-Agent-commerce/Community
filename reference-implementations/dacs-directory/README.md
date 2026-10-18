@@ -123,6 +123,7 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
+| `DACS_RAIL_SNAPSHOTS` | For positive payment verdicts | Operator-authenticated PA-1 registry snapshots (`registryVersion`, `rails` with exact `railId`, `railVersion`, `phaseHandler`, `railType`, `asset`, `network`, `parameters`, `availability`); absent/unknown versions remain indeterminate. Provision only after authenticating the registry index and definitions. Only live native DEM definitions have a settlement adapter. |
 | `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and included vet results indeterminate for session admission |
 | `DACS_RECIPE_SNAPSHOTS` | For session vetting | Operator-authenticated JSON array of historical `{registryVersion, recipes}` snapshots; `recipes` uses the same policy shape. Session pins select exact snapshots; unversioned requirements select the latest recipe in that snapshot. Missing snapshots remain indeterminate. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
@@ -190,8 +191,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    registration.
 2. **Chain scanning** (passive): the reindex pass walks the node's transaction history
    (`nodeCall getTransactions`, plain fetch), spots storage-program writes, classifies
-   anchored DACS artifacts by their self-describing program names, and attributes deals
-   to sellers via the buyer-anchored agreement. Agents nobody registered appear as
+   current-profile DACS artifacts by their signed content, and attributes a deal to its
+   seller through the agreement its buyer bundle references by locator and content hash.
+   Program names are never resolution keys, except on the legacy SDK compatibility path
+   (`dacs5:bundle:<jobId>`, `dacs3:agreement:<jobId>`). Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
    Revocation markers are recognised by their signed content, never by program name.
@@ -215,8 +218,16 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
    Resolved bundles recursively validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
-   records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
-   compatibility path.
+   records, and ratings. The signed listing fixes every phase kind and index; completed
+   sessions include every listed settle phase, with one evidence record per invocation.
+   A successful payment states its amount, rail-specific finality and observation time,
+   and transactions. Payment phase indices are recovered independently from the SR-2
+   program name and checked against the evidence hash and the listing rail. Settlements
+   are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
+   `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
+   leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
+   computing any seller or category totals. Legacy SDK artifacts remain on an
+   explicitly-labelled compatibility path.
 
 ## Architecture note: the web app is chain-fetch-only
 
@@ -245,6 +256,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
   elevate a tier unless its exact recipe version/method/availability/max-age policy is
+  present in `DACS_RECIPE_POLICIES`; missing policy fails closed. Required session vetting
+  selects the exact `DACS_RECIPE_SNAPSHOTS` registry pin: the scheme/version must be live, permit the result method,
+  and trust its authenticated signer, including results with an explicit expiry. Every
+  included result, even an optional one, needs a valid live policy. Missing, invalid and
+  non-live recipes remain indeterminate until the catalog can disclose each result's availability.
 - **Authority proofs need a method-specific deployment verifier.** `EvidenceGraphDeps.verifyAttestation`
   and the identity-tier verification argument must authenticate the original format's hash scope,
   required signer, validator roster/epoch and proof. The result signer's signature does not replace
@@ -254,11 +270,23 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   in string values and property names before canonical hashing. This publisher's pinned serializer
   supports integer negotiation percentages; fractional percentages receive HTTP 400. This is a
   narrower publication profile than the Standard's fractional-percentage inputs.
+- **Storage delivery is verified from readable cleartext and node access metadata.**
+  Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
+  The hash covers the complete canonical payload, including any `signature` or `signatures`
+  fields. The payload must match that hash and the job's program name; `buyer-only` requires a
+  restricted ACL naming the agreement-bound buyer. The pinned node denies anonymous reads of
+  restricted programs, so buyer-only delivery is indeterminate for this anonymous catalog. The
+  readable restricted-ACL tests describe a hypothetical node metadata contract. Unreadable payloads, encrypted payloads
+  and external pointers remain indeterminate and contribute no completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
   used until that resolver is configured; it fails closed to `indeterminate` rather
   than being relabelled as verified.
+- **DACS-3 §8.5.2 checks 5 and 6 need the commitment's anchored `committedAt`**, and a
+  bundle does not reference the CommitmentRecord. A session whose listing sets
+  `terms.deadlineSecAfterCommit` or `validity.notAfter` is therefore `indeterminate` and
+  never counted; `SPEC_PIN` lists this and the other recorded deviations.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
@@ -273,6 +301,13 @@ is retained only for labelled legacy artifacts. DACS-2 tier derivation fails clo
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
+
+Every catalog save applies one settlement ledger across all sellers, including scheduled
+indexing and immediate refreshes. A deal's `reputationEligible` records its verified evidence
+eligibility; `settlementRejected` records its current catalog admission separately. Rejected
+deals contribute no metrics or listing hints, and later saves reconsider them if the winning
+claim disappears or changes. Run a full reindex when upgrading an existing catalog so its
+cached evidence eligibility is refreshed.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
@@ -317,6 +352,22 @@ Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, p
 `pay-dem` and `pay-x402` phase kinds. Historical current-profile listings signed with phase
 names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
 a new signed listing version to make those offers executable.
+
+Native DEM success requires public transaction and block reads confirming inclusion, the payer
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). The stored RPC amount is OS,
+carried as a safe integer or an exact string; the send payload must contain a canonical OS
+string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
+All other current payment rails and paid SDK legacy sessions remain indeterminate until their
+authoritative settlement adapters are available. They contribute no completion or volume.
+Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
+verifier-issued nonce against its job, party, issuance window, authenticated first consumption
+time (`consumedAt`) and `consumedByPresentationHash`, `sha256Hex(canonicalize(identity))` of the complete
+first attempted IdentityBundle including `presentation` and its signatures, even when that attempt
+failed. The signed bundle scope hash omits `presentation` and cannot identify an attempt. The signed
+`presentedAt` timestamp is informational. This deployment does not install that resolver, so sessions
+requiring Vet remain indeterminate for completion and volume. Listing publication uses its signed self-binding.
+Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
+attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.
 
 Executable offers discovered through a hosted well-known index require source provenance.
 Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a

@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
 import type { WithdrawalProvenance } from "./wellknown.js";
-import { deriveSellerReputation } from "./reputation.js";
+import { deriveSellerReputation, reconcileCatalogReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -432,7 +432,11 @@ export const loadCatalog = (): Catalog => {
   }
   return catalog;
 };
-export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
+export const saveCatalog = (catalog: Catalog): void => {
+  // Every publication, including index-now, shares one settlement ledger.
+  reconcileCatalogReputation(catalog.sellers, catalog.generatedAt);
+  setJson("catalog", catalog);
+};
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = () => normalizeScanState(getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} }));

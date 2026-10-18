@@ -4,8 +4,8 @@ import type { Metadata } from "next";
 import CopyText from "@/src/components/CopyText";
 import VerifyAttestation from "@/src/components/VerifyAttestation";
 import VerifyDeal from "@/src/components/VerifyDeal";
-import { readAnchor } from "@/src/catalog/chain";
-import { resolveProgramAddress } from "@/src/catalog/store";
+import { readAnchor, readAnchorRecord } from "@/src/catalog/chain";
+import { canonicalProgramOwner, resolveProgramAddress } from "@/src/catalog/store";
 
 const EXPLORER = "https://explorer.demos.sh";
 
@@ -47,7 +47,11 @@ export default async function Deal({
   const attestationAddress = sellerClaim && jobId
     ? resolveProgramAddress(sellerClaim, deliveryName)
     : null;
-  const attestation = attestationAddress ? await readAnchor(attestationAddress) : null;
+  // The node does not check that an address matches its derivation, so only a record the
+  // expected seller owns is shown; its signature is still unverified until the check runs.
+  const attestationRecord = attestationAddress ? await readAnchorRecord(attestationAddress) : null;
+  const attestation = attestationRecord?.owner && sellerClaim &&
+    canonicalProgramOwner(attestationRecord.owner) === canonicalProgramOwner(sellerClaim) ? attestationRecord.data : null;
   const att = attestation as {
     repo?: string; pullNumber?: number; reviewId?: number;
     ghAuthor?: string; deliveredAt?: string; ghStateHash?: string;
@@ -101,9 +105,10 @@ export default async function Deal({
             )}
           </div>
           <p className="note">
-            The seller signed this delivery attestation (DACS-X) over the GitHub state at
+            The seller&apos;s storage holds this delivery attestation (DACS-X) over the GitHub state at
             delivery time — state hash <span className="mono">{att.ghStateHash?.slice(0, 16)}…</span>.
-            The attestation rides beside the bundle until the SDK can reference it in-bundle.
+            Check its signature to confirm the seller signed it. The attestation rides beside the
+            bundle until the SDK can reference it in-bundle.
           </p>
         </div>
       )}

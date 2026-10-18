@@ -253,3 +253,11 @@ export async function resolveOwnedAnchorByName(
   }
   return { status: "absent" };
 }
+
+/** Unauthenticated, bounded settlement reads; never signs or submits a transaction. */
+export async function readSettlementNode(message: "getTxByHash" | "getBlockByNumber", data: Record<string, unknown>): Promise<unknown> {
+  const result = await rpcCall({ "content-type": "application/json" }, {
+    method: "nodeCall", params: [{ type: "nodeCall", message, data, sender: "", signature: "", extra: "" }],
+  });
+  return result.status === "ok" && result.body.result === 200 ? result.body.response : null;
+}
