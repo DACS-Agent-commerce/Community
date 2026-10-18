@@ -9,7 +9,7 @@ import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registrat
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
-import { canonicalDemosAgentClaim } from "./claimRef";
+import { publisherListingAnchors } from "./publisherListings";
 import { readAnchorResult, type AnchorRead } from "./chain";
 import { findValidListingRevocation, verifyListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
@@ -392,13 +392,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
-    // Every known publisher's anchors, so a procurement session resolves its buyer-published listing.
-    const anchorsByPublisher = new Map<string, string[]>();
-    for (const reg of allRegs) {
-      const claim = canonicalDemosAgentClaim(reg.primaryClaim);
-      if (claim) anchorsByPublisher.set(claim, [...(anchorsByPublisher.get(claim) ?? []), ...reg.listingAnchors]);
-    }
-    const listingAnchorsFor = (claim: string) => anchorsByPublisher.get(canonicalDemosAgentClaim(claim) ?? "") ?? [];
+    const listingAnchorsFor = publisherListingAnchors(allRegs);
 
     const sellers = [];
     for (const reg of allRegs) {

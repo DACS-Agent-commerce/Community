@@ -1734,17 +1734,19 @@ test("a buyer-published procurement listing credits its supplier's verified comp
   await republish(misdirected, 0, () => {});
   uncounted(await index(misdirected, "misdirected-demand", 1), "buyer-published demand listing");
 
-  // Production wiring: by default the indexer reads chain-discovered listings, and a reindex pass
-  // passes every registered, discovered and well-known publisher's anchors.
+  // Batch indexing and immediate refresh share every known publisher's anchors.
   const procurementAgain = await vector("procurement-job", 1100);
   await republish(procurementAgain, 0, asProcurement, "sealed-envelope");
   const store = await import("../src/catalog/store.js");
   const { reindexAll } = await import("../src/catalog/reindexCore.js");
   const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const priorCatalog = store.loadCatalog();
+  const emptyCatalog = { catalogVersion: "1" as const, generatedAt: 0, sellers: [] };
   const bundleBindings = [await bindingFor("procurement-job", "buyer", procurementAgain.locators.buyer, procurementAgain.buyerBundle, 0),
     await bindingFor("procurement-job", "seller", procurementAgain.locators.seller, procurementAgain.sellerBundle, 1)];
   const supplierRegistration = { primaryClaim: dids[1], displayName: "supplier", listingAnchors: [],
     deals: [registeredDeal("procurement-job", procurementAgain.locators.buyer, procurementAgain.locators.seller)], bundleBindings };
+  let listingOwner = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     if (init?.method === "POST") {
@@ -1754,23 +1756,83 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     }
     const at = new URL(String(input)).pathname.split("/").pop() ?? "";
     const data = maps.get(at);
-    return data ? Response.json({ success: true, owner: `0x${dids[at === procurementAgain.locators.listing ? 0 : 1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[at === procurementAgain.locators.listing ? listingOwner : 1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     store.saveDomains([]);
+    store.saveRegistrations([supplierRegistration]);
+    store.saveCatalog(emptyCatalog);
     store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: { [procurementAgain.locators.listing]: `0x${dids[0].slice(-64)}` },
       deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
     credited(await indexRegistration(supplierRegistration, undefined, async () => []), "scan-state publisher anchors");
     store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
     uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "no discovered publisher anchors");
     store.saveRegistrations([{ primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] }, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "registered-only publisher before batch");
     await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
     const sellers = store.loadCatalog().sellers;
-    credited(sellers.find((seller) => seller.primaryClaim === dids[1])!, "reindexed supplier");
+    const reindexedSupplier = sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(reindexedSupplier, "reindexed supplier");
     assert.equal(sellers.find((seller) => seller.primaryClaim === dids[0])!.listings.length, 1);
+    credited(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []),
+      "registered-only publisher after immediate refresh");
+
+    // The registered anchor still works without a cached buyer listing. All discovery
+    // sources share the same read bound, and duplicates do not spend it twice.
+    store.saveCatalog(emptyCatalog);
+    const discovered = Object.fromEntries(others.map((anchor) => [anchor, `0x${dids[0].slice(-64)}`]));
+    const emptyState = { ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] };
+    store.saveScanState({ ...emptyState, listings: discovered });
+    uncounted(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []), "combined sources over the read bound");
+    delete discovered[others[0]];
+    discovered[procurementAgain.locators.listing] = `0x${dids[0].slice(-64)}`;
+    store.saveScanState({ ...emptyState, listings: discovered });
+    credited(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []), "combined sources deduplicate at the read bound");
+
+    // Only an authenticated well-known index introduces new catalog anchors.
+    store.saveScanState(emptyState);
+    store.saveRegistrations([supplierRegistration]);
+    store.saveCatalog(emptyCatalog);
+    store.saveDomains(["buyer.example"]);
+    const { crawlDomain, wellKnownWithdrawalMessage } = await import("../src/catalog/wellknown.js");
+    const indexRaw = JSON.stringify({ indexVersion: "1", generatedAt: 123, seller: dids[0], listings: [{ listingId: "svc", version: 1,
+      contentHash: artifactHash(procurementAgain.listing, "listing"), anchor: { kind: "storage-program", locator: procurementAgain.locators.listing } }] });
+    const indexHash = sha256Hex(indexRaw);
+    const crawl = (publisherSignature?: string) => crawlDomain("buyer.example", { validateUrl: async () => ({} as never), fetchJson: async (url) => {
+      const raw = new URL(url).pathname === "/.well-known/agent.json"
+        ? JSON.stringify({ dacs: { dacsVersion: "1", listings: { indexUrl: "https://buyer.example/.well-known/dacs/listings.json", indexHash: `sha256-${indexHash}`, publisherSignature } } })
+        : indexRaw;
+      return { raw, body: JSON.parse(raw) };
+    } });
+    const unsigned = await crawl();
+    assert.ok(!("error" in unsigned));
+    assert.equal(unsigned.withdrawalAuthenticated, false);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [unsigned], errors: [] }) });
+    uncounted(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "unsigned discovery");
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned discovery after immediate refresh");
+    const publisherSignature = Buffer.from(await ed25519Sign(Buffer.from(wellKnownWithdrawalMessage("buyer.example", indexHash)), privateKeyFromSeed(seeds[0]))).toString("base64url");
+    const authenticated = await crawl(publisherSignature);
+    assert.ok(!("error" in authenticated));
+    assert.equal(authenticated.withdrawalAuthenticated, true);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    const wellKnownSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(wellKnownSupplier, "well-known-only publisher after batch");
+    assert.equal(Object.keys(store.loadScanState().listings).length, 0);
+    assert.equal(store.loadRegistrations().some((reg) => reg.primaryClaim === dids[0]), false);
+    credited(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "well-known-only publisher after immediate refresh");
+
+    // A cached discovery never substitutes for current owner/signature/hash checks.
+    listingOwner = 1;
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with a different chain owner");
+    listingOwner = 0;
+    maps.set(procurementAgain.locators.listing, { ...procurementAgain.listing, listingId: "changed" });
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with tampered bytes");
+    maps.delete(procurementAgain.locators.listing);
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing missing on chain");
   } finally {
     globalThis.fetch = originalFetch;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
   }
 });

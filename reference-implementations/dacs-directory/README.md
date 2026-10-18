@@ -229,7 +229,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    `anchorBindings`, and checked against the listing rail. A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
    own owner-bound listing anchors (at most 32 read per publisher), never as one of the
-   supplier's offers, and the graph checks the publisher's role. Settlements
+   supplier's offers, and the graph checks the publisher's role. Batch indexing and
+   immediate refresh share registered, chain-discovered and previously verified catalog
+   anchors, including authenticated well-known discoveries. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before

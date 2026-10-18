@@ -70,6 +70,7 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import { publisherListingAnchors, type ResolvePublisherListingAnchors } from "./publisherListings.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
@@ -162,14 +163,7 @@ export function listingBindingRejection(
   return null;
 }
 
-/** Listing anchors known for one publisher. The default reads chain-discovered listings. */
-export type ResolvePublisherListingAnchors = (publisherClaim: string) => readonly string[];
-
-const scanStateListingAnchors: ResolvePublisherListingAnchors = (claim) => {
-  const publisher = canonicalDemosAgentClaim(claim);
-  return publisher === null ? [] : Object.entries(loadScanState().listings)
-    .filter(([, owner]) => ownerClaim(owner) === publisher).map(([anchor]) => anchor);
-};
+export type { ResolvePublisherListingAnchors } from "./publisherListings.js";
 
 /** Work bound per publisher whose listings are read to resolve another registration's sessions. */
 export const MAX_PUBLISHER_LISTING_READS = 32;
@@ -187,7 +181,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
-  listingAnchorsFor: ResolvePublisherListingAnchors = scanStateListingAnchors,
+  listingAnchorsFor: ResolvePublisherListingAnchors = publisherListingAnchors(),
 ): Promise<SellerRecord> {
   const now = Date.now();
 
