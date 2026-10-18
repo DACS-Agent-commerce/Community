@@ -167,6 +167,7 @@ export async function resolveOwnedAnchorByName(
   if (!owner) return { status: "indeterminate", reason: "expected owner is invalid" };
 
   const options = { exactMatch: true, limit: 32, offset: 0 };
+  let aclFilteredSearch = false;
   let search = await rpcCall({ "content-type": "application/json" }, {
     method: "nodeCall",
     params: [{
@@ -183,6 +184,7 @@ export async function resolveOwnedAnchorByName(
   // answers an unknown message with result 200 and this literal, and serves the same exact-name
   // search as a read-authenticated gcr_routine. A deployment with the nodeCall answers it directly.
   if (search.status === "ok" && isUnknownNodeCall(search.body)) {
+    aclFilteredSearch = true;
     search = await rpcCall(await gcrAuthHeaders(), {
       method: "gcr_routine",
       params: [{ method: "searchStoragePrograms", params: [programName, options] }],
@@ -242,9 +244,14 @@ export async function resolveOwnedAnchorByName(
   if (records.length > 1) {
     return { status: "indeterminate", reason: "multiple owner-bound programs use the same name" };
   }
-  return records[0]
-    ? { status: "present", address: records[0].address, record: records[0].record }
-    : { status: "absent" };
+  if (records[0]) return { status: "present", address: records[0].address, record: records[0].record };
+  // The pinned gcr_routine paginates before ACL filtering and exposes neither the raw
+  // page size nor a completion cursor. Even a short or empty page can hide an older
+  // owner-bound program. Only a fresh owner-confirmed match can resolve this search.
+  if (aclFilteredSearch) {
+    return { status: "indeterminate", reason: "ACL-filtered program-name lookup cannot establish absence" };
+  }
+  return { status: "absent" };
 }
 
 /** Unauthenticated, bounded settlement reads; never signs or submits a transaction. */

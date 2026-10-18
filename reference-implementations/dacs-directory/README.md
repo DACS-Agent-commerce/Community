@@ -343,8 +343,11 @@ cached evidence eligibility is refreshed.
 producer resume lookup exists only as the read-authenticated `gcr_routine
 searchStoragePrograms`; a deployed node may also answer it as a `nodeCall` (node2 did on
 2026-10-15). The Directory asks the `nodeCall` first and falls back to the `gcr_routine`
-only on the pinned revision's literal "Unknown message" answer, so either deployment
-resolves. `npm run check:node -- <exact program name>` is a read-only probe (no
+only on a recognized "Unknown message" answer. The fallback can recover a listing
+after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
+and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
+and withholds new publication until a complete search contract is available.
+`npm run check:node -- <exact program name>` is a read-only probe (no
 transactions) that reports the storage not-found answer and both search paths, and fails
 when they disagree; its output is dated runtime evidence, not a pin. Run it when the
 `DEMOS_RPC` deployment changes.

@@ -236,6 +236,36 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
   }
 });
 
+test("publisher withholds a create when the fallback search cannot establish absence", async () => {
+  const identityResponse = await POST(request(base));
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identitySignature = Buffer.from(
+    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
+  ).toString("hex");
+  const originalFetch = globalThis.fetch;
+  const methods: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const rpc = JSON.parse(String(init?.body));
+    methods.push(rpc.method);
+    if (rpc.method === "nodeCall" && rpc.params[0].message === "searchStoragePrograms") {
+      return Response.json({ result: 200, response: '{ error: "Unknown message"}' });
+    }
+    if (rpc.method === "gcr_routine") return Response.json({ result: 200, response: [] });
+    // Make a nonce request succeed so a regression fails on the HTTP result.
+    return Response.json({ result: 200, response: 6 });
+  };
+  try {
+    const response = await POST(request({ ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature }));
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.match(body.error, /could not safely determine.*cannot establish absence/);
+    assert.equal(body.tx, undefined);
+    assert.deepEqual(methods, ["nodeCall", "gcr_routine"], "no fresh nonce may be requested after an incomplete lookup");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 test("publisher emits canonical DEM and x402 registry IDs and rejects phase-name aliases", async () => {
   for (const alias of ["pay-dem", "pay-x402"]) {

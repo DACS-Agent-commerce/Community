@@ -250,7 +250,7 @@ test("node2 2026-10-17 structured unknown-message reply is recognized precisely"
     throw new Error("unexpected storage read");
   };
   try {
-    assert.equal((await resolveOwnedAnchorByName(programName, owner)).status, "absent");
+    assert.equal((await resolveOwnedAnchorByName(programName, owner)).status, "indeterminate");
     assert.deepEqual(methods, ["nodeCall", "gcr_routine"]);
   } finally { globalThis.fetch = original; }
 });
