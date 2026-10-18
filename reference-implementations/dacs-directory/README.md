@@ -309,9 +309,9 @@ base64url-patched Buffer).
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
-  otherwise propose the same next version. A version whose owner-held program no longer
-  authenticates (for example a Listing an earlier publisher signed with raw hex) is
-  stepped past, up to four per request.
+  otherwise propose the same next version. An occupied version whose owner-held program
+  no longer authenticates blocks publication for that listing ID. Recover by publishing
+  under a new listing ID; the publisher does not skip the occupied version.
 
 ## DACS surface / conformance declaration
 
