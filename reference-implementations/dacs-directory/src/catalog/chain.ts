@@ -45,10 +45,10 @@ export interface AnchorRecord {
 }
 
 /**
- * One storage read, classified. `absent` is a definitive answer that no
- * readable artifact object is at the locator (missing, non-public, or content
- * that cannot be one); `unavailable` is a transport or node failure, which
- * callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * One storage read, classified. `absent` means the locator is malformed or the
+ * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
+ * object. Denied access, transport errors and node failures are `unavailable`,
+ * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
  */
 export type AnchorRead =
   | { status: "present"; record: AnchorRecord }

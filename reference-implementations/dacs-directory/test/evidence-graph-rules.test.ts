@@ -168,6 +168,50 @@ test("the valid fixture session verifies, with every artifact in the graph", asy
   assert.deepEqual(agreementPrice(graph.agreement), { amount: "1.25", currency: "DEM" });
 });
 
+test("DeliverableRef hashes the complete DeliverableSpec, including signature-named extensions", () => {
+  for (const extensions of [
+    { signature: "additive metadata" },
+    { signatures: ["additive metadata"] },
+    { signature: "additive metadata", signatures: ["more metadata"] },
+  ]) {
+    const spec = { ...offered, ...extensions };
+    const listed = { ...listing, offering: { ...listing.offering as Obj, deliverable: spec } };
+    const agreement = baseScopes().agreement;
+    const terms = agreement.terms as Obj;
+    const fullHash = sha256Hex(canonicalize(spec));
+    assert.notEqual(fullHash, contentHash(spec));
+    terms.deliverable = { deliverableType: spec.kind, hash: fullHash };
+    assert.equal(agreementListingConformance(agreement, listed, dids[SELLER]), null);
+    terms.deliverable = { deliverableType: spec.kind, hash: contentHash(spec) };
+    assert.equal(agreementListingConformance(agreement, listed, dids[SELLER]), "deliverable");
+    terms.deliverable = { deliverableType: spec.kind, hash: fullHash };
+    const changed = { ...spec, ...("signature" in spec ? { signature: "changed" } : { signatures: ["changed"] }) };
+    assert.equal(agreementListingConformance(agreement,
+      { ...listed, offering: { ...listed.offering, deliverable: changed } }, dids[SELLER]), "deliverable");
+  }
+});
+
+test("composite requirementHash includes signature-named BundleRequirement extensions", async () => {
+  for (const extensions of [{ signature: "metadata" }, { signatures: ["metadata"] }]) {
+    const requirement = { ...listing.buyerRequirement as Obj, ...extensions };
+    const { signature: _, ...scope } = listing;
+    scope.buyerRequirement = requirement;
+    const extendedListing = { ...scope, signature: await envelope(scope, "listing", SELLER) };
+    const fullHash = sha256Hex(canonicalize(requirement));
+    assert.notEqual(fullHash, contentHash(requirement));
+    for (const requirementHash of [fullHash, contentHash(requirement)]) {
+      const graph = await evaluate({ listing: extendedListing, bundle: async (bundle, session) => {
+        bundle.vetRecords = [await publish(session, 30, {
+          recordVersion: "1", jobId: JOB, evaluatedParty: dids[BUYER], bundleHash: "a".repeat(64), requirementHash,
+          freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30,
+        }, "composite", SELLER)];
+      } });
+      assert.equal(graph.ok, requirementHash === fullHash, graph.reason);
+      if (requirementHash !== fullHash) assert.equal(graph.reason, "composite record is not bound to the listing's requirement");
+    }
+  }
+});
+
 test("DACS-5 §10.4.1: the bundle's own shape, parties and signatures", async () => {
   const phase = (change: Obj) => (bundle: Obj) => { bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok", ...change }]; };
   assert.deepEqual(await verdicts({

@@ -306,7 +306,7 @@ export function agreementListingConformance(
   const deliverable = rec(terms.deliverable);
   const offered = rec(rec(listing.offering)?.deliverable);
   if (!deliverable || !offered || deliverable.deliverableType !== offered.kind ||
-      normalizedHash(deliverable.hash) !== contentHash(offered) || deliverable.schemaUrl !== offered.schemaUrl) return "deliverable";
+      normalizedHash(deliverable.hash) !== sha256Hex(canonicalize(offered)) || deliverable.schemaUrl !== offered.schemaUrl) return "deliverable";
   // 5. Deadline: terms.deadline ≤ committedAt + deadlineSecAfterCommit (unix ms against seconds).
   // 6. Not expired: validity.notAfter ≥ committedAt.
   const window = rec(listing.terms)?.deadlineSecAfterCommit;
@@ -840,7 +840,7 @@ async function verifyCurrentEvidenceGraph(
   const requirement = rec(listed.raw.buyerRequirement);
   if (requirement && composites.some((artifact) =>
     !sameSigningIdentity(artifact.raw.evaluatedParty, verifiedListing.sellerClaim) &&
-    normalizedHash(artifact.raw.requirementHash) !== contentHash(requirement))) {
+    normalizedHash(artifact.raw.requirementHash) !== sha256Hex(canonicalize(requirement)))) {
     return failSigned("composite record is not bound to the listing's requirement");
   }
   const hasRequirements = requirement && (arr(requirement.required).length > 0 ||

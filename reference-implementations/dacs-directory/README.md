@@ -332,9 +332,9 @@ cached evidence eligibility is refreshed.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
   `stor-` prefix), or `{success, owner, programName, data, ...}`; a program holds at most
-  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` or 403
-  `PERMISSION_DENIED` is a definitive absence; any other 4xx, such as a proxy's or a
-  wrong route's, leaves a revocation check incomplete and a scan read retryable.
+  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` is a
+  definitive absence; a 403 `PERMISSION_DENIED` or any other 4xx, such as a proxy's
+  or a wrong route's, leaves a revocation check incomplete and a scan read retryable.
   `test/chain-storage.test.ts` pins each classification. This source pin does not
   attest the revision running at a remote RPC. The configured live service remains
   unpinned unless its operator supplies a verifiable deployment revision.
