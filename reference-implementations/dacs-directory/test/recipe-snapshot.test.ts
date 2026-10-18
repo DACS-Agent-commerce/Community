@@ -3,8 +3,9 @@ import test from "node:test";
 import { resolveConfiguredRecipeSnapshot, type RecipePolicy } from "../src/catalog/recipePolicy.js";
 import { matchesVetRequirement } from "../src/catalog/vetClaimRules.js";
 import type { ResolvedEvidence } from "../src/catalog/evidenceGraph.js";
+const signer = `did:demos:agent:${"a".repeat(64)}`;
 const policy = (recipeVersion: number, defaultMaxAgeSec = 1): RecipePolicy => ({ scheme: "lei", recipeVersion,
-  defaultMaxAgeSec, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [] });
+  defaultMaxAgeSec, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [signer] });
 
 test("session recipe pins resolve exact configured snapshots, never the unversioned policy list", async () => {
   const old = process.env.DACS_RECIPE_SNAPSHOTS;
@@ -18,18 +19,18 @@ test("session recipe pins resolve exact configured snapshots, never the unversio
   } finally { if (old === undefined) delete process.env.DACS_RECIPE_SNAPSHOTS; else process.env.DACS_RECIPE_SNAPSHOTS = old; }
 });
 
-test("snapshot membership, latest-at-start and freshness all use the selected recipe roster", () => {
+test("snapshot membership, latest-at-start and freshness all use the selected recipe roster", async () => {
   const locator = `stor-${"a".repeat(40)}`; const contentHash = "b".repeat(64);
   const result: ResolvedEvidence = { kind: "verify-result", locator, contentHash,
-    raw: { scheme: "lei", identifier: "ABC", recipeVersion: 1, decision: "pass", verifiedAt: 20 } };
+    raw: { scheme: "lei", identifier: "ABC", recipeVersion: 1, method: "verifiable-credential", signature: { signer, algorithm: "ed25519" }, decision: "pass", verifiedAt: 20 } };
   const identity = { claims: [{ ref: "lei:ABC", verifiedBy: { anchor: { kind: "storage-program", locator }, contentHash, recipeVersion: 1 } }] };
   const check = (recipes: RecipePolicy[], required = { scheme: "lei" } as Record<string, unknown>, at = 30) =>
     matchesVetRequirement(identity, { required: [required] }, [result], at, at, recipes);
-  assert.equal(check([policy(1)]), true);
-  assert.equal(check([policy(2)]), false, "result absent from snapshot");
-  assert.equal(check([policy(1), policy(2)]), false, "unversioned requirement selects newer session-start recipe");
-  assert.equal(check([policy(1), policy(2)], { scheme: "lei", recipeVersion: 1 }), true);
-  assert.equal(check([policy(1, 0)]), false, "snapshot default freshness cannot be replaced by another configured policy");
-  assert.equal(check([policy(1, 1)], { scheme: "lei" }, 1020), true);
-  assert.equal(check([policy(1, 1)], { scheme: "lei" }, 1021), false);
+  assert.equal(await check([policy(1)]), true);
+  assert.equal(await check([policy(2)]), false, "result absent from snapshot");
+  assert.equal(await check([policy(1), policy(2)]), false, "unversioned requirement selects newer session-start recipe");
+  assert.equal(await check([policy(1), policy(2)], { scheme: "lei", recipeVersion: 1 }), true);
+  assert.equal(await check([policy(1, 0)]), false, "snapshot default freshness cannot be replaced by another configured policy");
+  assert.equal(await check([policy(1, 1)], { scheme: "lei" }, 1020), true);
+  assert.equal(await check([policy(1, 1)], { scheme: "lei" }, 1021), false);
 });

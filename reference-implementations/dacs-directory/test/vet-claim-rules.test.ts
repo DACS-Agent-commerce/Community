@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, type ResolvedEvidence } from "../src/catalog/evidenceGraph.js";
-import { matchesVetRequirement } from "../src/catalog/vetClaimRules.js";
+import { matchesVetRequirement as evaluateVetRequirement } from "../src/catalog/vetClaimRules.js";
+const matchesVetRequirement: typeof evaluateVetRequirement = (identity, requirement, results, at, finalisedAt, recipes) =>
+  evaluateVetRequirement(identity, requirement, results, at, finalisedAt, recipes ?? JSON.parse(process.env.DACS_RECIPE_POLICIES ?? "[]"));
 
 type Obj = Record<string, unknown>;
 const seed = new Uint8Array(32).fill(17);
@@ -17,7 +19,7 @@ function proof(scheme = "lei", identifier = "ABC", change: Obj = {}, claimChange
   return { result, claim };
 }
 const policy = (scheme: string) => ({ scheme, recipeVersion: 1, methods: ["registry"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: [signer] });
-const requirement = (scheme: string): Obj => ({ required: [{ scheme }] });
+const requirement = (scheme: string): Obj => ({ required: [{ scheme, verificationRequired: true }] });
 async function withPolicies(run: () => Promise<void>) {
   const old = process.env.DACS_RECIPE_POLICIES;
   try { process.env.DACS_RECIPE_POLICIES = JSON.stringify(["lei", "did", "key", "domain", "sam-uei", "finra-crd", "erc8004", "stor-cred"].map(policy)); await run(); }
@@ -94,8 +96,67 @@ test("vet freshness selects the exact scheme AND recipe version among unequal wi
   const check = () => matchesVetRequirement({ claims: [p.claim] }, requirement("lei"), [p.result], 2021, 2021);
   for (const foreign of [{ ...policy("lei"), recipeVersion: 2 }, policy("ofac-clear")]) {
     process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...foreign, defaultMaxAgeSec: 1000000 }, policy("lei")]);
-    assert.equal(check(), false, JSON.stringify(foreign));
+    assert.equal(await check(), false, JSON.stringify(foreign));
   }
   process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...policy("lei"), defaultMaxAgeSec: 1000000 }]);
-  assert.equal(check(), true, "the matching long window can admit the result");
+  assert.equal(await check(), true, "the matching long window can admit the result");
 }));
+
+test("required claims are conjunctive and oneOf is OR within groups and AND across groups", async () => withPolicies(async () => {
+  const lei = proof();
+  const domain = proof("domain", "example.com");
+  domain.result.locator = `stor-${"b".repeat(40)}`;
+  (domain.claim.verifiedBy as Obj).anchor = { kind: "storage-program", locator: domain.result.locator };
+  const cr = (scheme: string) => ({ scheme, verificationRequired: true });
+  const check = (required: Obj[], oneOf?: Obj[][], claims = [lei.claim, domain.claim]) =>
+    matchesVetRequirement({ claims }, { required, oneOf }, [lei.result, domain.result], 30, 30);
+  assert.equal(await check([cr("lei"), cr("domain")]), true);
+  assert.equal(await check([cr("lei"), cr("did")]), false, "one passing required member is insufficient");
+  assert.equal(await check([cr("lei"), cr("domain")], undefined, [lei.claim]), false);
+  assert.equal(await check([], [[cr("did"), cr("lei")], [cr("domain"), cr("key")]]), true);
+  assert.equal(await check([], [[cr("lei"), cr("did")], [cr("key"), cr("domain")]]), true);
+  assert.equal(await check([], [[cr("lei")], [cr("key"), cr("did")]]), false, "every group needs a match");
+  assert.equal(await check([], [[cr("lei")], []]), false);
+  assert.equal(await check([cr("did")], [[cr("lei")]]), false, "oneOf does not override required");
+}));
+
+test("verificationRequired controls decision while freshness and exact-primary verification always apply", async () => withPolicies(async () => {
+  for (const decision of ["pass", "fail", "indeterminate"]) {
+    for (const verificationRequired of [true, false]) {
+      const p = proof("lei", "ABC", { decision });
+      const req = { required: [{ scheme: "lei", verificationRequired }] };
+      const identity = { claims: [p.claim], presentedBy: "lei:ABC" };
+      const check = (at = 30, selector = false) => matchesVetRequirement(identity,
+        { ...req, ...(selector ? { primaryClaimSelector: "lei" } : {}) }, [p.result], at, at);
+      assert.equal(await check(), !verificationRequired || decision === "pass", `${decision}/${verificationRequired}`);
+      assert.equal(await check(101), false, "unverified claims still require freshness");
+      assert.equal(await check(30, true), decision === "pass", "selector always requires pass");
+      assert.equal(await check(101, true), false, "selected primary must be fresh");
+    }
+  }
+}));
+
+test("vet requires a live exact-version recipe, allowed method and trusted signer even with validUntil", async () => {
+  const p = proof();
+  const check = (recipes?: import("../src/catalog/recipePolicy.js").RecipePolicy[], raw = p.result.raw, claim = p.claim) =>
+    evaluateVetRequirement({ claims: [claim] }, { required: [{ scheme: "lei", verificationRequired: true }] },
+      [{ ...p.result, raw }], 30, 30, recipes);
+  const live = policy("lei") as import("../src/catalog/recipePolicy.js").RecipePolicy;
+  assert.equal(await check([live]), true);
+  assert.equal(await check(), false, "no session recipe roster");
+  assert.equal(await check([]), false, "no matching recipe");
+  for (const availability of ["operator_gated", "closed_data", "bilateral", "mocked", "disabled", "failed"] as const)
+    assert.equal(await check([{ ...live, availability }]), false, availability);
+  for (const recipe of [{ ...live, recipeVersion: 2 }, { ...live, methods: ["external"] },
+    { ...live, trustedResultSigners: [] }, { ...live, defaultMaxAgeSec: -1 }]) assert.equal(await check([recipe]), false);
+  for (const recipeVersion of [undefined, 0, -1, 1.5, "1"]) {
+    const claim = { ...p.claim, verifiedBy: { ...p.claim.verifiedBy as Obj, recipeVersion } };
+    assert.equal(await check([live], { ...p.result.raw, recipeVersion }, claim), false, String(recipeVersion));
+  }
+  assert.equal(await check([live, live]), false, "ambiguous roster");
+  assert.equal(await check([live], { ...p.result.raw, method: "external" }), false);
+  assert.equal(await check([live], { ...p.result.raw, signature: { signer: `did:demos:agent:${"b".repeat(64)}`, algorithm: "ed25519" } }), false);
+  const optional = proof("domain", "example.com");
+  assert.equal(await evaluateVetRequirement({ claims: [p.claim] }, requirement("lei"), [p.result, optional.result], 30, 30, [live]), false,
+    "every included result requires policy, including optional results");
+});

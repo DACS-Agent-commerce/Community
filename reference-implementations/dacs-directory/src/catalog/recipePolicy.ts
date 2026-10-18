@@ -25,11 +25,11 @@ export async function validateRecipeResult(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<RecipePolicy | null> {
   try {
-    if (typeof raw.scheme !== "string" || !Number.isSafeInteger(raw.recipeVersion)) return null;
+    if (typeof raw.scheme !== "string" || !Number.isSafeInteger(raw.recipeVersion) || Number(raw.recipeVersion) < 1) return null;
     const recipe = await resolveRecipe(raw.scheme.toLowerCase(), Number(raw.recipeVersion));
     if (!recipe || recipe.scheme !== raw.scheme.toLowerCase() || recipe.recipeVersion !== raw.recipeVersion ||
-        !["live", "operator_gated", "closed_data", "bilateral"].includes(recipe.availability) ||
-        !Array.isArray(recipe.methods) || !recipe.methods.includes(String(raw.method)) ||
+        recipe.availability !== "live" ||
+        typeof raw.method !== "string" || !Array.isArray(recipe.methods) || !recipe.methods.includes(raw.method) ||
         !Array.isArray(recipe.trustedResultSigners) ||
         typeof recipe.defaultMaxAgeSec !== "number" || !Number.isFinite(recipe.defaultMaxAgeSec) || recipe.defaultMaxAgeSec < 0) return null;
     const signature = raw.signature as Record<string, unknown> | undefined;

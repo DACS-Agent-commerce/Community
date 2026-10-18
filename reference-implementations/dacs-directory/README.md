@@ -123,8 +123,8 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
-| `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers and included vet results indeterminate for session admission |
-| `DACS_RECIPE_SNAPSHOTS` | For session vetting | Operator-authenticated JSON array of historical `{registryVersion, recipes}` snapshots; `recipes` uses the same policy shape. Session pins select exact snapshots; unversioned requirements select the latest recipe in that snapshot. Missing snapshots remain indeterminate. |
+| `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers; session admission does not use this policy |
+| `DACS_RECIPE_SNAPSHOTS` | Helper only | JSON array of historical `{registryVersion, recipes}` snapshots for the standalone resolver. Production session admission does not consult this variable; operator authentication and graph integration are pending. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 | `NEXT_PUBLIC_BUTLER_ORIGIN` | Production | Public HTTPS origin of the DACS agent gateway used by `/try`; defaults to `http://127.0.0.1:8402` only for local development. Railway validates this at build time. |
@@ -190,14 +190,12 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
-   requires a carrying catalog to serve every such record whoever signed it, and
-   `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
-   Directory's own BB-6 resolution works through at most 32 per signer of each job and
-   role; another signer's bindings never use that budget. Overflow is sticky and makes
-   that signer's side `indeterminate`, never absent. There is no total across signers,
-   so stored bindings, and the work to re-verify them each pass, grow with the number of
-   bindings published for one job.
+   The scanner retains every supported BB-4-valid BundleBinding regardless of signer.
+   `GET /api/dacs/bundles/{jobId}` serves stored records without authentication,
+   using `limit` and `cursor`. The existing reindex/federation accumulation still
+   retains at most 32 per signer/job/role, so complete carriage through that path
+   remains pending. The separate BB-6 resolver fetches at most eight candidates
+   per signer; overflow makes that side `indeterminate`.
 3. **Evidence graph and federation**: current bundle copies are reached only after
    deriving the role-specific logical address and resolving a signed BundleBinding.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
@@ -231,13 +229,16 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   listing version or re-sends a chain transaction automatically.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
-- **DACS-2 recipe governance is deployment policy.** `verifiedBy` evidence cannot
-  elevate a tier unless its exact recipe version/method/availability/max-age policy is
-- **Authority proofs need a method-specific deployment verifier.** `EvidenceGraphDeps.verifyAttestation`
-  and the identity-tier verification argument must authenticate the original format's hash scope,
-  required signer, validator roster/epoch and proof. The result signer's signature does not replace
-  this check. No production authority adapter is installed, so these proofs remain indeterminate
-  for sessions and do not elevate identity tiers.
+- **DACS-2 recipe governance is deployment policy.** Identity-tier derivation checks
+  configured recipe version/method/availability/max-age and result signer policy.
+  The new recipe snapshot resolver and required-claim matcher are standalone helpers;
+  production session admission does not yet apply them. Their live-only policy does
+  not change the existing tier path's availability handling.
+- **Authority proof integration is pending.** Current graph and identity-tier paths
+  check authority content hashes. The standalone `authenticateAuthorityAttestation`
+  helper can delegate original proof/hash/signer/validator-epoch authentication to
+  a method-specific verifier, but it has no production caller. A result signer's
+  signature and a matching authority hash do not establish that authority proof.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -250,20 +251,22 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 ## DACS surface / conformance declaration
 
-`exercises-spec`: DACS-1 §6.3.4 current Listing publication and dual-profile reading,
-§6.3.5 well-known generation/crawling, and §6.3.6 catalog discovery. Current artifacts
-use directory-native, current-contract evidence-graph validation; the pinned SDK verifier
-is retained only for labelled legacy artifacts. DACS-2 tier derivation fails closed on
-unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
-settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
-computations remain advisory and independently reproducible from their refs.
+This is a partial implementation of DACS-1 listing publication, well-known
+files and catalog discovery, with current-artifact graph readers and a labelled
+legacy SDK path. It does not claim complete DACS conformance. Session historical
+identity/challenge/recipe admission, authority-proof authentication, native-payment
+finality, rail snapshots, delivery cleartext/ACL verification and full agreement
+conformance remain pending integration. Catalog computations are advisory and
+independently reproducible from their refs; reference verification alone does not
+establish payment or delivery.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
-- **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
+- **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation (v0.4,
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
-  with their hashes, and the recorded deviations. `test/standard-vectors.test.ts` checks
-  the hashes and runs each set through an adapter onto the Directory's own decisions. The
+  with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
+  the hashes and executes only the two vendored sets: SIG-6 encoding and Demos agent
+  claim resolution. Other upstream vector adapters are pending. The
   `did:demos:agent` primary-claim profile is the one deliberate addition; it comes from
   DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
 - **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
@@ -272,10 +275,12 @@ computations remain advisory and independently reproducible from their refs.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
   `stor-` prefix), or `{success, owner, programName, data, ...}`; a program holds at most
-  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). Only the node's 404 `NOT_FOUND` is a
-  definitive absence; a 403 `PERMISSION_DENIED` or any other 4xx, such as a proxy's
-  or a wrong route's, leaves a revocation check incomplete and a scan read retryable.
-  `test/chain-storage.test.ts` pins each classification. This source pin does not
+  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). The scanner currently labels every
+  HTTP 404 as `STORAGE_NOT_FOUND`, without distinguishing a structured node
+  `NOT_FOUND` from a proxy or wrong-route response. Missing/non-public locators
+  are terminal until replay; this diagnostic is not authoritative BB-8 absence.
+  `test/chain-storage.test.ts` covers storage reads, not that node/proxy distinction.
+  This source pin does not
   attest the revision running at a remote RPC. The configured live service remains
   unpinned unless its operator supplies a verifiable deployment revision.
 

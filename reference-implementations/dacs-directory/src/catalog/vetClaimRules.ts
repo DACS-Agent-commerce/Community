@@ -1,4 +1,4 @@
-import type { RecipePolicy } from "./recipePolicy.js";
+import { validateRecipeResult, type RecipePolicy } from "./recipePolicy.js";
 import { domainToASCII } from "node:url";
 import type { ResolvedEvidence } from "./evidenceGraph.js";
 
@@ -31,9 +31,18 @@ function claimIdentity(value: unknown): { scheme: string; identifier: string } |
   return id ? { scheme: name, identifier: id } : null;
 }
 
-/** DACS-1 MA-1..3 and DACS-2 §7.12, evaluated at the signed vet time. */
-export function matchesVetRequirement(identity: Obj, requirement: Obj, results: ResolvedEvidence[], at: unknown, finalisedAt: unknown, recipes?: readonly RecipePolicy[]): boolean {
+/** DACS-1 MA-1..3 and DACS-2 §7.12, evaluated at the signed vet time.
+ * Callers authenticate result signatures first and supply the session-pinned recipe roster. */
+export async function matchesVetRequirement(identity: Obj, requirement: Obj, results: ResolvedEvidence[], at: unknown, finalisedAt: unknown, recipes?: readonly RecipePolicy[]): Promise<boolean> {
   if (!finite(at) || !finite(finalisedAt) || at > finalisedAt) return false;
+  if (!recipes || new Set(recipes.map((recipe) => `${recipe.scheme}:${recipe.recipeVersion}`)).size !== recipes.length) return false;
+  const policies = new Map<ResolvedEvidence, RecipePolicy>();
+  for (const result of results) {
+    const policy = await validateRecipeResult(result.raw, async (scheme, version) =>
+      recipes.find((recipe) => recipe.scheme === scheme && recipe.recipeVersion === version) ?? null);
+    if (!policy) return false;
+    policies.set(result, policy);
+  }
   const claims = Array.isArray(identity.claims) ? identity.claims.map(rec).filter((c): c is Obj => Boolean(c)) : [];
   const satisfies = (claim: Obj, cr: Obj): boolean => {
     const id = claimIdentity(claim.ref);
@@ -44,21 +53,18 @@ export function matchesVetRequirement(identity: Obj, requirement: Obj, results: 
     if (!result || result.raw.recipeVersion !== ref.recipeVersion ||
         (cr.recipeVersion !== undefined && result.raw.recipeVersion !== cr.recipeVersion)) return false;
     const vr = result.raw;
-    if (recipes) {
+    {
       const members = recipes.filter((recipe) => recipe.scheme === id.scheme);
       if (!members.some((recipe) => recipe.recipeVersion === vr.recipeVersion) ||
           (cr.recipeVersion === undefined && vr.recipeVersion !== Math.max(...members.map((recipe) => recipe.recipeVersion)))) return false;
     }
     const verified = claimIdentity({ scheme: vr.scheme, identifier: vr.identifier });
-    if (!verified || verified.scheme !== id.scheme || verified.identifier !== id.identifier || vr.decision !== "pass" ||
+    if (!verified || verified.scheme !== id.scheme || verified.identifier !== id.identifier || (cr.verificationRequired === true && vr.decision !== "pass") ||
         !finite(vr.verifiedAt) || vr.verifiedAt > at) return false;
     let expiry = vr.validUntil;
     if (expiry === undefined) {
-      // A missing pinned recipe cannot manufacture an authority freshness window.
-      let policies: unknown;
-      try { policies = recipes ?? JSON.parse(process.env.DACS_RECIPE_POLICIES ?? "[]"); } catch { return false; }
-      const policy = Array.isArray(policies) ? policies.map(rec).find((p) => p?.scheme === id.scheme && p.recipeVersion === vr.recipeVersion) : null;
-      if (!policy || !finite(policy.defaultMaxAgeSec) || policy.defaultMaxAgeSec < 0) return false;
+      const policy = policies.get(result);
+      if (!policy) return false;
       expiry = vr.verifiedAt + policy.defaultMaxAgeSec * 1000;
     }
     if (!finite(expiry) || expiry < vr.verifiedAt ||
