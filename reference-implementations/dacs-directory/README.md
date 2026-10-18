@@ -352,11 +352,13 @@ the publisher as buyer and attributes supplier history to the agreement seller.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
   `stor-` prefix), or `{success, owner, programName, data, ...}`; a program holds at most
-  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). The scanner currently labels every
-  HTTP 404 as `STORAGE_NOT_FOUND`, without distinguishing a structured node
-  `NOT_FOUND` from a proxy or wrong-route response. Missing/non-public locators
-  are terminal until replay; this diagnostic is not authoritative BB-8 absence.
-  `test/chain-storage.test.ts` covers storage reads, not that node/proxy distinction.
+  1 MiB (`STORAGE_PROGRAM_MAX_SIZE_BYTES`). The scanner labels HTTP 404 as
+  `STORAGE_NOT_FOUND` only for a structured `errorCode: "NOT_FOUND"`
+  answer. Bare, proxy and wrong-route 404 responses remain retryable
+  `STORAGE_RPC_UNAVAILABLE`; structured 403 `PERMISSION_DENIED` is terminal for
+  scanner replay. These diagnostics are not authoritative BB-8 absence.
+  `test/scan-addresses.test.ts` checks the structured-node/proxy distinction and
+  retry behavior; `test/chain-storage.test.ts` checks classified storage reads.
   This source pin does not
   attest the revision running at a remote RPC. The configured live service remains
   unpinned unless its operator supplies a verifiable deployment revision.
@@ -452,7 +454,21 @@ standard Base64 and hex encodings are rejected. The signature is stored in the
 agent card, outside the hashed index. Changing the origin or index bytes requires
 a new signature.
 
-Upgrade note: current-profile listings require SIG-6 canonical Base64URL
-`signature.value`. Older Directory publishers emitted hex values for that profile;
-republish those listings with canonical signatures. The labelled legacy SDK
-profile retains its documented compatibility reader.
+New current-profile listings require SIG-6 canonical Base64URL `signature.value`.
+To retain immutable versions published by the previous Directory hex publisher,
+set `DACS_HISTORICAL_LISTING_IMPORTS` to an operator-controlled JSON object keyed
+by native `stor-` address. Inventory authenticated pre-upgrade publications before
+upgrading; each entry declares `encoding: "lowercase-hex"`, `sellerPrimaryClaim`,
+`listingId`, `listingVersion` and the exact unsigned `contentHash` (64 lowercase hex
+characters). This is an explicit local trust input, never a field accepted from
+registration requests, index rows or the listing itself. At most 256 entries and
+65,536 UTF-8 bytes are accepted; malformed or incomplete pins cannot import hex.
+
+Every historical read rechecks the original signatures, current schema and pinned
+tuple/hash. The importer normalizes only the envelope in memory, retaining the
+original stored bytes and native pointer. Catalog, detail, derivation, withdrawal,
+completed-session and publication recovery reads share it. Recovery returns the
+same stored artifact without a new transaction. Unpinned current hex artifacts
+remain rejected; the labelled draft SDK profile keeps its separate reader.
+`test/historical-listing-import.test.ts`, `test/current-indexer.test.ts` and
+`test/build-listing.test.ts` cover import boundaries and immutable history/recovery.

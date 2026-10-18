@@ -10,7 +10,7 @@ import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, verifyListing } from "./listingVerification";
+import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -500,7 +500,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     cache.set(locator, result);
     return result;
   };
-  const listings = new Map<string, Awaited<ReturnType<typeof verifyListing>>>();
+  const listings = new Map<string, Awaited<ReturnType<typeof verifyStoredListing>>>();
   const markers = new Map<string, Awaited<ReturnType<typeof findValidListingRevocation>>>();
   let examined = 0;
   try {
@@ -508,7 +508,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
       const { anchor, binding } = jobs[cursor];
       const anchored = await read(anchor);
       if (anchored.status !== "present") continue;
-      if (!listings.has(anchor)) listings.set(anchor, await verifyListing(anchored.record.data).catch(() => null));
+      if (!listings.has(anchor)) listings.set(anchor, await verifyStoredListing(anchored.record.data, anchor).catch(() => null));
       const listing = listings.get(anchor);
       if (!listing || listingBindingRejection(listing.sellerClaim, anchored.record.owner, agent.seller) ||
           listing.contentHash !== agent.contentHashes[anchor]) continue;

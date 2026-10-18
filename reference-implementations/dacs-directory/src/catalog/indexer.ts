@@ -35,7 +35,7 @@ import {
   findValidListingRevocation,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  verifyListing,
+  verifyStoredListing,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
@@ -173,7 +173,7 @@ export async function indexRegistration(
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) continue;
     // A listing with no canonical form throws while hashing; skip it like any invalid one.
-    const verified = await verifyListing(anchored.data).catch(() => null);
+    const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
     if (!verified) continue;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
@@ -463,7 +463,7 @@ export async function indexRegistration(
         readArtifact: async (r) => {
           const raw = await readAnchor(r);
           if (r === ref) rawBundle = raw;
-          if (raw && r !== ref) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
+          if (raw && r !== ref) resolvedArtifacts.push({ kind: "dacs-1-listing", raw, locator: r });
           return raw;
         },
         resolveRef: async (kind, jobId) => {

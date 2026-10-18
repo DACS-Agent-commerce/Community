@@ -247,6 +247,7 @@ test("a storage read separates a definitive answer from a transport failure (RB-
     ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "invalid"],
     ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable"],
     ["node failure", () => new Response(null, { status: 503 }), "unavailable"],
+    ["failed HTTP with plausible success JSON", () => body({ success: true, owner, programName, data: {} }, 503), "unavailable"],
     ["rate limited", () => new Response(null, { status: 429 }), "unavailable"],
     ["unsuccessful body", () => body({ success: false }), "unavailable"],
     ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable"],
@@ -300,5 +301,30 @@ test("node2 2026-10-17 structured unknown-message reply is recognized precisely"
   try {
     assert.equal((await resolveOwnedAnchorByName(programName, owner)).status, "indeterminate");
     assert.deepEqual(methods, ["nodeCall", "gcr_routine"]);
+  } finally { globalThis.fetch = original; }
+});
+
+test("node deployment probe refuses failed HTTP even with a plausible successful public program", async () => {
+  const { probeNodeContract } = await import("../src/catalog/nodeContract.js");
+  const original = globalThis.fetch;
+  const at = `stor-${"8".repeat(40)}`;
+  let readStatus = 200;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") return Response.json({ result: 200, response: [{ storageAddress: at, programName }] });
+    if (String(input).endsWith(`stor-${"0".repeat(40)}`)) {
+      return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    }
+    return Response.json({ success: true, programName, owner, data: { present: true } }, { status: readStatus });
+  };
+  try {
+    assert.equal((await probeNodeContract("https://node.example", programName)).ok, true,
+      "the same search and payload certify a successful read");
+    for (const status of [403, 404, 429, 500, 503]) {
+      readStatus = status;
+      const report = await probeNodeContract("https://node.example", programName);
+      assert.equal(report.searchesAgree, true);
+      assert.equal(report.storageNotFound, true);
+      assert.equal(report.ok, false, `HTTP ${status} cannot certify a node deployment`);
+    }
   } finally { globalThis.fetch = original; }
 });
