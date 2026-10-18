@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
+import { artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
@@ -51,7 +51,7 @@ async function vector(jobId = "job-1", offset = 0) {
   (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
-  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
+  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
@@ -143,6 +143,7 @@ async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = {
     payeeBoundAgreementVersion: "1",
+    derivedFromPattern: "fixed-price",
     jobId,
     listingRef,
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
@@ -1092,5 +1093,84 @@ test("procurement completion remains unverified for either publisher role until 
     const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
     assert.equal(graph.ok, false, publisherRole);
     assert.equal(graph.refsVerified, false, publisherRole);
+  }
+});
+
+test("fixed-price agreements require a declared matching pattern for both pricing kinds and agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pricingKind of ["negotiable", "fixed"] as const) {
+      for (const pattern of [undefined, null, 7, {}, "", "fixed_price", "rfq", "sealed-envelope", "fixed-price"]) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        if (pricingKind === "negotiable") {
+          const listingScope = signedScope(fixture.listing, "listing");
+          listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 };
+          fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+          maps.set(fixture.locators.listing, fixture.listing);
+        }
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        fixture.buyerBundle.listingRef = listingRef;
+        fixture.sellerBundle.listingRef = listingRef;
+        const agreementScope = signedScope(fixture.agreement, "agreement");
+        agreementScope.listingRef = listingRef;
+        if (pattern === undefined) delete agreementScope.derivedFromPattern;
+        else agreementScope.derivedFromPattern = pattern;
+        // Re-sign the agreement and both bundle references: rejection must be semantic.
+        await installAgreement(fixture, agreementScope);
+        for (const role of ["buyer", "seller"] as const) {
+          const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+          const accepted = pattern === "fixed-price";
+          const label = `${profile}/${pricingKind}/${role}/${JSON.stringify(pattern)}: ${graph.reason}`;
+          assert.equal(graph.signaturesVerified, true, label);
+          assert.equal(graph.ok, accepted, label);
+          assert.equal(graph.refsVerified, accepted, label);
+        }
+      }
+    }
+  }
+});
+
+test("agreement discovery requires a recognized pattern in both agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of [undefined, null, 7, {}, "", "fixed_price", "fixed-price", "rfq", "sealed-envelope"]) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const scope = signedScope(fixture.agreement, "agreement");
+      if (pattern === undefined) delete scope.derivedFromPattern;
+      else scope.derivedFromPattern = pattern;
+      await installAgreement(fixture, scope);
+      assert.equal(await verifiedDiscoveryAgreement(fixture.agreement),
+        typeof pattern === "string" && ["fixed-price", "rfq", "sealed-envelope"].includes(pattern),
+        `${profile}/${JSON.stringify(pattern)}`);
+    }
+  }
+});
+
+test("agreement patterns must match RFQ and sealed-envelope pipelines in both agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of ["rfq", "sealed-envelope"] as const) {
+      for (const declared of [pattern, "fixed-price"]) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        const listingScope = signedScope(fixture.listing, "listing");
+        (listingScope.pipeline as Obj[])[0] = pattern === "rfq"
+          ? { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300 } }
+          : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price" } };
+        listingScope.pricing = pattern === "rfq"
+          ? { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 }
+          : { kind: "auction", selectionRule: "lowest-price" };
+        fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+        maps.set(fixture.locators.listing, fixture.listing);
+        assert.ok(await verifyListing(fixture.listing));
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        fixture.buyerBundle.listingRef = listingRef;
+        fixture.sellerBundle.listingRef = listingRef;
+        const agreementScope = signedScope(fixture.agreement, "agreement");
+        agreementScope.listingRef = listingRef;
+        agreementScope.derivedFromPattern = declared;
+        await installAgreement(fixture, agreementScope);
+        const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${pattern}/${declared}: ${graph.reason}`;
+        assert.equal(graph.ok, declared === pattern, label);
+        assert.equal(graph.refsVerified, declared === pattern, label);
+      }
+    }
   }
 });

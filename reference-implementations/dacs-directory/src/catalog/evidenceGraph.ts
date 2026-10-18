@@ -55,6 +55,7 @@ const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
 type AgreementProfile = "legacy" | "payee-bound";
+const AGREEMENT_PATTERNS = new Set(["fixed-price", "rfq", "sealed-envelope"]);
 
 /** Select the agreement type before interpreting fields; never strip-and-retry. */
 function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
@@ -90,6 +91,11 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
     kind === "commit-agreement" || kind === "commit-payee-bound-agreement");
   const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
+
+  // DACS-3 §8.5.2 check 7: a valid pattern must also name this listing's
+  // negotiation phase; agreement signatures alone do not establish that match.
+  const negotiations = pipeline.filter((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
+  if (negotiations.length !== 1 || `negotiate-${agreement.derivedFromPattern}` !== negotiations[0].kind) return false;
 
   // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
   // exactly its center. Canonical decimal strings avoid floating-point loss.
@@ -207,6 +213,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const profile = agreementProfile(raw);
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
       arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
