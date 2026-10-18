@@ -9,7 +9,7 @@ import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, s
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
+import { indexRegistration, listingBindingRejection, MAX_PUBLISHER_LISTING_READS } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
@@ -1639,3 +1639,138 @@ test("PB-2 withholds completion and volume when a confirmed bound payout bypasse
   } finally { globalThis.fetch = originalFetch; }
 });
 
+// DACS-3 SE-8 / DACS-1: a procurement listing is published by the session's buyer, so the supplier
+// scored as agreement seller never holds it. Each fixture listing below is anchored by its signer.
+test("a buyer-published procurement listing credits its supplier's verified completion and volume", async () => {
+  /** Re-publish the fixture's listing as `publisher`, editing its scope, and re-pin both bundles and the agreement. */
+  const republish = async (fixture: Awaited<ReturnType<typeof vector>>, publisher: number, change: (scope: Obj) => void, pattern = "fixed-price") => {
+    const scope = signedScope(fixture.listing, "listing");
+    const identity: Obj = { bundleVersion: "1", presentedBy: dids[publisher], presentedAt: 1, claims: [{ ref: dids[publisher] }] };
+    const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[publisher]))).toString("hex");
+    scope.seller = { displayName: "publisher", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[publisher], signature: presentation }] } } };
+    change(scope);
+    fixture.listing = { ...scope, signature: await sign(scope, "listing", publisher) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    assert.notEqual(await verifyListing(fixture.listing), null);
+    const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    for (const field of ["buyerBundle", "sellerBundle"] as const) {
+      const bundle = signedScope(fixture[field], "bundle");
+      bundle.listingRef = listingRef;
+      bundle.phaseSummary = (bundle.phaseSummary as Obj[]).map((phase, index) => ({ ...phase, kind: (scope.pipeline as Obj[])[index].kind }));
+      fixture[field] = { ...bundle, anchoredByRole: fixture[field].anchoredByRole };
+    }
+    await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef, derivedFromPattern: pattern });
+  };
+  const asProcurement = (scope: Obj) => {
+    scope.pricing = { kind: "auction", selectionRule: "lowest-price", reservePrice: { amount: "2", currency: "DEM" } };
+    (scope.pipeline as Obj[])[0] = { kind: "negotiate-sealed-envelope-procurement",
+      parameters: { commitDeadline: 1, revealWindow: 60, selectionRule: "lowest-price", auctionMode: "procurement" } };
+  };
+  const index = async (fixture: Awaited<ReturnType<typeof vector>>, jobId: string, scored: number, options: {
+    ownListings?: boolean; publisherAnchors?: string[]; listingOwner?: number; listingPublisher?: number;
+  } = {}) => {
+    const publisher = options.listingPublisher ?? 0;
+    const bundleBindings = [await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1)];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === "POST") {
+        const call = JSON.parse(String(init.body)).params?.[0];
+        return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+      }
+      const at = String(input).split("/").pop() ?? "";
+      const data = maps.get(at);
+      // The supplier anchors the session artifacts; the listing's publisher anchors the listing.
+      const owner = at === fixture.locators.listing ? options.listingOwner ?? publisher : 1;
+      return data ? Response.json({ success: true, owner: `0x${dids[owner].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+        : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    };
+    try {
+      return await indexRegistration({ primaryClaim: dids[scored], displayName: "scored", listingAnchors: options.ownListings ? [fixture.locators.listing] : [],
+        deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)], bundleBindings }, undefined, async () => [], undefined, undefined,
+        (claim) => claim === dids[publisher] ? options.publisherAnchors ?? [fixture.locators.listing] : []);
+    } finally { globalThis.fetch = originalFetch; }
+  };
+  const credited = (record: Awaited<ReturnType<typeof index>>, name: string) => {
+    assert.equal(record.deals[0].refsVerified, true, name);
+    assert.equal(record.deals[0].reputationEligible, true, name);
+    assert.equal(record.deals[0].sellerOutcome, "completed", name);
+    assert.equal(record.reputation.completed, 1, name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }], name);
+  };
+  const uncounted = (record: Awaited<ReturnType<typeof index>>, name: string) => {
+    assert.equal(record.deals[0].refsVerified, false, name);
+    assert.equal(record.deals[0].reputationEligible, false, name);
+    assert.equal(record.reputation.completed, 0, name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [], name);
+  };
+
+  // Demand-mode control: the supplier publishes its own listing and holds it.
+  const demand = await vector("demand-control", 1200);
+  credited(await index(demand, "demand-control", 1, { ownListings: true, listingPublisher: 1, publisherAnchors: [] }), "demand control");
+
+  const procurement = await vector("procurement-job", 1100);
+  await republish(procurement, 0, asProcurement, "sealed-envelope");
+  // The supplier, scored as agreement seller, is credited from the buyer's own owner-bound listing,
+  // which does not become one of the supplier's offers.
+  const supplier = await index(procurement, "procurement-job", 1);
+  credited(supplier, "supplier");
+  assert.equal(supplier.primaryClaim, dids[1]);
+  assert.deepEqual(supplier.listings, []);
+  assert.equal(supplier.deals[0].category, "services.test");
+  // The publishing buyer holds the listing but is never scored as the session's seller.
+  const publisher = await index(procurement, "procurement-job", 0, { ownListings: true });
+  uncounted(publisher, "publisher scored as seller");
+  assert.equal(publisher.listings.length, 1);
+  // Without the publisher's own owner-bound anchor, the listing stays unresolved and the session uncounted.
+  uncounted(await index(procurement, "procurement-job", 1, { publisherAnchors: [] }), "no publisher anchors");
+  uncounted(await index(procurement, "procurement-job", 1, { listingOwner: 1 }), "listing anchored by another wallet");
+  const others = Array.from({ length: MAX_PUBLISHER_LISTING_READS }, (_, n) => locator(1300 + n));
+  uncounted(await index(procurement, "procurement-job", 1, { publisherAnchors: [...others, procurement.locators.listing] }), "over the read bound");
+  credited(await index(procurement, "procurement-job", 1, { publisherAnchors: [...others.slice(1), procurement.locators.listing] }), "at the read bound");
+
+  // A buyer-published listing that is not a procurement cannot cast its buyer as publisher (check 8).
+  const misdirected = await vector("misdirected-demand", 1400);
+  await republish(misdirected, 0, () => {});
+  uncounted(await index(misdirected, "misdirected-demand", 1), "buyer-published demand listing");
+
+  // Production wiring: by default the indexer reads chain-discovered listings, and a reindex pass
+  // passes every registered, discovered and well-known publisher's anchors.
+  const procurementAgain = await vector("procurement-job", 1100);
+  await republish(procurementAgain, 0, asProcurement, "sealed-envelope");
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const bundleBindings = [await bindingFor("procurement-job", "buyer", procurementAgain.locators.buyer, procurementAgain.buyerBundle, 0),
+    await bindingFor("procurement-job", "seller", procurementAgain.locators.seller, procurementAgain.sellerBundle, 1)];
+  const supplierRegistration = { primaryClaim: dids[1], displayName: "supplier", listingAnchors: [],
+    deals: [registeredDeal("procurement-job", procurementAgain.locators.buyer, procurementAgain.locators.seller)], bundleBindings };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+      return Response.json({ result: 200, response: [] });
+    }
+    const at = new URL(String(input)).pathname.split("/").pop() ?? "";
+    const data = maps.get(at);
+    return data ? Response.json({ success: true, owner: `0x${dids[at === procurementAgain.locators.listing ? 0 : 1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    store.saveDomains([]);
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: { [procurementAgain.locators.listing]: `0x${dids[0].slice(-64)}` },
+      deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "scan-state publisher anchors");
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "no discovered publisher anchors");
+    store.saveRegistrations([{ primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] }, supplierRegistration]);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    const sellers = store.loadCatalog().sellers;
+    credited(sellers.find((seller) => seller.primaryClaim === dids[1])!, "reindexed supplier");
+    assert.equal(sellers.find((seller) => seller.primaryClaim === dids[0])!.listings.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+  }
+});

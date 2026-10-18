@@ -226,7 +226,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    name is an opaque write input and is never read. Payment phase indices are recovered
    independently from a signed logical→native AnchorBinding that the evidence's own signer
    publishes for the record's native address and content hash, carried in the bundle's
-   `anchorBindings`, and checked against the listing rail. Settlements
+   `anchorBindings`, and checked against the listing rail. A procurement listing is
+   published by the session's buyer: the supplier's deal resolves it from that publisher's
+   own owner-bound listing anchors (at most 32 read per publisher), never as one of the
+   supplier's offers, and the graph checks the publisher's role. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before

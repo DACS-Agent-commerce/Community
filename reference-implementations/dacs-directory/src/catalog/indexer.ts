@@ -162,11 +162,24 @@ export function listingBindingRejection(
   return null;
 }
 
+/** Listing anchors known for one publisher. The default reads chain-discovered listings. */
+export type ResolvePublisherListingAnchors = (publisherClaim: string) => readonly string[];
+
+const scanStateListingAnchors: ResolvePublisherListingAnchors = (claim) => {
+  const publisher = canonicalDemosAgentClaim(claim);
+  return publisher === null ? [] : Object.entries(loadScanState().listings)
+    .filter(([, owner]) => ownerClaim(owner) === publisher).map(([anchor]) => anchor);
+};
+
+/** Work bound per publisher whose listings are read to resolve another registration's sessions. */
+export const MAX_PUBLISHER_LISTING_READS = 32;
+
 /**
  * Index one registration into a verified SellerRecord.
  *
  * `resolveIdentities` defaults to the narrow authenticated GCR call in gcr.ts;
- * tests may inject a deterministic resolver.
+ * tests may inject a deterministic resolver. `listingAnchorsFor` names other
+ * publishers' anchors, for sessions pinned to a listing this seller did not publish.
  */
 export async function indexRegistration(
   reg: Registration,
@@ -174,6 +187,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  listingAnchorsFor: ResolvePublisherListingAnchors = scanStateListingAnchors,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -337,6 +351,33 @@ export async function indexRegistration(
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
   onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
+  // DACS-3 SE-8: a procurement session pins a listing its buyer published, so the agreement seller
+  // scored here does not hold it. Its publisher's own owner-bound current listings resolve it, apart
+  // from this seller's; the graph then checks the publisher's role (§8.5.2 check 8). Over the read
+  // bound, the listing stays unresolved and the session uncounted.
+  const publisherListings = new Map<string, Promise<Map<string, { locator: string; raw: Record<string, unknown> }> | null>>();
+  const listingsPublishedBy = (claim: string) => {
+    const publisher = canonicalDemosAgentClaim(claim);
+    if (publisher === null) return Promise.resolve(null);
+    let pending = publisherListings.get(publisher);
+    if (!pending) {
+      pending = (async () => {
+        const anchors = [...new Set(listingAnchorsFor(publisher))];
+        if (anchors.length > MAX_PUBLISHER_LISTING_READS) return null;
+        const found = new Map<string, { locator: string; raw: Record<string, unknown> }>();
+        for (const anchor of anchors) {
+          const anchored = await readAnchorRecord(anchor);
+          const verified = anchored ? await verifyListing(anchored.data).catch(() => null) : null;
+          if (!anchored || verified?.profile !== "dacs-v0.1" ||
+              listingBindingRejection(verified.sellerClaim, anchored.owner, publisher) !== null) continue;
+          found.set(`${verified.scope.listingId}\n${verified.scope.listingVersion}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+        }
+        return found;
+      })();
+      publisherListings.set(publisher, pending);
+    }
+    return pending;
+  };
   const indexDeal = async (deal: RegisteredDeal): Promise<void> => {
     // Only bindings signed by this deal's role holders are discovery for it (BB-6).
     const roleHolder = (role: string) => role === "buyer" ? deal.owners.buyer : role === "seller" ? deal.owners.seller : null;
@@ -351,7 +392,8 @@ export async function indexRegistration(
       const id = String(ref.listingId ?? "");
       const version = Number(ref.version ?? ref.listingVersion ?? 0);
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
-      return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
+      const key = `${id}\n${version}\n${hash}`;
+      return listingArtifacts.get(key) ?? (await listingsPublishedBy(deal.owners.buyer))?.get(key) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing, readSettlementNode });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
