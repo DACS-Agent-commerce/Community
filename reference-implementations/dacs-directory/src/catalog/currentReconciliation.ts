@@ -40,9 +40,17 @@ export function currentBundleCopiesDiverge(
 ): boolean {
   const buyerType = buyerBundle.faultBundleVersion === "1" ? "fault" : buyerBundle.bundleVersion === "1" ? "legacy" : "unknown";
   const sellerType = sellerBundle.faultBundleVersion === "1" ? "fault" : sellerBundle.bundleVersion === "1" ? "legacy" : "unknown";
+  // Fault bundles name the absolute role at fault. When that role is the
+  // orchestrator, both buyer and seller legitimately report a counterparty
+  // failure/abort; perspective-flipping either would invent a contradiction.
+  const faultClass = (outcome: unknown) => outcome === "failed-perm" || outcome === "failed-counterparty" ? "failure"
+    : outcome === "aborted-by-self" || outcome === "aborted-by-other" ? "abort" : outcome;
+  const outcomesDiverge = buyerType === "fault"
+    ? faultClass(buyerBundle.outcome) !== faultClass(sellerBundle.outcome)
+    : flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome);
   return buyerType !== sellerType ||
     (buyerType === "fault" && buyerBundle.faultedParty !== sellerBundle.faultedParty) ||
-    flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
+    outcomesDiverge ||
     phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary);
 }
 

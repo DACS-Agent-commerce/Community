@@ -76,8 +76,8 @@ export function deriveSellerReputation(
   }
   scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
-  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral).length;
-  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral &&
+  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral || deal.faultedParty === "orchestrator").length;
+  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral && deal.faultedParty !== "orchestrator" &&
     (deal.sellerOutcome === "failed-counterparty" || deal.sellerOutcome === "aborted-by-other")).length;
   const partyFaultDenominator = scoped.length - neutral;
   const blameDenominator = partyFaultDenominator - counterpartyFault;

@@ -144,6 +144,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -153,11 +154,8 @@ export async function indexRegistration(
   try {
     const resolved = await resolveIdentities(hex);
     const record = parseCciRecord(reg.primaryClaim, resolved);
-    // Proof URLs live in the raw GCR payload (web2.<platform>[].proof).
-    const rawWeb2 = ((resolved as { response?: { web2?: Record<string, Array<{ username?: string; proof?: string }>> } })
-      ?.response?.web2) ?? {};
-    const proofFor = (platform: string, handle: string): string | undefined =>
-      rawWeb2[platform]?.find((e) => e?.username?.toLowerCase() === handle.toLowerCase())?.proof;
+    // The SDK already associates each proof with its parsed claim across all
+    // supported GCR envelopes, and skips malformed preceding rows.
     const profileFor = (platform: string, handle: string): string | undefined =>
       platform === "github" ? `https://github.com/${handle}` :
       platform === "twitter" ? `https://x.com/${handle}` : undefined;
@@ -166,7 +164,7 @@ export async function indexRegistration(
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
     cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
-          proofUrl: proofFor(c.platform, c.handle), linkUrl: profileFor(c.platform, c.handle) }
+          proofUrl: c.proof, linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
           linkUrl: explorerFor(c.chainType, c.address) });
   } catch {
@@ -458,6 +456,8 @@ export async function indexRegistration(
         bundleContentHash: authoritative?.bundleContentHash,
         reputationEligible: refsVerified,
         cancellationNeutral,
+        faultedParty: authoritative?.bundle.faultBundleVersion === "1"
+          ? authoritative.bundle.faultedParty as DealRecord["faultedParty"] : undefined,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
@@ -471,7 +471,7 @@ export async function indexRegistration(
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
       let rawBundle: Record<string, unknown> | null = null;
-      const verification = await verifyBundleCore(ref, {
+      const verification = await verifyLegacyBundle(ref, {
         readArtifact: async (r) => {
           const raw = await readAnchor(r);
           if (r === ref) rawBundle = raw;
@@ -492,7 +492,10 @@ export async function indexRegistration(
         resolvePublicKey: async (claim) =>
           (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
-      }).catch(() => null);
+      }).catch((error) => {
+        throwIfInfrastructureError(error);
+        return null;
+      });
       const bundle = verification && isLegacyMvpAttestationBundle(verification.bundle)
         ? verification.bundle
         : undefined;
@@ -537,6 +540,7 @@ export async function indexRegistration(
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
       reputationEligible,
       cancellationNeutral,
+      faultedParty: undefined,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       category: bundleCategory(bundle, categoriesByListing),
@@ -568,7 +572,7 @@ export async function indexRegistration(
         (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
       );
       const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
+      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral && d.faultedParty !== "orchestrator").length;
       return {
         categoryScope: l.offering.category,
         completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,

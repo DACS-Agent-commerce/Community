@@ -188,6 +188,9 @@ test("primaryClaim filtering accepts exact claims and canonical prefixes", () =>
   const claim = `did:demos:agent:${"a".repeat(64)}`;
   assert.equal(primaryClaimMatches(claim, claim), true);
   assert.equal(primaryClaimMatches(claim, "did:demos:agent"), true);
+  assert.equal(primaryClaimMatches(claim, "did:demos"), true);
+  assert.equal(primaryClaimMatches(claim, claim.slice(0, -1)), false);
+  assert.equal(primaryClaimMatches(claim, "did:demos:agen"), false);
   assert.equal(primaryClaimMatches(claim, "did:demos:other"), false);
   assert.equal(primaryClaimMatches(claim, `${claim}:extra`), false);
 });

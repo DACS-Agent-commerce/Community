@@ -101,3 +101,33 @@ test("listing discovery can add the inspection affordance without changing the s
   assert.equal(withInspection.transactionReadiness?.disposition, "unassessed");
   assert.equal(listing.inspection, undefined);
 });
+
+test("inspection preserves all service fields and canonical seller links with either artifact profile", () => {
+  const seller = `did:demos:agent:${"ab".repeat(32)}`;
+  const encodedSeller = `did%3Ademos%3Aagent%3A${"ab".repeat(32)}`;
+  for (const explicit of [true, false]) {
+    const candidate = structuredClone(listing);
+    candidate.listingId = "service/name";
+    candidate.seller.primaryClaim = `${seller}?channel=directory`;
+    if (!explicit) {
+      delete candidate.artifactProfile;
+      delete candidate.offering.rails;
+      delete candidate.offering.delivery;
+      delete candidate.offering.negotiation;
+    }
+    const envelope = buildDirectoryServiceInspectionEnvelope("https://directory.example", candidate);
+    assert.equal(envelope.artifact.listing.artifactProfile, explicit ? "dacs-v0.1" : "legacy-sdk-v0.1");
+    assert.equal(envelope.artifact.listing.seller, `${seller}?channel=directory`, "signed reference bytes are retained");
+    assert.deepEqual(envelope.artifact.service, {
+      title: "Dependency upgrade plan", category: "services.dependency-upgrade", tags: ["dependencies", "upgrade"],
+      rails: explicit ? ["pay-x402"] : [], delivery: explicit ? ["deliver-storage-program"] : [],
+      negotiation: explicit ? ["negotiate-fixed-price"] : [],
+    });
+    assert.deepEqual(envelope.artifact.links, {
+      listingJson: `https://directory.example/api/dacs/listings/service%2Fname/1?seller=${encodedSeller}`,
+      servicePage: `https://directory.example/service/${encodedSeller}/service%2Fname/1`,
+    });
+    assert.equal(envelope.source.url,
+      `https://directory.example/api/dacs/inspect-service/service%2Fname/1?seller=${encodedSeller}`);
+  }
+});
