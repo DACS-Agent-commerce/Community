@@ -32,6 +32,9 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
     // with the replacement chain's low tip on every zero-work scan.
     lastChainTip: 5,
     listings: { [`stor-${"a".repeat(40)}`]: `0x${"b".repeat(64)}` },
+    publisherListingDiscoveries: {
+      "old.example": { publisherClaim: `did:demos:agent:${"b".repeat(64)}`, listingAnchors: [`stor-${"a".repeat(40)}`] },
+    },
     deals: {},
   });
   store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "old chain", 1);
@@ -42,6 +45,7 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
   assert.equal(result.cursor, 3, "finality depth leaves the newest two transactions for replay");
   assert.equal(store.loadScanState().schemaVersion, 10);
   assert.deepEqual(Object.keys(store.loadScanState().listings), []);
+  assert.deepEqual(Object.keys(store.loadScanState().publisherListingDiscoveries), []);
   assert.equal(store.indexerDiagnostics().deadLetters, 0);
   assert.match(logs[0] ?? "", /chain replacement detected/);
 });

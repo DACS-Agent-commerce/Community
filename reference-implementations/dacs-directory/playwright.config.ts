@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const butlerOrigin = process.env.LIVE_BUTLER_ORIGIN ?? "https://butler.agentcommerce.network";
 const livePaidRun = process.env.RUN_LIVE_PAID_E2E === "1";
@@ -31,6 +34,9 @@ export default defineConfig({
     env: {
       NEXT_PUBLIC_DIRECTORY_URL: "http://localhost:3400",
       NEXT_PUBLIC_BUTLER_ORIGIN: butlerOrigin,
+      // Browser fixtures start unindexed, independent of unit-test reindexes
+      // or a developer's catalog in the default data directory.
+      DACS_DIRECTORY_DATA: mkdtempSync(join(tmpdir(), "dacs-directory-e2e-")),
     },
   },
 });

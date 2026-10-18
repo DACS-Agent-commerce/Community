@@ -344,6 +344,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    const activeDomains = new Set(domains.flatMap((domain) => {
+      try { return [normalizeSubmittedDomain(domain)]; }
+      catch { return []; }
+    }));
+    for (const domain of Object.keys(state.publisherListingDiscoveries)) {
+      if (!activeDomains.has(domain)) delete state.publisherListingDiscoveries[domain];
+    }
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
       for (const e of crawl.errors) {
@@ -356,6 +363,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       for (const agent of crawl.agents) {
         await ingestWellKnownRevocations(agent);
         const sourceProvenance = wellKnownWithdrawalProvenance(agent);
+        if (sourceProvenance) {
+          state.publisherListingDiscoveries[normalizeSubmittedDomain(agent.domain)] = {
+            publisherClaim: agent.seller,
+            listingAnchors: [...agent.listingAnchors],
+          };
+        }
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -392,7 +405,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
-    const listingAnchorsFor = publisherListingAnchors(allRegs);
+    // Use submitted signed registrations before synthetic discovery mutates
+    // them, plus this pass's scanner and authenticated domain hints.
+    const listingAnchorsFor = publisherListingAnchors(loadRegistrations(), state);
 
     const sellers = [];
     for (const reg of allRegs) {

@@ -1,3 +1,4 @@
+import "./helpers/isolated-directory.js";
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority, fixtureRecipeSnapshot } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
 import { deliverableAnchorBinding, OPAQUE_PROGRAM_NAME, paymentAnchorBinding } from "./helpers/anchor-binding.js";
@@ -14,6 +15,8 @@ import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/re
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { loadScanState, saveScanState } from "../src/catalog/store.js";
+import { registrationMessage } from "../src/catalog/registrationSig.js";
+import { parseRegistration } from "../src/catalog/registration.js";
 import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
@@ -1394,6 +1397,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
   const registrations = [await registration(later, "seller-a-later", 1), await registration(earlier, "seller-b-earlier", 0)];
   const originalFetch = globalThis.fetch;
   const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
   globalThis.fetch = async (input, init) => {
     if (init?.method === "POST") {
       const call = JSON.parse(String(init.body)).params?.[0];
@@ -1453,6 +1457,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
   } finally {
     globalThis.fetch = originalFetch;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1463,6 +1468,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
   const fixture = await vector("passive-binding-job", 1600);
   const originalMaps = new Map(maps);
   const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
   const originalFetch = globalThis.fetch;
   const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH;
   process.env.DACS_SCAN_FINALITY_DEPTH = "0";
@@ -1515,6 +1521,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
     globalThis.fetch = originalFetch;
     if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1524,6 +1531,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
   const { discoveredDealKey } = await import("../src/catalog/scanState.js");
   const originalFetch = globalThis.fetch;
   const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const priorCatalog = store.loadCatalog();
   const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH; process.env.DACS_SCAN_FINALITY_DEPTH = "0";
   const deal = { jobId: "cached-legacy", rail: "demos-native:DEM", buyerBundleRef: locator(3001), sellerBundleRef: locator(3002),
     owners: { buyer: dids[0], seller: dids[1] }, sellerFromAgreement: dids[1] };
@@ -1560,6 +1568,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
     globalThis.fetch = originalFetch;
     if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
     store.saveScanState(priorState); store.saveRegistrations(priorRegs); store.saveDomains(priorDomains);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1766,9 +1775,22 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: { [procurementAgain.locators.listing]: `0x${dids[0].slice(-64)}` },
       deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
     credited(await indexRegistration(supplierRegistration, undefined, async () => []), "scan-state publisher anchors");
+    // A third party can register unsigned candidates for an unregistered buyer.
+    // Those candidates cannot consume its suppliers' publisher read budget.
+    const squatter = { primaryClaim: dids[0], displayName: "squatter", listingAnchors: others };
+    assert.equal(parseRegistration(squatter).ok, true);
+    store.saveRegistrations([squatter, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter before batch");
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "unsigned squatter after batch");
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter after immediate refresh");
     store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
     uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "no discovered publisher anchors");
-    store.saveRegistrations([{ primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] }, supplierRegistration]);
+    const buyerRegistration = { primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] };
+    const signedAt = Date.now();
+    const message = registrationMessage(buyerRegistration, signedAt);
+    const signature = Buffer.from(await ed25519Sign(Buffer.from(message), privateKeyFromSeed(seeds[0]))).toString("base64url");
+    store.saveRegistrations([{ ...buyerRegistration, ownerSignature: { message, signature, signedAt } }, supplierRegistration]);
     credited(await indexRegistration(supplierRegistration, undefined, async () => []), "registered-only publisher before batch");
     await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
     const sellers = store.loadCatalog().sellers;
@@ -1782,7 +1804,7 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     // sources share the same read bound, and duplicates do not spend it twice.
     store.saveCatalog(emptyCatalog);
     const discovered = Object.fromEntries(others.map((anchor) => [anchor, `0x${dids[0].slice(-64)}`]));
-    const emptyState = { ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] };
+    const emptyState = { ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, publisherListingDiscoveries: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] };
     store.saveScanState({ ...emptyState, listings: discovered });
     uncounted(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []), "combined sources over the read bound");
     delete discovered[others[0]];
@@ -1822,6 +1844,54 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     assert.equal(store.loadRegistrations().some((reg) => reg.primaryClaim === dids[0]), false);
     credited(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "well-known-only publisher after immediate refresh");
 
+    // Reviewer outage probe: historical discovery survives catalog replacement
+    // even though the failed crawl cannot publish the buyer's current offers.
+    const outage = { log: () => {}, resolveIdentities: async () => [],
+      crawlWellKnown: async () => ({ agents: [], errors: [{ domain: "buyer.example", error: "temporary outage" }] }) };
+    await reindexAll(outage);
+    let batchSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(batchSupplier, "crawl outage after batch");
+    assert.equal(store.loadCatalog().sellers.some((seller) => seller.primaryClaim === dids[0]), false);
+    credited(await indexRegistration(supplierRegistration, batchSupplier, async () => []), "crawl outage after immediate refresh");
+    await reindexAll(outage);
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "repeated crawl outage");
+
+    // Reviewer pending-withdrawal probe: authenticated discovery must survive
+    // even on its first crawl, when no public buyer listing is ever saved.
+    store.saveScanState(emptyState);
+    store.saveCatalog(emptyCatalog);
+    const listingHash = artifactHash(procurementAgain.listing, "listing");
+    const pendingMarker = locator(16000);
+    maps.set(pendingMarker, { unreadable: true });
+    const normalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => String(input).endsWith(pendingMarker)
+      ? Response.json({ success: false, errorCode: "UNAVAILABLE" }, { status: 503 }) : normalFetch(input, init);
+    store.admitRevocationCandidates(listingHash, [{ locator: pendingMarker }]);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    assert.equal(store.hasPendingRevocationCandidates(listingHash), true);
+    assert.equal(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[0])!.listings.length, 0);
+    batchSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(batchSupplier, "pending withdrawal after batch");
+    credited(await indexRegistration(supplierRegistration, batchSupplier, async () => []), "pending withdrawal after immediate refresh");
+    globalThis.fetch = normalFetch;
+
+    // A prior catalog is presentation, not discovery. Its removed rows cannot
+    // exhaust the current pass's budget, even on the first replacement pass.
+    const staleCatalog = store.loadCatalog();
+    const buyerRow = staleCatalog.sellers.find((seller) => seller.primaryClaim === dids[0])!;
+    buyerRow.listings = others.map((anchor) => ({ ...publisher.listings[0], anchor: { kind: "storage-program", locator: anchor } }));
+    store.saveCatalog(staleCatalog);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "stale prior catalog anchors");
+
+    // Successful domain indexes replace old hints rather than accumulating
+    // withdrawn anchors; removing a domain retires its hints too.
+    store.saveScanState({ ...store.loadScanState(), publisherListingDiscoveries: {
+      "buyer.example": { publisherClaim: dids[0], listingAnchors: others },
+    } });
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "fresh authenticated index replaces old hints");
+
     // A cached discovery never substitutes for current owner/signature/hash checks.
     listingOwner = 1;
     uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with a different chain owner");
@@ -1830,6 +1900,9 @@ test("a buyer-published procurement listing credits its supplier's verified comp
     uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with tampered bytes");
     maps.delete(procurementAgain.locators.listing);
     uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing missing on chain");
+    store.saveDomains([]);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    assert.deepEqual(Object.keys(store.loadScanState().publisherListingDiscoveries), [], "removed domains retire discovery hints");
   } finally {
     globalThis.fetch = originalFetch;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
