@@ -70,7 +70,7 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
-import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
+import { deriveIdentityTier, sellerIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -576,9 +576,7 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
-  const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
-  const identityTier = identityTiers.includes("institutional") ? "institutional"
-    : identityTiers.includes("verified") ? "verified" : "self-declared";
+  const identityTier = sellerIdentityTier(await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe))));
 
   return {
     primaryClaim: reg.primaryClaim,

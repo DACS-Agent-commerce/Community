@@ -440,14 +440,14 @@ test("identity tier skips claims whose verification artifacts have no canonical 
   const resultFor = async (attestation: string, attestationHash: string) => {
     const scope: Obj = {
       resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass",
-      attestation: { anchor: { kind: "storage-program", locator: attestation }, contentHash: attestationHash }, verifiedAt: 20, validUntil: 200,
+      attestation: { anchor: { kind: "storage-program", locator: attestation }, contentHash: attestationHash, signer: authoritySigner }, verifiedAt: 20, validUntil: 200,
     };
     return { ...scope, signature: await signArtifact(scope, "verify-result", 0) };
   };
-  const attested = { authority: "ok" };
+  const attested = authorityProof({ authority: "ok" });
   objects[locator(71)] = JSON.stringify(attested);
   objects[locator(72)] = withMember(attested, "1e400");
-  const valid = await resultFor(locator(71), contentHash(attested));
+  const valid = await resultFor(locator(71), proofHash(attested));
   const malformedAttestation = await resultFor(locator(72), "e".repeat(64));
   objects[locator(73)] = JSON.stringify(valid);
   objects[locator(74)] = JSON.stringify(malformedAttestation);
@@ -457,9 +457,9 @@ test("identity tier skips claims whose verification artifacts have no canonical 
   const policy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live" as const, trustedResultSigners: [buyer] };
 
   const malformedOnly = { claims: [unhashableResult, claim(locator(74), malformedAttestation)] };
-  assert.equal(await deriveIdentityTier(malformedOnly, async () => policy, 100, read), "self-declared");
+  assert.equal(await deriveIdentityTier(malformedOnly, async () => policy, 100, read, undefined, verifyTestAuthority), "self-declared");
   const withValid = { claims: [unhashableResult, claim(locator(74), malformedAttestation), claim(locator(73), valid)] };
-  assert.equal(await deriveIdentityTier(withValid, async () => policy, 100, read), "institutional");
+  assert.equal(await deriveIdentityTier(withValid, async () => policy, 100, read, undefined, verifyTestAuthority), "institutional");
 });
 
 test("reindex drops malformed carried bindings and still indexes every later seller", async () => {

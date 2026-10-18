@@ -1291,23 +1291,23 @@ test("current pre-commit policy cancellations are reputation-neutral", () => {
 });
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {
-  maps.clear(); const attested = { authority: "ok" }; maps.set(locator(8), attested);
+  maps.clear(); const attested = authorityProof({ authority: "ok" }); maps.set(locator(8), attested);
   const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass", reason: "found",
-    attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: contentHash(attested) }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
+    attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: proofHash(attested), signer: authoritySigner }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
   const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(9), result);
   const identity = { claims: [{ ref: "lei:123", verifiedBy: ref(locator(9), result, "verify-result", { recipeVersion: 2 }) }] };
   const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
-  const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null);
+  const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority);
   assert.equal(tier, "institutional");
   const mixedScheme = structuredClone(result);
   (mixedScheme.signature as Obj).signer = `DID:demos:agent:${dids[0].slice(-64)}`;
   maps.set(locator(9), mixedScheme);
   assert.equal(
-    await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null),
+    await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority),
     "institutional",
     "trusted signer comparison uses its resolved canonical identity",
   );
-  assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+  assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority), "self-declared");
 });
 
 test("a mixed pair indexes the fault copy's advisory fields and hash even when it is the buyer copy", async () => {
