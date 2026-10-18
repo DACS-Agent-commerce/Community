@@ -58,6 +58,25 @@ interface ListingIndex {
   }>;
 }
 
+/** Whether this record completes a withdrawal check; discovery alone grants no authority. */
+export function listingIndexEntryIsComplete(value: unknown, seller: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as NonNullable<ListingIndex["listings"]>[number];
+  const hash = typeof entry.contentHash === "string" ? entry.contentHash.toLowerCase() : null;
+  if (typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+      !hash || !/^[0-9a-f]{64}$/.test(hash) || entry.anchor?.kind !== "storage-program" ||
+      typeof entry.anchor.locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(entry.anchor.locator)) return false;
+  if (entry.status === "active") return entry.revocation === undefined;
+  if (entry.status !== "revoked") return false;
+  const binding = entry.revocation;
+  return Boolean(binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
+    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
+    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
+    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
+    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
+    /^[0-9a-f]{64}$/.test(binding.markerContentHash));
+}
+
 export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
   binding.sellerPrimaryClaim, binding.listingId, binding.listingVersion, binding.listingContentHash,
   binding.logicalAddress, binding.markerAnchor.kind, binding.markerAnchor.locator, binding.markerContentHash,
@@ -161,18 +180,8 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
       typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) || !hash
     ) { incompleteWithdrawalHashes.push(hash ?? "*"); continue; }
-    if (entry.status === "revoked") {
-      const binding = entry.revocation;
-      if (!binding || typeof binding !== "object" || Array.isArray(binding) || binding.sellerPrimaryClaim !== seller || binding.listingId !== entry.listingId ||
-          binding.listingVersion !== entry.version || binding.listingContentHash !== hash ||
-          binding.logicalAddress !== revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) ||
-          binding.markerAnchor?.kind !== "storage-program" || typeof binding.markerAnchor.locator !== "string" ||
-          !/^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) || typeof binding.markerContentHash !== "string" ||
-          !/^[0-9a-f]{64}$/.test(binding.markerContentHash)) incompleteWithdrawalHashes.push(hash);
-      else revocations.push(binding);
-    } else if (entry.revocation !== undefined || (entry.status !== undefined && entry.status !== "active")) {
-      incompleteWithdrawalHashes.push(hash);
-    }
+    if (!listingIndexEntryIsComplete(entry, seller)) incompleteWithdrawalHashes.push(hash);
+    else if (entry.status === "revoked" && entry.revocation) revocations.push(entry.revocation);
     listingAnchors.push(locator);
     contentHashes[locator] = hash;
   }

@@ -28,8 +28,10 @@ export interface VerifiedListing {
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+// Procurement remains outside this reader profile until reconciliation can resolve
+// the publisher as buyer and attribute supplier history to the agreement seller.
 const PHASES = new Set([
-  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope", "negotiate-sealed-envelope-procurement",
+  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope",
   "commit-agreement", "commit-payee-bound-agreement",
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",

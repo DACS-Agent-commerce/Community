@@ -211,7 +211,7 @@ const negotiationStep = (kind: string, selectionRule: unknown = "lowest-price") 
       : kind === "negotiate-sealed-envelope-procurement" ? { parameters: sealed(selectionRule, "procurement") } : {}),
 });
 
-test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 allows", async () => {
+test("PS-3: supported negotiation patterns enforce pricing compatibility; procurement remains unsupported", async () => {
   const pricing: Record<string, Record<string, unknown>> = {
     fixed: { kind: "fixed", price: { amount: "1", currency: "USDC" } },
     negotiable: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
@@ -222,7 +222,7 @@ test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 al
     "negotiate-fixed-price": ["fixed", "negotiable", "metered"],
     "negotiate-rfq": ["negotiable", "metered"],
     "negotiate-sealed-envelope": ["auction"],
-    "negotiate-sealed-envelope-procurement": ["auction"],
+    "negotiate-sealed-envelope-procurement": [],
   };
   const verdicts: Record<string, boolean> = {};
   const expected: Record<string, boolean> = {};
@@ -271,7 +271,6 @@ test("schema conformance: recognised listing members must have their DACS-1/3/4 
     "rate phase": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate", parameters: { required: true } }] },
     "rail with version": { acceptedRails: [{ railId: "pay-x402", railVersion: 2, parameters: { network: "base" } }] },
     "sealed-envelope demand": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: { ...sealed("lowest-price"), auctionMode: "demand" } }, ...tail] },
-    "sealed-envelope procurement": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope-procurement", parameters: sealed("lowest-price", "procurement") }, ...tail] },
     "rfq with fallback": { pricing: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
       pipeline: [{ kind: "negotiate-rfq", parameters: { ...RFQ, rfqInitiator: "seller", fixedPriceFallback: true } }, ...tail] },
     "notAfter after notBefore": { validity: { notBefore: 1, notAfter: 2 } },
@@ -377,4 +376,22 @@ test("negotiable bounds and metered units retain their independent schema types"
     { ...band, maxPct: -1 }, { ...meter, unit: ["call"] }, { ...meter, unit: 1 }, { ...meter, unit: "" }, { ...meter, unit: "x".repeat(65) }]) {
     assert.equal(await verifyListing(signedCurrentListing({ pricing })), null);
   }
+});
+
+test("shared canonicalization and listing verification reject lone surrogates in signed keys and values", async () => {
+  const guarded = await import("../src/catalog/canonical.js");
+  for (const surrogate of ["\ud800", "\udfff"]) {
+    for (const extra of [{ nested: { value: surrogate } }, { nested: { [surrogate]: "value" } }]) {
+      for (const canonical of [guarded.canonicalize, guarded.contentHash]) {
+        assert.throws(() => canonical(extra), /invalid Unicode/);
+      }
+      // The pinned SDK can sign these bytes; the actual Directory caller must refuse them.
+      const raw = signedCurrentListing(extra);
+      assert.equal(await verifyListing(raw).catch(() => null), null);
+    }
+  }
+  const valid = { nested: { ["\ud83d\ude00"]: "\ud83d\ude00" } };
+  assert.doesNotThrow(() => guarded.canonicalize(valid));
+  assert.equal(guarded.contentHash(valid), contentHash(valid));
+  assert.ok(await verifyListing(signedCurrentListing(valid)));
 });

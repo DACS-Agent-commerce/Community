@@ -1039,3 +1039,58 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
 });
+
+test("fixed-price negotiation of a negotiable band requires the exact decimal center and currency", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const [amount, currency, accepted] of [
+      ["100.000000000000000001", "USDC", true],
+      ["90", "USDC", false],
+      ["100.000000000000000002", "USDC", false],
+      ["100.000000000000000001", "EUR", false],
+    ] as const) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "100.000000000000000001", currency: "USDC" }, minPct: 20, maxPct: 20 };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      fixture.buyerBundle.listingRef = listingRef;
+      fixture.sellerBundle.listingRef = listingRef;
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
+      await installAgreement(fixture, agreementScope);
+      const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+      assert.equal(graph.ok, accepted, `${profile}: ${amount} ${currency}: ${graph.reason}`);
+      assert.equal(graph.refsVerified, accepted);
+    }
+  }
+});
+
+test("procurement completion remains unverified for either publisher role until role-aware reconciliation is supported", async () => {
+  for (const publisherRole of ["buyer", "seller"] as const) {
+    const fixture = await vector();
+    const scope = signedScope(fixture.listing, "listing");
+    scope.pipeline = [{ kind: "negotiate-sealed-envelope-procurement", parameters: {
+      commitDeadline: 1, revealWindow: 3600, auctionMode: "procurement", selectionRule: "lowest-price",
+    } }, ...(scope.pipeline as Obj[]).slice(1)];
+    scope.pricing = { kind: "auction", selectionRule: "lowest-price" };
+    fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+    const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    const agreement = signedScope(fixture.agreement, "agreement");
+    agreement.listingRef = listingRef;
+    if (publisherRole === "buyer") {
+      agreement.parties = [{ role: "buyer", primaryClaim: dids[1] }, { role: "seller", primaryClaim: dids[0] }];
+      for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) {
+        bundle.parties = (bundle.parties as Obj[]).map(party => ({ ...party, role: party.role === "buyer" ? "seller" : "buyer" }));
+      }
+    }
+    fixture.buyerBundle.listingRef = listingRef;
+    fixture.sellerBundle.listingRef = listingRef;
+    await installAgreement(fixture, agreement);
+    assert.equal(await verifyListing(fixture.listing), null, publisherRole);
+    const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+    assert.equal(graph.ok, false, publisherRole);
+    assert.equal(graph.refsVerified, false, publisherRole);
+  }
+});

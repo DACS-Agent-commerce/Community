@@ -459,7 +459,7 @@ test("PIPE-1/VPC and required listing schema reject correctly signed deficient l
   }
 });
 
-test("a discovered revocation marker withheld before first verification never becomes active", async () => {
+test("unread unauthenticated revocation hints cannot suppress a verified listing", async () => {
   const { admitRevocationCandidates, hasPendingRevocationCandidates } = await import("../src/catalog/store.js");
   const originalFetch = globalThis.fetch;
   try {
@@ -475,7 +475,7 @@ test("a discovered revocation marker withheld before first verification never be
       for (let pass = 0; pass < 2; pass++) {
         const record = await indexRegistration({ primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [listingAt] }, undefined,
           async () => { throw new Error("offline"); });
-        assert.deepEqual(record.listings, []); assert.equal(hasPendingRevocationCandidates(hash), true);
+        assert.equal(record.listings[0]?.status, "active"); assert.equal(hasPendingRevocationCandidates(hash), true);
       }
       // Successfully read invalid bytes can be rejected, completing the pending check.
       globalThis.fetch = async (input) => Response.json({ success: true, owner: `0x${keys[0]}`, data: String(input).endsWith(listingAt) ? listed : "invalid marker bytes" });

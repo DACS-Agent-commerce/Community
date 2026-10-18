@@ -91,6 +91,16 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
   const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
 
+  // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
+  // exactly its center. Canonical decimal strings avoid floating-point loss.
+  const pricing = rec(listing.pricing);
+  if (pricing?.kind === "negotiable" && pipeline.some((phase) => phase.kind === "negotiate-fixed-price")) {
+    const center = rec(pricing.bandCenter);
+    const price = rec(terms.price);
+    if (!priceTermOk(center) || !priceTermOk(price) ||
+        price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
+  }
+
   if (profile === "legacy") return terms.payoutBindings === undefined;
   if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
 

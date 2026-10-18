@@ -143,3 +143,46 @@ test("RB-4: the first valid marker in the batch wins and the binding names it; u
   assert.equal(await findValidListingRevocation(["stor-bad", "stor-good"], listing, 2, async (at) => { reads.push(at); return stored[at]; }, undefined, undefined, 1), null);
   assert.deepEqual(reads, ["stor-bad"]);
 });
+
+test("the revocation fixture bytes match SPEC_PIN", () => {
+  const name = "revocation-binding-v0.3.json";
+  const raw = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
+  const pin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
+  const line = pin.split("\n").find(line => line.includes(name));
+  assert.ok(line);
+  assert.equal(createHash("sha256").update(raw).digest("hex"), line.trim().split(/\s+/).at(-1));
+});
+
+test("upstream well-known surface vectors exercise the actual entry parser and integrity gate", async t => {
+  const { listingIndexEntryIsComplete, crawlDomain } = await import("../src/catalog/wellknown.js");
+  const surfaceCases = vectors.vectors.filter(vector =>
+    vector.markerRead.status === "not-applicable" || SURFACE_ONLY.has(vector.want.failedAt ?? ""));
+  assert.equal(surfaceCases.length, 6);
+  for (const vector of surfaceCases) await t.test(vector.name, async t => {
+    if (vector.want.failedAt === "catalogFreshness") {
+      t.skip("Out of scope: Directory produces catalogs; it does not consume remote catalog records or their age.");
+      return;
+    }
+    if (vector.want.failedAt === "surfaceIntegrity") {
+      const result = await crawlDomain("fixture.example", { validateUrl: async () => ({} as never), fetchJson: async url => {
+        const body = url.endsWith("agent.json")
+          ? { dacs: { dacsVersion: "1", listings: { indexUrl: "https://fixture.example/listings.json", indexHash: `sha256-${"0".repeat(64)}` } } }
+          : { indexVersion: "1", generatedAt: 1, listings: [] };
+        return { body, raw: JSON.stringify(body) };
+      } });
+      assert.ok("error" in result);
+      assert.match(result.error, /indexHash mismatch/);
+      return;
+    }
+    const surfaces = (vector as unknown as { surfaces?: Array<{ status: string; binding?: string | null }> }).surfaces
+      ?? [vector.surface as { status: string; binding?: string | null }];
+    const complete = surfaces.map(surface => listingIndexEntryIsComplete({
+      listingId: fixtures.listing.listingId, version: fixtures.listing.listingVersion,
+      contentHash: fixtures.listing.listingContentHash,
+      anchor: { kind: "storage-program", locator: fixtures.bindings["opaque-name"].markerAnchor.locator },
+      status: surface.status,
+      ...(surface.binding ? { revocation: fixtures.bindings[surface.binding] } : {}),
+    }, fixtures.listing.sellerPrimaryClaim));
+    assert.equal(complete.every(Boolean) ? "absent" : "indeterminate", vector.want.revocationCheck);
+  });
+});

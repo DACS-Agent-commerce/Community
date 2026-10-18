@@ -28,6 +28,7 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
+  retainListingRevocation,
   recordWellKnownWithdrawalCheck,
   loadWithdrawalCursor,
   saveWithdrawalCursor,
@@ -352,14 +353,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
       for (const agent of crawl.agents) {
         await ingestWellKnownRevocations(agent);
-        const sourceProvenance = wellKnownWithdrawalProvenance(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
-          // An unsigned, unpinned source cannot establish a complete withdrawal
-          // check for a new executable offer. Independently known anchors remain
-          // available, and verified tombstones can still withdraw those offers.
-          if (!sourceProvenance) continue;
+          // Discovery is a hint; the indexer independently verifies the anchor,
+          // publisher, owner and declared hash. Withdrawal authority is separate.
           if (!reg.listingAnchors.includes(anchor)) {
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
@@ -523,6 +521,8 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
             async (locator) => { const result = await read(locator); return result.status === "present" ? result.record.data : null; }));
         const found = markers.get(key);
         if (found && found.markerContentHash === binding.markerContentHash && found.logicalAddress === binding.logicalAddress) {
+          const marker = cache.get(binding.markerAnchor.locator);
+          if (marker?.status === "present") retainListingRevocation(found, marker.record.data);
           admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
         }
       }

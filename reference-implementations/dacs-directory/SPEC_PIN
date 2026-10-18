@@ -6,6 +6,7 @@
 # DACS-Standard #296, merged into `next` at 725fa78bd124a7adb65df27adee376d5d44a4bd7; its fixture
 # is vendored below. Its keys are Ed25519, so artifacts signed with ecdsa-secp256k1 or
 # sr1-aggregate cannot be verified under this profile and are not published or counted.
+#   Procurement listings remain unsupported until publisher-as-buyer reconciliation and supplier attribution exist.
 # Recorded deviations (vectors: test/standard-vectors.test.ts; local guards: test/evidence-graph-rules.test.ts,
 # test/indexer-binding-rules.test.ts, test/legacy-deal-rules.test.ts and test/native-payment.test.ts):
 #   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not

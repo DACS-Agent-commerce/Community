@@ -300,3 +300,16 @@ test("publisher rejects fractional percentages cleanly under its integer profile
     assert.match((await response.json()).error, /integer/);
   }
 });
+
+test("publication rejects lone high/low surrogate keys and values and accepts a valid pair", async () => {
+  for (const surrogate of ["\ud800", "\udfff"]) {
+    for (const extra of [{ description: surrogate }, { [surrogate]: "extension" }]) {
+      const response = await POST(request({ ...base, ...extra }));
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /invalid Unicode/);
+    }
+  }
+  const response = await POST(request({ ...base, name: "Service \ud83d\ude00", ["\ud83d\ude00"]: "valid" }));
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).identityMessage);
+});

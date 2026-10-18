@@ -273,14 +273,17 @@ is retained only for labelled legacy artifacts. DACS-2 tier derivation fails clo
 unresolved recipe/evidence/freshness, and DACS-5 derivation includes ratings, volume,
 settlement uniqueness, anchor-time windowing, and deterministic receipts. Catalog
 computations remain advisory and independently reproducible from their refs.
+Procurement listings remain outside this reader profile until reconciliation supports
+the publisher as buyer and attributes supplier history to the agreement seller.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
 - **DACS Standard**: `SPEC_PIN` records the revision this Directory implements (v0.4,
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
-  with their hashes, and the recorded deviations. `test/standard-vectors.test.ts` checks
-  the hashes and runs each set through an adapter onto the Directory's own decisions. The
-  `did:demos:agent` primary-claim profile is the one deliberate addition; it comes from
+  with their hashes, and the recorded deviations. `test/listing-vectors.test.ts` and `test/revocation-vectors.test.ts` check
+  the two listing/withdrawal fixture hashes and exercise the Directory's decisions; the
+  revocation adapter explicitly excludes remote-catalog freshness, which this producer
+  does not consume. The `did:demos:agent` primary-claim profile is the one deliberate addition; it comes from
   DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
 - **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
   Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.

@@ -45,7 +45,9 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
-  hasPendingRevocationCandidates,
+  observedRevocationCandidate,
+  retainedListingRevocation,
+  retainListingRevocation,
   hasIncompleteWellKnownWithdrawal,
   boundWellKnownRevocations,
   admitRevocationCandidates,
@@ -98,6 +100,8 @@ export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
 /** A discovered candidate stays unresolved until its bytes can be verified (RB-5/6). */
 async function readRevocationCandidate(locator: string): Promise<Record<string, unknown> | null> {
+  const observed = observedRevocationCandidate(locator);
+  if (observed) return observed;
   const read = await readAnchorResult(locator);
   return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
 }
@@ -207,6 +211,7 @@ export async function indexRegistration(
       boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version)
         .map((binding) => ({ locator: binding.markerAnchor.locator })));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
+    const readMarkers = new Map<string, Record<string, unknown>>();
     const found = await findValidListingRevocation(
       [
         ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
@@ -214,19 +219,30 @@ export async function indexRegistration(
       ],
       verified,
       version,
-      readRevocationCandidate,
+      async (locator) => {
+        const marker = await readRevocationCandidate(locator);
+        if (marker) readMarkers.set(locator, marker);
+        return marker;
+      },
       undefined,
       progress,
       limit,
     );
     recordRevocationProgress(verified.contentHash, progress);
     // RB-3: a revocation verified on an earlier pass is retained, whatever its marker reads now.
-    const revocationBinding = found ?? prior?.listings.find((listing) => listing.status === "revoked" &&
+    if (found) {
+      const marker = readMarkers.get(found.markerAnchor.locator);
+      if (marker) retainListingRevocation(found, marker);
+    }
+    const retained = retainedListingRevocation(verified.contentHash);
+    const boundRetained = retained?.sellerPrimaryClaim === verified.sellerClaim && retained.listingId === listingId &&
+      retained.listingVersion === version ? retained : null;
+    const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
-    // RB-5: an unread or unexamined candidate leaves the check incomplete, and incomplete is never absent.
+    // Raw chain hints have no withdrawal authority. Only an authenticated source
+    // can leave an unresolved hold; a verified marker is retained above (RB-3).
     const revocation: RevocationCheck = revocationBinding ? "revoked"
-      : progress.unread.length > 0 || hasPendingRevocationCandidates(verified.contentHash) ||
-        hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
+      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;

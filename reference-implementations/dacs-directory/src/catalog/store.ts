@@ -373,6 +373,21 @@ const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
 /** True while any candidate for a listing is unread or not yet examined, so its RB-4 check is incomplete. */
 export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
   anyPendingCandidate.get(listingHash) !== undefined;
+
+/** Discovery bytes are retained so a carrier's later ACL change cannot erase a signed marker. */
+export function observedRevocationCandidate(locator: string): Record<string, unknown> | null {
+  const row = db.prepare("SELECT data_json FROM artifacts WHERE locator=? AND kind='listing-revocation'")
+    .get(locator) as { data_json: string | null } | undefined;
+  return row?.data_json ? JSON.parse(row.data_json) : null;
+}
+
+export function retainedListingRevocation(hash: string): RevocationBinding | null {
+  return getJson<{ binding: RevocationBinding } | null>(`listing-revocation:${hash}`, null)?.binding ?? null;
+}
+/** Call only after RB-4 verification against the independently verified listing signer. */
+export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
+  setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+}
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
@@ -447,6 +462,7 @@ export const saveScanState = db.transaction((state: ScanState): void => {
  * not rewrite an old failure's origin time as the rebuild time.
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'").run();
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
