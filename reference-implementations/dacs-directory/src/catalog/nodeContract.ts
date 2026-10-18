@@ -6,7 +6,6 @@
  */
 import { storageResponseJson } from "./artifactLimits.js";
 import { isUnknownNodeCall } from "./chain.js";
-import { gcrAuthHeaders } from "./gcr.js";
 
 export interface NodeContractReport {
   rpc: string;
@@ -57,7 +56,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
     method: "nodeCall",
     params: [{ type: "nodeCall", message: "searchStoragePrograms", sender: null, receiver: null, timestamp: null, data: { query: programName, options }, extra: "" }],
   });
-  const gcr = await post(base, await gcrAuthHeaders(), { method: "gcr_routine", params: [{ method: "searchStoragePrograms", params: [programName, options] }] });
+  const gcr = await post(base, { "content-type": "application/json" }, { method: "gcr_routine", params: [{ method: "searchStoragePrograms", params: [programName, options] }] });
   const viaNodeCall = addresses(nodeCall, programName);
   const viaGcr = addresses(gcr, programName);
   const nodeCallSearch = viaNodeCall ? "supported"

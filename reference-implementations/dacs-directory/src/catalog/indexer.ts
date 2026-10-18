@@ -50,7 +50,8 @@ import {
   retainListingRevocation,
   hasIncompleteWellKnownWithdrawal,
   boundWellKnownRevocations,
-  admitRevocationCandidates,
+  wellKnownWithdrawalRevision,
+  admitWellKnownRevocationCandidates,
   nextRevocationCandidates,
   resolveProgramAddress,
   loadScanState,
@@ -207,9 +208,9 @@ export async function indexRegistration(
     // Resolve authenticated carriage against this very same verified listing
     // read. An earlier discovery pre-read failure cannot discard a withdrawal,
     // and a foreign publisher cannot create globally hash-scoped pending work.
-    admitRevocationCandidates(verified.contentHash,
-      boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version)
-        .map((binding) => ({ locator: binding.markerAnchor.locator })));
+    const sourceRevision = wellKnownWithdrawalRevision();
+    const carriedBindings = boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version);
+    admitWellKnownRevocationCandidates(verified.contentHash, carriedBindings.map((binding) => binding.markerAnchor.locator));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const readMarkers = new Map<string, Record<string, unknown>>();
     const found = await findValidListingRevocation(
@@ -228,7 +229,7 @@ export async function indexRegistration(
       progress,
       limit,
     );
-    recordRevocationProgress(verified.contentHash, progress);
+    recordRevocationProgress(verified.contentHash, progress, carriedBindings, sourceRevision);
     // RB-3: a revocation verified on an earlier pass is retained, whatever its marker reads now.
     if (found) {
       const marker = readMarkers.get(found.markerAnchor.locator);

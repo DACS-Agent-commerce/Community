@@ -444,6 +444,14 @@ async function verifyCurrentEvidenceGraph(
       return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
+  // Discovery compatibility does not establish settlement semantics. This
+  // pairing needs agreement/deliverable, payment/finality and delivery adapters
+  // before either signed copy can contribute a verified outcome or volume.
+  // Include the RFQ fixed-price fallback and both agreement/bundle profiles.
+  if (rec(listed.raw.pricing)?.kind === "negotiable" && agreement?.derivedFromPattern === "fixed-price") {
+    return { ...fail("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
+      signaturesVerified, artifacts, agreement, listing: listed.raw };
+  }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: true, artifacts, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw) };
 }

@@ -12,7 +12,6 @@
  */
 import { boundedJson, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
-import { gcrAuthHeaders } from "./gcr.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 export const LIVE_STORAGE_SALT = "";
@@ -182,10 +181,10 @@ export async function resolveOwnedAnchorByName(
   });
   // The pinned node revision (README "Pinned upstreams") has no searchStoragePrograms nodeCall: it
   // answers an unknown message with result 200 and this literal, and serves the same exact-name
-  // search as a read-authenticated gcr_routine. A deployment with the nodeCall answers it directly.
+  // search as a public gcr_routine. A deployment with the nodeCall answers it directly.
   if (search.status === "ok" && isUnknownNodeCall(search.body)) {
     aclFilteredSearch = true;
-    search = await rpcCall(await gcrAuthHeaders(), {
+    search = await rpcCall({ "content-type": "application/json" }, {
       method: "gcr_routine",
       params: [{ method: "searchStoragePrograms", params: [programName, options] }],
     });

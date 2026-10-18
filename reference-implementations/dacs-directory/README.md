@@ -304,10 +304,11 @@ the publisher as buyer and attributes supplier history to the agreement seller.
   unpinned unless its operator supplies a verifiable deployment revision.
 
 **Node deployment contract.** At `ac8f45f` the exact-name program search used by the
-producer resume lookup exists only as the read-authenticated `gcr_routine
+producer resume lookup exists only as the public `gcr_routine
 searchStoragePrograms`; a deployed node may also answer it as a `nodeCall` (node2 did on
 2026-10-15). The Directory asks the `nodeCall` first and falls back to the `gcr_routine`
-only on a recognized "Unknown message" answer. The fallback can recover a listing
+only on a recognized "Unknown message" answer. Both public search reads send JSON
+headers without wallet authentication, as required by the pinned middleware contract. The fallback can recover a listing
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
 and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
 and withholds new publication until a complete search contract is available.
@@ -357,3 +358,18 @@ delay replay completion. Authenticated recrawls must retain each source's index
 timestamp and hash ordering, including after migration. A stored timestamp that is
 incorrectly ahead of the publisher's current index requires explicit operator
 revalidation of that source; an older index cannot silently replace it.
+
+Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
+fallback) are readable for listing discovery. Their deal evidence remains unverified
+and excluded from completion, ratings and volume until semantic agreement, settlement
+and delivery verification adapters support that combination.
+
+Authenticated revocation bindings survive newer active index advertisements and
+process restarts. An unread marker continues to withhold the offer until a successful
+read rejects it or verifies revocation; verified revocation takes precedence.
+Rejection is applied only while the captured source revision is current, so a slow
+read cannot clear a newer advertisement even when it references the same marker scope.
+
+The x402, AP2, EVM/EIP, SPL and HTLC names mirror the pinned DACS-4 rail registry.
+Independent protocol revisions and live handler compatibility are not asserted by
+these identifiers; any future live handler must pin and test its upstream contract.

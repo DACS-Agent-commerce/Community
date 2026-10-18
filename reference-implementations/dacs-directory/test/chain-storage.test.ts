@@ -72,6 +72,10 @@ test("producer resume lookup uses the pinned node's gcr_routine search when the 
       calls.push({ method: request.method, params: request.params[0], identity: new Headers(init.headers).get("identity") });
       // kynesyslabs/node ac8f45f: an unknown nodeCall message is result 200 with this literal.
       if (request.method === "nodeCall") return Response.json({ result: 200, response: '{ error: "Unknown message"}', require_reply: false, extra: null });
+      // Pinned middleware verifies any supplied signature and returns 401 for
+      // the SDK helper's incompatible digest. Public gcr_routine needs none.
+      if (new Headers(init.headers).has("identity")) return Response.json({ error: "invalid signature" }, { status: 401 });
+      assert.deepEqual([...new Headers(init.headers)], [["content-type", "application/json"]]);
       return Response.json({ result: 200, response: [{ storageAddress: honest, programName }] });
     }
     return Response.json({ success: true, data: { listingId: "service" }, owner, programName });
@@ -81,7 +85,7 @@ test("producer resume lookup uses the pinned node's gcr_routine search when the 
     assert.equal(resolution.status, "present");
     assert.deepEqual(calls.map((call) => call.method), ["nodeCall", "gcr_routine"]);
     assert.deepEqual(calls[1].params, { method: "searchStoragePrograms", params: [programName, { exactMatch: true, limit: 32, offset: 0 }] });
-    assert.match(calls[1].identity ?? "", /^ed25519:0x[0-9a-f]{64}$/, "the gcr_routine read carries the indexer's read-auth headers");
+    assert.equal(calls[1].identity, null, "public search must not send incompatible authentication");
     // Any other non-list answer is not the pinned node's unknown-message reply: no fallback, indeterminate.
     calls.length = 0;
     globalThis.fetch = async (_input, init) => {
@@ -101,6 +105,8 @@ test("the read-only node contract probe compares both search paths and the stora
   const node = (nodeCall: unknown, gcr: unknown, notFound = Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })) =>
     async (_input: unknown, init?: RequestInit) => {
       if (init?.method !== "POST") return notFound.clone();
+      if (new Headers(init.headers).has("identity")) return Response.json({ error: "invalid signature" }, { status: 401 });
+      assert.deepEqual([...new Headers(init.headers)], [["content-type", "application/json"]]);
       return Response.json(JSON.parse(String(init.body)).method === "nodeCall" ? nodeCall : gcr);
     };
   const found = { result: 200, response: [{ storageAddress: `stor-${"1".repeat(40)}`, programName }] };

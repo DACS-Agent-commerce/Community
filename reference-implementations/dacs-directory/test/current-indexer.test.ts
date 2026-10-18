@@ -1071,8 +1071,9 @@ test("fixed-price negotiation of a negotiable band requires the exact decimal ce
       agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
       await installAgreement(fixture, agreementScope);
       const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
-      assert.equal(graph.ok, accepted, `${profile}: ${amount} ${currency}: ${graph.reason}`);
-      assert.equal(graph.refsVerified, accepted);
+      assert.equal(graph.ok, false, `${profile}: ${amount} ${currency}: ${graph.reason}`);
+      assert.equal(graph.refsVerified, false);
+      assert.match(graph.reason ?? "", accepted ? /semantic settlement verification is unsupported/ : /does not match/);
     }
   }
 });
@@ -1127,7 +1128,7 @@ test("fixed-price agreements require a declared matching pattern for both pricin
         await installAgreement(fixture, agreementScope);
         for (const role of ["buyer", "seller"] as const) {
           const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
-          const accepted = pattern === "fixed-price";
+          const accepted = pattern === "fixed-price" && pricingKind === "fixed";
           const label = `${profile}/${pricingKind}/${role}/${JSON.stringify(pattern)}: ${graph.reason}`;
           assert.equal(graph.signaturesVerified, true, label);
           assert.equal(graph.ok, accepted, label);
@@ -1186,7 +1187,7 @@ test("agreement patterns must match RFQ and sealed-envelope pipelines in both ag
   }
 });
 
-test("RFQ fixed-price fallback remains eligible when explicitly declared", async () => {
+test("RFQ fixed-price fallback remains discoverable but requires semantic settlement adapters", async () => {
   for (const profile of ["legacy", "payee-bound"] as const) {
     const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
     const listingScope = signedScope(fixture.listing, "listing");
@@ -1208,8 +1209,9 @@ test("RFQ fixed-price fallback remains eligible when explicitly declared", async
       const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
       const label = `${profile}/${role}: ${graph.reason}`;
       assert.equal(graph.signaturesVerified, true, label);
-      assert.equal(graph.ok, true, label);
-      assert.equal(graph.refsVerified, true, label);
+      assert.equal(graph.ok, false, label);
+      assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
+      assert.equal(graph.refsVerified, false, label);
     }
   }
 });
@@ -1250,8 +1252,10 @@ test("RFQ fallback requires signed opt-in and the exact decimal center without r
         const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
         const label = `${profile}/${role}/${fallback}/${pattern}/${amount} ${currency}: ${graph.reason}`;
         assert.equal(graph.signaturesVerified, true, label);
-        assert.equal(graph.ok, accepted, label);
-        assert.equal(graph.refsVerified, accepted, label);
+        assert.equal(graph.ok, accepted && pattern === "rfq", label);
+        assert.equal(graph.refsVerified, accepted && pattern === "rfq", label);
+        if (accepted && pattern === "fixed-price") assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
+        if (!accepted) assert.match(graph.reason ?? "", /does not match/, label);
       }
     }
   }
@@ -1350,4 +1354,80 @@ test("authenticated indeterminate withdrawal hides discovery but retains a commi
     assert.equal(revoked.deals[0].refsVerified, true);
     assert.deepEqual(revoked.reputation, before.reputation, "verified revocation preserves committed history too");
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("new negotiable fixed-price pairings stay discoverable but cannot establish completion or volume", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const negotiation of ["negotiate-fixed-price", "negotiate-rfq"] as const) {
+      for (const faultBundle of [false, true]) for (const fault of ["missing-deliverable", "mismatched-deliverable", "usdc-pay-dem", "nonexistent-transaction", "missing-delivery", "missing-invocations"] as const) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        const scope = signedScope(fixture.listing, "listing");
+        const currency = fault === "usdc-pay-dem" ? "USDC" : "DEM";
+        scope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency }, minPct: 20, maxPct: 20 };
+        (scope.pipeline as Obj[])[0] = negotiation === "negotiate-rfq"
+          ? { kind: negotiation, parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true } }
+          : { kind: negotiation };
+        fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+        maps.set(fixture.locators.listing, fixture.listing);
+        assert.ok(await verifyListing(fixture.listing), "listing remains readable for discovery");
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        const agreement = signedScope(fixture.agreement, "agreement");
+        agreement.listingRef = listingRef;
+        agreement.terms = { ...(agreement.terms as Obj), price: { amount: "1.25", currency },
+          ...(fault === "missing-deliverable" ? {} : { deliverable: {
+            kind: "attested-payload", specHash: fault === "mismatched-deliverable" ? "f".repeat(64)
+              : contentHash((scope.offering as Obj).deliverable as Obj),
+          } }) };
+        for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) {
+          bundle.listingRef = listingRef;
+          if (fault !== "missing-invocations") bundle.phaseSummary = (scope.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
+        }
+        if (fault === "nonexistent-transaction") {
+          const evidence = signedScope(fixture.evidence, "evidence");
+          evidence.paymentTxRefs = [{ txId: "0".repeat(64), blockHash: "0".repeat(64), blockNumber: 1 }];
+          const signed = { ...evidence, signature: await sign(evidence, "evidence", 1) };
+          maps.set(fixture.locators.evidence, signed);
+          for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) bundle.settlementEvidence = [ref(fixture.locators.evidence, signed, "evidence")];
+        }
+        await installAgreement(fixture, agreement);
+        if (faultBundle) for (const role of ["buyer", "seller"] as const) {
+          const bundle = signedScope(role === "buyer" ? fixture.buyerBundle : fixture.sellerBundle, "bundle");
+          delete bundle.bundleVersion;
+          bundle.faultBundleVersion = "1";
+          bundle.faultedParty = "none";
+          const signed = { ...bundle, signatures: [await sign(bundle, "bundle", 0, true), await sign(bundle, "bundle", 1, true)], anchoredByRole: role };
+          maps.set(fixture.locators[role], signed);
+          if (role === "buyer") fixture.buyerBundle = signed;
+          else fixture.sellerBundle = signed;
+        }
+        const buyer = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+        const seller = await graphAt(fixture.locators.seller, fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${negotiation}/${faultBundle ? "fault" : "legacy"}/${fault}`;
+        assert.equal(buyer.signaturesVerified, true, label);
+        assert.equal(seller.signaturesVerified, true, label);
+        assert.equal(buyer.refsVerified, false, label);
+        assert.equal(seller.refsVerified, false, label);
+        const deal = registeredDeal(String(fixture.buyerBundle.jobId), fixture.locators.buyer, fixture.locators.seller);
+        assert.equal(reconcileCurrentCopies(deal, dids[1], buyer, seller).refsVerified, false, label);
+        const bindings = [await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+          await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1)];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input) => {
+          const data = maps.get(String(input).split("/").pop() ?? "");
+          return Response.json(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, data } : { success: false }, { status: data ? 200 : 404 });
+        };
+        try {
+          const indexed = await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+            deals: [deal], bundleBindings: bindings }, undefined, async () => { throw new Error("identity unavailable"); });
+          assert.equal(indexed.listings.length, 1, label);
+          assert.equal(indexed.deals[0].refsVerified, false, label);
+          assert.equal(indexed.deals[0].reputationEligible, false, label);
+          assert.equal(indexed.reputation.completed, 0, label);
+          assert.equal(indexed.reputation.bundleCount, 0, label);
+          assert.deepEqual(indexed.reputation.observedTransactionalVolume, [], label);
+        } finally { globalThis.fetch = originalFetch; }
+      }
+    }
+  }
 });

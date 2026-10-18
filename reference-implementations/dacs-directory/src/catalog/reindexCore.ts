@@ -465,7 +465,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     // Binding resolution has not happened yet. Keep it seller-scoped until a
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
-      [...(agent.incompleteWithdrawalHashes ?? []), ...agent.revocations.map((binding) => binding.listingContentHash)],
+      agent.incompleteWithdrawalHashes ?? [],
       agent.withdrawalIndex, agent.revocations, provenance)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
