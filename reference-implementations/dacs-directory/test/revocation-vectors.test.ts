@@ -101,7 +101,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "a non-Ed25519 algorithm": await verdict(await signed(tuple, seed, { algorithm: "ecdsa-secp256k1" })),
     "a listing signed by someone else": await verdict(await signed(tuple), 2, { ...listing, signer: didOf(otherSeed) }),
     // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
-    // producer would emit; nothing but the CORE §B.2 magnitude bound can reject it.
+    // producer would emit. The canonicalizer may reject it before the explicit magnitude check.
     "a revokedAt beyond the safe-integer range": await (async () => {
       const unsafe: Obj = { ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 };
       const jcs = JSON.stringify(Object.fromEntries(Object.entries(unsafe).sort(([a], [b]) => a < b ? -1 : 1)));

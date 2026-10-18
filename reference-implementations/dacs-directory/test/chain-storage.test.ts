@@ -102,9 +102,12 @@ test("producer resume lookup uses the pinned node's gcr_routine search when the 
 test("the read-only node contract probe compares both search paths and the storage not-found answer", async () => {
   const { probeNodeContract } = await import("../src/catalog/nodeContract.js");
   const originalFetch = globalThis.fetch;
-  const node = (nodeCall: unknown, gcr: unknown, notFound = Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })) =>
-    async (_input: unknown, init?: RequestInit) => {
-      if (init?.method !== "POST") return notFound.clone();
+  const node = (nodeCall: unknown, gcr: unknown, notFound = Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }),
+    knownProgram = Response.json({ success: true, programName, owner, data: {} })) =>
+    async (input: unknown, init?: RequestInit) => {
+      assert.ok(init?.signal, "every read has a deadline");
+      if (init?.method !== "POST") return String(input).endsWith(`stor-${"0".repeat(40)}`)
+        ? notFound.clone() : knownProgram.clone();
       if (new Headers(init.headers).has("identity")) return Response.json({ error: "invalid signature" }, { status: 401 });
       assert.deepEqual([...new Headers(init.headers)], [["content-type", "application/json"]]);
       return Response.json(JSON.parse(String(init.body)).method === "nodeCall" ? nodeCall : gcr);
@@ -133,10 +136,19 @@ test("the read-only node contract probe compares both search paths and the stora
     assert.equal((await verdict(node({ result: 200, response: [{}] }, found))).ok, false,
       "a malformed nodeCall must not select a fallback the Directory would never use");
     assert.deepEqual(await verdict(node({ result: 200, response: [] }, { result: 200, response: [] })),
-      { storageNotFound: true, nodeCallSearch: "supported", gcrRoutineSearch: "supported", searchesAgree: true, ok: true }, "empty searches are valid");
+      { storageNotFound: true, nodeCallSearch: "supported", gcrRoutineSearch: "supported", searchesAgree: true, ok: false }, "an empty search cannot certify a known public program");
+    assert.equal((await verdict(node({ result: 200, response: UNKNOWN_NODE_CALL }, { result: 200, response: [] }))).ok, false,
+      "an empty fallback also cannot certify a known program");
+    for (const known of [
+      Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }),
+      Response.json({ success: true, programName: `${programName}-wrong`, owner, data: {} }),
+      Response.json({ success: true, programName, data: {} }),
+      Response.json({ success: true, programName, owner, data: [] }),
+      new Response("{", { status: 200 }),
+    ]) assert.equal((await verdict(node(found, found, undefined, known))).ok, false, "matching searches still need a fresh public storage read");
     for (const length of [31, 32, 33]) {
       const page = { result: 200, response: Array.from({ length }, (_, index) => ({
-        storageAddress: `stor-${index.toString(16).padStart(40, "0")}`, programName,
+        storageAddress: `stor-${(index + 1).toString(16).padStart(40, "0")}`, programName,
       })) };
       const expected = length < 32;
       const report = await verdict(node(page, page));
@@ -200,7 +212,7 @@ test("producer resume lookup fails closed when the bounded result page is full",
   globalThis.fetch = async () => Response.json({
     result: 200,
     response: Array.from({ length: 32 }, (_, index) => ({
-      storageAddress: `stor-${index.toString(16).padStart(40, "0")}`,
+      storageAddress: `stor-${(index + 1).toString(16).padStart(40, "0")}`,
       programName,
     })),
   });

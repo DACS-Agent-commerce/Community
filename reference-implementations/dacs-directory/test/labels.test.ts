@@ -38,3 +38,11 @@ test("published metered prices retain their unit and minimum", () => {
   assert.equal(publishedPriceLabel({ kind: "fixed", priceHint: "10", currency: "DEM" }), "10 DEM");
   assert.equal(publishedPriceLabel({ kind: "metered" }), "Not published");
 });
+
+
+test("registry rail IDs and historical aliases share their display labels", () => {
+  assert.equal(railLabel("demos-native:DEM"), "DEM");
+  assert.equal(railLabel("x402:default"), "USDC · x402");
+  assert.equal(railLabel("pay-dem"), "DEM");
+  assert.equal(railLabel("pay-x402"), "USDC · x402");
+});

@@ -69,11 +69,10 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
   // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
   // proxy's or a wrong route's, leaves the read incomplete (RB-6).
-  if (res.status === 404 || res.status === 403) {
+  if (res.status === 404) {
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
-      const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
-      return res.status === 404 && answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
+      return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" } : { status: "unavailable" };
     } catch {
       return { status: "unavailable" };
     }

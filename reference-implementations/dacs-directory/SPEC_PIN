@@ -79,6 +79,21 @@
 # conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
 # conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
+# Its marker-level rejected verdicts and entry-completeness checks do not assert
+# end-to-end catalog status for every vector. In particular, unauthenticated
+# incomplete rows cannot create withdrawal holds (RB-5/RB-6 local policy).
+# For binding-logical-address-mismatch and binding-marker-content-hash-mismatch,
+# the producer derives a fresh binding from a verified marker rather than using
+# the corrupt received binding; that producer result is revoked, unlike the
+# upstream consumer verdict of indeterminate. Current authenticated marker
+# rejections release source bindings; marker-level indeterminate does not imply
+# that the producer publishes an indeterminate catalog row.
+# Directory extension to DACS-1 6.3.5: dacs.listings.publisherSignature signs UTF-8
+# "dacs-directory withdrawal-index:v1\ndomain:<normalized HTTPS origin>\nindex:sha256-<lowercase hash>"
+# with no final newline. The index seller's did:demos:agent Ed25519 key signs;
+# raw signatures use canonical unpadded Base64URL (64 bytes / 86 characters).
+# Hash the exact served index bytes; the signature is external in the agent card.
+# See README and test/withdrawal-publisher-signature.test.ts.
 # Other upstream vector sets are unimplemented adapters/unexecuted here,
 # including sb2-settlement-uniqueness, agreement-listing,
 # mixed-version-reconciliation, fault-bundle-perspective-pair,

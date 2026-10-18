@@ -77,7 +77,7 @@ test("DACS-1 §6.3.2: identity, offering, pricing, pipeline and validity rules a
     "a 2,000-character description": set("offering.description", "d".repeat(2000)),
     "a 64-character category": set("offering.category", "c".repeat(64)),
     "16 tags of 32 characters": set("offering.tags", Array.from({ length: 16 }, () => "t".repeat(32))),
-    "negotiable pricing at 0% and 99%": pricedWith({ ...negotiable, minPct: 99, maxPct: 0 }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "negotiable pricing at 0% and 99%": pricedWith({ ...negotiable, bandCenter: { amount: "100", currency: "DEM" }, minPct: 99, maxPct: 0 }, { kind: "negotiate-rfq", parameters: RFQ }),
     "an amount below one": set("pricing.price", { amount: "0.5", currency: "DEM" }),
     "a 64-character currency and unit": set("pricing.price", { amount: "1", currency: "c".repeat(64), unit: "u".repeat(64) }),
     "metered pricing with a minimum total in its currency": pricedWith({ kind: "metered", unitPrice: { amount: "1", currency: "DEM" }, unit: "u".repeat(64), minTotal: { amount: "2", currency: "DEM" } }, { kind: "negotiate-fixed-price" }),
@@ -510,5 +510,17 @@ test("parameterless phase kinds accept object parameters and bind nested extensi
     for (const parameters of [null, [], "metadata", 7]) {
       assert.equal(await verifyListing(listing(change(parameters))), null, `${kind}: malformed parameter object`);
     }
+  }
+});
+
+
+test("current listing envelopes require canonical SIG-6 bytes", async () => {
+  const canonical = listing();
+  const signature = canonical.signature as Obj;
+  assert.ok(await verifyListing(canonical));
+  const bytes = Buffer.from(signature.value as string, "base64url");
+  for (const value of [bytes.toString("hex"), `0x${bytes.toString("hex")}`, bytes.toString("base64"), `${signature.value}==`]) {
+    assert.equal(await verifyListing({ ...canonical, signature: { ...signature, value } }), null,
+      `noncanonical envelope ${value.slice(0, 12)}`);
   }
 });

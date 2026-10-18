@@ -362,8 +362,9 @@ the publisher as buyer and attributes supplier history to the agreement seller.
   unpinned unless its operator supplies a verifiable deployment revision.
 
 **Node deployment contract.** At `ac8f45f` the exact-name program search used by the
-producer resume lookup exists only as the public `gcr_routine
-searchStoragePrograms`; a deployed node may also answer it as a `nodeCall` (node2 did on
+producer resume lookup is available as the public `gcr_routine
+searchStoragePrograms` and `GET /storage-program/search?q=...&exact=true`; both
+filter ACLs after pagination. A deployed node may also answer it as a `nodeCall` (node2 did on
 2026-10-15). The Directory asks the `nodeCall` first and falls back to the `gcr_routine`
 only on a recognized "Unknown message" answer. Both public search reads send JSON
 headers without wallet authentication, as required by the pinned middleware contract. The fallback can recover a listing
@@ -372,7 +373,8 @@ and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
 and withholds new publication until a complete search contract is available.
 `npm run check:node -- <exact program name>` is a read-only probe (no
 transactions) that reports the storage not-found answer and both search paths, and fails
-when they disagree; its output is dated runtime evidence, not a pin. Run it when the
+when they disagree, return no known program, or a fresh read cannot confirm one
+matching public program. Its output is dated runtime evidence, not a pin. Run it when the
 `DEMOS_RPC` deployment changes.
 
 ## License
@@ -431,3 +433,26 @@ read cannot clear a newer advertisement even when it references the same marker 
 The x402, AP2, EVM/EIP, SPL and HTLC names mirror the pinned DACS-4 rail registry.
 Independent protocol revisions and live handler compatibility are not asserted by
 these identifiers; any future live handler must pin and test its upstream contract.
+
+The optional `dacs.listings.publisherSignature` is a Directory extension to DACS-1
+§6.3.5. Sign these exact UTF-8 bytes (LF separators, no final newline):
+
+```text
+dacs-directory withdrawal-index:v1
+domain:https://seller.example
+index:sha256-<64 lowercase hex digits>
+```
+
+`domain` is the normalized submitted HTTPS origin (lowercase hostname, no path or
+trailing slash, default port omitted). The hash is SHA-256 of the exact served
+index bytes, including whitespace. Use the Ed25519 key identified by the index's
+`seller` (`did:demos:agent:<64 lowercase hex>`). Encode the raw 64-byte signature
+as canonical unpadded Base64URL (86 characters, zero residual bits); padded,
+standard Base64 and hex encodings are rejected. The signature is stored in the
+agent card, outside the hashed index. Changing the origin or index bytes requires
+a new signature.
+
+Upgrade note: current-profile listings require SIG-6 canonical Base64URL
+`signature.value`. Older Directory publishers emitted hex values for that profile;
+republish those listings with canonical signatures. The labelled legacy SDK
+profile retains its documented compatibility reader.
