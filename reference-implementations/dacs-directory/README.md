@@ -407,4 +407,9 @@ complete authenticated check or a verified revocation resolves it. Failed later
 crawls retain incomplete checks; verified tombstones remain revoked. Upgrades retain
 affected seller/hash holds, including checks with no queued marker. Legacy sources
 without recorded provenance require a signature or operator pin before reconciliation;
-chain replay alone cannot release those holds.
+chain replay alone cannot release those holds. Ambiguous legacy candidates hold only
+their listing hashes until chain replay completes; unrelated source failures do not
+delay replay completion. Authenticated recrawls must retain each source's index
+timestamp and hash ordering, including after migration. A stored timestamp that is
+incorrectly ahead of the publisher's current index requires explicit operator
+revalidation of that source; an older index cannot silently replace it.

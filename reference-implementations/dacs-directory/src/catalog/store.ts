@@ -279,17 +279,20 @@ db.transaction(() => {
     if (source.provenance === "legacy") delete source.bindings;
   }
   setJson("withdrawal-sources", sources);
-  const ambiguous = db.prepare("SELECT 1 FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL LIMIT 1").get();
-  if (ambiguous) {
+  const ambiguousHashes = (db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL")
+    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash);
+  if (ambiguousHashes.length) {
     db.prepare("DELETE FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL").run();
     const state = getJson<ScanState>("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
     setJson("scan-state", { ...state, schemaVersion: 0 });
-    setJson("withdrawal-carriage-replay-required", true);
+    // The candidate's seller is unknown, but its listing hash is still known.
+    // Unrelated offers need no quarantine while chain history is replayed.
+    setJson("withdrawal-carriage-replay-hashes", ambiguousHashes);
   }
-  if (ambiguous || sources.length) {
+  if (ambiguousHashes.length || sources.length) {
     const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
     setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({ ...seller,
-      listings: seller.listings.filter((listing) => listing.status === "revoked" || (!ambiguous &&
+      listings: seller.listings.filter((listing) => listing.status === "revoked" || (!ambiguousHashes.includes(listing.contentHash) &&
         !sources.some((source) => source.seller === seller.primaryClaim &&
           (source.incomplete.includes(listing.contentHash) || source.incomplete.includes("*"))))),
     })) });
@@ -470,7 +473,7 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
   for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
   if (seller) {
     const prior = sources.find((source) => source.domain === domain && source.seller === seller);
-    if (!index || (prior?.provenance !== "legacy" && prior?.index && (index.generatedAt < prior.index.generatedAt ||
+    if (!index || (prior?.index && (index.generatedAt < prior.index.generatedAt ||
         (index.generatedAt === prior.index.generatedAt && index.hash !== prior.index.hash)))) {
       setJson("withdrawal-sources", sources);
       return false;
@@ -483,13 +486,15 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
   return true;
 });
 export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
-  getJson("withdrawal-carriage-replay-required", false) || withdrawalSources().some((source) =>
+  getJson("withdrawal-carriage-replay-required", false) ||
+  getJson<string[]>("withdrawal-carriage-replay-hashes", []).includes(hash) || withdrawalSources().some((source) =>
     source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*")));
-export const finishWithdrawalCarriageReplay = (): void => {
-  if (!withdrawalSources().some((source) => source.provenance === "legacy")) {
-    setJson("withdrawal-carriage-replay-required", false);
-  }
-};
+export const finishWithdrawalCarriageReplay = db.transaction((): void => {
+  // Older v4 databases may still carry the global flag. Successful chain
+  // replay clears it independently of each source's authenticated checks.
+  setJson("withdrawal-carriage-replay-required", false);
+  setJson("withdrawal-carriage-replay-hashes", []);
+});
 
 /** Called only after the indexer verifies the listing's signature and chain owner. */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>

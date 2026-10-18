@@ -293,6 +293,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
     saveScanState(state);
+    finishWithdrawalCarriageReplay();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -342,10 +343,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
-    let discoveryComplete = true;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
-      discoveryComplete = crawl.errors.length === 0;
       for (const e of crawl.errors) {
         let domain: string;
         try { domain = normalizeSubmittedDomain(e.domain); }
@@ -392,7 +391,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
-    if (discoveryComplete) finishWithdrawalCarriageReplay();
 
     const sellers = [];
     for (const reg of allRegs) {
