@@ -146,6 +146,10 @@ test("the read-only node contract probe compares both search paths and the stora
       assert.equal((await verdict(node({ result: 200, response: UNKNOWN_NODE_CALL }, page))).ok, expected,
         `fallback page contains ${length} candidates`);
       assert.equal((await verdict(node(page, found))).ok, false, "one full or disagreeing page cannot pass");
+      assert.equal((await verdict(node(found, page))).ok, false, "a short direct page cannot hide a full or disagreeing GCR page");
+    }
+    for (const invalidGcr of [null, { result: 503 }, { result: 200, response: [{}] }]) {
+      assert.equal((await verdict(node(found, invalidGcr))).ok, false, 'direct success cannot hide an indeterminate GCR comparison');
     }
     assert.equal((await verdict(node(found, found, new Response(null, { status: 404 })))).ok, false, "a bare 404 is not the node's answer");
   } finally {

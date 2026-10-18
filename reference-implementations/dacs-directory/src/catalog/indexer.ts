@@ -99,10 +99,8 @@ const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
-/** A discovered candidate stays unresolved until its bytes can be verified (RB-5/6). */
+/** Missing or unavailable current bytes cannot reject an older candidate (RB-5/6). */
 async function readRevocationCandidate(locator: string): Promise<Record<string, unknown> | null> {
-  const observed = observedRevocationCandidate(locator);
-  if (observed) return observed;
   const read = await readAnchorResult(locator);
   return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
 }
@@ -221,13 +219,20 @@ export async function indexRegistration(
       verified,
       version,
       async (locator) => {
-        const marker = await readRevocationCandidate(locator);
+        const marker = observedRevocationCandidate(locator);
         if (marker) readMarkers.set(locator, marker);
         return marker;
       },
       undefined,
       progress,
       limit,
+      async (locator) => {
+        // Cached invalid bytes cannot adjudicate either a repaired marker or
+        // its current source binding, even if only its signature has changed.
+        const marker = await readRevocationCandidate(locator);
+        if (marker) readMarkers.set(locator, marker);
+        return marker;
+      },
     );
     recordRevocationProgress(verified.contentHash, progress, carriedBindings, sourceRevision);
     // RB-3: a revocation verified on an earlier pass is retained, whatever its marker reads now.
