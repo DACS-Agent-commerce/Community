@@ -388,7 +388,15 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+export const loadCatalog = (): Catalog => {
+  const catalog: Catalog = getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  for (const seller of catalog.sellers) for (const listing of seller.listings) {
+    const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
+    if (listing.status === "revoked" && !listing.revocation && legacy.revocationBinding) listing.revocation = legacy.revocationBinding;
+    delete legacy.revocationBinding;
+  }
+  return catalog;
+};
 export const saveCatalog = (catalog: Catalog): void => {
   // Every publication, including index-now, shares one settlement ledger.
   reconcileCatalogReputation(catalog.sellers, catalog.generatedAt);

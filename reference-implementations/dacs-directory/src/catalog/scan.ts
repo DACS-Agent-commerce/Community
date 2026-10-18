@@ -31,7 +31,7 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "./types.js";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {

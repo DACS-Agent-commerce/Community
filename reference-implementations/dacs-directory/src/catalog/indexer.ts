@@ -17,7 +17,7 @@
 import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 // verifyBundleCore is exported from the SDK's agent barrel, but that barrel
 // also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
@@ -257,7 +257,7 @@ export async function indexRegistration(
     recordRevocationProgress(verified.contentHash, progress);
     // RB-3: a revocation verified on an earlier pass is retained, whatever its marker reads now.
     const revocationBinding = found ?? prior?.listings.find((listing) => listing.status === "revoked" &&
-      listing.contentHash === verified.contentHash)?.revocationBinding ?? null;
+      listing.contentHash === verified.contentHash)?.revocation ?? null;
     // RB-5: an unread or unexamined candidate leaves the check incomplete, and incomplete is never absent.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
       : progress.unread.length > 0 || hasPendingRevocationCandidates(verified.contentHash) ? "indeterminate" : "absent";
@@ -300,7 +300,7 @@ export async function indexRegistration(
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
       status: revocation === "revoked" ? "revoked" : "active",
-      ...(revocationBinding ? { revocationBinding } : {}),
+      ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
     });
   }

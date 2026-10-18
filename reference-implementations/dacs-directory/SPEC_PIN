@@ -35,7 +35,9 @@
 #     Listing publication continues to accept a nonce-free signed self-binding.
 #   Required credential matching uses the signed composite generatedAt (unix ms) as the historical
 #     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
-#     validUntil governs; without it, DACS_RECIPE_POLICIES must supply defaultMaxAgeSec for the exact
+#     Session recipeRegistryVersion selects an operator-authenticated DACS_RECIPE_SNAPSHOTS roster.
+#     Unknown snapshots and results outside that roster remain indeterminate. Unversioned requirements
+#     select the latest recipe in the roster. validUntil governs; without it the roster supplies defaultMaxAgeSec for the exact
 #     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
 #     live exact-version recipe policy, an allowed method and a trusted authenticated signer.
 #     RAV-2: the catalog does not disclose per-result availability yet. Non-live vet results
@@ -103,3 +105,13 @@
 #   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
 #   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
 #   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
+
+# Additional consumer/publisher profile:
+#   Canonical hashing rejects lone UTF-16 surrogates in values and keys (server and browser).
+#   The pinned SDK serializer accepts only integer JSON numbers. Listing publication rejects
+#   fractional negotiation percentages with HTTP 400; fractional-percentage publication is unsupported.
+#   Authority evidence needs a method-specific authenticated proof/hash/signer/validator-epoch adapter.
+#   No production authority adapter is installed; identity tiers and session evidence fail closed.
+#   Listing discovery retains revoked tombstones with the normative `revocation` binding.
+#   Generated A2A cards require an explicit service endpoint and transport; otherwise only the
+#   DACS discovery descriptor is emitted, without claiming an A2A service at the hosting origin.

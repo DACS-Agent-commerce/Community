@@ -68,3 +68,12 @@ test("a second captured confirmed transfer verifies numeric and string OS", asyn
       async (message) => message === "getTxByHash" ? changed : included), "pass");
   }
 });
+
+test("PB-2 binds a payee-bound native destination to the seller primary claim", async () => {
+  const payeeBound = { ...agreement, payeeBoundAgreementVersion: "1", terms: { ...agreement.terms,
+    rail: { railId: "demos-native:DEM" }, payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: tx.content.to }] } };
+  const read = async (message: string) => message === "getTxByHash" ? tx : block;
+  assert.equal(await verifyNativePayment(ref, payeeBound, 2, read), "pass");
+  const unrelatedSeller = { ...payeeBound, parties: [agreement.parties[0], { role: "seller", primaryClaim: `did:demos:agent:${"e".repeat(64)}` }] };
+  assert.equal(await verifyNativePayment(ref, unrelatedSeller, 2, read), "fail", "real transfer and co-signed payout do not substitute seller identity");
+});

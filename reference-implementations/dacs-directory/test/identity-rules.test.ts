@@ -1,3 +1,4 @@
+import { authorityProof, authoritySigner, proofHash, verifyTestAuthority } from "./helpers/authority.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -15,22 +16,24 @@ const at = (n: number) => `stor-${(0xc000 + n).toString(16).padStart(40, "0")}`;
 const LEI = "5493001KJTIIGC8Y1R12";
 const VERIFIED_AT = 1_000_000;
 const NOW = VERIFIED_AT + 1_000;
-const attested = { authority: "gleif", record: LEI };
+const attested = authorityProof({ authority: "gleif", record: LEI });
 
 const policy = (change: Partial<RecipePolicy> = {}): RecipePolicy => ({
   scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 3600, availability: "live", trustedResultSigners: [dids[TRUSTED]], ...change,
 });
 interface Case {
   result?: Obj; signer?: number; envelope?: Obj; claim?: Obj; ref?: Obj; recipe?: RecipePolicy | null;
+  proof?: Obj; authenticate?: boolean;
   now?: number; store?: (store: Map<string, Obj>) => void; scheme?: string;
 }
 
 async function tier(c: Case = {}) {
   const scheme = c.scheme ?? "lei";
-  const store = new Map<string, Obj>([[at(2), attested]]);
+  const proof = c.proof ?? attested;
+  const store = new Map<string, Obj>([[at(2), proof]]);
   const result: Obj = {
     resultVersion: "1", scheme, identifier: LEI, recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "registry match",
-    attestation: { anchor: { kind: "storage-program", locator: at(2) }, contentHash: contentHash(attested) }, fetchedAt: VERIFIED_AT - 10, verifiedAt: VERIFIED_AT,
+    attestation: { anchor: { kind: "storage-program", locator: at(2) }, contentHash: proofHash(proof), signer: authoritySigner }, fetchedAt: VERIFIED_AT - 10, verifiedAt: VERIFIED_AT,
     ...c.result,
   };
   for (const key of Object.keys(result)) if (result[key] === undefined) delete result[key];
@@ -47,7 +50,7 @@ async function tier(c: Case = {}) {
   const recipe = c.recipe === undefined ? policy({ scheme }) : c.recipe;
   return deriveIdentityTier({ claims: [claim] }, async (wantScheme, version) =>
     recipe && recipe.scheme === wantScheme && recipe.recipeVersion === version ? recipe : null,
-  c.now ?? NOW, async (locator) => store.get(locator) ?? null);
+  c.now ?? NOW, async (locator) => store.get(locator) ?? null, undefined, c.authenticate === false ? undefined : verifyTestAuthority);
 }
 
 test("an institutional scheme verified under a live recipe gives the institutional tier, another scheme gives verified", async () => {
@@ -93,6 +96,13 @@ test("every VerifyResult rule withholds the tier when it fails", async () => {
     "a recipe trusting another signer": { recipe: policy({ trustedResultSigners: [dids[OTHER]] }) },
     "a recipe trusting an unresolvable signer": { recipe: policy({ trustedResultSigners: ["cci:unknown"] }) },
     "validUntil before verifiedAt": { result: { validUntil: VERIFIED_AT - 1 } },
+    "a string wrapper issuedAt": { claim: { issuedAt: "999" } },
+    "a null wrapper issuedAt": { claim: { issuedAt: null } },
+    "a string validUntil": { result: { validUntil: "999" } },
+    "a null validUntil": { result: { validUntil: null } },
+    "a string wrapper expiry": { claim: { expiresAt: "999" } },
+    "a null wrapper expiry": { claim: { expiresAt: null } },
+    "a future verifiedAt": { result: { verifiedAt: NOW + 1 } },
     "a past validUntil": { result: { validUntil: NOW - 1 } },
     "a result older than the recipe's maximum age": { now: VERIFIED_AT + 3_600_000 + 1 },
     "an expired claim wrapper": { claim: { expiresAt: NOW - 1 } },
@@ -117,14 +127,14 @@ test("one verified claim is enough, and an institutional scheme outranks the res
     const claimsList: Obj[] = [];
     for (const [index, scheme] of schemes.entries()) {
       const result: Obj = { resultVersion: "1", scheme, identifier: LEI, recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "ok",
-        attestation: { anchor: { kind: "storage-program", locator: at(2) }, contentHash: contentHash(attested) }, fetchedAt: 1, verifiedAt: VERIFIED_AT };
+        attestation: { anchor: { kind: "storage-program", locator: at(2) }, contentHash: proofHash(attested), signer: authoritySigner }, fetchedAt: 1, verifiedAt: VERIFIED_AT };
       const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-verifyresult:v1:${artifactHash(result, "verify-result")}`), privateKeyFromSeed(seeds[TRUSTED]))).toString("base64url");
       const signed = { ...result, signature: { algorithm: "ed25519", signer: dids[TRUSTED], value } };
       store.set(at(10 + index), signed);
       claimsList.push({ ref: `${scheme}:${LEI}`, verifiedBy: { anchor: { kind: "storage-program", locator: at(10 + index) }, contentHash: artifactHash(signed, "verify-result"), recipeVersion: 2 } });
     }
     claimsList.push({ ref: "github:unverified" });
-    return deriveIdentityTier({ claims: claimsList }, async (scheme) => policy({ scheme }), NOW, async (locator) => store.get(locator) ?? null);
+    return deriveIdentityTier({ claims: claimsList }, async (scheme) => policy({ scheme }), NOW, async (locator) => store.get(locator) ?? null, undefined, verifyTestAuthority);
   };
   assert.equal(await claims(["domain", "lei"]), "institutional");
   assert.equal(await claims(["domain", "github"]), "verified");
@@ -161,4 +171,14 @@ test("IT-1..IT-3 at the seller: the highest tier among its listings' bundles", (
   assert.equal(sellerIdentityTier(["self-declared", "self-declared"]), "self-declared");
   assert.equal(sellerIdentityTier(["self-declared", "verified"]), "verified");
   assert.equal(sellerIdentityTier(["verified", "institutional", "self-declared"]), "institutional");
+});
+
+test("authority proof authentication is mandatory independently of the trusted result signer", async () => {
+  assert.equal(await tier({ authenticate: false }), "self-declared");
+  const { signature: _, ...unsigned } = attested;
+  for (const proof of [unsigned, { ...attested, signature: "A".repeat(86) }, authorityProof({ authority: "gleif", record: LEI }, 8),
+    { ...attested, signer: dids[OTHER] }]) {
+    assert.equal(await tier({ proof }), "self-declared", "missing, forged, wrong-epoch and wrong-signer proofs stay unverified even when rehashed");
+  }
+  assert.equal(await tier({ store: (store) => store.set(at(2), { ...attested, signature: "A".repeat(86) }) }), "self-declared", "signature-only tampering changes authority integrity");
 });

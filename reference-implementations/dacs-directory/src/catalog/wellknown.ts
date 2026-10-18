@@ -1,3 +1,4 @@
+import { revocationLogicalAddress } from "./listingVerification.js";
 /**
  * §6.3.5 well-known crawler — the spec's federation mechanism.
  *
@@ -12,10 +13,10 @@
  * lists anchors it doesn't own is caught by the indexer (listing.agentId
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
-import type { BundleBinding } from "./types.js";
+import type { BundleBinding, RevocationBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
 
@@ -26,6 +27,7 @@ export interface WellKnownAgent {
   listingAnchors: string[];
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
+  revocations: RevocationBinding[];
   /** BB-4-verified records from the optional DACS-1 bundle-binding index. */
   bundleBindings: BundleBinding[];
 }
@@ -46,6 +48,7 @@ interface ListingIndex {
     anchor?: { kind?: string; locator?: string };
     summary?: { title?: string };
     status?: "active" | "revoked";
+    revocation?: RevocationBinding;
   }>;
 }
 
@@ -71,21 +74,22 @@ async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | 
   }
 }
 
-export async function crawlDomain(domain: string): Promise<WellKnownAgent | { domain: string; error: string }> {
+export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fetchJson; validateUrl?: typeof validatePublicHttpsUrl } = {}): Promise<WellKnownAgent | { domain: string; error: string }> {
+  const fetchDocument = deps.fetchJson ?? fetchJson;
   let base: string;
   try {
     base = normalizeSubmittedDomain(domain);
-    await validatePublicHttpsUrl(base);
+    await (deps.validateUrl ?? validatePublicHttpsUrl)(base);
   } catch (e) {
     return { domain, error: e instanceof Error ? e.message : "invalid domain" };
   }
-  const card = await fetchJson(`${base}/.well-known/agent.json`);
+  const card = await fetchDocument(`${base}/.well-known/agent.json`);
   if (!card) return { domain, error: "no .well-known/agent.json" };
 
   const dacs = (card.body as { dacs?: DacsBlock })?.dacs;
   if (dacs?.dacsVersion !== "1" || !dacs.listings?.indexUrl) return { domain, error: "agent.json has no supported dacs.listings block" };
 
-  const index = await fetchJson(dacs.listings.indexUrl);
+  const index = await fetchDocument(dacs.listings.indexUrl);
   if (!index) return { domain, error: `listings index unreachable (${dacs.listings.indexUrl})` };
 
   // The hash IS the binding (§6.3.5): "sha256-<hex>" over the index bytes.
@@ -108,14 +112,24 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   }
 
   const listingAnchors: string[] = [];
+  const revocations: RevocationBinding[] = [];
   const contentHashes: Record<string, string> = {};
   for (const entry of idx.listings ?? []) {
     const locator = entry.anchor?.locator;
     if (
-      entry.status === "revoked" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+      !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       !locator || !/^stor-[0-9a-f]{40}$/.test(locator) ||
       !entry.contentHash || !/^[0-9a-fA-F]{64}$/.test(entry.contentHash)
     ) continue;
+    if (entry.status === "revoked") {
+      const binding = entry.revocation;
+      if (!binding || binding.sellerPrimaryClaim !== seller || binding.listingId !== entry.listingId ||
+          binding.listingVersion !== entry.version || binding.listingContentHash !== entry.contentHash.toLowerCase() ||
+          binding.logicalAddress !== revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) ||
+          binding.markerAnchor?.kind !== "storage-program" || !/^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) ||
+          !/^[0-9a-f]{64}$/.test(binding.markerContentHash)) return { domain, error: "invalid revoked listing binding" };
+      revocations.push(binding);
+    } else if (entry.revocation !== undefined) return { domain, error: "active listing carries revocation" };
     listingAnchors.push(locator);
     contentHashes[locator] = entry.contentHash.toLowerCase();
   }
@@ -123,7 +137,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
   if (dacs.bundleBindings?.indexUrl) {
-    const bindingIndex = await fetchJson(dacs.bundleBindings.indexUrl);
+    const bindingIndex = await fetchDocument(dacs.bundleBindings.indexUrl);
     if (!bindingIndex) return { domain, error: `bundle-binding index unreachable (${dacs.bundleBindings.indexUrl})` };
     const expectedBindingHash = (dacs.bundleBindings.indexHash ?? "").replace(/^sha256-/, "").toLowerCase();
     const actualBindingHash = sha256Hex(bindingIndex.raw);
@@ -137,7 +151,7 @@ export async function crawlDomain(domain: string): Promise<WellKnownAgent | { do
     const verified = await Promise.all(carried.map((binding) => verifyBundleBinding(binding)));
     for (const binding of verified) if (binding) bundleBindings.push(binding);
   }
-  return { domain, seller, displayName, listingAnchors, contentHashes, bundleBindings };
+  return { domain, seller, displayName, listingAnchors, contentHashes, revocations, bundleBindings };
 }
 
 export async function crawlDomains(domains: string[]): Promise<{
@@ -147,7 +161,7 @@ export async function crawlDomains(domains: string[]): Promise<{
   const agents: WellKnownAgent[] = [];
   const errors: Array<{ domain: string; error: string }> = [];
   for (let i = 0; i < domains.length; i += 5) {
-    const batch = await Promise.all(domains.slice(i, i + 5).map(crawlDomain));
+    const batch = await Promise.all(domains.slice(i, i + 5).map((domain) => crawlDomain(domain)));
     for (const r of batch) {
       if ("error" in r) errors.push(r);
       else agents.push(r);

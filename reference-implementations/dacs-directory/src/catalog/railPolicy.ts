@@ -1,4 +1,4 @@
-import { canonicalize } from "@kynesyslabs/dacs/canonical";
+import { canonicalize } from "./canonical.js";
 type Obj = Record<string, unknown>;
 const rec = (v: unknown): Obj | null => v && typeof v === "object" && !Array.isArray(v) ? v as Obj : null;
 

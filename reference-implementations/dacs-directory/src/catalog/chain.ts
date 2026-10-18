@@ -11,7 +11,7 @@
  * client's unrelated multichain dependency tree.
  */
 import { boundedJson, storageResponseJson } from "./artifactLimits.js";
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "./canonical.js";
 import { gcrAuthHeaders } from "./gcr.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");

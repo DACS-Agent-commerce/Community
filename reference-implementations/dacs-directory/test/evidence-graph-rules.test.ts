@@ -1,3 +1,4 @@
+import { authorityProof, authoritySigner, proofHash, verifyTestAuthority, fixtureRecipeSnapshot } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -128,7 +129,7 @@ async function evaluate(c: Case = {}) {
     .map((signer) => envelope(bundle, "bundle", signer, signer, "party"))), anchoredByRole: c.anchoredByRole ?? "buyer" };
   c.stored?.(signed, session);
   store.set(at(5), signed);
-  return buildCurrentEvidenceGraph(at(5), {
+  return buildCurrentEvidenceGraph(at(5), { verifyAttestation: verifyTestAuthority, resolveRecipeSnapshot: fixtureRecipeSnapshot,
     resolveSessionChallenge: c.resolveSessionChallenge,
     readSettlementNode: nativeNodeFixture(() => store.values()),
     read: async (locator) => store.get(locator) ?? null,
@@ -393,10 +394,10 @@ test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked
   });
   process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: [dids[OUTSIDER]] }]);
   const requirementHash = contentHash((listing.buyerRequirement as Obj));
-  const attestationRaw = { authority: "registry", body: "ok" };
+  const attestationRaw = authorityProof({ authority: "registry", body: "ok" });
   const attest = (session: Session, n = 20) => {
     session.store.set(at(n), attestationRaw);
-    return { anchor: { kind: "storage-program", locator: at(n) }, contentHash: contentHash(attestationRaw) };
+    return { anchor: { kind: "storage-program", locator: at(n) }, contentHash: proofHash(attestationRaw), signer: authoritySigner };
   };
   const verifyResult = (session: Session, change: Obj = {}) => ({
     resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1, method: "verifiable-credential", decision: "pass",
@@ -1171,10 +1172,10 @@ test("procurement vet requirements bind the seller counterparty rather than the 
         scopes.bundle.phaseSummary = pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
       },
       bundle: async (bundle, session) => {
-        const attestation = { authority: "registry", body: "match" }; session.store.set(at(20), attestation);
+        const attestation = authorityProof({ authority: "registry", body: "match" }); session.store.set(at(20), attestation);
         const result = await publish(session, 21, { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
           method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
-          attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: contentHash(attestation) } }, "verify-result", OUTSIDER);
+          attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: proofHash(attestation), signer: authoritySigner } }, "verify-result", OUTSIDER);
         const identities = [BUYER, SELLER].map((party) => ({ bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, sessionNonce: `challenge-${dids[party]}`,
           claims: [{ ref: dids[party] }, ...(party === SELLER ? [{ ref: "lei:5493001KJTIIGC8Y1R12", verifiedBy: { ...result, recipeVersion: 1 } }] : [])] }));
         bundle.parties = identities.map((identity, party) => ({ role: party === BUYER ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(identity),

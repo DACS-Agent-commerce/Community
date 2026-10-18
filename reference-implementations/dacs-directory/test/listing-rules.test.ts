@@ -358,7 +358,7 @@ test("the indexer publishes a verified listing only when it is readable, bound t
     assert.deepEqual(published.published.terms, { cancellationPolicy: "pre-commit" });
     assert.deepEqual(published.published.buyerRequirement, { requirementVersion: "1", required: [] });
     assert.equal(published.published.status, "active");
-    assert.equal(Object.hasOwn(published.published, "revocationBinding"), false);
+    assert.equal(Object.hasOwn(published.published, "revocation"), false);
     // The current listing's IdentityBundle is carried for the identity tier; a legacy listing has none.
     assert.equal((record.identityBundle as Obj | undefined)?.presentedBy, dids[0]);
   } finally {
@@ -412,12 +412,12 @@ test("RB-3 retention carries forward only this listing version's own revoked rec
       const record = await indexRegistration({ primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [at] }, prior(listings),
         async () => { throw new Error("identity unavailable"); });
       const published = record.listings[0] as unknown as Obj;
-      return `${published.status} ${Object.hasOwn(published, "revocationBinding") ? "with binding" : "without binding"}`;
+      return `${published.status} ${Object.hasOwn(published, "revocation") ? "with binding" : "without binding"}`;
     };
-    assert.equal(await statusWith([{ listingId: "retained", contentHash: hash, status: "revoked", revocationBinding: binding }]), "revoked with binding");
-    assert.equal(await statusWith([{ listingId: "retained", contentHash: "f".repeat(64), status: "revoked", revocationBinding: { ...binding, listingContentHash: "f".repeat(64) } }]),
+    assert.equal(await statusWith([{ listingId: "retained", contentHash: hash, status: "revoked", revocation: binding }]), "revoked with binding");
+    assert.equal(await statusWith([{ listingId: "retained", contentHash: "f".repeat(64), status: "revoked", revocation: { ...binding, listingContentHash: "f".repeat(64) } }]),
       "active without binding", "another version's revocation");
-    assert.equal(await statusWith([{ listingId: "retained", contentHash: hash, status: "active", revocationBinding: binding }]),
+    assert.equal(await statusWith([{ listingId: "retained", contentHash: hash, status: "active", revocation: binding }]),
       "active without binding", "an active record's stray binding");
   } finally {
     globalThis.fetch = originalFetch;

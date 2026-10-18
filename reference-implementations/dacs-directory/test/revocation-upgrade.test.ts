@@ -64,7 +64,7 @@ test("upgrade requeues prior rejected markers and immediately withholds affected
   store.admitRevocationCandidates(hash, [{ locator: missing, contentHash: "d".repeat(64) }]);
   assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), [missing, privateMarker], "same bytes remain queued");
   assert.deepEqual(store.loadCatalog().sellers[0].listings.map((entry) => entry.listingId), ["unaffected", "revoked"]);
-  assert.equal(store.loadCatalog().sellers[0].listings[1].revocationBinding?.markerContentHash, "f".repeat(64));
+  assert.equal(store.loadCatalog().sellers[0].listings[1].revocation?.markerContentHash, "f".repeat(64));
 });
 
 test("upgraded 403/404 markers withhold activation until a recovered marker verifies", async () => {
@@ -90,7 +90,7 @@ test("upgraded 403/404 markers withhold activation until a recovered marker veri
     recovered = true; now += 1_000;
     const restored = await indexRegistration(registration, unavailable, async () => { throw new Error("offline"); });
     assert.equal(restored.listings[0]?.status, "revoked");
-    assert.equal(restored.listings[0]?.revocationBinding?.listingContentHash, hash);
+    assert.equal(restored.listings[0]?.revocation?.listingContentHash, hash);
   } finally { globalThis.fetch = originalFetch; Date.now = originalNow; }
 });
 

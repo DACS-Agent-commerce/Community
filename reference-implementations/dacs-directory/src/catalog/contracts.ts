@@ -49,7 +49,7 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationBinding: {
+    revocation: {
       type: "object",
       required: [
         "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
@@ -84,8 +84,8 @@ export const listingSummarySchema = {
   },
   allOf: [{
     if: { properties: { status: { const: "revoked" } }, required: ["status"] },
-    then: { required: ["revocationBinding"] },
-    else: { not: { required: ["revocationBinding"] } },
+    then: { required: ["revocation"] },
+    else: { not: { required: ["revocation"] } },
   }],
 } as const;
 

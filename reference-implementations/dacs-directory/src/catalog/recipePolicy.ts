@@ -43,3 +43,20 @@ export async function validateRecipeResult(
     return null;
   } catch { return null; }
 }
+
+/** Operator-authenticated historical registry snapshots; never infer a snapshot from
+ * a list of individually live policies. The session pin selects this exact roster. */
+export interface RecipeSnapshot { registryVersion: number; recipes: RecipePolicy[] }
+export type ResolveRecipeSnapshot = (version: number) => Promise<RecipeSnapshot | null>;
+export const resolveConfiguredRecipeSnapshot: ResolveRecipeSnapshot = async (version) => {
+  try {
+    const snapshots: RecipeSnapshot[] = JSON.parse(process.env.DACS_RECIPE_SNAPSHOTS ?? "[]");
+    const matches = snapshots.filter((snapshot) => snapshot.registryVersion === version);
+    if (matches.length !== 1 || !Array.isArray(matches[0].recipes)) return null;
+    const recipes = matches[0].recipes;
+    const keys = recipes.map((recipe) => `${recipe.scheme}:${recipe.recipeVersion}`);
+    if (new Set(keys).size !== keys.length || recipes.some((recipe) => !recipe.scheme ||
+        !Number.isSafeInteger(recipe.recipeVersion) || recipe.recipeVersion < 1)) return null;
+    return matches[0];
+  } catch { return null; }
+};

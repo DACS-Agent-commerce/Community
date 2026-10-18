@@ -262,3 +262,11 @@ test("publisher emits canonical DEM and x402 registry IDs and rejects phase-name
     }
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("publisher rejects fractional percentages cleanly under its integer profile", async () => {
+  for (const [minPct, maxPct] of [[2.5, 20], [2, 2.5]]) {
+    const response = await POST(request({ ...base, pricing: { kind: "negotiable", amount: "10", currency: "DEM", minPct, maxPct } }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /integer/);
+  }
+});

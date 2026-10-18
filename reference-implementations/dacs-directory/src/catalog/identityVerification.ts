@@ -1,4 +1,4 @@
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
 import { readAnchor } from "./chain.js";
 import { artifactHash, isCurrentRef, verifyComponentSignature } from "./evidenceGraph.js";
 import {
@@ -31,7 +31,9 @@ async function verifiedClaim(
   resolveRecipe: ResolveRecipe,
   read: typeof readAnchor,
   resolveKey: ResolvePrimaryClaimKey,
+  verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<{ scheme: string } | null> {
+  if (claim.issuedAt !== undefined && (typeof claim.issuedAt !== "number" || !Number.isFinite(claim.issuedAt))) return null;
   const parts = claimParts(claim.ref); const ref = obj(claim.verifiedBy);
   if (!parts || !ref || !isCurrentRef(ref) || !Number.isSafeInteger(ref.recipeVersion)) return null;
   const raw = await read(ref.anchor.locator); if (!raw) return null;
@@ -43,14 +45,16 @@ async function verifiedClaim(
   const recipe = await validateRecipeResult(raw, resolveRecipe, resolveKey);
   // A tier has no per-result availability disclosure, so only live recipes can elevate it (RAV-2).
   if (!recipe || recipe.availability !== "live") return null;
+  if (!Number.isFinite(raw.verifiedAt) || raw.verifiedAt > now ||
+      (raw.validUntil !== undefined && (typeof raw.validUntil !== "number" || !Number.isFinite(raw.validUntil))) ||
+      (claim.expiresAt !== undefined && (typeof claim.expiresAt !== "number" || !Number.isFinite(claim.expiresAt)))) return null;
   const authorityExpiry = typeof raw.validUntil === "number" ? raw.validUntil : raw.verifiedAt + recipe.defaultMaxAgeSec * 1000;
   const wrapperExpiry = typeof claim.expiresAt === "number" ? claim.expiresAt : Infinity;
   if (authorityExpiry < raw.verifiedAt || now > Math.min(authorityExpiry, wrapperExpiry)) return null;
-  // The VerifyResult's own authority evidence is hash-bound as well. Validator
-  // set aggregate-signature semantics remain a deployment trust-policy concern.
+  // Authority proof authentication is independent of the VerifyResult signer.
   const attestation = obj(raw.attestation);
   if (!attestation || !isCurrentRef(attestation)) return null;
-  const attested = await read(attestation.anchor.locator); if (!attested || contentHash(attested) !== normalizeHash(attestation.contentHash)) return null;
+  const attested = await read(attestation.anchor.locator); if (!attested || !(await authenticateAuthorityAttestation(attested, attestation, raw, verifyAttestation))) return null;
   return { scheme: parts.scheme };
 }
 
@@ -65,11 +69,12 @@ export async function deriveIdentityTier(
   now = Date.now(),
   read: typeof readAnchor = readAnchor,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+  verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<IdentityTier> {
   const claims = Array.isArray(identityBundle?.claims) ? identityBundle.claims.map(obj).filter(Boolean) as Obj[] : [];
   // A claim whose chain artifacts cannot be canonicalized is unverified; the others still count.
   const verified = (await Promise.all(claims.map((claim) =>
-    verifiedClaim(claim, now, resolveRecipe, read, resolveKey).catch(() => null)))).filter(Boolean) as Array<{ scheme: string }>;
+    verifiedClaim(claim, now, resolveRecipe, read, resolveKey, verifyAttestation).catch(() => null)))).filter(Boolean) as Array<{ scheme: string }>;
   if (verified.some((claim) => INSTITUTIONAL.has(claim.scheme))) return "institutional";
   return verified.length ? "verified" : "self-declared";
 }

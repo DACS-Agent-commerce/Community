@@ -35,6 +35,8 @@ export async function verifyNativePayment(ref: Obj, agreement: Obj, phaseIndex: 
   const bindings = Array.isArray(terms?.payoutBindings) ? terms.payoutBindings.map(rec) : [];
   const binding = bindings.find((b) => b?.phaseIndex === phaseIndex && b.railId === rec(terms?.rail)?.railId);
   const payee = address(agreement.payeeBoundAgreementVersion === "1" ? binding?.payeeAddress : parties.find((p) => p?.role === "seller")?.primaryClaim);
+  const seller = address(parties.find((p) => p?.role === "seller")?.primaryClaim);
+  if (!seller || payee !== seller) return "fail";
   if (!payer || !payee || price?.currency !== "DEM" || amount === null || amount <= 0n) return "fail";
   if (!read) return "indeterminate";
   try {

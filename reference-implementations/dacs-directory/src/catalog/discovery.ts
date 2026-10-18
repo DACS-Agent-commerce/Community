@@ -24,3 +24,6 @@ export function primaryClaimMatches(claim: string, filter: string): boolean {
   const canonicalFilter = filter.toLowerCase();
   return canonicalClaim === canonicalFilter || canonicalClaim.startsWith(canonicalFilter + ":");
 }
+
+/** Machine discovery retains authenticated withdrawal records. */
+export const discoveryListing = (listing: ListingSummary): boolean => activeOffer(listing) || listing.status === "revoked" && Boolean(listing.revocation);

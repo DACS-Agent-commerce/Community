@@ -1,6 +1,6 @@
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import {
   resolvePrimaryClaimKey,

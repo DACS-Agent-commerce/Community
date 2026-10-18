@@ -12,7 +12,7 @@
  * nonce plus the live empty salt, and readback re-binds owner/name/content.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash, listingAddress } from "@kynesyslabs/dacs/canonical";
+import { assertValidUnicode, contentHash, listingAddress } from "../../../../src/catalog/canonical.js";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import {
   deriveStorageAddress,
@@ -76,6 +76,7 @@ export async function POST(req: NextRequest) {
   if (body.description.length > 2000) {
     return NextResponse.json({ error: "description exceeds the 2000-char spec cap" }, { status: 400 });
   }
+  try { assertValidUnicode(body); } catch { return NextResponse.json({ error: "invalid Unicode" }, { status: 400 }); }
   if (
     !Array.isArray(body.rails) || body.rails.length > 16 ||
     !body.rails.every((v) => typeof v === "string" && /^[A-Za-z0-9:-]{1,128}$/.test(v)) ||
@@ -130,9 +131,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "pricing needs a positive canonical amount and currency" }, { status: 400 });
   }
   if (pricingKind === "negotiable" && (
-    !Number.isFinite(Number(body.pricing?.minPct)) || !Number.isFinite(Number(body.pricing?.maxPct)) ||
+    !Number.isSafeInteger(body.pricing?.minPct) || !Number.isSafeInteger(body.pricing?.maxPct) ||
     Number(body.pricing?.minPct) < 0 || Number(body.pricing?.minPct) >= 100 || Number(body.pricing?.maxPct) < 0
-  )) return NextResponse.json({ error: "negotiation percentages are invalid" }, { status: 400 });
+  )) return NextResponse.json({ error: "negotiation percentages must be nonnegative integers in this publisher profile" }, { status: 400 });
   if (pricingKind === "auction" && body.pricing?.selectionRule && !["lowest-price", "highest-price", "first-acceptable"].includes(body.pricing.selectionRule)) {
     return NextResponse.json({ error: "unsupported auction selection rule" }, { status: 400 });
   }

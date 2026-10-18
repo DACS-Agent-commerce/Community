@@ -17,7 +17,7 @@ import {
   type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { crawlDomains } from "./wellknown";
+import { crawlDomains, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
@@ -159,7 +159,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
   }
   for (const seller of prior.sellers) for (const listing of seller.listings) {
-    const locator = listing.revocationBinding?.markerAnchor.locator;
+    const locator = listing.revocation?.markerAnchor.locator;
     if (!locator) continue;
     const verified = state.verifiedRevocations[listing.contentHash] ?? [];
     if (!verified.includes(locator)) verified.push(locator);
@@ -338,6 +338,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const crawl = await crawlDomains(domains);
       for (const e of crawl.errors) log(`well-known: ${e.domain} — ${e.error}`);
       for (const agent of crawl.agents) {
+        ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -406,7 +407,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
 
     for (const seller of catalogSellers) for (const listing of seller.listings) {
-      const locator = listing.revocationBinding?.markerAnchor.locator;
+      const locator = listing.revocation?.markerAnchor.locator;
       if (!locator) continue;
       const verified = state.verifiedRevocations[listing.contentHash] ?? [];
       if (!verified.includes(locator)) verified.push(locator);
@@ -428,5 +429,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });
     throw error;
+  }
+}
+
+/** Discovery carriage enters the same RB-4 queue as passive marker discovery. */
+export function ingestWellKnownRevocations(agent: WellKnownAgent): void {
+  for (const binding of agent.revocations) {
+    admitRevocationCandidates(binding.listingContentHash, [{ locator: binding.markerAnchor.locator }]);
   }
 }

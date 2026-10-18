@@ -1,4 +1,4 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "./canonical.js";
 import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 

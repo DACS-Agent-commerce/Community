@@ -1,3 +1,4 @@
+import { assertValidUnicode } from "../catalog/canonical.js";
 /**
  * The in-browser deal verifier's logic, kept apart from rendering so every verdict, label and
  * artifact read is testable. VerifyDeal.tsx only renders what these functions return.
@@ -48,6 +49,7 @@ export async function verifyDealInBrowser(
   const verification = await verifyBundleCore(bundleRef, {
     readArtifact: async (r) => {
       const raw = await deps.fetchArtifact(`ref=${encodeURIComponent(r)}`);
+      assertValidUnicode(raw);
       if (r === bundleRef) rawBundle = raw;
       // The pinned SDK uses readArtifact only for the root and final listing;
       // agreement/evidence/vet artifacts enter through resolveRef below.
@@ -58,6 +60,7 @@ export async function verifyDealInBrowser(
       const name = anchorName[kind]?.(jobId);
       if (!name) return null;
       const raw = await deps.fetchArtifact(`owner=${encodeURIComponent(buyerOwner)}&name=${encodeURIComponent(name)}`);
+      assertValidUnicode(raw);
       if (raw) resolvedArtifacts.push({ kind, raw });
       return raw;
     },

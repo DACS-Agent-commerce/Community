@@ -1,4 +1,4 @@
-import { canonicalize, contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, stripSignature } from "./canonical.js";
 import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {

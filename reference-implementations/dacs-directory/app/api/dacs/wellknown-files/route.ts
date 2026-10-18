@@ -7,11 +7,11 @@
  * construction — host them byte-exact, then register the domain here.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash, sha256Hex, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "../../../../src/catalog/canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
-import { activeOffer } from "@/src/catalog/discovery";
+import { activeOffer, discoveryListing } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
@@ -20,6 +20,15 @@ export async function GET(req: NextRequest) {
   const domain = (q.get("domain")?.trim() || "YOUR-DOMAIN.example")
     .replace(/^https?:\/\//, "")
     .replace(/\/$/, "");
+  const endpoint = q.get("a2aEndpoint");
+  const transport = q.get("a2aTransport");
+  if (endpoint || transport) {
+    try {
+      const url = new URL(endpoint ?? "");
+      if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+          !["JSONRPC", "GRPC", "HTTP+JSON"].includes(transport ?? "")) throw new Error();
+    } catch { return NextResponse.json({ error: "provide an HTTPS a2aEndpoint and its a2aTransport" }, { status: 400 }); }
+  }
   const hex = claim?.match(/([0-9a-fA-F]{64})$/)?.[1];
   if (!claim || !hex) return NextResponse.json({ error: "need ?claim=" }, { status: 400 });
 
@@ -32,14 +41,15 @@ export async function GET(req: NextRequest) {
   }
 
   const listings = seller.listings.filter(activeOffer);
+  const published = seller.listings.filter(discoveryListing);
   const entries = [];
-  for (const l of listings) {
+  for (const l of published) {
     const raw = await readAnchor(l.anchor.locator);
-    if (!raw) continue;
+    if (!raw && l.status !== "revoked") continue;
     entries.push({
       listingId: l.listingId,
       version: l.version,
-      contentHash: contentHash(stripSignature(raw)),
+      contentHash: l.contentHash,
       anchor: { kind: "storage-program", locator: l.anchor.locator },
       summary: {
         title: l.offering.title,
@@ -48,6 +58,7 @@ export async function GET(req: NextRequest) {
         ...(l.pricing.priceHint ? { priceHint: l.pricing.priceHint } : {}),
       },
       status: l.status,
+      ...(l.status === "revoked" ? { revocation: l.revocation } : {}),
     });
   }
 
@@ -69,10 +80,7 @@ export async function GET(req: NextRequest) {
     {
       name: seller.displayName,
       description: listings[0]?.offering.description ?? "",
-      url: `https://${domain}`,
-      version: "1.0.0",
-      protocolVersion: "0.3.0",
-      preferredTransport: "HTTP+JSON",
+      ...(endpoint ? { url: endpoint, version: "1.0.0", protocolVersion: "0.3.0", preferredTransport: transport } : {}),
       capabilities: { streaming: false, pushNotifications: false, stateTransitionHistory: false },
       defaultInputModes: ["application/json", "text/plain"],
       defaultOutputModes: ["application/json"],
@@ -97,7 +105,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     files: {
-      "/.well-known/agent-card.json": agentJson,
+      ...(endpoint ? { "/.well-known/agent-card.json": agentJson } : {}),
       "/.well-known/agent.json": agentJson,
       "/.well-known/dacs/listings.json": listingsJson,
     },

@@ -1,11 +1,12 @@
-import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
+import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyIdentityPresentation, verifyListing } from "./listingVerification.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
 import { matchesVetRequirement } from "./vetClaimRules.js";
-import { validateRecipeResult, type RecipePolicy } from "./recipePolicy.js";
+import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
 import { nativeRailAdmission } from "./railPolicy.js";
@@ -57,6 +58,8 @@ export interface HistoricalSessionChallenge {
   consumedByPresentationHash: string;
 }
 export interface EvidenceGraphDeps {
+  verifyAttestation?: VerifyAuthorityAttestation;
+  resolveRecipeSnapshot?: ResolveRecipeSnapshot;
   readSettlementNode?: SettlementNodeRead;
   /** Authenticate verifier issuance, job binding, bounded lifetime and the first consuming
    * presentation attempt (CORE SN-1..4). Record its complete digest before verification,
@@ -345,7 +348,7 @@ export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): R
   else delete scope.signature;
   return scope;
 }
-export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => contentHash(signedScope(raw, kind));
+export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => kind === "attestation" ? sha256Hex(canonicalize(raw)) : contentHash(signedScope(raw, kind));
 export const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 
 export async function verifyComponentSignature(
@@ -492,12 +495,12 @@ export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): 
   } catch { return false; }
 }
 
-async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | null> {
+async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps, authorityResult?: Record<string, unknown>): Promise<ResolvedEvidence | null> {
   if (kind === "attestation") {
     if (!isCurrentRef(ref)) return null;
     const hash = normalizedHash(ref.contentHash);
     const raw = await deps.read(ref.anchor.locator);
-    if (!raw || !withinArtifactLimit(raw) || contentHash(raw) !== hash) return null;
+    if (!raw || !withinArtifactLimit(raw) || (!authorityResult || !(await authenticateAuthorityAttestation(raw, ref, authorityResult, deps.verifyAttestation)))) return null;
     return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
   }
   if (!isCurrentRef(ref)) return null;
@@ -634,7 +637,7 @@ async function verifyCurrentEvidenceGraph(
   // content hash all agree.
   const seen = new Map(artifacts.map((artifact) => [`${artifact.kind}\n${artifact.locator}`, artifact]));
   let graphLimitExceeded = false;
-  const addNested = async (kind: ArtifactKind, value: unknown): Promise<boolean> => {
+  const addNested = async (kind: ArtifactKind, value: unknown, authorityResult?: Record<string, unknown>): Promise<boolean> => {
     if (!isCurrentRef(value)) return false;
     // A VerifyResultRef's recipeVersion is load-bearing (CORE §B.3) and must equal the resolved result's.
     const recipeOk = (artifact: ResolvedEvidence) => kind !== "verify-result" ||
@@ -642,9 +645,10 @@ async function verifyCurrentEvidenceGraph(
     const key = `${kind}\n${value.anchor.locator}`;
     const hash = normalizedHash(value.contentHash);
     const known = seen.get(key);
-    if (known) return known.contentHash === hash && recipeOk(known);
+    if (known) return known.contentHash === hash && recipeOk(known) &&
+      (kind !== "attestation" || Boolean(authorityResult && await authenticateAuthorityAttestation(known.raw, value, authorityResult, deps.verifyAttestation)));
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
-    const nested = await resolveRef(kind, value, deps); if (!nested || !recipeOk(nested)) return false;
+    const nested = await resolveRef(kind, value, deps, authorityResult); if (!nested || !recipeOk(nested)) return false;
     if ((kind === "evidence" || kind === "composite" || kind === "amendment") && nested.raw.jobId !== raw.jobId) return false;
     if ((kind === "evidence" || kind === "amendment") && !parties.some((party) =>
       sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
@@ -658,12 +662,12 @@ async function verifyCurrentEvidenceGraph(
       for (const key of ["freshness", "dealSpecific"] as const) for (const value of Array.isArray(artifact.raw[key]) ? artifact.raw[key] as unknown[] : []) {
         if (!(await addNested("verify-result", value))) return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "nested VerifyResult reference failed");
       }
-      for (const signal of arr(artifact.raw.supplementary)) if (signal.attestation !== undefined && !(await addNested("attestation", signal.attestation))) {
+      for (const signal of arr(artifact.raw.supplementary)) if (signal.attestation !== undefined && !(await addNested("attestation", signal.attestation, { ...signal, method: signal.source }))) {
         return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "supplementary attestation reference failed");
       }
     }
     if (artifact.kind === "evidence") {
-      if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef))) {
+      if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef, { ...artifact.raw, method: artifact.raw.phase }))) {
         return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "delivery attestation reference failed");
       }
       // amendmentRefs name SettlementAmendment records (DACS-4 §9.7.1), never more evidence.
@@ -684,7 +688,7 @@ async function verifyCurrentEvidenceGraph(
       } else if (graphLimitExceeded) return failSigned("evidence graph exceeds size limit");
       else flaggedAmendments.push({ locator: artifact.locator, reason: "AMEND-1: the amended evidence does not resolve for this job" });
     }
-    if (artifact.kind === "verify-result" && !(await addNested("attestation", artifact.raw.attestation))) {
+    if (artifact.kind === "verify-result" && !(await addNested("attestation", artifact.raw.attestation, artifact.raw))) {
       return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "VerifyResult attestation reference failed");
     }
   }
@@ -692,9 +696,13 @@ async function verifyCurrentEvidenceGraph(
     (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
     `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
   const composites = artifacts.filter((artifact) => artifact.kind === "composite");
+  const recipeSnapshot = artifacts.some((artifact) => artifact.kind === "verify-result" || artifact.kind === "composite")
+    ? await (deps.resolveRecipeSnapshot ?? resolveConfiguredRecipeSnapshot)(Number(raw.recipeRegistryVersion)) : null;
+  if (artifacts.some((artifact) => artifact.kind === "verify-result" || artifact.kind === "composite") &&
+      (!recipeSnapshot || recipeSnapshot.registryVersion !== raw.recipeRegistryVersion)) return failSigned("recipe registry snapshot is unavailable");
   const recipePolicies = new Map<ResolvedEvidence, RecipePolicy | null>();
   for (const result of artifacts.filter((artifact) => artifact.kind === "verify-result")) {
-    const policy = await validateRecipeResult(result.raw, undefined, resolveKey);
+    const policy = await validateRecipeResult(result.raw, async (scheme, version) => recipeSnapshot?.recipes.find((recipe) => recipe.scheme === scheme && recipe.recipeVersion === version) ?? null, resolveKey);
     recipePolicies.set(result, policy);
     // RAV-2/3: until per-result availability is disclosed, even optional results
     // need a valid live policy before giving the graph verified standing.
@@ -891,7 +899,7 @@ async function verifyCurrentEvidenceGraph(
       // policies therefore remain indeterminate rather than granting verified standing.
       const eligible = results.filter((result) => recipePolicies.get(result)?.availability === "live");
       return matchesVetRequirement(identities.get(counterpartyRole)!, requirement,
-        eligible, record.raw.generatedAt, raw.finalisedAt);
+        eligible, record.raw.generatedAt, raw.finalisedAt, recipeSnapshot?.recipes);
     };
     if (!(await Promise.all(composites.map(async (record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && await provesRequirement(record)))).some(Boolean)) {

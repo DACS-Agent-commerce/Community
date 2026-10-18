@@ -1,3 +1,4 @@
+import { authorityProof, authoritySigner, proofHash, verifyTestAuthority } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -383,8 +384,9 @@ test("each signed payment phase requires its own transaction kind and complete C
 
 test("required vet execution binds presented claims, verification and phase pointers before catalog admission", async (t) => {
   const original = new Map(store);
+  const originalSnapshots = process.env.DACS_RECIPE_SNAPSHOTS;
   const originalPolicies = process.env.DACS_RECIPE_POLICIES;
-  type VetCase = { firstAttempt?: "buyer" | "seller"; challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation" | "scope-only" | "legacy-marker" | "missing-digest"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
+  type VetCase = { registryVersion?: number; snapshotPolicies?: Obj[]; firstAttempt?: "buyer" | "seller"; challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation" | "scope-only" | "legacy-marker" | "missing-digest"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
@@ -392,6 +394,11 @@ test("required vet execution binds presented claims, verification and phase poin
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
   const livePolicy = { scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [dids[OUTSIDER]] };
   const cases: VetCase[] = [
+    { name: "unknown positive recipe registry pin", registryVersion: 999, graphOnly: true },
+    { name: "result missing from recipe snapshot", snapshotPolicies: [{ recipeVersion: 2 }], graphOnly: true },
+    { name: "unversioned requirement selects session-start latest", requirement: { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true }] }, snapshotPolicies: [{}, { recipeVersion: 2 }], graphOnly: true },
+    { name: "explicit older recipe remains selectable in snapshot", snapshotPolicies: [{}, { recipeVersion: 2 }], expected: true, graphOnly: true },
+    { name: "snapshot default freshness cannot use a different policy list", result: { validUntil: undefined }, snapshotPolicies: [{ defaultMaxAgeSec: 0 }], graphOnly: true },
     { name: "both parties passed with valid first presentation attempts", expected: true },
     { name: "invalid buyer first attempt consumes nonce before a valid retry", firstAttempt: "buyer" },
     { name: "invalid seller first attempt consumes nonce before a valid retry", firstAttempt: "seller" },
@@ -520,6 +527,7 @@ test("required vet execution binds presented claims, verification and phase poin
     for (const c of cases) await t.test(c.name, async () => {
       store.clear(); for (const [key, raw] of original) store.set(key, raw);
       process.env.DACS_RECIPE_POLICIES = c.rawPolicy ?? JSON.stringify([...(c.policy ?? [{}]).map((policy) => ({ ...livePolicy, ...policy })), ...(c.primaryProof ? [{ ...livePolicy, scheme: "did" }] : [])]);
+      try { process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: c.snapshotPolicies ? c.snapshotPolicies.map((policy) => ({ ...livePolicy, ...policy })) : JSON.parse(process.env.DACS_RECIPE_POLICIES!) }]); } catch { process.env.DACS_RECIPE_SNAPSHOTS = "[]"; }
       const req = c.requirement ?? requirement;
       const pipeline = [...(c.noVet ? [] : [{ kind: "vet-credentials" }]), { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }];
       const phaseIndex = pipeline.length - 2;
@@ -528,10 +536,10 @@ test("required vet execution binds presented claims, verification and phase poin
       const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
       const agreedScope = { ...agreementScope, listingRef: pinned };
       const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
-      const attestation = { authority: "registry", decision: "pass" };
+      const attestation = authorityProof({ authority: "registry", decision: "pass" });
       const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
         method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
-        attestation: { anchor: { kind: "storage-program", locator: at(80) }, contentHash: contentHash(attestation) }, ...c.result };
+        attestation: { anchor: { kind: "storage-program", locator: at(80) }, contentHash: proofHash(attestation), signer: authoritySigner }, ...c.result };
       for (const key of Object.keys(resultScope)) if (resultScope[key] === undefined) delete resultScope[key];
       const result = { ...resultScope, signature: signedWith(resultScope, "verify-result", OUTSIDER) };
       const resultRef = { ...refTo(at(81), result, "verify-result"), recipeVersion: 1 };
@@ -597,9 +605,10 @@ test("required vet execution binds presented claims, verification and phase poin
         c.pointer === "evidence" ? refTo(at(3), evidence, "evidence") : undefined;
       const phaseSummary = pipeline.flatMap((phase, index) => c.omittedVet && index === 0 ? [] :
         [{ index, kind: phase.kind, outcome: "ok", ...(index === 0 && pointer ? { attestationRef: pointer } : {}) }]);
-      const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
+      const scope = bundleScope({ recipeRegistryVersion: c.registryVersion ?? 1, listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const graph = await buildCurrentEvidenceGraph(at(20), {
+        verifyAttestation: verifyTestAuthority,
         resolveSessionChallenge: async (jobId, party) => {
           if (c.challenge === "missing" || c.challenge === "reused") return null;
           const challenge = {
@@ -632,7 +641,9 @@ test("required vet execution binds presented claims, verification and phase poin
       }
       if (c.graphOnly) return;
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)], [], "demos-native:DEM", phaseIndex);
-      const indexed = expected && c.noVet;
+      // Production has no authority-proof adapter, including for optional included results.
+      const indexed = expected && c.noVet && records.every((record) =>
+        (record.freshness as unknown[]).length === 0 && (record.dealSpecific as unknown[]).length === 0);
       assert.equal(seller.deals[0].refsVerified, Boolean(indexed), c.name);
       assert.equal(seller.deals[0].reputationEligible, Boolean(indexed), c.name);
       assert.equal(seller.reputation.completed, indexed ? 1 : 0, c.name);
@@ -640,6 +651,7 @@ test("required vet execution binds presented claims, verification and phase poin
     });
   } finally {
     store.clear(); for (const [key, raw] of original) store.set(key, raw);
+    if (originalSnapshots === undefined) delete process.env.DACS_RECIPE_SNAPSHOTS; else process.env.DACS_RECIPE_SNAPSHOTS = originalSnapshots;
     if (originalPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = originalPolicies;
   }
 });

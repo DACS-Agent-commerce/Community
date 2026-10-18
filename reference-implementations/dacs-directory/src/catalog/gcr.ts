@@ -20,7 +20,7 @@ import {
   publicKeyFromSeed,
   rawPublicKey,
 } from "@kynesyslabs/dacs/crypto";
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const SEED_PATH = join(process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data"), ".indexer-seed");

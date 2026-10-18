@@ -266,7 +266,7 @@ test("a rejected marker re-published in place with a corrected signature envelop
   transactions = [memo(50, locator(9)), ...transactions];
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
-  assert.equal(publishedListing()?.revocationBinding?.markerAnchor.locator, locator(9));
+  assert.equal(publishedListing()?.revocation?.markerAnchor.locator, locator(9));
 });
 
 test("a verified marker missing from the candidate queue is still checked first", async () => {
@@ -293,7 +293,7 @@ test("a verified revocation stays revoked while its marker cannot be read or no 
     [locator(5)]: { data: JSON.stringify(marker), owner: ownerOf(otherBuyer) },
   }, [locator(1), locator(5)]);
   await reindex();
-  const binding = publishedListing()?.revocationBinding;
+  const binding = publishedListing()?.revocation;
   assert.equal(publishedListing()?.status, "revoked");
   assert.equal(binding?.markerAnchor.locator, locator(5));
   transactions = [];
@@ -301,13 +301,13 @@ test("a verified revocation stays revoked while its marker cannot be read or no 
   unavailable.add(locator(5));
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
-  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+  assert.deepEqual(publishedListing()?.revocation, binding);
   // Later content at the marker's locator does not withdraw the revocation either.
   unavailable.clear();
   storage[locator(5)] = { data: JSON.stringify(unsigned(1)), owner: ownerOf(otherBuyer) };
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
-  assert.deepEqual(publishedListing()?.revocationBinding, binding);
+  assert.deepEqual(publishedListing()?.revocation, binding);
 });
 
 test("an unread or unexamined revocation candidate withholds the listing rather than publishing it active (RB-5)", async () => {
@@ -362,7 +362,7 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   transactions = [];
   await reindex();
   assert.equal(publishedListing()?.status, "active");
-  assert.equal(Object.hasOwn(publishedListing()!, "revocationBinding"), false);
+  assert.equal(Object.hasOwn(publishedListing()!, "revocation"), false);
 });
 
 for (const route of ["unsigned bundle-named program", "bundle and agreement signed by its own parties"]) {
