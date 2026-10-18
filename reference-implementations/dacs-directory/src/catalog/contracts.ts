@@ -306,9 +306,16 @@ export const openApiDocument = (origin: string) => ({
     },
     "/api/dacs/bundles/{jobId}": {
       get: {
-        summary: "Retrieve BB-4-verified DACS-5 BundleBindings known to this catalog",
-        parameters: [{ name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } }],
-        responses: { "200": { description: "Signed BundleBinding candidates" }, "400": { description: "Invalid jobId" } },
+        summary: "Retrieve every BB-4-verified DACS-5 BundleBinding this catalog holds for the job, whoever signed it",
+        parameters: [
+          { name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+          { name: "cursor", in: "query", description: "Opaque cursor from the previous page", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "A page of signed BundleBindings with `total` and, when more remain, the next `cursor`" },
+          "400": { description: "Invalid jobId or pagination" },
+        },
       },
     },
     "/api/dacs/inspect-service/{listingId}/{version}": {

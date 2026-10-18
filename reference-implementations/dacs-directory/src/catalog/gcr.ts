@@ -20,7 +20,7 @@ import {
   publicKeyFromSeed,
   rawPublicKey,
 } from "@kynesyslabs/dacs/crypto";
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const SEED_PATH = join(process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data"), ".indexer-seed");
@@ -33,7 +33,8 @@ function indexerSeed(): Uint8Array {
   return Uint8Array.from(seed);
 }
 
-async function authHeaders(): Promise<Record<string, string>> {
+/** Read-auth headers for an unprivileged gcr_routine call, signed with the throwaway indexer key. */
+export async function gcrAuthHeaders(): Promise<Record<string, string>> {
   const seed = indexerSeed();
   const priv = privateKeyFromSeed(seed);
   const pubHex = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex");
@@ -53,7 +54,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 export async function gcrGetIdentities(addressHex: string): Promise<unknown> {
   const res = await fetch(RPC + "/", {
     method: "POST",
-    headers: await authHeaders(),
+    headers: await gcrAuthHeaders(),
     signal: AbortSignal.timeout(30_000),
     body: JSON.stringify({
       method: "gcr_routine",

@@ -860,6 +860,44 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
   }
 });
 
+test("registration-time holder binding overflow leaves the buyer side indeterminate", async () => {
+  const fixture = await vector("registration-binding-overflow-job", 140);
+  const deal = registeredDeal("registration-binding-overflow-job", fixture.locators.buyer, fixture.locators.seller);
+  const { signature: _signature, ...buyerScope } = await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0);
+  // Distinct signed records share one native address, keeping BB-6's separate
+  // fetch budget from masking the registration-time binding cap.
+  const buyers = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
+    const scope = { ...buyerScope, anchorTx: `tx-registration-binding-${index}` };
+    const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`),
+      privateKeyFromSeed(seeds[0]))).toString("base64url");
+    return { ...scope, signature: { algorithm: "ed25519" as const, signer: dids[0], value } };
+  }));
+  assert.equal(new Set(buyers.map((binding) => contentHash(binding))).size, 33);
+  const seller = await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1);
+  const saved = loadScanState();
+  const originalFetch = globalThis.fetch;
+  saveScanState({ ...saved, bundleBindings: {}, bundleBindingOverflow: [] });
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  const index = (count: number) => indexRegistration({ primaryClaim: dids[1], displayName: "seller",
+    listingAnchors: [fixture.locators.listing], deals: [deal], bundleBindings: [...buyers.slice(0, count), seller] },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  try {
+    assert.equal((await index(32)).deals[0].refsVerified, true, "the full in-budget set resolves normally");
+    assert.deepEqual(loadScanState().bundleBindingOverflow, [], "no persisted overflow supplies the registration-time marker");
+    const record = await index(33);
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, false, "truncating the holder's bindings must leave its side indeterminate");
+    assert.equal(record.reputation.bundleCount, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    saveScanState(saved);
+  }
+});
+
 test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
   const fixture = await vector("seller-fallback-job", 80);
   maps.delete(fixture.locators.buyer);
