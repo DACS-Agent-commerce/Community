@@ -1,118 +1,88 @@
-# DACS Standard revision this Directory implements and tests against
+# DACS Standard source revision used by this Directory's partial implementation
 # github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
 4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
-# Profile notes: primary claims use the did:demos:agent ClaimReference profile
-# (src/catalog/claimRef.ts), which the pinned revision does not yet define. It comes from
-# DACS-Standard #296, merged into `next` at 725fa78bd124a7adb65df27adee376d5d44a4bd7; its fixture
-# is vendored below. Its keys are Ed25519, so artifacts signed with ecdsa-secp256k1 or
-# sr1-aggregate cannot be verified under this profile and are not published or counted.
-#   Procurement listings remain unsupported until publisher-as-buyer reconciliation and supplier attribution exist.
-# Recorded deviations (vectors: test/standard-vectors.test.ts; local guards: test/evidence-graph-rules.test.ts,
-# test/indexer-binding-rules.test.ts, test/legacy-deal-rules.test.ts and test/native-payment.test.ts):
-#   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not
-#     reference: a session whose listing sets deadlineSecAfterCommit or validity.notAfter is
-#     indeterminate and never counted.
-#   CD-1: a non-canonical amount (e.g. "95.00") is rejected rather than canonicalised (fail-closed).
-#   agreement-listing-v0.1 `fractional-pct-out` expects reject; the §8.5.2 text (round to the CD-1
-#     digits of bandCenter) accepts it, and the Directory follows the text.
-#   SB-1: pinned evm/x402 refs omit logIndex; Solana refs omit instructionIndex. These refs are
-#     error and never counted. AP2, htlc-* and liquidity-tank refs have no SB-1 key format and are
-#     likewise uncounted (HTLC-5 session binding is not an SB-1 key). Every legacy SDK evm-erc20
-#     or x402 deal is uncounted because its TxRef lacks the event index; only legacy pay-dem keys.
-#   Authoritative bundle absence: the Demos mapping declares no absence-evidence policy. Both
-#     absence sets below run; their policy-qualified one-sided pass/include cases deliberately
-#     remain indeterminate/excluded. No Directory endpoint authenticates those projected proofs.
-#   Vet admission resolves historical IdentityBundle bytes and checks the presentation/hash. This
-#     profile can read a signed BundleParty extension `identityBundle` (inline) or
-#     `identityBundleRef` (storage-program locator and IdentityBundle hash), or use
-#     EvidenceGraphDeps.resolveIdentityBundle. Publication self-bindings cannot supply session identity.
-#     IdentityBundle hashes omit presentation per DACS-1. Session Vet additionally requires a trusted
-#     resolveSessionChallenge adapter authenticating verifier issuance, job/party/nonce, challenge
-#     lifetime, authenticated consumedAt and consumedByPresentationHash: sha256Hex(canonicalize(identity))
-#     of the complete first attempted IdentityBundle including presentation/signatures, even on failure (CORE SN-1..4).
-#     A signed-scope bundle hash is insufficient; historical adapters must supply the complete digest.
-#     IdentityBundle.presentedAt is schema-checked but informational.
-#     No production historical-challenge resolver is installed: those sessions remain indeterminate.
-#     Listing publication continues to accept a nonce-free signed self-binding.
-#   Required credential matching uses the signed composite generatedAt (unix ms) as the historical
-#     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
-#     Session recipeRegistryVersion selects an operator-authenticated DACS_RECIPE_SNAPSHOTS roster.
-#     Unknown snapshots and results outside that roster remain indeterminate. Unversioned requirements
-#     select the latest recipe in the roster. validUntil governs; without it the roster supplies defaultMaxAgeSec for the exact
-#     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
-#     live exact-version recipe policy, an allowed method and a trusted authenticated signer.
-#     RAV-2: the catalog does not disclose per-result availability yet. Non-live vet results
-#     remain indeterminate; non-live recipes cannot elevate identity tiers either. This applies
-#     to every included VerifyResult, optional ones too: each needs a valid live recipe policy.
-#     Wrapper expiry and listing maxAge only narrow that authority window.
-#     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
-#     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
-#   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. The DV-1 hash covers
-#     the complete NFC/JCS payload, including any signature/signatures fields (the pinned SDK's
-#     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
-#     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
-#     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
-#   Rail admission uses explicitly provisioned DACS_RAIL_SNAPSHOTS (PA-1 operator trust).
-#     Snapshots pin registryVersion and railVersion, handler, asset, network, parameters and availability.
-#     Operators must authenticate the registry index/definitions before provisioning; no snapshot is
-#     bundled or inferred from a listing or RPC. Unknown versions remain indeterminate. Only a live
-#     demos-native:DEM definition with native-dem/DEM/9 and network demos can use the native adapter.
-#   Native pay-dem: success additionally requires blockNumber and getTxByHash/getBlockByNumber
-#     reads establishing confirmed inclusion, native-send endpoints and the exact DEM price in OS.
-#     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
-#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Unavailable reads never count. The node source calls terminal inclusion "confirmed".
-#   Attested-payload and entitlement success remain indeterminate until authoritative attestation
-#     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
-#   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
-#     adapters; they never contribute completion or volume. AP2 and x402 success is indeterminate: this profile has no authenticated provider-receipt
-#     resolver. A signed receipt pointer/hash alone cannot establish provider or HTTP settlement.
-#   Current publisher rail IDs are demos-native:DEM and x402:default. Historical signed phase-name
-#     aliases remain readable for evidence, but public discovery excludes those current offers;
-#     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
-#   Anonymous restricted-program reads on node ac8f45f are denied: buyer-only is indeterminate
-#     on that deployment. ACL-success tests model a hypothetical readable metadata contract.
-#   Revocation candidates: discovered markers returning NOT_FOUND, PERMISSION_DENIED or a transport
-#     failure stay pending/indeterminate. Persistent 1–60 second exponential backoff bounds retries.
-#     Only successfully read invalid content can reject a candidate; verified revocation is retained.
-#   Per-claim PresentationSignature.signature retains the SDK auto-detected legacy encoding;
-#     strict SIG-6 value-envelope decoding is enforced separately.
-# Skipped vector sets at this pin:
-#   private-deliverables-v0.1: projected cci/40-byte buyer addresses and encryption/entitlement
-#     gates do not map directly to this agent profile; signed local graph cases pin DV-1..3.
-#   verifyresult-acceptance-v0.1: recipe-registry steward signatures and cci claims are outside
-#     the deployment-policy recipe adapter; local vet/recipe tests pin the supported profile.
-#   fab-bundle-extended-pointer-v0.3: no external extended-pointer resolver.
-#   settlement-finalization-propagation-v0.3 and receipt-rederivation-v0.3: handler-side
-#     finalization/receipt emission, not this read-only catalog consumer.
-#   commitment-anchor-authority-v0.3: no CommitmentRecord locator is exposed by current bundles.
-#   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
-#     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
-#     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
-#   Previously skipped unresolved-vs-absent-v0.3 and bundle-absence-evidence-v0.3 are now vendored
-#     and exercised, with the two one-sided pass cases explicitly recorded above.
-# Node compatibility: ac8f45f pins source/API behavior, not the revision of a remote deployment.
-#     No remote revision attestation is available; runtime probe output is dated evidence only.
-# Vendored conformance vectors (byte-identical copies; sha256 checked by test/standard-vectors.test.ts):
-#   conformance/vectors/security/signature-value-encoding-v0.1.json   bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
-#   conformance/vectors/security/revocation-binding-v0.3.json         3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
-#   conformance/vectors/security/sb2-settlement-uniqueness-v0.1.json  31c9455dc0147f27cf7a7d47cb17ffc019016bf63aa366b9dbadd720f8b16b81
-#   conformance/vectors/security/agreement-listing-v0.1.json          857ebf0ea4b885b92b0d6ad509a37cf5076218881c510ef2f2d05d734d94503b
-#   conformance/vectors/security/mixed-version-reconciliation-v0.3.json 41c1bc7eee95ac3bf625eaea4db88929e2eb6cb20c6bade9c3192dc3337a9e0b
-#   conformance/vectors/security/fault-bundle-perspective-pair-v0.3.json f56586a27afa851202a121576814eb0a68bddc4bdc9ce675740ba085870ed285
-#   conformance/vectors/security/payee-destination-binding-v0.1.json  cd83d95982d6529ac3f776d48df8d92c86b80806a88e96a62d80674563aaa779
-#   conformance/vectors/security/listing-preserve-unknown-v0.1.json   7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
-#   conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78) demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-#   conformance/vectors/security/unresolved-vs-absent-v0.3.json 8a543319798cb60073631a9a2431f45e866f89db8b136a76b679780718a15b91
-#   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
-#   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
-#   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
-
-# Additional consumer/publisher profile:
-#   Canonical hashing rejects lone UTF-16 surrogates in values and keys (server and browser).
-#   The pinned SDK serializer accepts only integer JSON numbers. Listing publication rejects
-#   fractional negotiation percentages with HTTP 400; fractional-percentage publication is unsupported.
-#   Authority evidence needs a method-specific authenticated proof/hash/signer/validator-epoch adapter.
-#   No production authority adapter is installed; identity tiers and session evidence fail closed.
-#   Listing discovery retains revoked tombstones with the normative `revocation` binding.
-#   Generated A2A cards require an explicit service endpoint and transport; otherwise only the
-#   DACS discovery descriptor is emitted, without claiming an A2A service at the hosting origin.
+# Additional primary-claim profile: did:demos:agent:<64 lowercase hex>, Ed25519,
+# from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7.
+# This is a source pin, not a declaration of complete DACS conformance.
+#
+# Implemented and tested in this split:
+# - BundleBinding BB-4 signature/member checks and strict SIG-6 envelope decoding:
+#   test/bundle-binding-rules.test.ts and test/bundle-binding.test.ts.
+# - BB-5..8 role-holder resolution, deterministic per-signer work limits and
+#   indeterminate overflow/divergence: the same binding tests.
+# - catalogBundleBindings and scanChain retain all supported BB-4-valid records,
+#   regardless of signer. The unauthenticated bundle route pages persisted records.
+#   test/catalog-binding-pagination.test.ts covers scan -> direct persistence -> HTTP.
+#   Reindex/federation accumulation in this part retains every verified binding.
+# - canonical.ts guards its wrappers against lone UTF-16 surrogates in keys/values;
+#   SDK NFC behavior and valid pairs are pinned by test/canonical-rules.test.ts.
+#   Other SDK canonicalizer callers have not all adopted this guard.
+# - Isolated matchesVetRequirement helper: required AND, OR within oneOf groups,
+#   AND across groups, exact verified primary, per-scheme claim normalization,
+#   verificationRequired decision gate, unconditional freshness, and unknown
+#   parameters unmatched. It requires an explicit session recipe roster and
+#   pre-authenticated results; every included result needs an exact live recipe,
+#   allowed method and trusted signer, including results with validUntil.
+#   Every required/oneOf member must declare a boolean verificationRequired;
+#   VerifyResult shape is checked even when verificationRequired is false.
+#   BundleRequirement requires requirementVersion "1". Result and policy methods
+#   must belong to the pinned eight-kind DACS-2 VerificationMethod registry.
+#   Unversioned requirements select the latest version in the supplied roster.
+#   Primary selection authenticates the exact result without overriding explicit
+#   listing recipe pins. Every presentedBy requires a trusted method-specific
+#   VerifyPrimaryClaimControl adapter; missing/rejecting/throwing adapters fail
+#   closed. The adapter must authenticate holder linkage and session-bound control;
+#   an identifier-existence result alone never establishes presenter control.
+#   validUntil or exact-recipe defaultMaxAgeSec sets the authority window; wrapper
+#   expiry/maxAge can only narrow it. See test/vet-claim-rules.test.ts.
+# - Isolated recipe policy and historical snapshot resolvers:
+#   test/recipe-policy.test.ts and test/recipe-snapshot.test.ts.
+# - Isolated authenticateAuthorityAttestation adapter boundary: missing, rejecting
+#   or throwing adapters fail closed; adapters must authenticate original proof/hash
+#   scope, signer and validator epoch. test/authority-attestation.test.ts uses a
+#   signed fixture adapter; it is not a production method-specific verifier.
+#
+# Pending production integration (these helpers do not constrain current session
+# admission or identity tiers): historical IdentityBundle/challenge authentication,
+# session recipeRegistryVersion snapshot selection, required-claim matching and
+# method-specific authority-proof authentication. Current authority evidence is
+# hash-checked; the standalone adapter is not wired into graph/tier derivation.
+# Tier policy still accepts operator_gated/closed_data/bilateral without disclosing
+# per-result availability. The isolated new helpers use a live-only profile.
+# Native-payment inclusion/finality and exact event/instruction settlement keys,
+# authenticated rail snapshots, delivery cleartext/ACL/grant verification and full
+# agreement/listing conformance are pending; graph reference verification alone
+# does not establish these properties. No DACS_RAIL_SNAPSHOTS adapter exists here.
+#
+# Other current limitations:
+# - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
+# - Current listing and revocation readers enforce strict SIG-6 encoding; graph
+#   readers retain permissive legacy decoding. BundleBinding verification is strict.
+# - SDK canonicalization accepts only integer numbers. Fractional publication is
+#   unsupported; listing publication rejects fractional negotiation percentages.
+# - Discovery excludes revoked offers and carries revoked tombstones with their
+#   normative revocation binding. Procurement listings remain unsupported.
+# - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
+# - scan.ts classifies any HTTP 404 as STORAGE_NOT_FOUND without checking the node
+#   error body; missing/non-public locators are terminal until replay. This is an
+#   operational label, never authoritative BB-8 absence evidence.
+# - Node ac8f45f02fc9c25082ce9b83595c2e3916b49c5a is a source/API reference only;
+#   no remote deployment revision is attested by an RPC URL or successful read.
+#
+# Vendored conformance inputs (byte hashes and local decisions are checked by
+# test/standard-vectors.test.ts, test/listing-vectors.test.ts and
+# test/revocation-vectors.test.ts):
+# conformance/vectors/security/signature-value-encoding-v0.1.json
+# sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+# conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
+# sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
+# conformance/vectors/security/listing-preserve-unknown-v0.1.json
+# sha256 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+# conformance/vectors/security/revocation-binding-v0.3.json
+# sha256 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+# The revocation adapter excludes remote-catalog freshness (not consumed here).
+# Other upstream vector sets are unimplemented adapters/unexecuted here,
+# including sb2-settlement-uniqueness, agreement-listing,
+# mixed-version-reconciliation, fault-bundle-perspective-pair,
+# payee-destination-binding, unresolved-vs-absent,
+# bundle-absence-evidence, metered-pricing and phase-kind-divergence.
