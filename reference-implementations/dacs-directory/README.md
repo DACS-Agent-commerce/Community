@@ -240,8 +240,8 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
    Revocation markers are recognised by their signed content, never by program name.
-   Every candidate locator is queued once per listing hash; each pass fully verifies
-   at most 16 per listing — markers that already passed RB-4 first, then those
+   Every candidate locator is queued once per listing hash; each pass examines
+   at most 16 locators per listing — markers that already passed RB-4 first, then those
    anchored by the listing owner, then arrival order. The queue itself has no cap.
    An incomplete withdrawal check from a publisher-authenticated or operator-pinned
    well-known source is `indeterminate` (RB-5), so its listing is withheld from new
@@ -251,6 +251,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    a separate complete active source must establish discovery eligibility.
    Once a marker verifies, the listing stays `revoked` with its
    binding even if the marker later cannot be read (RB-3).
+   A cached marker that passes RB-4 can establish revocation. A cached rejection
+   requires a current marker read before rejecting the candidate or releasing a
+   hold: at most 16 current reads and 32 cached/current checks per pass. Missing or
+   unavailable reads keep authenticated holds across recrawls and restarts.
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
    `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The

@@ -196,9 +196,9 @@ test("every revocation candidate is eventually verified with bounded work per pa
   }
   assert.equal(listingStatus(), "revoked");
   assert.ok(passes <= Math.ceil(candidates.length / 16), `revoked after ${passes} passes`);
-  // Retained readable bytes allow even now-unreadable bogus candidates to be rejected.
+  // Invalid retained bytes cannot conclusively reject a now-unreadable locator.
   const queued = pending(listingHash);
-  for (const at of unreadable) assert.ok(!queued.includes(at), `${at} was rejected from retained bytes`);
+  for (const at of unreadable) assert.ok(queued.includes(at), `${at} stays pending until a current read succeeds`);
   // Rejected candidates are not verified again.
   reads = new Map();
   await reindex();
@@ -225,7 +225,7 @@ test("per-pass revocation work does not grow with the number of queued candidate
     work.push({ calls: sqlWork.calls, rows: sqlWork.rows, verified: readsOf(queued) });
   }
   assert.deepEqual(work[1], work[0], "the same statements and rows with ten times the queue");
-  assert.equal(work[0].verified, 0, "retained bytes require no repeat node reads");
+  assert.equal(work[0].verified, 16, "each cached rejection gets one bounded current read");
   // Nothing unexamined left the queue: two passes examined 32 of the 400.
   assert.equal(pending(listingHash).length, 400 - 32);
 });
@@ -363,7 +363,7 @@ test("retained signed discovery revokes while unauthenticated unread or unexamin
   vanishing.add(locator(8));
   await reindex();
   assert.equal(publishedListing()?.status, "active");
-  assert.deepEqual(pending(listingHash), []);
+  assert.deepEqual(pending(listingHash), [locator(8)], "missing current bytes cannot make a cached rejection conclusive");
 
   // Every candidate examined and rejected: absent, and an active record carries no binding.
   resetIndex([sellerRegistration, later], 33);

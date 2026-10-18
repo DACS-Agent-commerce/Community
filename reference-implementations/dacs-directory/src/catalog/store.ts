@@ -410,7 +410,9 @@ export const recordRevocationProgress = db.transaction(
     examinedBindings: readonly RevocationBinding[] = [], sourceRevision = -1): void => {
     for (const locator of progress.rejected) { rejectCandidate.run(listingHash, locator); clearRevocationRetry.run(listingHash, locator); }
     if (progress.rejected.length > 0 && examinedBindings.length > 0 && sourceRevision === wellKnownWithdrawalRevision()) {
-      // Compare exact binding identities captured before the read. A slow
+      // Callers must reject these bindings only after a current marker read,
+      // never from an older scanner observation. Compare exact binding
+      // identities captured before the read. A slow
       // rejection must not erase a newer binding at the same marker address.
       // The source revision also protects a newer advertisement of identical
       // scope bytes whose previously invalid signature may have been repaired.

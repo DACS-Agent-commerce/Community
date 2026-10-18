@@ -359,7 +359,7 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
-/** Per-listing, per-pass bound on candidate reads and RB-4 verifications. */
+/** Per-listing, per-pass candidate bound; each may check cached and current bytes. */
 export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
 
 /** Candidates examined by one call: unreadable ones are retried later, rejected ones were read and failed RB-4. */
@@ -372,7 +372,9 @@ export interface RevocationCandidateProgress {
  * Fully verify discovered candidates, in the given order and at most `limit`
  * of them, and return the RB-2 binding this catalog can publish. A bogus
  * candidate never shadows a later valid marker; unexamined candidates are
- * left for a later call.
+ * left for a later call. When the first reader supplies cached observations,
+ * a failed check must use the current reader before recording a rejection.
+ * This bounds work to `limit` current reads and at most `2 * limit` checks.
  */
 export async function findValidListingRevocation(
   candidateRefs: string[],
@@ -382,14 +384,20 @@ export async function findValidListingRevocation(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
   progress: RevocationCandidateProgress = { unread: [], rejected: [] },
   limit = REVOCATION_VERIFICATIONS_PER_PASS,
+  readCurrentCandidate?: (ref: string) => Promise<Record<string, unknown> | null>,
 ): Promise<RevocationBinding | null> {
   for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
-    const candidate = await readCandidate(ref);
+    let candidate = await readCandidate(ref);
+    let valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    if (!valid && readCurrentCandidate) {
+      candidate = await readCurrentCandidate(ref);
+      valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    }
     if (!candidate) {
       progress.unread.push(ref);
       continue;
     }
-    if (!(await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey))) {
+    if (!valid) {
       progress.rejected.push(ref);
       continue;
     }

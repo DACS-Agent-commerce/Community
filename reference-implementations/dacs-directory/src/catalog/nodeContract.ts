@@ -67,6 +67,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
     rpc: base, observedAt: new Date().toISOString(), storageNotFound, nodeCallSearch,
     gcrRoutineSearch: viaGcr ? "supported" : "failed", searchesAgree,
     // Resume lookup falls back only on the recognized unknown-message reply.
-    ok: storageNotFound && (nodeCallSearch === "supported" || (nodeCallSearch === "unknown-message" && viaGcr !== null)) && searchesAgree !== false,
+    ok: storageNotFound && viaGcr !== null &&
+      ((nodeCallSearch === "supported" && searchesAgree === true) || nodeCallSearch === "unknown-message"),
   };
 }
