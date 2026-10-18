@@ -79,23 +79,22 @@ export type StorageReadFailureCode =
 /** Safe cause classification; response bodies and upstream text are never persisted. */
 export function storageReadFailureCode(status: number, errorCode?: string): StorageReadFailureCode {
   const normalized = typeof errorCode === "string" ? errorCode.trim().toUpperCase() : undefined;
-  if (status === 404) {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (status === 401 || status === 403) {
-    return "STORAGE_NOT_PUBLIC";
-  }
   // A server-side or transport-class status remains retryable even if an
   // untrusted error body happens to carry a terminal-looking code.
   if (status >= 500 || status < 100) return "STORAGE_RPC_UNAVAILABLE";
-  if (normalized === "NOT_FOUND" || normalized === "STORAGE_NOT_FOUND" || normalized === "PROGRAM_NOT_FOUND") {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (normalized === "PERMISSION_DENIED" || normalized === "UNAUTHORIZED") return "STORAGE_NOT_PUBLIC";
+  // Only the node's own answer is terminal: NOT_FOUND on a 404, PERMISSION_DENIED on a 403. Any
+  // other 4xx (a proxy's, a wrong route's; the node never answers 401) stays retryable rather than
+  // hiding an artifact, such as a revocation marker, for good (RB-6).
+  if (status === 404) return normalized === "NOT_FOUND" ? "STORAGE_NOT_FOUND" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 403) return normalized === "PERMISSION_DENIED" ? "STORAGE_NOT_PUBLIC" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 401) return "STORAGE_RPC_UNAVAILABLE";
   return status >= 200 && status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE";
 }
 
 export async function readStorage(address: string, attempts = 3): Promise<StorageRead> {
+  // Scanner reads use native locators only. Reject malformed input locally; an HTTP 400 for a
+  // valid locator says nothing about the program's existence and must remain retryable.
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { success: false, failureCode: "ARTIFACT_REJECTED" };
   let lastFailure: StorageReadFailureCode = "STORAGE_RPC_UNAVAILABLE";
   const boundedAttempts = Number.isSafeInteger(attempts) && attempts >= 1 && attempts <= 5 ? attempts : 3;
   for (let attempt = 1; attempt <= boundedAttempts; attempt++) {
@@ -197,8 +196,8 @@ export function isListingRevocationCandidate(value: unknown): boolean {
     Number(marker.listingVersion) > 0 &&
     typeof marker.listingContentHash === "string" &&
     /^[0-9a-fA-F]{64}$/.test(marker.listingContentHash) &&
-    Number.isSafeInteger(marker.revokedAt) &&
-    Number(marker.revokedAt) >= 0 &&
+    typeof marker.revokedAt === "number" &&
+    Math.abs(marker.revokedAt) <= Number.MAX_SAFE_INTEGER &&
     (marker.reason === undefined || typeof marker.reason === "string") &&
     (signed.algorithm === "ed25519" ||
       signed.algorithm === "ecdsa-secp256k1" ||

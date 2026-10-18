@@ -172,9 +172,13 @@ DACS artifact; it does not attribute a publishing failure to an agent. Raw excep
 payloads, internal URLs and stack traces are never returned.
 
 Storage-read diagnostics distinguish `STORAGE_NOT_FOUND`, `STORAGE_NOT_PUBLIC`,
-`STORAGE_RPC_UNAVAILABLE`, and `STORAGE_INVALID_RESPONSE`. Missing and non-public
+`STORAGE_RPC_UNAVAILABLE`, `STORAGE_INVALID_RESPONSE`, and `ARTIFACT_REJECTED`. Missing and non-public
 locators are terminal until a later chain replay observes them again; transient node
-and response failures retain bounded retries. `STORAGE_NOT_FOUND` is operational
+and response failures retain bounded retries. `ARTIFACT_REJECTED` means the content was
+read but fails the artifact policy (oversized, a DACS-named program without object data,
+or no canonical JSON form). It has its own retry class: it is never dead-lettered, it is
+retried with backoff while at most 1,000 rejected locators are active, and the
+longest-waiting one takes the next free slot. `STORAGE_NOT_FOUND` is operational
 diagnostic evidence only: under the current Demos mapping it is never authoritative
 DACS-5 absence evidence and cannot satisfy BB-8.
 
@@ -190,6 +194,14 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
+   Revocation markers are recognised by their signed content, never by program name.
+   Every candidate locator is queued once per listing hash; each pass fully verifies
+   at most 16 per listing — markers that already passed RB-4 first, then those
+   anchored by the listing owner, then arrival order. The queue itself has no cap.
+   While any candidate is unread or not yet examined the RB-4 check is incomplete
+   (`indeterminate`, RB-5), so the listing is withheld from the catalog rather than
+   published `active`. Once a marker verifies, the listing stays `revoked` with its
+   binding even if the marker later cannot be read (RB-3).
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
    `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
@@ -238,6 +250,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   required signer, validator roster/epoch and proof. The result signer's signature does not replace
   this check. No production authority adapter is installed, so these proofs remain indeterminate
   for sessions and do not elevate identity tiers.
+- **Canonical input uses Unicode scalar values.** Server and browser reject lone UTF-16 surrogates
+  in string values and property names before canonical hashing. This publisher's pinned serializer
+  supports integer negotiation percentages; fractional percentages receive HTTP 400. This is a
+  narrower publication profile than the Standard's fractional-percentage inputs.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -279,7 +295,54 @@ computations remain advisory and independently reproducible from their refs.
   attest the revision running at a remote RPC. The configured live service remains
   unpinned unless its operator supplies a verifiable deployment revision.
 
+**Node deployment contract.** At `ac8f45f` the exact-name program search used by the
+producer resume lookup exists only as the read-authenticated `gcr_routine
+searchStoragePrograms`; a deployed node may also answer it as a `nodeCall` (node2 did on
+2026-10-15). The Directory asks the `nodeCall` first and falls back to the `gcr_routine`
+only on a recognized "Unknown message" answer. The fallback can recover a listing
+after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
+and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
+and withholds new publication until a complete search contract is available.
+`npm run check:node -- <exact program name>` is a read-only probe (no
+transactions) that reports the storage not-found answer and both search paths, and fails
+when they disagree; its output is dated runtime evidence, not a pin. Run it when the
+`DEMOS_RPC` deployment changes.
+
 ## License
 
 MIT. This in-tree submission is covered by the Community repository's root
 [`LICENSE`](../../LICENSE).
+
+Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, paired with
+`pay-dem` and `pay-x402` phase kinds. Historical current-profile listings signed with phase
+names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
+a new signed listing version to make those offers executable.
+
+Executable offers discovered through a hosted well-known index require source provenance.
+Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a
+server-side JSON object mapping normalized HTTPS origins to canonical seller DIDs
+(for example, `{"https://agent.example":"did:demos:agent:<64 lowercase hex>"}`).
+Verify that seller/domain relationship independently before adding a pin. Public
+domain submissions and listing endpoints do not create pins. An unsigned, unpinned
+index can carry independently verified tombstones for known listings, but cannot
+introduce executable offers. A pinned unsigned index retains incomplete withdrawal
+checks until a completed check from that same source or a verified revocation.
+
+Before queuing a carried marker, the crawler independently verifies the listing's
+publisher, chain owner, content hash, ID and version. Unsigned Standard indexes can
+discover independently verified seller-signed tombstones. A listing's `seller.publicEndpoint`
+is a self-claim and does not authorize unresolved hints. Discovery deduplicates anchors
+and bindings and spends at most 32 node reads per domain per pass, with a persisted
+cursor for continuation. Authenticated bindings remain seller-scoped until the indexer
+verifies the listing's publisher, owner and tuple using its own listing read. An authenticated
+index with an incomplete withdrawal entry withholds that offer until a later
+complete authenticated check or a verified revocation resolves it. Failed later
+crawls retain incomplete checks; verified tombstones remain revoked. Upgrades retain
+affected seller/hash holds, including checks with no queued marker. Legacy sources
+without recorded provenance require a signature or operator pin before reconciliation;
+chain replay alone cannot release those holds. Ambiguous legacy candidates hold only
+their listing hashes until chain replay completes; unrelated source failures do not
+delay replay completion. Authenticated recrawls must retain each source's index
+timestamp and hash ordering, including after migration. A stored timestamp that is
+incorrectly ahead of the publisher's current index requires explicit operator
+revalidation of that source; an older index cannot silently replace it.

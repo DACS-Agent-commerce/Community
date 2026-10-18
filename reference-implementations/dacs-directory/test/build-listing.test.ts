@@ -115,7 +115,7 @@ test("publisher builds a verifiable metered listing with the AP2 rail/phase bind
 
     const listingSignature = Buffer.from(
       ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
+    ).toString("base64url");
     assert.ok(await verifyListing({
       ...built.listing,
       signature: { algorithm: "ed25519", signer: claim, value: listingSignature },
@@ -141,7 +141,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
         ? Response.json({ result: 200, response: [] })
         : Response.json({ result: 200, response: 6 });
     }
-    return new Response(null, { status: 404 });
+    return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
     const builtResponse = await POST(request(finalInput));
@@ -155,7 +155,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     };
     const listingSignature = Buffer.from(
       ed25519Sign(Buffer.from(built.message, "utf8"), privateKey),
-    ).toString("hex");
+    ).toString("base64url");
     const signedListing = {
       ...built.listing,
       signature: { algorithm: "ed25519", signer: claim, value: listingSignature },
@@ -233,5 +233,70 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
     assert.equal(calls, 1, "an indeterminate search must not fall through to a nonce request");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("publisher withholds a create when the fallback search cannot establish absence", async () => {
+  const identityResponse = await POST(request(base));
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identitySignature = Buffer.from(
+    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
+  ).toString("hex");
+  const originalFetch = globalThis.fetch;
+  const methods: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const rpc = JSON.parse(String(init?.body));
+    methods.push(rpc.method);
+    if (rpc.method === "nodeCall" && rpc.params[0].message === "searchStoragePrograms") {
+      return Response.json({ result: 200, response: '{ error: "Unknown message"}' });
+    }
+    if (rpc.method === "gcr_routine") return Response.json({ result: 200, response: [] });
+    // Make a nonce request succeed so a regression fails on the HTTP result.
+    return Response.json({ result: 200, response: 6 });
+  };
+  try {
+    const response = await POST(request({ ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature }));
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.match(body.error, /could not safely determine.*cannot establish absence/);
+    assert.equal(body.tx, undefined);
+    assert.deepEqual(methods, ["nodeCall", "gcr_routine"], "no fresh nonce may be requested after an incomplete lookup");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("publisher emits canonical DEM and x402 registry IDs and rejects phase-name aliases", async () => {
+  for (const alias of ["pay-dem", "pay-x402"]) {
+    const response = await POST(request({ ...base, rails: [alias] }));
+    assert.equal(response.status, 400);
+  }
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try {
+    for (const [railId, phaseKind, currency] of [["demos-native:DEM", "pay-dem", "DEM"], ["x402:default", "pay-x402", "USDC"]]) {
+      const body = { ...base, rails: [railId], pricing: { kind: "fixed", amount: "1", currency } };
+      const stage = await POST(request(body));
+      assert.equal(stage.status, 200);
+      const identity = await stage.json() as { identityMessage: string; identityPresentedAt: number };
+      const response = await POST(request({ ...body, identityPresentedAt: identity.identityPresentedAt,
+        identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") }));
+      assert.equal(response.status, 200, await response.clone().text());
+      const built = await response.json() as { listing: { acceptedRails: unknown; pipeline: unknown[] } };
+      assert.deepEqual(built.listing.acceptedRails, [{ railId }]);
+      assert.deepEqual(built.listing.pipeline[2], { kind: phaseKind, parameters: { rail: railId } });
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher rejects fractional percentages cleanly under its integer profile", async () => {
+  for (const [minPct, maxPct] of [[2.5, 20], [2, 2.5]]) {
+    const response = await POST(request({ ...base, pricing: { kind: "negotiable", amount: "10", currency: "DEM", minPct, maxPct } }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /integer/);
   }
 });

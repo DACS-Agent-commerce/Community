@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, Registration, ScanState } from "./types.js";
+import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
+import type { WithdrawalProvenance } from "./wellknown.js";
 import { deriveSellerReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
@@ -133,6 +134,14 @@ db.exec(`
     state TEXT NOT NULL DEFAULT 'pending',
     PRIMARY KEY(listing_hash, locator)
   );
+  CREATE TABLE IF NOT EXISTS revocation_candidate_retries (
+    listing_hash TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    retry_after INTEGER NOT NULL,
+    PRIMARY KEY(listing_hash, locator),
+    FOREIGN KEY(listing_hash, locator) REFERENCES revocation_candidates(listing_hash, locator) ON DELETE CASCADE
+  );
   CREATE INDEX IF NOT EXISTS revocation_candidates_seq_idx ON revocation_candidates(seq);
   CREATE INDEX IF NOT EXISTS revocation_candidates_pending_idx
     ON revocation_candidates(listing_hash, seq) WHERE state = 'pending';
@@ -235,10 +244,67 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   setJson("sr2-anchor-schema-version", 2);
 })();
 
+// Earlier releases persisted unreadable (403/404) candidates as rejected without
+// a trustworthy reason. Reverify those decisions once, and withhold affected
+// active catalog entries immediately, before the first reindex can run.
+db.transaction(() => {
+  if (getJson("revocation-read-schema-version", 0) >= 1) return;
+  const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
+    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
+  db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
+    SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
+      AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
+  )`).run();
+  db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
+  if (affected.size) {
+    const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
+      ...seller, listings: seller.listings.filter((listing) =>
+        listing.status === "revoked" || !affected.has(listing.contentHash)),
+    })) });
+  }
+  setJson("revocation-read-schema-version", 1);
+}).immediate();
+
+// Keep source-specific upgrade holds even when no candidate was queued. v2 did
+// not retain source provenance, so only an authenticated recrawl can release it.
+db.transaction(() => {
+  const version = getJson<number>("withdrawal-carriage-schema-version", 0);
+  if (version >= 4) return;
+  const sources = getJson<WithdrawalSource[]>("withdrawal-sources", []);
+  for (const source of sources) {
+    source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
+    source.provenance = version === 3 ? "publisher-signature" : "legacy";
+    // Legacy bindings must not create candidate authority before revalidation.
+    if (source.provenance === "legacy") delete source.bindings;
+  }
+  setJson("withdrawal-sources", sources);
+  const ambiguousHashes = (db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL")
+    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash);
+  if (ambiguousHashes.length) {
+    db.prepare("DELETE FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL").run();
+    const state = getJson<ScanState>("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
+    setJson("scan-state", { ...state, schemaVersion: 0 });
+    // The candidate's seller is unknown, but its listing hash is still known.
+    // Unrelated offers need no quarantine while chain history is replayed.
+    setJson("withdrawal-carriage-replay-hashes", ambiguousHashes);
+  }
+  if (ambiguousHashes.length || sources.length) {
+    const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({ ...seller,
+      listings: seller.listings.filter((listing) => listing.status === "revoked" || (!ambiguousHashes.includes(listing.contentHash) &&
+        !sources.some((source) => source.seller === seller.primaryClaim &&
+          (source.incomplete.includes(listing.contentHash) || source.incomplete.includes("*"))))),
+    })) });
+  }
+  setJson("withdrawal-carriage-schema-version", 4);
+}).immediate();
+
 /**
  * Revocation candidates, per listing content hash. Each locator is admitted
  * once and stays pending until it is read and fails RB-4; a rejected locator
- * is admitted again only when the chain shows it with different content.
+ * is admitted again only when the chain shows it with a different stored
+ * value (`content_hash` hashes the whole value, signature envelope included).
  * `seq` is arrival order; an unreadable candidate is given a new one, so it
  * moves behind the others and is retried later.
  */
@@ -281,9 +347,15 @@ db.transaction(() => {
 }).immediate();
 
 const pendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
-  WHERE listing_hash = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+  WHERE listing_hash = ? AND state = 'pending' AND NOT EXISTS (
+    SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
+      AND r.locator = revocation_candidates.locator AND r.retry_after > ?
+  ) ORDER BY seq LIMIT ?`);
 const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candidates
-  WHERE listing_hash = ? AND owner = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' AND NOT EXISTS (
+    SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
+      AND r.locator = revocation_candidates.locator AND r.retry_after > ?
+  ) ORDER BY seq LIMIT ?`);
 /**
  * The next `limit` candidates to verify for a listing: those anchored by the
  * listing's owner first, then the rest in arrival order. Two indexed queries
@@ -292,18 +364,33 @@ const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candid
 export function nextRevocationCandidates(listingHash: string, listingOwner: string | null, limit: number): string[] {
   const rows = (statement: Database.Statement, ...params: unknown[]) =>
     (statement.all(...params) as Array<{ locator: string }>).map((row) => row.locator);
-  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), limit) : [];
-  return [...new Set([...owned, ...rows(pendingCandidates, listingHash, limit)])].slice(0, limit);
+  const now = Date.now();
+  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), now, limit) : [];
+  return [...new Set([...owned, ...rows(pendingCandidates, listingHash, now, limit)])].slice(0, limit);
 }
+const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND state = 'pending' LIMIT 1`);
+/** True while any candidate for a listing is unread or not yet examined, so its RB-4 check is incomplete. */
+export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
+  anyPendingCandidate.get(listingHash) !== undefined;
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
-/** Apply one verification batch: rejected candidates leave the queue, unreadable ones move to its back. */
+const retryAttempts = db.prepare("SELECT attempts FROM revocation_candidate_retries WHERE listing_hash = ? AND locator = ?");
+const scheduleRevocationRetry = db.prepare(`INSERT INTO revocation_candidate_retries(listing_hash,locator,attempts,retry_after)
+  SELECT listing_hash,locator,?,? FROM revocation_candidates WHERE listing_hash=? AND locator=? AND state='pending'
+  ON CONFLICT(listing_hash,locator) DO UPDATE SET attempts=excluded.attempts,retry_after=excluded.retry_after`);
+const clearRevocationRetry = db.prepare("DELETE FROM revocation_candidate_retries WHERE listing_hash=? AND locator=?");
+/** Unread candidates stay pending, move to the back, and retry with exponential 1–60 second backoff. */
 export const recordRevocationProgress = db.transaction(
   (listingHash: string, progress: { unread: readonly string[]; rejected: readonly string[] }): void => {
-    for (const locator of progress.rejected) rejectCandidate.run(listingHash, locator);
+    for (const locator of progress.rejected) { rejectCandidate.run(listingHash, locator); clearRevocationRetry.run(listingHash, locator); }
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
-    for (const locator of progress.unread) requeueCandidate.run(seq++, listingHash, locator);
+    for (const locator of progress.unread) {
+      requeueCandidate.run(seq++, listingHash, locator);
+      const attempts = (retryAttempts.get(listingHash, locator) as { attempts: number } | undefined)?.attempts ?? 0;
+      scheduleRevocationRetry.run(Math.min(attempts + 1, 7), Date.now() + Math.min(60_000, 1_000 * 2 ** attempts), listingHash, locator);
+    }
   },
 );
 
@@ -336,7 +423,15 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+export const loadCatalog = (): Catalog => {
+  const catalog: Catalog = getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  for (const seller of catalog.sellers) for (const listing of seller.listings) {
+    const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
+    if (listing.status === "revoked" && !listing.revocation && legacy.revocationBinding) listing.revocation = legacy.revocationBinding;
+    delete legacy.revocationBinding;
+  }
+  return catalog;
+};
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
@@ -359,6 +454,62 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 });
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
+
+interface WithdrawalSource { domain: string; seller: string; hashes: string[]; incomplete: string[];
+  provenance?: WithdrawalProvenance | "legacy";
+  bindings?: RevocationBinding[];
+  index?: { generatedAt: number; hash: string } }
+const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+/** A source can clear its own incomplete checks only with another authenticated index. */
+export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
+  hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
+  bindings: NonNullable<WithdrawalSource["bindings"]> = [],
+  provenance: WithdrawalProvenance = "publisher-signature"): boolean => {
+  const sources = withdrawalSources();
+  for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
+  if (seller) {
+    const prior = sources.find((source) => source.domain === domain && source.seller === seller);
+    if (!index || (prior?.index && (index.generatedAt < prior.index.generatedAt ||
+        (index.generatedAt === prior.index.generatedAt && index.hash !== prior.index.hash)))) {
+      setJson("withdrawal-sources", sources);
+      return false;
+    }
+    const missing = (prior?.hashes ?? []).filter((hash) => !hashes.includes(hash));
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings, provenance };
+    if (prior) Object.assign(prior, next); else sources.push(next);
+  }
+  setJson("withdrawal-sources", sources);
+  return true;
+});
+export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
+  getJson("withdrawal-carriage-replay-required", false) ||
+  getJson<string[]>("withdrawal-carriage-replay-hashes", []).includes(hash) || withdrawalSources().some((source) =>
+    source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*")));
+export const finishWithdrawalCarriageReplay = db.transaction((): void => {
+  // Older v4 databases may still carry the global flag. Successful chain
+  // replay clears it independently of each source's authenticated checks.
+  setJson("withdrawal-carriage-replay-required", false);
+  setJson("withdrawal-carriage-replay-hashes", []);
+});
+
+/** Called only after the indexer verifies the listing's signature and chain owner. */
+export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
+  withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
+    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
+      binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
+
+/** Continue bounded discovery work across passes, even across process restarts. */
+export const loadWithdrawalCursor = (domain: string, seller: string, indexHash: string): number => {
+  const saved = getJson<Record<string, { hash: string; cursor: number }>>("withdrawal-cursors", {})[`${domain}\n${seller}`];
+  return saved?.hash === indexHash ? saved.cursor : 0;
+};
+export const saveWithdrawalCursor = (domain: string, seller: string, hash: string, cursor: number): void => {
+  const cursors = getJson<Record<string, { hash: string; cursor: number }>>("withdrawal-cursors", {});
+  cursors[`${domain}\n${seller}`] = { hash, cursor };
+  setJson("withdrawal-cursors", cursors);
+};
+
+
 export const loadFixtureSeeds = (): FixtureSeed[] => {
   const seeds = getJson<unknown[]>("fixtures", []);
   return [...new Set(seeds.filter((seed): seed is FixtureSeed =>

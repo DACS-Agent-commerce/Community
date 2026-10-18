@@ -1,3 +1,4 @@
+import { revocationLogicalAddress } from "./listingVerification.js";
 /**
  * §6.3.5 well-known crawler — the spec's federation mechanism.
  *
@@ -12,10 +13,11 @@
  * lists anchors it doesn't own is caught by the indexer (listing.agentId
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
-import { sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
-import type { BundleBinding } from "./types.js";
+import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
+import type { BundleBinding, RevocationBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
 
@@ -26,13 +28,19 @@ export interface WellKnownAgent {
   listingAnchors: string[];
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
+  revocations: RevocationBinding[];
+  /** Authenticates this index's seller/domain; listing ownership is checked separately. */
+  withdrawalAuthenticated?: boolean;
+  withdrawalHashes?: string[];
+  incompleteWithdrawalHashes?: string[];
+  withdrawalIndex?: { generatedAt: number; hash: string };
   /** BB-4-verified records from the optional DACS-1 bundle-binding index. */
   bundleBindings: BundleBinding[];
 }
 
 interface DacsBlock {
   dacsVersion?: string;
-  listings?: { indexUrl?: string; indexHash?: string };
+  listings?: { indexUrl?: string; indexHash?: string; publisherSignature?: string };
   bundleBindings?: { indexUrl?: string; indexHash?: string };
 }
 interface ListingIndex {
@@ -46,8 +54,14 @@ interface ListingIndex {
     anchor?: { kind?: string; locator?: string };
     summary?: { title?: string };
     status?: "active" | "revoked";
+    revocation?: RevocationBinding;
   }>;
 }
+
+export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
+  binding.sellerPrimaryClaim, binding.listingId, binding.listingVersion, binding.listingContentHash,
+  binding.logicalAddress, binding.markerAnchor.kind, binding.markerAnchor.locator, binding.markerContentHash,
+]);
 
 export function normalizeSubmittedDomain(domain: string): string {
   const raw = domain.includes("://") ? domain : `https://${domain}`;
@@ -58,6 +72,26 @@ export function normalizeSubmittedDomain(domain: string): string {
     (url.pathname !== "/" && url.pathname !== "") || url.search || url.hash
   ) throw new Error("submit a public HTTPS hostname, without a path, query, or custom port");
   return url.origin;
+}
+
+export type WithdrawalProvenance = "publisher-signature" | "operator-pin";
+
+/** Server configuration only: public domain submissions never authorize a seller. */
+export function wellKnownWithdrawalProvenance(agent: WellKnownAgent): WithdrawalProvenance | undefined {
+  if (agent.withdrawalAuthenticated) return "publisher-signature";
+  try {
+    const pins: unknown = JSON.parse(process.env.DACS_WITHDRAWAL_SOURCE_PINS ?? "{}");
+    if (!pins || typeof pins !== "object" || Array.isArray(pins)) return;
+    const domain = normalizeSubmittedDomain(agent.domain);
+    for (const [source, seller] of Object.entries(pins)) {
+      if (seller === agent.seller && normalizeSubmittedDomain(source) === domain) return "operator-pin";
+    }
+  } catch { /* Invalid configuration grants no source authority. */ }
+}
+
+/** Sign these exact UTF-8 bytes; the signature lives outside the hashed index. */
+export function wellKnownWithdrawalMessage(domain: string, indexHash: string): string {
+  return `dacs-directory withdrawal-index:v1\ndomain:${normalizeSubmittedDomain(domain)}\nindex:sha256-${indexHash.replace(/^sha256-/, "").toLowerCase()}`;
 }
 
 async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | null> {
@@ -71,83 +105,110 @@ async function fetchJson(url: string): Promise<{ body: unknown; raw: string } | 
   }
 }
 
-export async function crawlDomain(domain: string): Promise<WellKnownAgent | { domain: string; error: string }> {
+export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fetchJson; validateUrl?: typeof validatePublicHttpsUrl } = {}): Promise<WellKnownAgent | { domain: string; error: string }> {
+  const fetchDocument = deps.fetchJson ?? fetchJson;
   let base: string;
   try {
     base = normalizeSubmittedDomain(domain);
-    await validatePublicHttpsUrl(base);
+    await (deps.validateUrl ?? validatePublicHttpsUrl)(base);
   } catch (e) {
     return { domain, error: e instanceof Error ? e.message : "invalid domain" };
   }
-  const card = await fetchJson(`${base}/.well-known/agent.json`);
+  const card = await fetchDocument(`${base}/.well-known/agent.json`);
   if (!card) return { domain, error: "no .well-known/agent.json" };
 
   const dacs = (card.body as { dacs?: DacsBlock })?.dacs;
   if (dacs?.dacsVersion !== "1" || !dacs.listings?.indexUrl) return { domain, error: "agent.json has no supported dacs.listings block" };
 
-  const index = await fetchJson(dacs.listings.indexUrl);
+  const index = await fetchDocument(dacs.listings.indexUrl);
   if (!index) return { domain, error: `listings index unreachable (${dacs.listings.indexUrl})` };
 
   // The hash IS the binding (§6.3.5): "sha256-<hex>" over the index bytes.
-  const expected = (dacs.listings.indexHash ?? "").replace(/^sha256-/, "").toLowerCase();
+  const expected = (typeof dacs.listings.indexHash === "string" ? dacs.listings.indexHash : "").replace(/^sha256-/, "").toLowerCase();
   const actual = sha256Hex(index.raw);
   if (!expected || actual !== expected) {
     return { domain, error: `indexHash mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)` };
   }
 
   const idx = index.body as ListingIndex;
-  if (idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
+  if (!idx || typeof idx !== "object" || idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
     return { domain, error: "listings.json has an invalid version or generatedAt" };
   }
   const seller = idx.seller;
-  if (!seller || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
+  if (typeof seller !== "string" || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
     return { domain, error: "listings.json has no canonical Demos seller claim" };
   }
   if (!Array.isArray(idx.listings) || idx.listings.length > 200) {
     return { domain, error: "listings.json must contain at most 200 listings" };
   }
+  const signature = dacs.listings.publisherSignature;
+  const withdrawalAuthenticated = typeof signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(signature) &&
+    Boolean(await verifyPrimaryClaimSignature(Buffer.from(wellKnownWithdrawalMessage(base, actual), "utf8"),
+      Buffer.from(signature, "base64url"), seller, "ed25519"));
 
   const listingAnchors: string[] = [];
+  const revocations: RevocationBinding[] = [];
+  const withdrawalHashes: string[] = [];
+  const incompleteWithdrawalHashes: string[] = [];
   const contentHashes: Record<string, string> = {};
   for (const entry of idx.listings ?? []) {
+    if (!entry || typeof entry !== "object") { incompleteWithdrawalHashes.push("*"); continue; }
+    const hash = typeof entry.contentHash === "string" && /^[0-9a-fA-F]{64}$/.test(entry.contentHash)
+      ? entry.contentHash.toLowerCase() : null;
+    if (hash) withdrawalHashes.push(hash);
     const locator = entry.anchor?.locator;
     if (
-      entry.status === "revoked" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
-      !locator || !/^stor-[0-9a-f]{40}$/.test(locator) ||
-      !entry.contentHash || !/^[0-9a-fA-F]{64}$/.test(entry.contentHash)
-    ) continue;
+      typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+      typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) || !hash
+    ) { incompleteWithdrawalHashes.push(hash ?? "*"); continue; }
+    if (entry.status === "revoked") {
+      const binding = entry.revocation;
+      if (!binding || typeof binding !== "object" || Array.isArray(binding) || binding.sellerPrimaryClaim !== seller || binding.listingId !== entry.listingId ||
+          binding.listingVersion !== entry.version || binding.listingContentHash !== hash ||
+          binding.logicalAddress !== revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) ||
+          binding.markerAnchor?.kind !== "storage-program" || typeof binding.markerAnchor.locator !== "string" ||
+          !/^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) || typeof binding.markerContentHash !== "string" ||
+          !/^[0-9a-f]{64}$/.test(binding.markerContentHash)) incompleteWithdrawalHashes.push(hash);
+      else revocations.push(binding);
+    } else if (entry.revocation !== undefined || (entry.status !== undefined && entry.status !== "active")) {
+      incompleteWithdrawalHashes.push(hash);
+    }
     listingAnchors.push(locator);
-    contentHashes[locator] = entry.contentHash.toLowerCase();
+    contentHashes[locator] = hash;
   }
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
+  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)], contentHashes,
+    revocations: [...new Map(revocations.map((binding) => [revocationBindingKey(binding), binding])).values()], bundleBindings,
+    withdrawalAuthenticated, withdrawalHashes: [...new Set(withdrawalHashes)], incompleteWithdrawalHashes: [...new Set(incompleteWithdrawalHashes)],
+    withdrawalIndex: { generatedAt: Number(idx.generatedAt), hash: actual } };
   if (dacs.bundleBindings?.indexUrl) {
-    const bindingIndex = await fetchJson(dacs.bundleBindings.indexUrl);
-    if (!bindingIndex) return { domain, error: `bundle-binding index unreachable (${dacs.bundleBindings.indexUrl})` };
-    const expectedBindingHash = (dacs.bundleBindings.indexHash ?? "").replace(/^sha256-/, "").toLowerCase();
+    const bindingIndex = await fetchDocument(dacs.bundleBindings.indexUrl);
+    if (!bindingIndex) return agent;
+    const expectedBindingHash = (typeof dacs.bundleBindings.indexHash === "string" ? dacs.bundleBindings.indexHash : "").replace(/^sha256-/, "").toLowerCase();
     const actualBindingHash = sha256Hex(bindingIndex.raw);
     if (!expectedBindingHash || actualBindingHash !== expectedBindingHash) {
-      return { domain, error: `bundle-binding indexHash mismatch (expected ${expectedBindingHash.slice(0, 12)}…, got ${actualBindingHash.slice(0, 12)}…)` };
+      return agent;
     }
     const carried = (bindingIndex.body as { bindings?: unknown })?.bindings;
     if (!Array.isArray(carried) || carried.length > 256) {
-      return { domain, error: "bundle-binding index must contain at most 256 records" };
+      return agent;
     }
     const verified = await Promise.all(carried.map((binding) => verifyBundleBinding(binding)));
     for (const binding of verified) if (binding) bundleBindings.push(binding);
   }
-  return { domain, seller, displayName, listingAnchors, contentHashes, bundleBindings };
+  return agent;
 }
 
-export async function crawlDomains(domains: string[]): Promise<{
+export async function crawlDomains(domains: string[], deps: Parameters<typeof crawlDomain>[1] = {}): Promise<{
   agents: WellKnownAgent[];
   errors: Array<{ domain: string; error: string }>;
 }> {
   const agents: WellKnownAgent[] = [];
   const errors: Array<{ domain: string; error: string }> = [];
   for (let i = 0; i < domains.length; i += 5) {
-    const batch = await Promise.all(domains.slice(i, i + 5).map(crawlDomain));
+    const batch = await Promise.all(domains.slice(i, i + 5).map((domain) => crawlDomain(domain, deps)));
     for (const r of batch) {
       if ("error" in r) errors.push(r);
       else agents.push(r);
