@@ -5,15 +5,17 @@ import type { VerifyAuthorityAttestation } from "../../src/catalog/authorityAtte
 const seed = new Uint8Array(32).fill(93);
 export const authoritySigner = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
 export const proofHash = (raw: Record<string, unknown>) => sha256Hex(canonicalize(raw));
-export function authorityProof(body: Record<string, unknown>, epoch = 7) {
+export function authorityProof(body: Record<string, unknown>, epoch = 7, signatureField = "signature"):
+  Record<string, unknown> & { epoch: number; signer: string; signature?: string; proofSignature?: string } {
   const scope = { ...body, epoch, signer: authoritySigner };
-  return { ...scope, signature: Buffer.from(ed25519Sign(Buffer.from(`test-authority:v1:${proofHash(scope)}`), privateKeyFromSeed(seed))).toString("base64url") };
+  return { ...scope, [signatureField]: Buffer.from(ed25519Sign(Buffer.from(`test-authority:v1:${proofHash(scope)}`), privateKeyFromSeed(seed))).toString("base64url") };
 }
 export const verifyTestAuthority: VerifyAuthorityAttestation = async (raw, ref, result) => {
+  const signature = raw.signature ?? raw.proofSignature;
   if (!["consensus-backed-proxy", "verifiable-credential", "external", "pay-dem", "deliver-storage-program"].includes(String(result.method)) ||
       raw.epoch !== 7 || raw.signer !== authoritySigner || ref.signer !== authoritySigner ||
-      proofHash(raw) !== ref.contentHash || typeof raw.signature !== "string") return false;
-  const { signature, ...scope } = raw;
+      proofHash(raw) !== ref.contentHash || typeof signature !== "string") return false;
+  const { signature: _signature, proofSignature: _proofSignature, ...scope } = raw;
   return Boolean(await verifyPrimaryClaimSignature(Buffer.from(`test-authority:v1:${proofHash(scope)}`),
     Buffer.from(signature, "base64url"), authoritySigner, "ed25519"));
 };

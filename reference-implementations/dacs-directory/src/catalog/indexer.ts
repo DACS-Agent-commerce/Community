@@ -46,6 +46,7 @@ import {
   artifactAnchorTime,
   clearListingRejection,
   hasPendingRevocationCandidates,
+  hasIncompleteWellKnownWithdrawal,
   nextRevocationCandidates,
   resolveProgramAddress,
   loadScanState,
@@ -260,7 +261,8 @@ export async function indexRegistration(
       listing.contentHash === verified.contentHash)?.revocation ?? null;
     // RB-5: an unread or unexamined candidate leaves the check incomplete, and incomplete is never absent.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
-      : progress.unread.length > 0 || hasPendingRevocationCandidates(verified.contentHash) ? "indeterminate" : "absent";
+      : progress.unread.length > 0 || hasPendingRevocationCandidates(verified.contentHash) ||
+        hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;

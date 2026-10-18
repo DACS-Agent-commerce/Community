@@ -377,3 +377,15 @@ failed. The signed bundle scope hash omits `presentation` and cannot identify an
 requiring Vet remain indeterminate for completion and volume. Listing publication uses its signed self-binding.
 Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
 attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.
+
+Withdrawal discovery from a hosted well-known index requires publisher authentication.
+The well-known file export returns `withdrawalSigning.message`: sign those exact UTF-8
+bytes with the seller's ed25519 key and place the unpadded base64url signature in
+`dacs.listings.publisherSignature` in `agent.json` (and the identical A2A alias, when
+present). Keep `listings.json` byte-exact. The signing message binds the normalized
+HTTPS domain and SHA-256 hash of that index; generate a new signature whenever either
+changes. Unsigned indexes still discover offers, whose chain signatures and ownership
+are independently checked, but cannot authorize withdrawal checks. An authenticated
+index with an incomplete withdrawal entry withholds that offer until a later
+complete authenticated check or a verified revocation resolves it. Failed later
+crawls retain incomplete checks; verified tombstones remain revoked.

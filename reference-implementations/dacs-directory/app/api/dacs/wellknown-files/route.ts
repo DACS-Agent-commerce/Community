@@ -13,6 +13,7 @@ import { readAnchor } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
 import { activeOffer, discoveryListing } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
+import { wellKnownWithdrawalMessage } from "@/src/catalog/wellknown";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -108,6 +109,12 @@ export async function GET(req: NextRequest) {
       ...(endpoint ? { "/.well-known/agent-card.json": agentJson } : {}),
       "/.well-known/agent.json": agentJson,
       "/.well-known/dacs/listings.json": listingsJson,
+    },
+    withdrawalSigning: {
+      algorithm: "ed25519", signer: claim,
+      message: wellKnownWithdrawalMessage(`https://${domain}`, sha256Hex(listingsJson)),
+      signatureField: "dacs.listings.publisherSignature",
+      encoding: "base64url",
     },
     note: "Host these files byte-exact (the indexHash binds listings.json), then register the domain on this page.",
   });

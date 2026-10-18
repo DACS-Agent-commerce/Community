@@ -386,7 +386,7 @@ test("required vet execution binds presented claims, verification and phase poin
   const original = new Map(store);
   const originalSnapshots = process.env.DACS_RECIPE_SNAPSHOTS;
   const originalPolicies = process.env.DACS_RECIPE_POLICIES;
-  type VetCase = { registryVersion?: number; snapshotPolicies?: Obj[]; firstAttempt?: "buyer" | "seller"; challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation" | "scope-only" | "legacy-marker" | "missing-digest"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
+  type VetCase = { snapshotControl?: boolean; registryVersion?: number; snapshotPolicies?: Obj[]; firstAttempt?: "buyer" | "seller"; challengeTiming?: Obj; challenge?: "missing" | "foreign-job" | "reused" | "other-presentation" | "scope-only" | "legacy-marker" | "missing-digest"; name: string; expected?: boolean; buyer?: Obj; result?: Obj; claim?: Obj; requirement?: Obj;
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
@@ -394,11 +394,11 @@ test("required vet execution binds presented claims, verification and phase poin
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
   const livePolicy = { scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [dids[OUTSIDER]] };
   const cases: VetCase[] = [
-    { name: "unknown positive recipe registry pin", registryVersion: 999, graphOnly: true },
-    { name: "result missing from recipe snapshot", snapshotPolicies: [{ recipeVersion: 2 }], graphOnly: true },
-    { name: "unversioned requirement selects session-start latest", requirement: { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true }] }, snapshotPolicies: [{}, { recipeVersion: 2 }], graphOnly: true },
+    { name: "unknown positive recipe registry pin", snapshotControl: true, registryVersion: 999, graphOnly: true },
+    { name: "result missing from recipe snapshot", snapshotControl: true, snapshotPolicies: [{ recipeVersion: 2 }], graphOnly: true },
+    { name: "unversioned requirement selects session-start latest", snapshotControl: true, requirement: { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true }] }, snapshotPolicies: [{}, { recipeVersion: 2 }], graphOnly: true },
     { name: "explicit older recipe remains selectable in snapshot", snapshotPolicies: [{}, { recipeVersion: 2 }], expected: true, graphOnly: true },
-    { name: "snapshot default freshness cannot use a different policy list", result: { validUntil: undefined }, snapshotPolicies: [{ defaultMaxAgeSec: 0 }], graphOnly: true },
+    { name: "snapshot default freshness cannot use a different policy list", snapshotControl: true, result: { validUntil: undefined }, snapshotPolicies: [{ defaultMaxAgeSec: 0 }], graphOnly: true },
     { name: "both parties passed with valid first presentation attempts", expected: true },
     { name: "invalid buyer first attempt consumes nonce before a valid retry", firstAttempt: "buyer" },
     { name: "invalid seller first attempt consumes nonce before a valid retry", firstAttempt: "seller" },
@@ -536,7 +536,7 @@ test("required vet execution binds presented claims, verification and phase poin
       const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
       const agreedScope = { ...agreementScope, listingRef: pinned };
       const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
-      const attestation = authorityProof({ authority: "registry", decision: "pass" });
+      const attestation = authorityProof({ authority: "registry", decision: "pass" }, 7, c.snapshotControl ? "proofSignature" : "signature");
       const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
         method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
         attestation: { anchor: { kind: "storage-program", locator: at(80) }, contentHash: proofHash(attestation), signer: authoritySigner }, ...c.result };
@@ -607,7 +607,7 @@ test("required vet execution binds presented claims, verification and phase poin
         [{ index, kind: phase.kind, outcome: "ok", ...(index === 0 && pointer ? { attestationRef: pointer } : {}) }]);
       const scope = bundleScope({ recipeRegistryVersion: c.registryVersion ?? 1, listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
-      const graph = await buildCurrentEvidenceGraph(at(20), {
+      const buildGraph = () => buildCurrentEvidenceGraph(at(20), {
         verifyAttestation: verifyTestAuthority,
         resolveSessionChallenge: async (jobId, party) => {
           if (c.challenge === "missing" || c.challenge === "reused") return null;
@@ -632,6 +632,22 @@ test("required vet execution binds presented claims, verification and phase poin
         readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: locator === at(61) ? `dacs4:deliverable:${JOB}` : `dacs4:payment:${JOB}:demos-native%3ADEM:${phaseIndex}` }),
         resolveListing: async () => ({ locator: at(1), raw: listed }),
       });
+      if (c.snapshotControl) {
+        const selectedSnapshot = process.env.DACS_RECIPE_SNAPSHOTS;
+        process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: [livePolicy] }]);
+        const controlScope = { ...scope, recipeRegistryVersion: 1 };
+        store.set(at(20), copy("buyer", controlScope)).set(at(21), copy("seller", controlScope));
+        const control = await buildGraph();
+        assert.equal(control.ok, true, `${c.name} positive control: ${control.reason}`);
+        process.env.DACS_RECIPE_SNAPSHOTS = selectedSnapshot;
+        store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+      }
+      const graph = await buildGraph();
+      if (c.snapshotControl) {
+        assert.equal(graph.reason, c.registryVersion === 999 ? "recipe registry snapshot is unavailable"
+          : c.name === "result missing from recipe snapshot" ? "vet recipe availability is indeterminate: invalid policy"
+          : "committed vet lacks passing verification evidence for the listing's requirements");
+      }
       const expected = c.expected ?? false;
       assert.equal(graph.signaturesVerified, true, c.name);
       assert.equal(graph.ok, expected, `${c.name}: ${graph.reason}`);

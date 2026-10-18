@@ -17,7 +17,7 @@ import {
   type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { crawlDomains, type WellKnownAgent } from "./wellknown";
+import { crawlDomains, normalizeSubmittedDomain, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
@@ -27,6 +27,8 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
+  recordWellKnownWithdrawalCheck,
+  finishWithdrawalCarriageReplay,
   saveCatalog,
   saveScanState,
   beginScanRun,
@@ -57,6 +59,8 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /** Alternate discovery transport for deterministic/offline deployments. */
+  crawlWellKnown?: typeof crawlDomains;
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
@@ -335,8 +339,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
     if (domains.length > 0) {
-      const crawl = await crawlDomains(domains);
-      for (const e of crawl.errors) log(`well-known: ${e.domain} — ${e.error}`);
+      const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
+      for (const e of crawl.errors) {
+        let domain: string;
+        try { domain = normalizeSubmittedDomain(e.domain); }
+        catch { continue; /* An invalid legacy domain cannot identify an authenticated source. */ }
+        recordWellKnownWithdrawalCheck(domain);
+        log(`well-known: ${e.domain} — ${e.error}`);
+      }
       for (const agent of crawl.agents) {
         ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
@@ -371,6 +381,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
+    finishWithdrawalCarriageReplay();
 
     const sellers = [];
     for (const reg of allRegs) {
@@ -434,6 +445,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 
 /** Discovery carriage enters the same RB-4 queue as passive marker discovery. */
 export function ingestWellKnownRevocations(agent: WellKnownAgent): void {
+  const domain = normalizeSubmittedDomain(agent.domain);
+  if (!agent.withdrawalAuthenticated) {
+    recordWellKnownWithdrawalCheck(domain);
+    return;
+  }
+  if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
+    agent.incompleteWithdrawalHashes, agent.withdrawalIndex)) return;
   for (const binding of agent.revocations) {
     admitRevocationCandidates(binding.listingContentHash, [{ locator: binding.markerAnchor.locator }]);
   }

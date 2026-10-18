@@ -265,6 +265,24 @@ db.transaction(() => {
   setJson("revocation-read-schema-version", 1);
 }).immediate();
 
+// Older well-known ingestion queued locators without publisher authentication or
+// chain observations. Discard that carriage and replay chain discovery once;
+// until the replay completes, neither index-now nor cached reads assert absence.
+db.transaction(() => {
+  if (getJson("withdrawal-carriage-schema-version", 0) >= 1) return;
+  const ambiguous = db.prepare("SELECT 1 FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL LIMIT 1").get();
+  if (ambiguous) {
+    db.prepare("DELETE FROM revocation_candidates WHERE owner IS NULL AND content_hash IS NULL").run();
+    const state = getJson<ScanState>("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} });
+    setJson("scan-state", { ...state, schemaVersion: 0 });
+    setJson("withdrawal-carriage-replay-required", true);
+    const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({ ...seller,
+      listings: seller.listings.filter((listing) => listing.status === "revoked") })) });
+  }
+  setJson("withdrawal-carriage-schema-version", 1);
+}).immediate();
+
 /**
  * Revocation candidates, per listing content hash. Each locator is admitted
  * once and stays pending until it is read and fails RB-4; a rejected locator
@@ -423,6 +441,35 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 });
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
+
+interface WithdrawalSource { domain: string; seller: string; hashes: string[]; incomplete: string[];
+  index?: { generatedAt: number; hash: string } }
+const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+/** A source can clear its own incomplete checks only with another authenticated index. */
+export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
+  hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"]): boolean => {
+  const sources = withdrawalSources();
+  for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
+  if (seller) {
+    const prior = sources.find((source) => source.domain === domain && source.seller === seller);
+    if (!index || (prior?.index && (index.generatedAt < prior.index.generatedAt ||
+        (index.generatedAt === prior.index.generatedAt && index.hash !== prior.index.hash)))) {
+      setJson("withdrawal-sources", sources);
+      return false;
+    }
+    const missing = (prior?.hashes ?? []).filter((hash) => !hashes.includes(hash));
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index };
+    if (prior) Object.assign(prior, next); else sources.push(next);
+  }
+  setJson("withdrawal-sources", sources);
+  return true;
+});
+export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
+  getJson("withdrawal-carriage-replay-required", false) || withdrawalSources().some((source) =>
+    source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*")));
+export const finishWithdrawalCarriageReplay = (): void => setJson("withdrawal-carriage-replay-required", false);
+
+
 export const loadFixtureSeeds = (): FixtureSeed[] => {
   const seeds = getJson<unknown[]>("fixtures", []);
   return [...new Set(seeds.filter((seed): seed is FixtureSeed =>

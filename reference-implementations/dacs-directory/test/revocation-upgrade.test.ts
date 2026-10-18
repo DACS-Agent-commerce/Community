@@ -44,8 +44,8 @@ seeded.exec(`
 const insert = seeded.prepare("INSERT INTO revocation_candidates VALUES (?,?,?,?,?,?)");
 insert.run(hash, missing, null, "d".repeat(64), 1, "rejected");
 insert.run(hash, privateMarker, null, "e".repeat(64), 2, "rejected");
-insert.run(freshHash, invalid, null, null, 3, "pending");
-insert.run(revokedHash, at("5"), null, null, 4, "rejected");
+insert.run(freshHash, invalid, `0x${claim.slice(-64)}`, null, 3, "pending");
+insert.run(revokedHash, at("5"), `0x${claim.slice(-64)}`, null, 4, "rejected");
 seeded.prepare("INSERT INTO kv_state VALUES ('catalog',?,0)").run(JSON.stringify({
   catalogVersion: "1", generatedAt: 100, sellers: [{ primaryClaim: claim, deals: [], listings: [
     { listingId: "upgrade", contentHash: hash, status: "active" },
