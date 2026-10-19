@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { canonicalDemosAgentClaim } from "../src/catalog/claimRef.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, type LegacySignatureEncoding } from "../src/catalog/signatureValue.js";
 import { resolveBundleSide, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import {
@@ -18,13 +19,48 @@ import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
 
+function fixture(name: string, hash: string) {
+  const bytes = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), hash, `${name} must remain byte-identical to its upstream pin`);
+  return JSON.parse(bytes.toString("utf8"));
+}
+
+test("pinned SIG-6 vectors exercise canonical decoding and declared legacy import", () => {
+  const set = fixture("signature-value-encoding-v0.1.json", "bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312");
+  assert.equal(set.vectors.length, set.count);
+  for (const vector of set.vectors) {
+    if (vector.mode === "legacy-import") {
+      const value = importLegacySignatureValue(vector.value, vector.declaredEncoding as LegacySignatureEncoding | undefined);
+      assert.equal(value !== null, vector.expected === "accept", vector.name);
+      if (value !== null) assert.equal(value, vector.want.canonicalValue, vector.name);
+    } else {
+      const bytes = canonicalSignatureBytes(vector.value);
+      assert.equal(bytes !== null, vector.expected === "accept", vector.name);
+      if (bytes) {
+        assert.equal(bytes.length, vector.want.decodedLength);
+        assert.equal(Buffer.from(bytes).toString("hex"), set.signatureBytesHex);
+      }
+    }
+  }
+});
+
+test("pinned Demos agent claim fixture exercises canonical claim resolution", () => {
+  const set = fixture("demos-agent-claim-reference.json", "0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933");
+  assert.equal(set.cases.length, 4);
+  for (const vector of set.cases) {
+    const claim = canonicalDemosAgentClaim(vector.input);
+    assert.equal(claim !== null, vector.expected.accepted, vector.id);
+    assert.equal(claim, vector.expected.canonical, vector.id);
+  }
+});
+
 // Upstream DACS-Standard conformance vectors (SPEC_PIN) run through adapters onto the Directory's own
 // decision functions. A vector set is often a projection of the full artifacts; each adapter maps the
 // projection onto the Directory's input shape and nothing else. A case the Directory does not decide
 // is listed with its reason, and a deliberate deviation is pinned with the Directory's own verdict.
 type Obj = Record<string, unknown>;
-const fixture = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, import.meta.url);
-const load = <T>(name: string) => JSON.parse(readFileSync(fixture(name), "utf8")) as T;
+const fixtureUrl = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, import.meta.url);
+const load = <T>(name: string) => JSON.parse(readFileSync(fixtureUrl(name), "utf8")) as T;
 const pinned = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
 const VENDORED = [
   "metered-pricing-v0.3.json", "phase-kind-divergence-v0.3.json",
@@ -36,7 +72,7 @@ const VENDORED = [
 
 test("every vendored Standard file is the byte-identical copy SPEC_PIN records", () => {
   for (const name of VENDORED) {
-    const digest = createHash("sha256").update(readFileSync(fixture(name))).digest("hex");
+    const digest = createHash("sha256").update(readFileSync(fixtureUrl(name))).digest("hex");
     assert.match(pinned, new RegExp(`${name.replace(/[.]/g, "\\.")}\\s+${digest}`), name);
   }
 });

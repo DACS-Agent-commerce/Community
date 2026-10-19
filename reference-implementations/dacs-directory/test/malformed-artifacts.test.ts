@@ -269,7 +269,7 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const name = "dacs3:agreement:job-attribution";
   // Only the legacy SDK profile resolves its agreement by owner and program name.
   const buyerBundle = { data: '{"any":1}', name: "dacs5:bundle:job-attribution", owner: ownerOf(buyer) };
-  const scope = { agreementVersion: "1", jobId: "job-attribution", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
+  const scope = { agreementVersion: "1", jobId: "job-attribution", derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "demos-native:DEM" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };

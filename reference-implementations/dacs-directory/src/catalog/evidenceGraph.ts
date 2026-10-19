@@ -3,10 +3,10 @@ import { boundLogicalAddress, deliverableLogicalAddress, parsePaymentLogicalAddr
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
-import { verifyIdentityPresentation, verifyListing } from "./listingVerification.js";
+import { verifyIdentityPresentation, verifyStoredListing } from "./listingVerification.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
-import { matchesVetRequirement } from "./vetClaimRules.js";
+import { matchesVetRequirement, type VerifyPrimaryClaimControl } from "./vetClaimRules.js";
 import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
@@ -68,6 +68,9 @@ export interface EvidenceGraphDeps {
    * Historical reads are idempotent; they never issue or consume a challenge.
    * Return null for unavailable evidence or a replay attempt. */
   resolveSessionChallenge?: (jobId: string, party: Record<string, unknown>) => Promise<HistoricalSessionChallenge | null>;
+  /** Trusted control verifier for the presented primary claim (DACS-2 §7.12). Without one,
+   * session vet admission stays fail-closed: a verified primary claim alone is not control proof. */
+  verifyPrimaryClaimControl?: VerifyPrimaryClaimControl;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
@@ -162,6 +165,7 @@ const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
 type AgreementProfile = "legacy" | "payee-bound";
+const AGREEMENT_PATTERNS = new Set(["fixed-price", "rfq", "sealed-envelope"]);
 
 /** Select the agreement type before interpreting fields; never strip-and-retry. */
 function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
@@ -197,6 +201,26 @@ export function agreementMatchesListing(agreement: Record<string, unknown>, list
     kind === "commit-agreement" || kind === "commit-payee-bound-agreement");
   const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
+
+  // DACS-3 §8.5.2 check 7: a valid pattern must also name this listing's
+  // negotiation phase, including an explicitly enabled RFQ fixed-price fallback.
+  const negotiations = pipeline.filter((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
+  if (negotiations.length !== 1) return false;
+  const negotiation = negotiations[0];
+  const pricing = rec(listing.pricing);
+  const fixedPriceFallback = negotiation.kind === "negotiate-rfq" &&
+    rec(negotiation.parameters)?.fixedPriceFallback === true && agreement.derivedFromPattern === "fixed-price" &&
+    pricing?.kind === "negotiable";
+  if (agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)] && !fixedPriceFallback) return false;
+
+  // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
+  // exactly its center. Canonical decimal strings avoid floating-point loss.
+  if (pricing?.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price") {
+    const center = rec(pricing.bandCenter);
+    const price = rec(terms.price);
+    if (!priceTermOk(center) || !priceTermOk(price) ||
+        price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
+  }
 
   if (profile === "legacy") return terms.payoutBindings === undefined;
   if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
@@ -243,7 +267,7 @@ function bandBound(center: unknown, pct: unknown, direction: 1n | -1n): Decimal 
   const numerator = centre.units * (denominator + direction * percent.units);
   return numerator < 0n ? null : { units: (2n * numerator + denominator) / (2n * denominator), scale: centre.scale };
 }
-const AGREEMENT_PATTERNS: Record<string, string> = {
+const NEGOTIATION_PATTERNS: Record<string, string> = {
   "negotiate-fixed-price": "fixed-price",
   "negotiate-rfq": "rfq",
   "negotiate-sealed-envelope": "sealed-envelope",
@@ -336,7 +360,7 @@ export function agreementListingConformance(
   const negotiation = pipeline.find((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
   const fallback = negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true &&
     agreement.derivedFromPattern === "fixed-price";
-  if (!negotiation || (!fallback && agreement.derivedFromPattern !== AGREEMENT_PATTERNS[String(negotiation.kind)])) return "pattern";
+  if (!negotiation || (!fallback && agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)])) return "pattern";
   // 8. Role direction: the publisher is the agreement seller, or the buyer of a procurement (SE-8).
   const publisherRole = negotiation.kind === "negotiate-sealed-envelope-procurement" ? "buyer" : "seller";
   if (!arr(agreement.parties).some((party) => party.role === publisherRole && sameSigningIdentity(party.primaryClaim, publisher))) {
@@ -431,6 +455,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const profile = agreementProfile(raw);
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
       arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
@@ -805,7 +830,7 @@ async function verifyCurrentEvidenceGraph(
   const tupleOk = listed && listed.raw.listingId === listingRef.listingId &&
     Number.isSafeInteger(pinnedVersion) && listed.raw.listingVersion === pinnedVersion;
   const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
-    ? await verifyListing(listed.raw, resolveKey) : null;
+    ? await verifyStoredListing(listed.raw, listed.locator, resolveKey) : null;
   if (!listed || verifiedListing?.profile !== "dacs-v0.1") return failSigned("listing reference failed");
   // A summary entry is an invocation of the signed pipeline at this exact index. A completed
   // session executed every mandatory phase. ST-5 permits rate to be declined.
@@ -911,7 +936,7 @@ async function verifyCurrentEvidenceGraph(
       // policies therefore remain indeterminate rather than granting verified standing.
       const eligible = results.filter((result) => recipePolicies.get(result)?.availability === "live");
       return matchesVetRequirement(identities.get(counterpartyRole)!, requirement,
-        eligible, record.raw.generatedAt, raw.finalisedAt, recipeSnapshot?.recipes);
+        eligible, record.raw.generatedAt, raw.finalisedAt, recipeSnapshot?.recipes, deps.verifyPrimaryClaimControl);
     };
     if (!(await Promise.all(composites.map(async (record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && await provesRequirement(record)))).some(Boolean)) {
@@ -934,6 +959,14 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("agreement listing conformance is indeterminate: checks 5 and 6 need the commitment's committedAt");
     }
     if (nonconforming) return failSigned(`agreement fails listing conformance check: ${nonconforming}`);
+  }
+  // Discovery compatibility does not establish settlement semantics. This
+  // pairing needs agreement/deliverable, payment/finality and delivery adapters
+  // before either signed copy can contribute a verified outcome or volume.
+  // Include the RFQ fixed-price fallback and both agreement/bundle profiles.
+  if (rec(listed.raw.pricing)?.kind === "negotiable" && agreement?.derivedFromPattern === "fixed-price") {
+    return { ...failSigned("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
+      artifacts, agreement, listing: listed.raw };
   }
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.

@@ -93,6 +93,7 @@ interface Case {
   listing?: Obj;
   defaultDelivery?: boolean;
   resolveSessionChallenge?: EvidenceGraphDeps["resolveSessionChallenge"];
+  verifyPrimaryClaimControl?: EvidenceGraphDeps["verifyPrimaryClaimControl"];
   /** The logical address each default AnchorBinding publishes, by native locator. */
   anchorAddresses?: Record<string, string>;
   /** Replaces the carried default bindings: one per settlement anchor, signed by its evidence's signer. */
@@ -142,6 +143,7 @@ async function evaluate(c: Case = {}) {
   store.set(at(5), signed);
   return buildCurrentEvidenceGraph(at(5), { verifyAttestation: verifyTestAuthority, resolveRecipeSnapshot: fixtureRecipeSnapshot,
     resolveSessionChallenge: c.resolveSessionChallenge,
+    verifyPrimaryClaimControl: c.verifyPrimaryClaimControl,
     readSettlementNode: nativeNodeFixture(() => store.values()),
     read: async (locator) => store.get(locator) ?? null,
     readAnchorRecord: c.noAnchorMetadata ? undefined : (async (locator) => {
@@ -891,9 +893,10 @@ test("further graph rules: discriminators, profiles, bounds, external verifiers 
   });
   const payout = (phaseIndex: number, railId = "demos-native:DEM") => ({ railId, phaseIndex, payeeAddress: dids[SELLER] });
   // A delivery phase carrying a `rail` parameter is not a pay phase and needs no payout binding.
+  // Non-pay phases may carry object parameters, kept in the signed scope (#98, dab2497).
   const railedDelivery = await (async () => {
     const scope = { ...signedScopeOf(payeeBoundListing), pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-payee-bound-agreement" },
-      { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-attested-payload", parameters: { rail: "demos-native:DEM" } }] };
+      { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program", parameters: { rail: "demos-native:DEM" } }] };
     return { ...scope, signature: await envelope(scope, "listing", SELLER) };
   })();
   const attestation = { authority: "registry" };
@@ -929,6 +932,7 @@ test("further graph rules: discriminators, profiles, bounds, external verifiers 
     "two payouts, the second on the delivery phase": payee(twoPays, [payout(2), payout(4)]),
     "two payouts, the second on another rail": payee(twoPays, [payout(2), payout(3, "pay-x402")]),
     "a rail parameter on a delivery phase": payee(railedDelivery, [payout(2)]),
+    "a payout on the railed delivery phase": payee(railedDelivery, [payout(2), payout(3)]),
   }), {
     "both discriminators under the plain domain": "agreement reference failed",
     "both discriminators under the payee-bound domain": "agreement reference failed",
@@ -944,7 +948,8 @@ test("further graph rules: discriminators, profiles, bounds, external verifiers 
     "payouts for both pay phases": "ok",
     "a payout for one pay phase twice": COVERAGE,
     "two payouts, the second on the delivery phase": COVERAGE, "two payouts, the second on another rail": COVERAGE,
-    "a rail parameter on a delivery phase": "listing reference failed",
+    "a rail parameter on a delivery phase": "ok",
+    "a payout on the railed delivery phase": COVERAGE,
   });
   // A graph that fails before its signatures verify never reports them verified.
   const shapeFailure = await evaluate({ bundle: (bundle) => { bundle.outcome = "won"; } });
@@ -1267,7 +1272,9 @@ test("payee bindings independently validate rail and destination types and allow
   const agreed = baseScopes().agreement;
   delete agreed.agreementVersion; agreed.payeeBoundAgreementVersion = "1";
   (agreed.terms as Obj).payoutBindings = [{ ...valid, phaseIndex: 0 }];
-  assert.equal(agreementMatchesListing(agreed, { pipeline: [{ kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "commit-payee-bound-agreement" }] }), true);
+  // Check 7 needs the agreement's negotiation phase; it follows so the pay phase keeps index zero.
+  assert.equal(agreementMatchesListing(agreed, { pipeline: [{ kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "commit-payee-bound-agreement" },
+    { kind: "negotiate-fixed-price" }] }), true);
 });
 
 test("a malformed but correctly signed discovery agreement cannot establish seller attribution", async () => {
@@ -1285,7 +1292,8 @@ test("fault counterparty attribution rejects non-string parties under valid bund
 
 test("procurement vet requirements bind the seller counterparty rather than the buyer publisher", async () => {
   const oldPolicies = process.env.DACS_RECIPE_POLICIES;
-  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: dids }]);
+  const recipe = { recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: dids };
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ scheme: "lei", ...recipe }, { scheme: "did", ...recipe }]);
   try {
   const identity: Obj = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1, claims: [{ ref: dids[BUYER] }] };
   const presentation = Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[BUYER]))).toString("hex");
@@ -1296,6 +1304,9 @@ test("procurement vet requirements bind the seller counterparty rather than the 
   const procurement = { ...scope, signature: await envelope(scope, "listing", BUYER) };
   for (const resultParty of [SELLER, BUYER]) {
     const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), listing: procurement, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
+      // Fixture control verifier for the seller counterparty's exact primary and its result.
+      verifyPrimaryClaimControl: async ({ identity, primary, result }) =>
+        identity.presentedBy === dids[SELLER] && `did:${primary.identifier}` === dids[SELLER] && result.locator === at(22),
       scopes: (scopes) => {
         scopes.agreement.derivedFromPattern = "sealed-envelope";
         scopes.bundle.phaseSummary = pipeline.map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
@@ -1305,14 +1316,21 @@ test("procurement vet requirements bind the seller counterparty rather than the 
         const result = await publish(session, 21, { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
           method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
           attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: proofHash(attestation), signer: authoritySigner } }, "verify-result", OUTSIDER);
+        // The seller's presented primary carries its own verified claim in either iteration.
+        const primary = await publish(session, 22, { resultVersion: "1", scheme: "did", identifier: dids[SELLER].slice(4), recipeVersion: 1,
+          method: "verifiable-credential", decision: "pass", reason: "holder key match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
+          attestation: { anchor: { kind: "storage-program", locator: at(20) }, contentHash: proofHash(attestation), signer: authoritySigner } }, "verify-result", OUTSIDER);
         const identities = [BUYER, SELLER].map((party) => ({ bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, sessionNonce: `challenge-${dids[party]}`,
-          claims: [{ ref: dids[party] }, ...(party === SELLER ? [{ ref: "lei:5493001KJTIIGC8Y1R12", verifiedBy: { ...result, recipeVersion: 1 } }] : [])] }));
+          claims: party === SELLER
+            ? [{ ref: dids[party], verifiedBy: { ...primary, recipeVersion: 1 } }, { ref: "lei:5493001KJTIIGC8Y1R12", verifiedBy: { ...result, recipeVersion: 1 } }]
+            : [{ ref: dids[party] }] }));
         bundle.parties = identities.map((identity, party) => ({ role: party === BUYER ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(identity),
           identityBundle: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[party], signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[party]))).toString("hex") }] } } }));
         bundle.vetRecords = await Promise.all([BUYER, SELLER].map((party) => publish(session, 30 + party, {
           recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: contentHash(identities[party]),
           requirementHash: party === SELLER ? contentHash(requirement) : "c".repeat(64),
-          freshness: party === resultParty ? [{ ...result, recipeVersion: 1 }] : [], dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: 30,
+          freshness: [...(party === SELLER ? [{ ...primary, recipeVersion: 1 }] : []), ...(party === resultParty ? [{ ...result, recipeVersion: 1 }] : [])],
+          dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: 30,
         }, "composite", OUTSIDER)));
       },
     });
@@ -1322,7 +1340,7 @@ test("procurement vet requirements bind the seller counterparty rather than the 
 });
 
 test("payout helper rejects malformed entries with false and preserves its valid control", () => {
-  const agreement: Obj = { payeeBoundAgreementVersion: "1", terms: { payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[SELLER] }] } };
+  const agreement: Obj = { payeeBoundAgreementVersion: "1", derivedFromPattern: "fixed-price", terms: { payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[SELLER] }] } };
   const listed = { pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-payee-bound-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }] };
   assert.equal(agreementMatchesListing(agreement, listed), true);
   for (const payoutBindings of [[{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: [dids[SELLER]] }], undefined, null, {}, [null], [[]]]) {

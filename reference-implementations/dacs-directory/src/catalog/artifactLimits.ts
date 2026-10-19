@@ -6,8 +6,8 @@ export const MAX_DACS_ARTIFACT_BYTES = 128 * 1024;
 /** Ceiling on a stored payload's JSON, with room above the DACS cap for encoding and metadata. */
 export const MAX_ARTIFACT_BYTES = 256 * 1024;
 /**
- * The Demos node accepts programs up to 1 MiB (STORAGE_PROGRAM_MAX_SIZE_BYTES; MAX_SIZE_BYTES in
- * demosdk 4.0.13), so one storage response is bounded there.
+ * Independent directory policy for the complete storage response envelope.
+ * The node's 1 MiB payload cap does not bound its response metadata or encoding.
  */
 export const MAX_STORAGE_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_ARTIFACT_DEPTH = 128;

@@ -67,7 +67,7 @@ test("upgrade requeues prior rejected markers and immediately withholds affected
   assert.equal(store.loadCatalog().sellers[0].listings[1].revocation?.markerContentHash, "f".repeat(64));
 });
 
-test("upgraded 403/404 markers withhold activation until a recovered marker verifies", async () => {
+test("upgraded 403/404 hints gain withdrawal authority only after a recovered marker verifies", async () => {
   const originalFetch = globalThis.fetch, originalNow = Date.now;
   let now = originalNow(), recovered = false;
   Date.now = () => now;
@@ -84,7 +84,7 @@ test("upgraded 403/404 markers withhold activation until a recovered marker veri
   try {
     const registration = { primaryClaim: claim, displayName: "seller", listingAnchors: [listingAt] };
     const unavailable = await indexRegistration(registration, undefined, async () => { throw new Error("offline"); });
-    assert.deepEqual(unavailable.listings, []);
+    assert.equal(unavailable.listings[0]?.status, "active");
     assert.equal(store.hasPendingRevocationCandidates(hash), true);
     assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), []);
     recovered = true; now += 1_000;

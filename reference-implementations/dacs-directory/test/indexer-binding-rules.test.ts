@@ -424,9 +424,12 @@ test("required vet execution binds presented claims, verification and phase poin
     noClaim?: boolean; noIdentity?: boolean; badHash?: boolean; badPresentation?: boolean; noVet?: boolean;
     records?: "none" | "buyer" | "seller" | "wrong-requirement" | "failed" | "empty" | "supplementary";
     omittedVet?: boolean; pointer?: "composite" | "result" | "failed-result" | "foreign" | "evidence";
-    policy?: Obj[]; wrongLocator?: boolean; hashPrefix?: string; rawPolicy?: string; callback?: boolean; primaryProof?: boolean; badAuthority?: boolean; malformedFreshness?: boolean; identityRef?: boolean; generatedAt?: number; verifiedByVersion?: number; sellerFromListing?: boolean; badAnchorHash?: boolean; bundleOutcome?: string; graphOnly?: boolean };
+    policy?: Obj[]; wrongLocator?: boolean; hashPrefix?: string; rawPolicy?: string; callback?: boolean; primaryProof?: boolean; control?: "missing" | "rejects"; badAuthority?: boolean; malformedFreshness?: boolean; identityRef?: boolean; generatedAt?: number; verifiedByVersion?: number; sellerFromListing?: boolean; badAnchorHash?: boolean; bundleOutcome?: string; graphOnly?: boolean };
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
   const livePolicy = { scheme: "lei", recipeVersion: 1, defaultMaxAgeSec: 1, methods: ["verifiable-credential"], availability: "live", trustedResultSigners: [dids[OUTSIDER]] };
+  // DACS-2 §7.12: the presented primary needs its own verified claim under a roster recipe,
+  // plus a trusted control adapter. Cases opt out with primaryProof: false.
+  const primaryPolicy = { ...livePolicy, scheme: "did" };
   const cases: VetCase[] = [
     { name: "unknown positive recipe registry pin", snapshotControl: true, registryVersion: 999, graphOnly: true },
     { name: "result missing from recipe snapshot", snapshotControl: true, snapshotPolicies: [{ recipeVersion: 2 }], graphOnly: true },
@@ -479,13 +482,15 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "callback resolves presented identity", callback: true, graphOnly: true, expected: true },
     { name: "callback identity wrong hash", callback: true, badHash: true, graphOnly: true },
     { name: "callback identity invalid presentation", callback: true, badPresentation: true, graphOnly: true },
-    { name: "verified selected primary with independent required claim", primaryProof: true, requirement: { ...requirement, primaryClaimSelector: "did" }, expected: true },
+    { name: "verified selected primary with independent required claim", requirement: { ...requirement, primaryClaimSelector: "did" }, expected: true },
+    { name: "missing primary control adapter fails closed", control: "missing", graphOnly: true },
+    { name: "rejecting primary control adapter fails closed", control: "rejects", graphOnly: true },
     { name: "only oneOf still requires vet pipeline", noVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] } },
     { name: "only oneOf still requires vet execution", omittedVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] } },
-    { name: "only selector still requires vet pipeline", noVet: true, primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
-    { name: "only selector still requires vet execution", omittedVet: true, primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
+    { name: "only selector still requires vet pipeline", noVet: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
+    { name: "only selector still requires vet execution", omittedVet: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" } },
     { name: "only oneOf successful proof", requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] }, expected: true },
-    { name: "only selector successful proof", primaryProof: true, requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" }, expected: true },
+    { name: "only selector successful proof", requirement: { requirementVersion: "1", required: [], primaryClaimSelector: "did" }, expected: true },
     { name: "empty oneOf permits no vet pipeline", noVet: true, requirement: { requirementVersion: "1", required: [], oneOf: [] }, expected: true },
     { name: "nonrequired composite malformed freshness", malformedFreshness: true, requirement: { requirementVersion: "1", required: [] } },
     { name: "passing composite pointer", pointer: "composite", expected: true },
@@ -550,7 +555,7 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "hash-bound anchored IdentityBundle", identityRef: true, expected: true },
     { name: "anchored IdentityBundle reference has wrong hash", identityRef: true, badAnchorHash: true },
     { name: "publisher listing identity cannot replace session identity", sellerFromListing: true },
-    { name: "selector requires the exact presentedBy verification", requirement: { ...requirement, primaryClaimSelector: "did" } },
+    { name: "selector requires the exact presentedBy verification", primaryProof: false, requirement: { ...requirement, primaryClaimSelector: "did" } },
     { name: "oneOf alternative must occur in presented claims", noClaim: true, requirement: { requirementVersion: "1", required: [], oneOf: [[{ scheme: "lei", verificationRequired: true }]] } },
     { name: "freshness is mandatory even without verificationRequired", result: { validUntil: 29 }, requirement: { ...requirement, required: [{ scheme: "lei", verificationRequired: false }] } },
     { name: "issuedAt cannot widen listing maxAge", claim: { issuedAt: 2020 }, requirement: { ...requirement, required: [{ scheme: "lei", verificationRequired: true, maxAge: 1 }] }, generatedAt: 2020, result: { validUntil: 10000 } },
@@ -560,8 +565,11 @@ test("required vet execution binds presented claims, verification and phase poin
   try {
     for (const c of cases) await t.test(c.name, async () => {
       store.clear(); for (const [key, raw] of original) store.set(key, raw);
-      process.env.DACS_RECIPE_POLICIES = c.rawPolicy ?? JSON.stringify([...(c.policy ?? [{}]).map((policy) => ({ ...livePolicy, ...policy })), ...(c.primaryProof ? [{ ...livePolicy, scheme: "did" }] : [])]);
-      try { process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: c.snapshotPolicies ? c.snapshotPolicies.map((policy) => ({ ...livePolicy, ...policy })) : JSON.parse(process.env.DACS_RECIPE_POLICIES!) }]); } catch { process.env.DACS_RECIPE_SNAPSHOTS = "[]"; }
+      const primaryProof = c.primaryProof ?? true;
+      const roster = (policies: Obj[]) => primaryProof && !policies.some((policy) => policy.scheme === "did" && policy.recipeVersion === 1)
+        ? [...policies, primaryPolicy] : policies;
+      process.env.DACS_RECIPE_POLICIES = c.rawPolicy ?? JSON.stringify(roster((c.policy ?? [{}]).map((policy) => ({ ...livePolicy, ...policy }))));
+      try { process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: c.snapshotPolicies ? roster(c.snapshotPolicies.map((policy) => ({ ...livePolicy, ...policy }))) : JSON.parse(process.env.DACS_RECIPE_POLICIES!) }]); } catch { process.env.DACS_RECIPE_SNAPSHOTS = "[]"; }
       const req = c.requirement ?? requirement;
       const pipeline = [...(c.noVet ? [] : [{ kind: "vet-credentials" }]), { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }];
       const listedScope = { ...listingScope, buyerRequirement: req, pipeline };
@@ -570,9 +578,10 @@ test("required vet execution binds presented claims, verification and phase poin
       const agreedScope = { ...agreementScope, listingRef: pinned };
       const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
       const attestation = authorityProof({ authority: "registry", decision: "pass" }, 7, c.snapshotControl ? "proofSignature" : "signature");
-      const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
+      const resultBase: Obj = { resultVersion: "1", scheme: "lei", identifier: "5493001KJTIIGC8Y1R12", recipeVersion: 1,
         method: "verifiable-credential", decision: "pass", reason: "registry match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
-        attestation: { anchor: { kind: "storage-program", locator: at(80) }, contentHash: proofHash(attestation), signer: authoritySigner }, ...c.result };
+        attestation: { anchor: { kind: "storage-program", locator: at(80) }, contentHash: proofHash(attestation), signer: authoritySigner } };
+      const resultScope: Obj = { ...resultBase, ...c.result };
       for (const key of Object.keys(resultScope)) if (resultScope[key] === undefined) delete resultScope[key];
       const result = { ...resultScope, signature: signedWith(resultScope, "verify-result", OUTSIDER) };
       const resultRef = { ...refTo(at(81), result, "verify-result"), recipeVersion: 1 };
@@ -580,12 +589,13 @@ test("required vet execution binds presented claims, verification and phase poin
       for (const key of Object.keys(claim)) if (claim[key] === undefined) delete claim[key];
       if (c.wrongLocator) (claim.verifiedBy as Obj).anchor = { kind: "storage-program", locator: at(82) };
       if (c.hashPrefix) (claim.verifiedBy as Obj).contentHash = c.hashPrefix + String(resultRef.contentHash).toUpperCase();
-      const primaryScope: Obj = { ...resultScope, scheme: "did", identifier: dids[BUYER].slice(4) };
+      // The primary's own passing result ignores c.result, so result overrides still target the required claim alone.
+      const primaryScope: Obj = { ...resultBase, scheme: "did", identifier: dids[BUYER].slice(4), validUntil: 10000 };
       const primaryResult = { ...primaryScope, signature: signedWith(primaryScope, "verify-result", OUTSIDER) };
       const primaryRef = { ...refTo(at(85), primaryResult, "verify-result"), recipeVersion: 1 };
       store.set(at(85), primaryResult);
       const buyerScope: Obj = { bundleVersion: "1", presentedBy: dids[BUYER], presentedAt: 1, sessionNonce: `challenge-${dids[BUYER]}`,
-        claims: [{ ref: dids[BUYER], ...(c.primaryProof ? { verifiedBy: primaryRef } : {}) }, ...(c.noClaim ? [] : [claim])], ...c.buyer };
+        claims: [{ ref: dids[BUYER], ...(primaryProof ? { verifiedBy: primaryRef } : {}) }, ...(c.noClaim ? [] : [claim])], ...c.buyer };
       for (const key of Object.keys(buyerScope)) if (buyerScope[key] === undefined) delete buyerScope[key];
       const sellerScope = { ...identity, sessionNonce: `challenge-${dids[SELLER]}` };
       const buyerIdentity = presented(BUYER, buyerScope);
@@ -614,7 +624,7 @@ test("required vet execution binds presented claims, verification and phase poin
       const composite = (party: number): Obj => {
         const scope = { recordVersion: "1", jobId: JOB, evaluatedParty: dids[party], bundleHash: parties[party].bundleHash,
           requirementHash: contentHash(party === BUYER ? req : { requirementVersion: "1", required: [] }),
-          freshness: party === BUYER ? [resultRef, ...(c.primaryProof ? [primaryRef] : [])] : (c.malformedFreshness ? [{ contentHash: "0".repeat(64) }] : []), dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: c.generatedAt ?? 30 } as Obj;
+          freshness: party === BUYER ? [resultRef, ...(primaryProof ? [primaryRef] : [])] : (c.malformedFreshness ? [{ contentHash: "0".repeat(64) }] : []), dealSpecific: [], supplementary: [], overallDecision: "pass", generatedAt: c.generatedAt ?? 30 } as Obj;
         if (party === BUYER) {
           if (c.records === "wrong-requirement") scope.requirementHash = "0".repeat(64);
           if (c.records === "failed") scope.overallDecision = "fail";
@@ -660,6 +670,9 @@ test("required vet execution binds presented claims, verification and phase poin
             ? "0".repeat(64) : String(party.bundleHash) };
         },
         resolveIdentityBundle: c.callback ? async () => buyerIdentity : undefined,
+        // Fixture control verifier for the buyer's exact primary and result; production installs none.
+        verifyPrimaryClaimControl: c.control === "missing" ? undefined : async ({ identity, primary, result }) =>
+          c.control !== "rejects" && identity.presentedBy === dids[BUYER] && `did:${primary.identifier}` === dids[BUYER] && result.locator === at(85),
         readSettlementNode: nativeNodeFixture(() => store.values()),
         read: async (locator) => store.get(locator) ?? null,
         readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
@@ -667,7 +680,7 @@ test("required vet execution binds presented claims, verification and phase poin
       });
       if (c.snapshotControl) {
         const selectedSnapshot = process.env.DACS_RECIPE_SNAPSHOTS;
-        process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: [livePolicy] }]);
+        process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 1, recipes: roster([livePolicy]) }]);
         const controlScope = { ...scope, recipeRegistryVersion: 1 };
         store.set(at(20), copy("buyer", controlScope)).set(at(21), copy("seller", controlScope));
         const control = await buildGraph();
@@ -975,12 +988,23 @@ test("hybrid and legacy listings cannot bypass current graph and catalog admissi
     const control = installListedCase((scope) => Object.assign(scope, compatibility));
     assert.equal((await currentGraph(control)).ok, true);
     assert.equal((await indexSeller(holders())).reputation.completed, 1);
+    // Object-valued parameters on non-pay phases stay in the signed scope (#98, dab2497),
+    // for hybrid listings exactly as for current ones.
+    for (const change of [
+      (scope: Obj) => { (scope.pipeline as Obj[])[0].parameters = {}; },
+      (scope: Obj) => { (scope.pipeline as Obj[])[1].parameters = { unexpected: true }; },
+    ]) {
+      const listed = installListedCase((scope) => { Object.assign(scope, compatibility); change(scope); });
+      const graph = await currentGraph(listed);
+      assert.equal(graph.ok, true, graph.reason);
+      assert.equal((await indexSeller(holders())).reputation.completed, 1);
+    }
     for (const change of [
       (scope: Obj) => { scope.pipeline = (scope.pipeline as Obj[]).slice(0, 3); },
       (scope: Obj) => { (scope.pipeline as Obj[]).push({ kind: "vet-credentials" }); },
       (scope: Obj) => { ((scope.seller as Obj).identity as Obj).bundleVersion = "2"; },
-      (scope: Obj) => { (scope.pipeline as Obj[])[0].parameters = {}; },
-      (scope: Obj) => { (scope.pipeline as Obj[])[1].parameters = { unexpected: true }; },
+      (scope: Obj) => { (scope.pipeline as Obj[])[0].parameters = []; },
+      (scope: Obj) => { (scope.pipeline as Obj[])[1].parameters = "unexpected"; },
       (scope: Obj) => { delete scope.dacsVersion; },
     ]) {
       const listed = installListedCase((scope) => { Object.assign(scope, compatibility); change(scope); });

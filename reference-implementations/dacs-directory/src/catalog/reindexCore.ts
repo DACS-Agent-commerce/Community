@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { publisherListingAnchors } from "./publisherListings";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, verifyListing } from "./listingVerification";
+import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -30,6 +30,8 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
+  retainListingRevocation,
+  retainedListingRevocation,
   recordWellKnownWithdrawalCheck,
   loadWithdrawalCursor,
   saveWithdrawalCursor,
@@ -372,11 +374,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
-          // An unsigned, unpinned source cannot establish a complete withdrawal
-          // check for a new executable offer. Independently known anchors remain
-          // available, and verified tombstones can still withdraw those offers.
-          if (!sourceProvenance) continue;
+          // A revoked or incomplete row can carry a marker, but cannot introduce an
+          // active offer. Authenticated unresolved sources create holds; unsigned
+          // carriage must first resolve a verified tombstone. Independent active
+          // registrations, chain observations and complete mirrors remain usable.
           if (!reg.listingAnchors.includes(anchor)) {
+            const retained = retainedListingRevocation(agent.contentHashes[anchor]);
+            if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
+                retained?.sellerPrimaryClaim !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {
@@ -480,7 +485,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     // Binding resolution has not happened yet. Keep it seller-scoped until a
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
-      [...(agent.incompleteWithdrawalHashes ?? []), ...agent.revocations.map((binding) => binding.listingContentHash)],
+      agent.incompleteWithdrawalHashes ?? [],
       agent.withdrawalIndex, agent.revocations, provenance)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
@@ -515,7 +520,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     cache.set(locator, result);
     return result;
   };
-  const listings = new Map<string, Awaited<ReturnType<typeof verifyListing>>>();
+  const listings = new Map<string, Awaited<ReturnType<typeof verifyStoredListing>>>();
   const markers = new Map<string, Awaited<ReturnType<typeof findValidListingRevocation>>>();
   let examined = 0;
   try {
@@ -523,7 +528,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
       const { anchor, binding } = jobs[cursor];
       const anchored = await read(anchor);
       if (anchored.status !== "present") continue;
-      if (!listings.has(anchor)) listings.set(anchor, await verifyListing(anchored.record.data).catch(() => null));
+      if (!listings.has(anchor)) listings.set(anchor, await verifyStoredListing(anchored.record.data, anchor).catch(() => null));
       const listing = listings.get(anchor);
       if (!listing || listingBindingRejection(listing.sellerClaim, anchored.record.owner, agent.seller) ||
           listing.contentHash !== agent.contentHashes[anchor]) continue;
@@ -542,6 +547,8 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
             async (locator) => { const result = await read(locator); return result.status === "present" ? result.record.data : null; }));
         const found = markers.get(key);
         if (found && found.markerContentHash === binding.markerContentHash && found.logicalAddress === binding.logicalAddress) {
+          const marker = cache.get(binding.markerAnchor.locator);
+          if (marker?.status === "present") retainListingRevocation(found, marker.record.data);
           admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
         }
       }
