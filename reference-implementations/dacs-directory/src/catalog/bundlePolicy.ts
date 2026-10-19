@@ -3,7 +3,7 @@ import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
 import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
-import { verifyListing } from "./listingVerification.js";
+import { verifyListing, verifyStoredListing } from "./listingVerification.js";
 import {
   resolvePrimaryClaimKey,
   resolveDemosPrimaryClaimKey,
@@ -120,6 +120,8 @@ export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
 export interface ResolvedArtifact {
   kind: string;
   raw: Record<string, unknown>;
+  /** Exact source pointer, required to select an out-of-band historical import. */
+  locator?: string;
 }
 
 interface ExpectedArtifact {
@@ -178,7 +180,9 @@ export async function verifyReferencedArtifactSignature(
   partyClaims: Set<string> = new Set(),
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
-  if (artifact.kind === "dacs-1-listing") return (await verifyListing(artifact.raw, resolveKey)) !== null;
+  if (artifact.kind === "dacs-1-listing") return (artifact.locator
+    ? await verifyStoredListing(artifact.raw, artifact.locator, resolveKey)
+    : await verifyListing(artifact.raw, resolveKey)) !== null;
   const separator = SEPARATORS[artifact.kind];
   if (!separator) return false;
   const raw = artifact.raw;

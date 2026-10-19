@@ -13,8 +13,7 @@
 # - catalogBundleBindings and scanChain retain all supported BB-4-valid records,
 #   regardless of signer. The unauthenticated bundle route pages persisted records.
 #   test/catalog-binding-pagination.test.ts covers scan -> direct persistence -> HTTP.
-#   The existing reindexCore accumulation still caps records at 32 per signer/job/role;
-#   complete carriage through reindex/federation is pending integration.
+#   Reindex/federation accumulation in this part retains every verified binding.
 # - canonical.ts guards its wrappers against lone UTF-16 surrogates in keys/values;
 #   SDK NFC behavior and valid pairs are pinned by test/canonical-rules.test.ts.
 #   Other SDK canonicalizer callers have not all adopted this guard.
@@ -57,26 +56,49 @@
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
-# - Current listing/graph signature readers retain permissive legacy decoding;
-#   strict SIG-6 decoding is currently wired into BundleBinding verification.
+# - New current listings and revocation markers enforce strict SIG-6 encoding.
+#   Historical current hex listings require exact operator-controlled native/hash/
+#   tuple/seller import pins (DACS_HISTORICAL_LISTING_IMPORTS; README). Other graph
+#   envelopes retain legacy decoding. BundleBinding verification is strict.
 # - SDK canonicalization accepts only integer numbers. Fractional publication is
-#   unsupported; the publication route does not yet validate all fractions itself.
-# - Discovery filters revoked listings; it does not serve revoked tombstones.
+#   unsupported; listing publication rejects fractional negotiation percentages.
+# - Discovery excludes revoked offers and carries revoked tombstones with their
+#   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
-# - scan.ts classifies any HTTP 404 as STORAGE_NOT_FOUND without checking the node
-#   error body; missing/non-public locators are terminal until replay. This is an
-#   operational label, never authoritative BB-8 absence evidence.
+# - scan.ts requires structured errorCode NOT_FOUND on HTTP 404 before
+#   classifying STORAGE_NOT_FOUND. Proxy/bare/wrong-route 404s stay retryable
+#   STORAGE_RPC_UNAVAILABLE (test/scan-addresses.test.ts); structured permission
+#   denial is terminal until replay, never authoritative BB-8 absence evidence.
 # - Node ac8f45f02fc9c25082ce9b83595c2e3916b49c5a is a source/API reference only;
 #   no remote deployment revision is attested by an RPC URL or successful read.
 #
 # Vendored conformance inputs (byte hashes and local decisions are checked by
-# test/standard-vectors.test.ts; these are the only upstream sets exercised here):
+# test/standard-vectors.test.ts, test/listing-vectors.test.ts and
+# test/revocation-vectors.test.ts):
 # conformance/vectors/security/signature-value-encoding-v0.1.json
 # sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-# All other upstream vector sets are unimplemented adapters/unexecuted here,
-# including revocation-binding, sb2-settlement-uniqueness, agreement-listing,
+# conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+# conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+# The revocation adapter excludes remote-catalog freshness (not consumed here).
+# Its marker-level rejected verdicts and entry-completeness checks do not assert
+# end-to-end catalog status for every vector. In particular, unauthenticated
+# incomplete rows cannot create withdrawal holds (RB-5/RB-6 local policy).
+# For binding-logical-address-mismatch and binding-marker-content-hash-mismatch,
+# the producer derives a fresh binding from a verified marker rather than using
+# the corrupt received binding; that producer result is revoked, unlike the
+# upstream consumer verdict of indeterminate. Current authenticated marker
+# rejections release source bindings; marker-level indeterminate does not imply
+# that the producer publishes an indeterminate catalog row.
+# Directory extension to DACS-1 6.3.5: dacs.listings.publisherSignature signs UTF-8
+# "dacs-directory withdrawal-index:v1\ndomain:<normalized HTTPS origin>\nindex:sha256-<lowercase hash>"
+# with no final newline. The index seller's did:demos:agent Ed25519 key signs;
+# raw signatures use canonical unpadded Base64URL (64 bytes / 86 characters).
+# Hash the exact served index bytes; the signature is external in the agent card.
+# See README and test/withdrawal-publisher-signature.test.ts.
+# Other upstream vector sets are unimplemented adapters/unexecuted here,
+# including sb2-settlement-uniqueness, agreement-listing,
 # mixed-version-reconciliation, fault-bundle-perspective-pair,
-# payee-destination-binding, listing-preserve-unknown, unresolved-vs-absent,
+# payee-destination-binding, unresolved-vs-absent,
 # bundle-absence-evidence, metered-pricing and phase-kind-divergence.
