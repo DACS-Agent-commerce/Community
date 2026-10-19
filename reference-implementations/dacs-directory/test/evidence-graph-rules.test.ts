@@ -522,6 +522,14 @@ test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked
       const result = verifyResult(session, { attestation: { ...attest(session), contentHash: "0".repeat(64) } });
       return composite({ dealSpecific: [{ ...(await publish(session, 31, result, "verify-result", OUTSIDER)), recipeVersion: 1 }] });
     }),
+    // A second VerifyResult citing an already resolved attestation is authenticated again against itself.
+    "two results citing one attestation that authenticates both": vetted(async (session) => composite({
+      freshness: [{ ...(await publish(session, 31, verifyResult(session), "verify-result", OUTSIDER)), recipeVersion: 1 }],
+      dealSpecific: [{ ...(await publish(session, 32, verifyResult(session, { reason: "second registry match" }), "verify-result", OUTSIDER)), recipeVersion: 1 }] })),
+    "a second result citing that attestation under another signer": vetted(async (session) => composite({
+      freshness: [{ ...(await publish(session, 31, verifyResult(session), "verify-result", OUTSIDER)), recipeVersion: 1 }],
+      dealSpecific: [{ ...(await publish(session, 32, verifyResult(session, { reason: "second registry match", attestation: { ...attest(session), signer: dids[OUTSIDER] } }),
+        "verify-result", OUTSIDER)), recipeVersion: 1 }] })),
     "a supplementary signal from dacs-5": signal({}),
     "an external signal without an attestation": signal({ source: "external" }),
     "an external signal with its attestation": vetted(async (session) => composite({ supplementary: [{ source: "external", signalType: "rating-avg", value: "4.5", observedAt: 5, attestation: attest(session) }] })),
@@ -575,6 +583,8 @@ test("DACS-2 vet records and DACS-4 evidence chains are dereferenced and checked
     "a verified result and its attestation": "ok", "a result whose decision is not in the enum": NESTED,
     "a result whose attestation is not a reference": NESTED, "a result reference with another content hash": NESTED,
     "a result whose attestation hash does not match": "VerifyResult attestation reference failed",
+    "two results citing one attestation that authenticates both": "ok",
+    "a second result citing that attestation under another signer": "VerifyResult attestation reference failed",
     "a supplementary signal from dacs-5": "ok", "an external signal without an attestation": COMPOSITE,
     "an external signal with its attestation": "ok", "a signal value that is a boolean": COMPOSITE,
     "a signal source that is not a string": COMPOSITE, "a signal without a type": COMPOSITE, "a signal without observedAt": COMPOSITE,

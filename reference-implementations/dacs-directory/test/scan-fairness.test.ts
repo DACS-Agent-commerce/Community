@@ -458,6 +458,13 @@ test("a discovered current-profile deal is attributed through the agreementRef i
   deal = await scannedDeal();
   assert.equal(deal?.owners.seller, "");
 
+  // A reference to a locator that holds nothing attributes nothing, and the scan still completes.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(984))), owner: ownerOf(buyer) },
+  }, [locator(980)]);
+  deal = await scannedDeal();
+  assert.deepEqual([deal?.buyerBundleRef, deal?.owners.seller, deal?.agreementLocator], [locator(980), "", undefined]);
+
   // Two programs sharing the conventional name do not void a deal its signed reference attributes.
   resetIndex([later], 36);
   chain({

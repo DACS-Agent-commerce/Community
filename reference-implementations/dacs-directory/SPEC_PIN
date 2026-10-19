@@ -52,9 +52,10 @@
 #   so those sessions remain indeterminate. Fixture adapters drive
 #   test/indexer-binding-rules.test.ts, test/current-indexer.test.ts and
 #   test/evidence-graph-rules.test.ts; the profile limits are recorded below.
-# - Native pay-dem inclusion and exact amount, operator-provisioned rail snapshots,
-#   SB-1 settlement keys and one catalog-wide SB-2 ledger: test/native-payment.test.ts
-#   and test/indexer-binding-rules.test.ts.
+# - Native pay-dem inclusion and exact amount, operator-provisioned rail snapshots and
+#   SB-1 settlement keys: test/native-payment.test.ts and test/indexer-binding-rules.test.ts.
+#   One catalog-wide SB-2 ledger across sellers, applied on every catalog save:
+#   test/reputation-rules.test.ts.
 # - DV-1..3 storage delivery from readable cleartext and node ACL metadata, resolved
 #   through signed AnchorBindings.
 # - DACS-3 §8.5.2 agreement/listing conformance: currency, price, rail, deliverable,

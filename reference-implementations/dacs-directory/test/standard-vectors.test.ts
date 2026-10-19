@@ -184,13 +184,50 @@ test("DACS-5 §10.4.3 mixed-version-reconciliation-v0.3 and fault-bundle-perspec
     if (want.scoredOutcome !== undefined) assert.equal(result.sellerOutcome, want.scoredOutcome, vector.name);
     if (want.reputationEffect !== undefined) assert.equal(result.refsVerified ? "include" : "exclude", want.reputationEffect, vector.name);
     if (want.faultedParty !== undefined && !result.divergent && result.refsVerified) assert.equal(result.authoritative.bundle.faultedParty, want.faultedParty, vector.name);
+    // Only an authoritative FaultAttestationBundle that faults the orchestrator is neutral.
+    assert.equal(result.orchestratorFaultNeutral, vector.name === "mixed-orchestrator-nondivergent", vector.name);
+    const rep = deriveSellerReputation([{ ...deal, sellerOutcome: result.sellerOutcome, orchestratorFaultNeutral: result.orchestratorFaultNeutral,
+      signatureVerified: true, refsVerified: true, reputationEligible: true, finalisedAt: 10, verifiedAt: 10 }], 0, 100);
     if (vector.name === "mixed-orchestrator-nondivergent") {
-      assert.equal(result.orchestratorFaultNeutral, true);
-      const rep = deriveSellerReputation([{ ...deal, sellerOutcome: result.sellerOutcome, orchestratorFaultNeutral: result.orchestratorFaultNeutral,
-        signatureVerified: true, refsVerified: true, reputationEligible: true, finalisedAt: 10, verifiedAt: 10 }], 0, 100);
       assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, null, null, null]);
     }
+    // A FAB-authoritative seller fault stays in both denominators.
+    if (vector.name === "mixed-nondivergent-fab-authoritative") {
+      assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, 0, 0, 0]);
+    }
   }
+});
+
+test("DACS-5 §10.4.3 divergence classes for failure and substrate outcomes, three-party faults and both mixed orientations", () => {
+  const two = [{ role: "buyer", primaryClaim: "did:demos:buyer" }, { role: "seller", primaryClaim: "did:demos:seller" }];
+  const three = [...two, { role: "orchestrator", primaryClaim: "did:demos:orchestrator" }];
+  const phaseSummary = [{ index: 0, kind: "deliver-storage-program", outcome: "ok" }];
+  const legacy = (anchoredByRole: string, outcome: string, parties = two): Obj => ({ bundleVersion: "1", anchoredByRole, outcome, parties, phaseSummary });
+  const fab = (anchoredByRole: string, outcome: string, faultedParty: string, parties = two): Obj =>
+    ({ faultBundleVersion: "1", anchoredByRole, outcome, faultedParty, parties, phaseSummary });
+  // [name, buyer copy, seller copy, diverges]
+  const cases: Array<[string, Obj, Obj, boolean]> = [
+    ["FAB failure pair faulting the seller", fab("buyer", "failed-counterparty", "seller"), fab("seller", "failed-perm", "seller"), false],
+    ["FAB substrate pair", fab("buyer", "failed-substrate", "none"), fab("seller", "failed-substrate", "none"), false],
+    ["legacy buyer substrate vs FAB seller substrate", legacy("buyer", "failed-substrate"), fab("seller", "failed-substrate", "none"), false],
+    ["FAB buyer substrate vs legacy seller substrate", fab("buyer", "failed-substrate", "none"), legacy("seller", "failed-substrate"), false],
+    ["FAB buyer abort faulting the seller vs legacy seller self-abort", fab("buyer", "aborted-by-other", "seller"), legacy("seller", "aborted-by-self"), false],
+    ["FAB buyer failure faulting the seller vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "seller"), legacy("seller", "failed-perm"), false],
+    ["legacy failure pair", legacy("buyer", "failed-counterparty"), legacy("seller", "failed-perm"), false],
+    ["three-party FAB pair faulting the orchestrator and the buyer", fab("buyer", "failed-counterparty", "orchestrator", three),
+      fab("seller", "failed-counterparty", "buyer", three), true],
+    ["FAB failure vs FAB abort, same fault", fab("buyer", "failed-counterparty", "seller"), fab("seller", "aborted-by-self", "seller"), true],
+    ["FAB buyer self-abort vs legacy seller self-abort", fab("buyer", "aborted-by-self", "buyer"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer completed vs legacy seller self-abort", fab("buyer", "completed", "none"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer faulting the orchestrator vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "orchestrator", three),
+      legacy("seller", "failed-perm", three), true],
+    ["legacy buyer failed-perm vs FAB seller faulting the orchestrator", legacy("buyer", "failed-perm", three),
+      fab("seller", "failed-counterparty", "orchestrator", three), true],
+    ["legacy buyer completed vs FAB seller substrate", legacy("buyer", "completed"), fab("seller", "failed-substrate", "none"), true],
+    ["FAB buyer substrate vs legacy seller completed", fab("buyer", "failed-substrate", "none"), legacy("seller", "completed"), true],
+    ["FAB completed vs FAB substrate", fab("buyer", "completed", "none"), fab("seller", "failed-substrate", "none"), true],
+  ];
+  for (const [name, buyer, seller, diverges] of cases) assert.equal(currentBundleCopiesDiverge(buyer, seller), diverges, name);
 });
 
 test("DACS-3 §8.5 payee-destination-binding-v0.1: artifact type and PB-1 payout coverage", () => {

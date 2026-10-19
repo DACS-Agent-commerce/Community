@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { verifyNativePayment } from "../src/catalog/nativePayment.js";
+import { demOs, verifyNativePayment } from "../src/catalog/nativePayment.js";
 
 // Read-only node2 captures from 2026-10-17, retained byte-for-byte.
 const captured = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/native-payment/${name}.json`, import.meta.url), "utf8")).response;
@@ -76,4 +76,49 @@ test("PB-2 binds a payee-bound native destination to the seller primary claim", 
   assert.equal(await verifyNativePayment(ref, payeeBound, 2, read), "pass");
   const unrelatedSeller = { ...payeeBound, parties: [agreement.parties[0], { role: "seller", primaryClaim: `did:demos:agent:${"e".repeat(64)}` }] };
   assert.equal(await verifyNativePayment(ref, unrelatedSeller, 2, read), "fail", "real transfer and co-signed payout do not substitute seller identity");
+});
+
+test("PB-2 reads the payee from this phase's own payout binding, not from the seller claim", async () => {
+  const read = async (message: string) => message === "getTxByHash" ? tx : block;
+  const other = `0x${"e".repeat(64)}`;
+  const bound = (payoutBindings: Array<Record<string, unknown>>) => ({ ...agreement, payeeBoundAgreementVersion: "1",
+    terms: { ...agreement.terms, rail: { railId: "demos-native:DEM" }, payoutBindings } });
+  // The transfer goes to the seller, but this phase's binding names someone else.
+  assert.equal(await verifyNativePayment(ref, bound([{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: other }]), 2, read), "fail");
+  // Only another pay phase's binding, or another rail's binding at this index, names the seller.
+  const twoPhases = bound([{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: other }, { railId: "demos-native:DEM", phaseIndex: 4, payeeAddress: tx.content.to }]);
+  assert.equal(await verifyNativePayment(ref, twoPhases, 2, read), "fail");
+  assert.equal(await verifyNativePayment(ref, twoPhases, 4, read), "pass");
+  assert.equal(await verifyNativePayment(ref, bound([{ railId: "demos-native:DEM", phaseIndex: 4, payeeAddress: tx.content.to }]), 2, read), "fail");
+  assert.equal(await verifyNativePayment(ref, bound([{ railId: "other-rail", phaseIndex: 2, payeeAddress: tx.content.to }]), 2, read), "fail");
+});
+
+test("§9.5.9 inclusion needs this transaction's hash in the block, not just the block number", async () => {
+  const others = ["cd".repeat(32), `0x${"ef".repeat(32)}`];
+  assert.equal(await check(tx, { ...block, content: { ...block.content, ordered_transactions: others } }), "fail");
+  assert.equal(await check(tx, { ...block, content: { ...block.content, ordered_transactions: [...others, tx.hash] } }), "pass");
+  assert.equal(await check(tx, { ...block, number: tx.blockNumber + 1 }), "fail");
+});
+
+test("only a native send operation settles the agreement", async () => {
+  for (const nativeOperation of ["transfer", "Send", "", undefined]) {
+    const changed = structuredClone(tx);
+    changed.content.data[1].nativeOperation = nativeOperation;
+    assert.equal(await check(changed), "fail", String(nativeOperation));
+  }
+});
+
+test("multi-digit and fractional DEM prices convert exactly to OS", async () => {
+  assert.deepEqual(["12", "10.5", "100.000000001"].map(demOs), [12_000_000_000n, 10_500_000_000n, 100_000_000_001n]);
+  for (const [amount, os] of [["12", 12_000_000_000], ["10.5", 10_500_000_000]] as const) {
+    const changed = structuredClone(tx);
+    changed.content.amount = os;
+    changed.content.data[1].args[1] = String(os);
+    const priced = { ...agreement, terms: { price: { amount, currency: "DEM" } } };
+    assert.equal(await verifyNativePayment(ref, priced, 2, async (message) => message === "getTxByHash" ? changed : block), "pass", amount);
+  }
+});
+
+test("a node read that throws leaves the payment indeterminate", async () => {
+  assert.equal(await verifyNativePayment(ref, agreement, 2, async () => { throw new Error("node unreachable"); }), "indeterminate");
 });

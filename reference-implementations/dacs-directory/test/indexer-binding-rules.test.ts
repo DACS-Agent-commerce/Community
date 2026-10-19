@@ -245,6 +245,29 @@ test("a session aborted before commitment verifies with each copy signed by its 
   assert.equal(deal.anchoredByRole, "seller");
 });
 
+test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain bytes", async () => {
+  const { boundLogicalAddress, verifyAnchorBinding } = await import("../src/catalog/anchorBinding.js");
+  const scope: Obj = { anchorBindingVersion: "1", jobId: JOB, logicalAddress: deliverableLogicalAddress(JOB), nativeAddress: at(61),
+    contentHash: contentHash(payload), signer: dids[SELLER] };
+  const signedOver = (message: string) => ({ ...scope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: value(message, SELLER) } });
+  // The domain is spelled out rather than imported, so the signed bytes themselves are pinned.
+  const domainSeparated = signedOver(`dacs-x-anchor-binding:v1:${contentHash(scope)}`);
+  const bare = signedOver(contentHash(scope));
+  assert.notEqual(await verifyAnchorBinding(domainSeparated), null);
+  assert.equal(await verifyAnchorBinding(bare), null);
+  assert.equal(await verifyAnchorBinding(signedOver(`dacs-bundle-binding:v1:${contentHash(scope)}`)), null);
+  const anchor = { jobId: JOB, nativeAddress: at(61), contentHash: contentHash(payload), signer: dids[SELLER] };
+  assert.equal(await boundLogicalAddress([domainSeparated], anchor), deliverableLogicalAddress(JOB));
+  assert.equal(await boundLogicalAddress([bare], anchor), null);
+  // Structural limits hold for an otherwise correctly signed binding.
+  const signedScope = (change: Obj) => { const body = { ...scope, ...change };
+    return { ...body, signature: { algorithm: "ed25519", signer: dids[SELLER], value: value(`dacs-x-anchor-binding:v1:${contentHash(body)}`, SELLER) } }; };
+  assert.notEqual(await verifyAnchorBinding(signedScope({})), null);
+  for (const change of [{ anchorBindingVersion: "2" }, { jobId: "j".repeat(161) }, { padding: "p".repeat(16 * 1024) }]) {
+    assert.equal(await verifyAnchorBinding(signedScope(change)), null, Object.keys(change)[0]);
+  }
+});
+
 test("a completed deal with no pay phase or evidence never contributes reputation (review probe P4)", async () => {
   const bare = bundleScope({ phaseSummary: [], settlementEvidence: [] });
   store.set(at(20), copy("buyer", bare)).set(at(21), copy("seller", bare));
@@ -253,38 +276,57 @@ test("a completed deal with no pay phase or evidence never contributes reputatio
   assert.equal(deal.reputationEligible, false);
 });
 
+const FAILED_MANDATORY_PHASE = "completed session contains a failed mandatory phase";
+/** Publishes `pipeline` and a both-signed completed session over it whose phase entries carry `outcomes`
+ * (default ok); each settle phase cites `evidenceAt[index]`, else the fixture success evidence, or `at(30)` when it failed. */
+function failedPhaseSession(pipeline: Obj[], outcomes: Record<number, string>, evidenceAt: Record<number, Obj> = {}) {
+  const listedScope = { ...listingScope, pipeline };
+  const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
+  store.set(at(1), listed);
+  const listingRef = { ...bundleScope().listingRef as Obj, contentHash: artifactHash(listed, "listing") };
+  const agreedScope = { ...agreementScope, listingRef };
+  const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
+  store.set(at(2), agreed);
+  const phaseSummary = pipeline.map((phase, index) => outcomes[index] === "fail"
+    ? { index, kind: phase.kind, outcome: "fail", errorClass: "permanent" } : { index, kind: phase.kind, outcome: "ok" });
+  const settlementEvidence = phaseSummary.flatMap((phase): Obj[] => {
+    if (evidenceAt[phase.index]) return [evidenceAt[phase.index]];
+    if (phase.outcome === "fail") return /^(pay|deliver)-/.test(String(phase.kind)) ? [refTo(at(30), store.get(at(30))!, "evidence")] : [];
+    if (phase.kind === "pay-dem") return [refTo(at(3), evidence, "evidence")];
+    return phase.kind === "deliver-storage-program" ? [refTo(at(60), delivery, "evidence")] : [];
+  });
+  const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary, settlementEvidence });
+  store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
+  return buildCurrentEvidenceGraph(at(20), {
+    readSettlementNode: nativeNodeFixture(() => store.values()),
+    read: async (locator) => store.get(locator) ?? null,
+    readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
+    resolveListing: async () => ({ locator: at(1), raw: listed }),
+  });
+}
+const failedEvidence = (phase: string) => {
+  const scope: Obj = { evidenceVersion: "1", jobId: JOB, phase, outcome: "failure", observedAt: 100 };
+  return { ...scope, signature: signedWith(scope, "evidence", SELLER) };
+};
+
 test("completed sessions reject failed mandatory phases and retain the non-fatal rate exception", async () => {
   const original = new Map(store);
+  // Every listed phase has an entry and only `kind` fails, so ST-2 itself decides each case. A failed
+  // commit carrying an agreement is refused by its own earlier rule.
+  const expected: Record<string, string | undefined> = {
+    "pay-dem": FAILED_MANDATORY_PHASE, "deliver-storage-program": FAILED_MANDATORY_PHASE, "deliver-entitlement": FAILED_MANDATORY_PHASE,
+    "deliver-attested-payload": FAILED_MANDATORY_PHASE, "vet-credentials": FAILED_MANDATORY_PHASE, "negotiate-fixed-price": FAILED_MANDATORY_PHASE,
+    "commit-agreement": "agreement contradicts failed commitment", rate: undefined,
+  };
   try {
-    for (const kind of ["pay-dem", "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "vet-credentials", "negotiate-fixed-price", "commit-agreement", "rate"]) {
+    for (const [kind, reason] of Object.entries(expected)) {
       store.clear(); for (const [key, raw] of original) store.set(key, raw);
-      const failedSettlement = kind.startsWith("pay-") || kind.startsWith("deliver-");
-      const pipeline = structuredClone(listingScope.pipeline) as Obj[];
-      if (kind !== "pay-dem") pipeline.push({ kind });
-      const listedScope = { ...listingScope, pipeline };
-      const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
-      store.set(at(1), listed);
-      const listingRef = { ...bundleScope().listingRef as Obj, contentHash: artifactHash(listed, "listing") };
-      const agreedScope = { ...agreementScope, listingRef };
-      const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
-      store.set(at(2), agreed);
-      const failedScope: Obj = { evidenceVersion: "1", jobId: JOB, phase: kind, outcome: "failure", observedAt: 100 };
-      const failed = { ...failedScope, signature: signedWith(failedScope, "evidence", SELLER) };
-      store.set(at(30), failed);
-      const phaseSummary = kind === "pay-dem" ? [{ index: 2, kind, outcome: "fail", errorClass: "permanent" }]
-        : [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind, outcome: "fail", errorClass: "permanent" }];
-      const settlementEvidence = kind === "pay-dem" ? [refTo(at(30), failed, "evidence")]
-        : [refTo(at(3), evidence, "evidence"), ...(failedSettlement ? [refTo(at(30), failed, "evidence")] : [])];
-      if (kind === "rate") { phaseSummary[3].index = 4; phaseSummary.splice(3, 0, { index: 3, kind: "deliver-storage-program", outcome: "ok" } as never); settlementEvidence.push(refTo(at(60), delivery, "evidence")); }
-      const scope = bundleScope({ listingRef, agreementRef: refTo(at(2), agreed, "agreement"), phaseSummary, settlementEvidence });
-      store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
-      const graph = await buildCurrentEvidenceGraph(at(20), {
-        readSettlementNode: nativeNodeFixture(() => store.values()),
-        read: async (locator) => store.get(locator) ?? null,
-        readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
-        resolveListing: async () => ({ locator: at(1), raw: listed }),
-      });
+      const base = structuredClone(listingScope.pipeline) as Obj[];
+      const pipeline = base.some((phase) => phase.kind === kind) ? base : kind === "vet-credentials" ? [{ kind }, ...base] : [...base, { kind }];
+      store.set(at(30), failedEvidence(kind));
+      const graph = await failedPhaseSession(pipeline, { [pipeline.findIndex((phase) => phase.kind === kind)]: "fail" });
       assert.equal(graph.signaturesVerified, true, kind);
+      assert.equal(graph.reason, reason, kind);
       const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
       const allowed = kind === "rate";
       assert.equal(graph.refsVerified, allowed, `${kind}: ${graph.reason}`);
@@ -294,6 +336,31 @@ test("completed sessions reject failed mandatory phases and retain the non-fatal
       assert.equal(seller.reputation.bundleCount, allowed ? 1 : 0, kind);
       assert.deepEqual(seller.reputation.observedTransactionalVolume, allowed ? [{ currency: "DEM", amount: "2" }] : [], kind);
     }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("ST-2: a completed session with a verified payment and a failed storage delivery counts no completion or volume", async () => {
+  const original = new Map(store);
+  try {
+    // Every listed phase is present and signed for; the delivery phase failed and cites its signed failure evidence.
+    store.set(at(30), failedEvidence("deliver-storage-program"));
+    const failedDelivery = await failedPhaseSession(structuredClone(listingScope.pipeline) as Obj[], { 3: "fail" });
+    assert.deepEqual([failedDelivery.ok, failedDelivery.refsVerified, failedDelivery.reason], [false, false, FAILED_MANDATORY_PHASE]);
+    const seller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+    assert.deepEqual([seller.deals[0].refsVerified, seller.reputation.completed, seller.reputation.observedTransactionalVolume], [false, 0, []]);
+    // Two delivery invocations both report ok, but one of their two records is a failure, so the
+    // evidence (not the phase entries) carries the failure.
+    const repeated = [...structuredClone(listingScope.pipeline) as Obj[], { kind: "deliver-storage-program" }];
+    const failedRecord = await failedPhaseSession(repeated, {}, { 4: refTo(at(30), store.get(at(30))!, "evidence") });
+    assert.deepEqual([failedRecord.ok, failedRecord.refsVerified, failedRecord.reason], [false, false, FAILED_MANDATORY_PHASE]);
+    const repeatedSeller = await indexSeller([binding("buyer", at(20), BUYER), binding("seller", at(21), SELLER)]);
+    assert.deepEqual([repeatedSeller.deals[0].refsVerified, repeatedSeller.reputation.completed, repeatedSeller.reputation.observedTransactionalVolume], [false, 0, []]);
+    // Control: the same repeated pipeline with two successful records verifies and counts.
+    const secondPayload = { report: "second fixture delivery" };
+    const secondScope: Obj = { ...deliveryScope, observedAt: 102, deliverableContentHash: contentHash(secondPayload), deliverableAnchor: { kind: "storage-program", locator: at(63) } };
+    store.set(at(62), { ...secondScope, signature: signedWith(secondScope, "evidence", SELLER) }).set(at(63), secondPayload);
+    const control = await failedPhaseSession(repeated, {}, { 4: refTo(at(62), store.get(at(62))!, "evidence") });
+    assert.deepEqual([control.refsVerified, control.reason], [true, undefined]);
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
@@ -454,6 +521,7 @@ test("required vet execution binds presented claims, verification and phase poin
     { name: "diagnostic timestamp after expiry and finalisation", buyer: { presentedAt: 121 }, expected: true },
     { name: "first consuming attempt before issuance", challengeTiming: { consumedAt: -1 } },
     { name: "first consuming attempt after expiry", challengeTiming: { consumedAt: 121 } },
+    { name: "first consuming attempt after expiry but before finalisation", challengeTiming: { expiresAt: 100, consumedAt: 110 } },
     { name: "first consuming attempt after finalisation", challengeTiming: { expiresAt: 200, consumedAt: 121 } },
     { name: "missing authenticated consumption time", challengeTiming: { consumedAt: undefined } },
     { name: "nonfinite authenticated consumption time", challengeTiming: { consumedAt: Number.NaN } },
@@ -698,7 +766,7 @@ test("required vet execution binds presented claims, verification and phase poin
       assert.equal(graph.signaturesVerified, true, c.name);
       assert.equal(graph.ok, expected, `${c.name}: ${graph.reason}`);
       assert.equal(graph.refsVerified, expected, c.name);
-      if (c.firstAttempt || ["scope-only", "legacy-marker", "missing-digest"].includes(c.challenge ?? "")) {
+      if (c.firstAttempt || ["scope-only", "legacy-marker", "missing-digest"].includes(c.challenge ?? "") || (c.challengeTiming && !expected)) {
         assert.match(graph.reason ?? "", /authenticated historical challenge is unavailable or mismatched/);
       }
       if (c.graphOnly) return;
@@ -1049,6 +1117,24 @@ test("paid completion requires an authenticated matching versioned live rail def
       const graph = await currentGraph(listing);
       assert.equal(graph.ok, false, JSON.stringify(value)); assert.match(graph.reason!, /pinned rail/);
       await assertUncounted();
+    }
+    // PA-1: each pinned field of the native DEM definition is checked on its own.
+    const mismatch = "payment verification is indeterminate: pinned rail handler, asset or network does not match";
+    for (const change of [{ railType: "evm" }, { asset: { kind: "erc20", symbol: "DEM", decimals: 9 } }, { asset: { kind: "native-dem", symbol: "DEM", decimals: 18 } }]) {
+      process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails: [{ ...snapshot[0].rails[0], ...change }] }]);
+      assert.equal((await currentGraph(listing)).reason, mismatch, JSON.stringify(change));
+      await assertUncounted();
+    }
+    // A definition identical to native DEM except for its railId is not the native DEM rail.
+    process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails: [{ ...snapshot[0].rails[0], railId: "demos-native:DEM-alt" }] }]);
+    const altRail = installListedCase((s) => { s.acceptedRails = [{ railId: "demos-native:DEM-alt" }]; (s.pipeline as Obj[])[2].parameters = { rail: "demos-native:DEM-alt" }; });
+    assert.equal((await currentGraph(altRail)).reason, mismatch);
+    await assertUncounted();
+    store.clear(); for (const [key, raw] of original) store.set(key, raw);
+    // A version-0 definition, or two identical definitions, selects no single pinned rail.
+    for (const rails of [[{ ...snapshot[0].rails[0], railVersion: 0 }], [snapshot[0].rails[0], snapshot[0].rails[0]]]) {
+      process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails }]);
+      assert.equal((await currentGraph(listing)).reason, "payment verification is indeterminate: authenticated pinned rail definition is unavailable");
     }
     process.env.DACS_RAIL_SNAPSHOTS = policy;
     const unknownRegistry = installListedCase(() => {}, (s) => { s.railRegistryVersion = 999; });
