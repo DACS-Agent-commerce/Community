@@ -49,7 +49,7 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationBinding: {
+    revocation: {
       type: "object",
       required: [
         "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
@@ -84,8 +84,8 @@ export const listingSummarySchema = {
   },
   allOf: [{
     if: { properties: { status: { const: "revoked" } }, required: ["status"] },
-    then: { required: ["revocationBinding"] },
-    else: { not: { required: ["revocationBinding"] } },
+    then: { required: ["revocation"] },
+    else: { not: { required: ["revocation"] } },
   }],
 } as const;
 
@@ -274,7 +274,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs": { get: { summary: "API index", responses: { "200": { description: "Linked API capabilities" } } } },
     "/api/dacs/listings": {
       get: {
-        summary: "Search active services",
+        summary: "Search active services and verified withdrawal records",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
