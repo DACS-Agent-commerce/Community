@@ -81,7 +81,7 @@ import {
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
   legacyFullSignatureStanding,
-  legacyPaymentProofUnavailable,
+  legacyListingSettlementIndeterminate,
   refsPassStrictPolicy,
   verifiedListingTerms,
   type ResolvedArtifact,
@@ -573,7 +573,9 @@ export async function indexRegistration(
     );
     const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent && !legacyPaymentProofUnavailable(bundle);
+    // §10.5.1: the pinned listing, never the outcome, decides what this profile cannot verify.
+    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent &&
+      !legacyListingSettlementIndeterminate(authoritative.verification, authoritative.resolvedArtifacts);
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {

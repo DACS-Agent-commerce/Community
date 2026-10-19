@@ -136,7 +136,8 @@ async function evaluate(c: Case = {}) {
   }
   const defaults = await defaultAnchorBindings(bundle, session, c.anchorAddresses);
   const carried = c.anchorBindings ? await c.anchorBindings(defaults, session) : defaults;
-  if (carried.length > 0) bundle.anchorBindings = carried;
+  // Directory-profile tooling always carries the signed member, empty when nothing is bound.
+  if (carried.length > 0 || bundle.anchorBindings === undefined) bundle.anchorBindings = carried;
   const signed: Obj = { ...bundle, signatures: await Promise.all((c.bundleSigners ?? [BUYER, SELLER])
     .map((signer) => envelope(bundle, "bundle", signer, signer, "party"))), anchoredByRole: c.anchoredByRole ?? "buyer" };
   c.stored?.(signed, session);

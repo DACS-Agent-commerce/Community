@@ -124,6 +124,18 @@
 #   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
 #     adapters; they never contribute completion or volume. AP2 and x402 success is indeterminate: this profile has no authenticated provider-receipt
 #     resolver. A signed receipt pointer/hash alone cannot establish provider or HTTP settlement.
+#   DACS-5 §10.5.1 (exclusion neither helps nor harms): what this deployment cannot verify is decided
+#     from the pinned listing, the session's signed profile and the installed adapters, never from the
+#     outcome (evidenceGraph.ts deploymentVerifiability; bundlePolicy.ts legacyListingSettlementIndeterminate).
+#     Every session on such a listing is excluded from numerator and denominator, pre-commit failures
+#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader or a live native DEM
+#     snapshot for the bundle's railRegistryVersion; a non-storage, encrypt-to-buyer or unreadable delivery;
+#     vet-credentials without a challenge resolver (or, with identity requirements, a control adapter);
+#     listing commitment-time bounds; negotiate-fixed-price on a negotiable listing. A legacy session is
+#     excluded whenever its pinned listing declares a payment rail, delivery, price or settle phase.
+#     Only a transient read failure of one pass (node, payload) is still per session; the next pass rechecks it.
+#   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
+#     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
 #   Current publisher rail IDs are demos-native:DEM and x402:default. Historical signed phase-name
 #     aliases remain readable for evidence, but public discovery excludes those current offers;
 #     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
@@ -140,6 +152,10 @@
 #     record's own signer and carried in the bundle's `anchorBindings` member. StorageProgram names
 #     are never read; a missing, unauthenticated or conflicting binding leaves the session uncounted.
 #     Well-known, catalog and chain-scan carriage of AnchorBindings is not implemented.
+#     Neither the pinned Standard nor the pinned SDK emits `anchorBindings`. A bundle without that
+#     signed member, on a listing with a pay-dem or deliver-storage-program phase, comes from tooling
+#     without this extension and is indeterminate whatever its outcome, so such sessions are neutral:
+#     the Directory publishes no rate for them rather than counting only their failures.
 #
 # Pending production integration (split 4/5): method-specific authority-proof
 # authentication. The session graph authenticates VerifyResult authority evidence only
@@ -179,6 +195,16 @@
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
 #     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
+#
+# Partially run vector sets at this pin (test/standard-vectors.test.ts):
+#   payee-destination-binding-v0.1: 14 of 28. Run: 8 current-reader agreement-artifact-gate cases and
+#     6 PB-1 coverage cases, decided against the pinned commitment phase. Skipped: 4 legacy-reader
+#     cases (this consumer is not a legacy agreement reader); 2 agreement-signature-domain cases and
+#     agreement-stripped-payee-bound-cannot-downgrade, which rest on the vector's cci-lei signatures
+#     outside the did:demos:agent profile; 7 pre-pay-destination-gate cases (PB-1 abort, PB-2 tiers,
+#     PB-3/SB-3), a payer-side gate this read-only catalog never runs.
+#   metered-pricing-v0.3: 19 of 22. Run: every agreement-validation case. Skipped: the 3
+#     quantity-derivation cases, which are handler-side.
 #
 # Vendored conformance inputs, byte-identical under test/fixtures/dacs-standard/ at the
 # pin above, except the Demos agent claim fixture, which is from DACS-Standard #296 at 725fa78.

@@ -101,9 +101,9 @@ function anchorBindingsFor(scope: Obj): Obj[] {
       ? [anchorBinding(jobId, deliverableLogicalAddress(jobId), payloadAt, evidence.deliverableContentHash, signer)] : [];
   });
 }
+// Directory-profile tooling always carries the signed anchorBindings member, empty when nothing is bound.
 const copy = (anchoredByRole: string, scope = bundleScope(), signers = [BUYER, SELLER]) => {
-  const bindings = scope.anchorBindings === undefined ? anchorBindingsFor(scope) : [];
-  const carried = bindings.length > 0 ? { ...scope, anchorBindings: bindings } : scope;
+  const carried = scope.anchorBindings === undefined ? { ...scope, anchorBindings: anchorBindingsFor(scope) } : scope;
   return { ...carried, signatures: signers.map((signer) => signedWith(carried, "bundle", signer, "party")), anchoredByRole };
 };
 store.set(at(5), copy("buyer")).set(at(6), copy("seller"));
@@ -369,7 +369,7 @@ test("each signed payment phase requires its own transaction kind and complete C
   const rails: Array<{ phase: string; ref: Obj; finality: Obj; required: string[] }> = [
     { phase: "pay-dem", ref: { kind: "demos", blockNumber: 1, txHash: hash }, finality: { model: "bft-final" }, required: ["txHash", "blockNumber"] },
     { phase: "pay-evm-erc20", ref: { kind: "evm", chainId: 8453, txHash: hash, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["chainId", "txHash"] },
-    { phase: "pay-solana-spl", ref: { kind: "solana", cluster: "devnet", signature: "1".repeat(64), instructionIndex: 0 }, finality: { model: "commitment-level", finalityCommitmentLevel: "finalized" }, required: ["cluster", "signature"] },
+    { phase: "pay-solana-spl", ref: { kind: "solana", cluster: "devnet", signature: "1".repeat(64), instructionIndex: 0 }, finality: { model: "commitment-level", finalityCommitmentLevel: "finalized" }, required: ["cluster", "signature", "instructionIndex"] },
     { phase: "pay-x402", ref: { kind: "x402", httpResource: "https://example.com/resource", paymentReceiptHash: hash, protocolVersion: "2", settlementTxHash: hash, chainId: 8453, logIndex: 0 }, finality: { model: "block-depth", finalityBlocks: 1 }, required: ["httpResource", "paymentReceiptHash", "protocolVersion", "chainId"] },
     { phase: "pay-ap2", ref: { kind: "ap2", mandateId: "mandate", providerRef: "receipt", protocolVersion: "1", receiptAttestation: { anchor: { kind: "storage-program", locator: at(60) }, contentHash: contentHash({ receipt: true }) } }, finality: { model: "provider-receipt" }, required: ["mandateId", "providerRef", "protocolVersion", "receiptAttestation"] },
     { phase: "pay-cross-chain-htlc", ref: { kind: "htlc-claim", chainId: 8453, contractAddress: `0x${"12".repeat(20)}`, claimTxHash: hash }, finality: { model: "htlc-reveal" }, required: ["chainId", "contractAddress", "claimTxHash"] },
@@ -1175,8 +1175,8 @@ test("attested payload and entitlement assertions require authoritative delivery
 test("signed pre-commit failures count in completion denominators without volume", async () => {
   const original = new Map(store);
   try {
-    for (const kind of ["vet-credentials", "negotiate-fixed-price", "commit-agreement"]) {
-      const listed = installListedCase((s) => { if (kind === "vet-credentials") (s.pipeline as Obj[]).unshift({ kind }); }, (s) => {
+    for (const kind of ["negotiate-fixed-price", "commit-agreement"]) {
+      const listed = installListedCase(() => {}, (s) => {
         delete s.agreementRef; s.settlementEvidence = []; s.ratingRefs = [];
         s.phaseSummary = [{ index: kind === "commit-agreement" ? 1 : 0, kind, outcome: "fail", errorClass: "permanent" }];
       });
@@ -1190,6 +1190,69 @@ test("signed pre-commit failures count in completion denominators without volume
       assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
     }
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+test("§10.5.1: what the deployment cannot verify excludes every outcome on the listing, never only completions", async () => {
+  // These checks used to run only once a session paid, delivered or committed, so a
+  // seller's verified paid completions dropped out while its signed pre-commit failures still
+  // counted, publishing it at 0%. Each limitation now excludes the completion and the failure alike.
+  const original = new Map(store), policy = process.env.DACS_RAIL_SNAPSHOTS!;
+  const failBeforeCommit = (index: number, kind: string) => (s: Obj) => {
+    delete s.agreementRef; s.settlementEvidence = []; s.ratingRefs = [];
+    s.phaseSummary = [{ index, kind, outcome: "fail", errorClass: "permanent" }];
+  };
+  const asSellerFault = () => {
+    for (const [locator, role, outcome] of [[at(5), "buyer", "failed-counterparty"], [at(6), "seller", "failed-perm"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
+    }
+  };
+  // A copy from tooling without the Directory AnchorBinding extension: no anchorBindings member at all.
+  const withoutBindingProfile = () => {
+    for (const [locator, role] of [[at(5), "buyer"], [at(6), "seller"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); delete scope.anchorBindings;
+      store.set(locator, { ...scope, signatures: [BUYER, SELLER].map((signer) => signedWith(scope, "bundle", signer, "party")), anchoredByRole: role });
+    }
+  };
+  const published = async () => {
+    const seller = await indexSeller(holders());
+    return { verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate };
+  };
+  const excluded = { verified: false, bundleCount: 0, completionRate: null };
+  const cases: Array<[string, (s: Obj) => void, [number, string], (() => void)?]> = [
+    ["a non-DEM payment rail", (s) => { s.acceptedRails = [{ railId: "x402:default" }]; (s.pipeline as Obj[])[2] = { kind: "pay-x402", parameters: { rail: "x402:default" } }; },
+      [0, "negotiate-fixed-price"]],
+    ["vetting without a historical challenge resolver", (s) => { (s.pipeline as Obj[]).unshift({ kind: "vet-credentials" }); }, [0, "vet-credentials"]],
+    ["no live rail snapshot for the session's registry version", () => {}, [0, "negotiate-fixed-price"],
+      () => { process.env.DACS_RAIL_SNAPSHOTS = "[]"; }],
+    ["a copy without the AnchorBinding profile", () => {}, [0, "negotiate-fixed-price"], withoutBindingProfile],
+    ["commitment-time bounds", (s) => { s.validity = { ...(s.validity as Obj), notAfter: 4_102_444_800_000 }; }, [0, "negotiate-fixed-price"]],
+    ["storage delivery encrypted to the buyer", (s) => { ((s.offering as Obj).deliverable as Obj).accessModel = "encrypt-to-buyer"; }, [1, "commit-agreement"]],
+    ["an entitlement delivery", (s) => { (s.offering as Obj).deliverable = { kind: "entitlement", durationSec: 60, renewable: false }; (s.pipeline as Obj[])[3] = { kind: "deliver-entitlement" }; },
+      [0, "negotiate-fixed-price"]],
+  ];
+  try {
+    // Control: on a verifiable listing the paid completion and the pre-commit failure both count.
+    installListedCase(() => {});
+    assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 1 });
+    const control = installListedCase(() => {}, failBeforeCommit(0, "negotiate-fixed-price")); asSellerFault();
+    assert.equal((await currentGraph(control)).ok, true);
+    assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0 });
+    for (const [name, change, [index, kind], deploy] of cases) {
+      store.clear(); for (const [key, raw] of original) store.set(key, raw);
+      installListedCase(change); deploy?.();
+      assert.deepEqual(await published(), excluded, `${name}: completion`);
+      process.env.DACS_RAIL_SNAPSHOTS = policy;
+      const failure = installListedCase(change, failBeforeCommit(index, kind)); asSellerFault(); deploy?.();
+      const graph = await currentGraph(failure);
+      assert.equal(graph.ok, false, name);
+      assert.match(graph.reason!, /^session verification is indeterminate for every outcome on this listing: /, name);
+      assert.deepEqual(await published(), excluded, `${name}: failure`);
+      process.env.DACS_RAIL_SNAPSHOTS = policy;
+    }
+  } finally {
+    process.env.DACS_RAIL_SNAPSHOTS = policy;
+    store.clear(); for (const [key, raw] of original) store.set(key, raw);
+  }
 });
 
 test("a refuted seller cancellation marker cannot hide the buyer copy's established marker", async () => {

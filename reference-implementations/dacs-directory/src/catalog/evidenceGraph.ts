@@ -10,7 +10,7 @@ import { matchesVetRequirement, type VerifyPrimaryClaimControl } from "./vetClai
 import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
-import { nativeRailAdmission } from "./railPolicy.js";
+import { nativeRailAdmission, nativeRailConfigured } from "./railPolicy.js";
 import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
@@ -124,7 +124,8 @@ export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
       case "pay-dem": return ref.kind === "demos" && hash(ref.txHash) &&
         (raw.outcome !== "success" || Number.isSafeInteger(ref.blockNumber) && Number(ref.blockNumber) > 0);
       case "pay-evm-erc20": return ref.kind === "evm" && chain(ref.chainId) && hash(ref.txHash);
-      case "pay-solana-spl": return ref.kind === "solana" && settlementTxId({ ...ref, instructionIndex: 0 }) !== null;
+      // SB-1: the canonical key needs the instructionIndex; a reference without it is an error, never index 0.
+      case "pay-solana-spl": return ref.kind === "solana" && settlementTxId(ref) !== null;
       case "pay-x402": return ref.kind === "x402" && text(ref.httpResource) &&
         typeof ref.paymentReceiptHash === "string" && /^[0-9a-f]{64}$/.test(ref.paymentReceiptHash) &&
         (ref.protocolVersion === "1" || ref.protocolVersion === "2") &&
@@ -543,6 +544,64 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash ||
       !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return null;
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
+}
+
+/**
+ * DACS-5 §10.5.1: exclusion must neither help nor harm. What this deployment cannot verify is
+ * therefore decided from the pinned listing, the session's signed profile and the configured
+ * adapters, never from how far the session got. Every session on such a listing is indeterminate,
+ * pre-commit failures and aborts included; a check that ran only once a session committed, paid
+ * or delivered would drop unverifiable completions while still counting failures.
+ * Returns null when every phase the listing's pipeline can reach is verifiable here.
+ */
+export function deploymentVerifiability(
+  listing: Record<string, unknown>,
+  bundle: Record<string, unknown>,
+  deps: Pick<EvidenceGraphDeps, "readSettlementNode" | "readAnchorRecord" | "resolveSessionChallenge" | "verifyPrimaryClaimControl">,
+): string | null {
+  const pipeline = arr(listing.pipeline);
+  const kinds = pipeline.map((phase) => String(phase.kind));
+  const unsupportedPayment = kinds.find((kind) => PAYMENT_PHASES.has(kind) && kind !== "pay-dem");
+  if (unsupportedPayment) return `payment rail ${unsupportedPayment} has no authoritative adapter`;
+  const unsupportedDelivery = kinds.find((kind) => DELIVERY_PHASES.has(kind) && kind !== "deliver-storage-program");
+  if (unsupportedDelivery) return `delivery ${unsupportedDelivery} has no authoritative attestation or entitlement adapter`;
+  if (kinds.includes("pay-dem")) {
+    if (pipeline.some((phase) => phase.kind === "pay-dem" && rec(phase.parameters)?.rail !== "demos-native:DEM")) {
+      return "a pay-dem phase names a rail other than demos-native:DEM";
+    }
+    if (!deps.readSettlementNode) return "the native payment node reader is unavailable";
+    if (!nativeRailConfigured(bundle.railRegistryVersion)) return "no authenticated live native DEM rail definition is installed for the session's rail registry version";
+  }
+  if (kinds.includes("deliver-storage-program")) {
+    const deliverable = rec(rec(listing.offering)?.deliverable);
+    if (deliverable?.kind !== "storage-program") return "storage delivery has no storage-program deliverable";
+    if ((deliverable.accessModel ?? "public") === "encrypt-to-buyer") return "storage delivery is encrypted to the buyer";
+    if (!deps.readAnchorRecord) return "the storage payload reader is unavailable";
+  }
+  // Payment and storage anchors resolve only through this Directory's AnchorBinding extension, which
+  // the Standard and the pinned SDK do not emit. Tooling without it never carries the signed
+  // member, whatever the outcome, so its sessions are neutral rather than counted only when they fail.
+  if (kinds.some((kind) => kind === "pay-dem" || kind === "deliver-storage-program") && !Array.isArray(bundle.anchorBindings)) {
+    return "the session does not carry the AnchorBinding profile its payment and storage anchors need";
+  }
+  if (kinds.includes("vet-credentials")) {
+    if (!deps.resolveSessionChallenge) return "authenticated historical session challenges are unavailable";
+    const requirement = rec(listing.buyerRequirement);
+    const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
+      (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
+    if (hasRequirements && !deps.verifyPrimaryClaimControl) return "primary-claim control verification is unavailable";
+  }
+  // DACS-3 §8.5.2 checks 5 and 6 need the CommitmentRecord's anchored committedAt, which no bundle carries.
+  if (rec(listing.terms)?.deadlineSecAfterCommit !== undefined || rec(listing.validity)?.notAfter !== undefined) {
+    return "commitment-time bounds need the commitment's committedAt";
+  }
+  // Every agreement on such a listing is fixed-price, which has no settlement semantics here. An RFQ
+  // step's fixed-price fallback is chosen per agreement during negotiation and is judged there.
+  const negotiation = pipeline.find((phase) => String(phase.kind).startsWith("negotiate-"));
+  if (rec(listing.pricing)?.kind === "negotiable" && negotiation?.kind === "negotiate-fixed-price") {
+    return "fixed-price agreements on negotiable listings have no settlement semantics";
+  }
+  return null;
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
@@ -1031,6 +1090,10 @@ async function verifyCurrentEvidenceGraph(
       }
     }
   }
+  // Last, so every specific evidence failure above keeps its own reason; any session still standing
+  // here, whatever its outcome, is excluded when its listing is not verifiable by this deployment.
+  const unverifiable = deploymentVerifiability(listed.raw, raw, deps);
+  if (unverifiable) return failSigned(`session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }

@@ -279,7 +279,16 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    name is an opaque write input and is never read. Payment phase indices are recovered
    independently from a signed logical→native AnchorBinding that the evidence's own signer
    publishes for the record's native address and content hash, carried in the bundle's
-   `anchorBindings`, and checked against the listing rail. A procurement listing is
+   `anchorBindings`, and checked against the listing rail. AnchorBinding is this
+   Directory's own extension: neither the pinned Standard nor the pinned SDK emits it, so
+   a bundle without the signed `anchorBindings` member on a listing with a `pay-dem` or
+   storage delivery phase is indeterminate, whatever its outcome. What the Directory cannot
+   verify is decided from the pinned listing, the session's signed profile and the installed
+   adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
+   listing, pre-commit failures and aborts included, is left out of both the numerator and
+   the denominator, so an unverifiable listing yields no rate instead of a 0% one. Copies are
+   reconciled per `(buyer, jobId)` session; another buyer's session on the same jobId is a
+   separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
    own owner-bound listing anchors (at most 32 reads per publisher in each discovery
    tier), never as one of the supplier's offers, and the graph checks the publisher's role. Batch indexing and
@@ -288,8 +297,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    If these sources miss the pinned listing tuple, unsigned registration candidates
    provide a separate fallback of at most 32 reads, with the same owner, signature
    and tuple checks. Unsigned candidates cannot consume the trusted sources' budget.
-   Hints survive transient crawl failures; a successful domain crawl replaces that
-   domain's hints, and domain removal or chain replacement clears them. Every use
+   Hints survive transient crawl failures. A successful domain crawl with a publisher
+   signature or an operator pin replaces that domain's hints; an unsigned, unpinned crawl
+   leaves the earlier hints in place. Domain removal or chain replacement clears them. Every use
    rechecks the current listing owner, signature and pinned tuple. Settlements
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
@@ -391,7 +401,9 @@ cached evidence eligibility is refreshed.
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
   with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
   every vendored file's hash, SIG-6 encoding and Demos agent claim resolution, and runs
-  the other vendored sets through adapters onto the Directory's own decisions.
+  the other vendored sets through adapters onto the Directory's own decisions. Two sets
+  run in part: `payee-destination-binding` (14 of 28) and `metered-pricing` (19 of 22);
+  `SPEC_PIN` names the skipped cases and why.
   `test/listing-vectors.test.ts` and `test/revocation-vectors.test.ts` check the two
   listing/withdrawal fixture hashes and exercise the Directory's decisions. The
   revocation adapter explicitly excludes remote-catalog freshness, which this producer
@@ -446,7 +458,8 @@ and payee, and the exact agreed amount (1 DEM = 10^9 OS). The stored RPC amount 
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
 string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
 All other current payment rails and paid SDK legacy sessions remain indeterminate until their
-authoritative settlement adapters are available. They contribute no completion or volume.
+authoritative settlement adapters are available. Every session on such a listing, failed or
+completed, contributes no completion, denominator or volume.
 Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
 verifier-issued nonce against its job, party, issuance window, authenticated first consumption
 time (`consumedAt`) and `consumedByPresentationHash`, `sha256Hex(canonicalize(identity))` of the complete
@@ -457,10 +470,12 @@ own verified claim under a roster recipe and a trusted, method-specific
 `EvidenceGraphDeps.verifyPrimaryClaimControl` adapter that authenticates holder linkage and
 session-bound control (DACS-2 §7.12); an identifier-existence result alone is not control proof.
 Missing, rejecting or throwing adapters fail closed. This deployment installs neither the challenge
-resolver nor a control adapter, so sessions requiring Vet remain indeterminate for completion and
-volume. Listing publication uses its signed self-binding.
-Attested-payload and entitlement deliveries likewise remain indeterminate until authoritative
-attestation and grant adapters are installed. Storage delivery verifies payload bytes and ACLs.
+resolver nor a control adapter, so every session on a listing with a Vet phase, whatever its
+outcome, is indeterminate and left out of completion, denominators and volume. Listing
+publication uses its signed self-binding.
+Attested-payload and entitlement deliveries likewise remain indeterminate, for every session on
+the listing, until authoritative attestation and grant adapters are installed. Storage delivery
+verifies payload bytes and ACLs.
 
 Well-known indexes can introduce offers after the Directory independently verifies
 each listing's signature, publisher, chain owner and content hash. Source provenance

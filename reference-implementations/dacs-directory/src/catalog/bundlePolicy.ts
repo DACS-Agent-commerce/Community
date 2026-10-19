@@ -68,8 +68,10 @@ export function bundleMatchesRegisteredAnchor(
   return expectedRole !== null && bundle?.anchoredByRole === expectedRole;
 }
 
-/** Legacy signatures/hashes establish artifact integrity, not paid settlement.
- * No authoritative adapter exists for this profile, including native DEM. */
+/** One legacy copy's own payment proof, for the per-deal browser verdict only. Legacy
+ * signatures/hashes establish artifact integrity, not paid settlement, and no authoritative
+ * adapter exists for this profile, including native DEM. Reputation never keys on this:
+ * see legacyListingSettlementIndeterminate. */
 export function legacyPaymentProofUnavailable(bundle: BundleVerification["bundle"]): boolean {
   return bundle?.outcome === "completed" || Boolean(bundle?.settlementEvidence?.length);
 }
@@ -147,10 +149,13 @@ export function bundleMatchesRegisteredDeal(
 }
 
 /**
- * DACS-5 §10.5.1 per-jobId reconciliation over one seller's verified deals.
+ * DACS-5 §10.5.1 per-session reconciliation over one seller's verified deals.
  * One record is kept per bundle ref, and canonically equal copies of a jobId
- * collapse to one. Among divergent copies a lone fully signed one takes
- * precedence; equal standing voids the jobId (BB-6), whoever the buyers are.
+ * collapse to one. A jobId is unique only per producer, so a session is one
+ * (buyer, jobId) pair of this seller: BB-6 weighs only authorized copies of the
+ * same party map. Among divergent copies of one session a lone fully signed one
+ * takes precedence; equal standing voids that session. Another buyer's session on
+ * the same jobId is a separate record and can never void or supersede this one.
  * A superseded or voided record stays listed but is never reputation-eligible.
  */
 export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
@@ -165,8 +170,10 @@ export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
     forms.add(form);
     return true;
   });
+  const session = (deal: DealRecord) =>
+    `${demosSigningIdentity(deal.owners.buyer)}\n${demosSigningIdentity(deal.owners.seller)}\n${deal.jobId}`;
   const byJob = new Map<string, DealRecord[]>();
-  for (const deal of unique) if (deal.refsVerified) byJob.set(deal.jobId, [...(byJob.get(deal.jobId) ?? []), deal]);
+  for (const deal of unique) if (deal.refsVerified) byJob.set(session(deal), [...(byJob.get(session(deal)) ?? []), deal]);
   const authoritative = new Set<DealRecord>();
   for (const copies of byJob.values()) {
     const full = copies.filter((deal) => deal.fullSignatureStanding);
@@ -337,8 +344,39 @@ export function verifiedListingTerms(
   artifacts: ResolvedArtifact[],
   refsVerified: boolean,
 ): Record<string, unknown> | undefined {
+  const scope = refsVerified ? pinnedLegacyListing(verification, artifacts) : undefined;
+  return scope?.terms && typeof scope.terms === "object" && !Array.isArray(scope.terms)
+    ? scope.terms as Record<string, unknown>
+    : undefined;
+}
+
+/**
+ * DACS-5 §10.5.1: exclusion must neither help nor harm, so it is decided by the pinned listing,
+ * never by the outcome. This profile has no authoritative payment or delivery adapter (native DEM
+ * included), so every session pinned to a listing that declares a payment rail, a delivery, a
+ * price or a settle phase is indeterminate: completions, failures and aborts alike. Keying on
+ * `outcome === "completed"` instead would drop the completions and keep counting the failures.
+ * A pin that does not resolve to the exact listing is indeterminate too.
+ */
+export function legacyListingSettlementIndeterminate(
+  verification: BundleVerification | null | undefined,
+  artifacts: ResolvedArtifact[],
+): boolean {
+  const scope = pinnedLegacyListing(verification, artifacts);
+  if (!scope) return true;
+  const declared = (value: unknown) => value !== undefined && !(Array.isArray(value) && value.length === 0);
+  return declared(scope.supportedPaymentRails) || declared(scope.supportedDelivery) || declared(scope.acceptedRails) ||
+    declared(scope.pricing) || declared(scope.price) || (scope.pipeline !== undefined && (!Array.isArray(scope.pipeline) ||
+      scope.pipeline.some((phase) => !phase || typeof phase !== "object" || /^(?:pay|deliver)-/.test(String((phase as Record<string, unknown>).kind)))));
+}
+
+/** The exact (listingId, version, contentHash) listing scope a legacy bundle pins, if it was read. */
+function pinnedLegacyListing(
+  verification: BundleVerification | null | undefined,
+  artifacts: ResolvedArtifact[],
+): Record<string, unknown> | undefined {
   const ref = verification?.bundle?.listingRef;
-  if (!refsVerified || !ref) return undefined;
+  if (!ref) return undefined;
   const artifact = artifacts.find((candidate) => candidate.kind === "dacs-1-listing");
   if (!artifact) return undefined;
   const scope = stripSignature(artifact.raw) as Record<string, unknown>;
@@ -356,9 +394,7 @@ export function verifiedListingTerms(
   } catch {
     return undefined;
   }
-  return scope.terms && typeof scope.terms === "object" && !Array.isArray(scope.terms)
-    ? scope.terms as Record<string, unknown>
-    : undefined;
+  return scope;
 }
 
 export function bundleCategory(
