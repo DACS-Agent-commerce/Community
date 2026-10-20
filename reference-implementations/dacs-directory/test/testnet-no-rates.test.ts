@@ -243,7 +243,9 @@ test("upgrading a pre-projection database with object TxRefs withholds all old c
   saveCatalog(fixture);
   assert.equal(loadStoredCatalog().sellers[0].reputation.bundleCount, 2);
   assert.deepEqual(loadStoredCatalog().sellers[0].deals.map((deal) => deal.settlementTxIds), [[], []]);
-  for (const version of [undefined, 0, SETTLEMENT_PROJECTION_VERSION + 1]) {
+  // Version 3 made a deal eligible without a payment claim for every ok pay phase.
+  assert.ok(SETTLEMENT_PROJECTION_VERSION > 3);
+  for (const version of [undefined, 0, 3, SETTLEMENT_PROJECTION_VERSION + 1]) {
     fixture.sellers[0].deals.forEach((deal) => { deal.settlementProjectionVersion = version; });
     saveCatalog(fixture);
     for (let read = 0; read < 2; read++) {

@@ -15,7 +15,7 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
-import { inCategory, PINNED_RAIL_HANDLERS, settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION, UNPROJECTED_PINNED_RAILS } from "../src/catalog/settlementUniqueness.js";
+import { inCategory, isCanonicalSettlementTxId, PINNED_RAIL_HANDLERS, settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION, UNPROJECTED_PINNED_RAILS } from "../src/catalog/settlementUniqueness.js";
 import { projectTestnetCatalog, rebuildCatalogObservations } from "../src/catalog/testnetMetrics.js";
 import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
@@ -841,31 +841,47 @@ test("current bundle shape requires registry pins, party hashes and valid unique
 });
 
 test("DACS-5 keeps exact volume and SR-2 window and voids SB-2 settlement collisions with testnet ratings unavailable", () => {
+  const tx = `demos:${"12".repeat(32)}`;
   const base: DealRecord = { jobId: "a", rail: "pay-dem", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: "a".repeat(64), agreementPrice: { amount: "1.25", currency: "DEM" },
-    settlementTxIds: [{ id: "tx", observedAt: 10, phaseIndex: 2 }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
-  const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2 }] };
-  const unrelated = { ...base, jobId: "c", bundleContentHash: "d".repeat(64), agreementPrice: { amount: "2", currency: "DEM" }, settlementTxIds: [{ id: "other-tx", observedAt: 30, phaseIndex: 2 }] };
+    settlementTxIds: [{ id: tx, observedAt: 10, phaseIndex: 2 }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
+  const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: tx, observedAt: 20, phaseIndex: 2 }] };
+  const unrelated = { ...base, jobId: "c", bundleContentHash: "d".repeat(64), agreementPrice: { amount: "2", currency: "DEM" }, settlementTxIds: [{ id: `demos:${"34".repeat(32)}`, observedAt: 30, phaseIndex: 2 }] };
   // SB-2(2): no settlement-side binding authority, so the whole collision group is void.
   const out = deriveSellerReputation([base, duplicate, unrelated], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "2" }]);
   assert.deepEqual(out.bundleRefs?.map((ref) => ref.id), ["c"]);
   assert.equal(out.averageSellerRating, null); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
   // Repeating one (jobId, phaseIndex) claim is idempotent and still counts once.
-  const repeated = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: "tx", observedAt: 11, phaseIndex: 2 }] }], 0, 200);
+  const repeated = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: tx, observedAt: 11, phaseIndex: 2 }] }], 0, 200);
   assert.equal(repeated.bundleCount, 1);
   assert.deepEqual(repeated.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
   // One job claiming the settlement for two phases is a collision too.
-  const twoPhases = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: "tx", observedAt: 10, phaseIndex: 3 }] }], 0, 200);
+  const twoPhases = deriveSellerReputation([{ ...base, settlementTxIds: [base.settlementTxIds![0], { id: tx, observedAt: 10, phaseIndex: 3 }] }], 0, 200);
   assert.equal(twoPhases.bundleCount, 0);
-  // Hash spelling variants are one settlement (SB-1 lower-case hex without 0x).
+  // A stored id in any spelling but the exact SB-1 one is not an SB-1 id:
+  // its deal neither counts nor voids the canonical claim.
   const hash = "ab".repeat(32);
-  const spelled = deriveSellerReputation([
-    { ...base, settlementTxIds: [{ id: `demos:${hash}`, observedAt: 10, phaseIndex: 2 }] },
-    { ...duplicate, settlementTxIds: [{ id: `demos:0x${hash.toUpperCase()}`, observedAt: 20, phaseIndex: 2 }] },
+  for (const id of [`demos:0x${hash}`, `demos:${hash.toUpperCase()}`, `evm:8453:${hash.toUpperCase()}:0`, `evm:08453:${hash}:0`,
+    ` demos:${hash}`, "tx", "", `solana:mainnet:${"1".repeat(63)}:0`]) {
+    const spelled = deriveSellerReputation([
+      { ...base, settlementTxIds: [{ id: `demos:${hash}`, observedAt: 10, phaseIndex: 2 }] },
+      { ...duplicate, settlementTxIds: [{ id, observedAt: 20, phaseIndex: 2 }] },
+    ], 0, 200);
+    assert.deepEqual(spelled.bundleRefs?.map((ref) => ref.id), ["a"], JSON.stringify(id));
+  }
+  // A Solana Base58 signature is case-sensitive: two signatures that differ
+  // only in letter case are distinct settlements and both count.
+  const lower = `solana:mainnet:${"f".repeat(87)}:0`;
+  const mixed = `solana:mainnet:${"F".repeat(64)}${"f".repeat(23)}:0`;
+  assert.ok(isCanonicalSettlementIdentity(lower) && isCanonicalSettlementIdentity(mixed));
+  const cased = deriveSellerReputation([
+    { ...base, settlementTxIds: [{ id: lower, observedAt: 10, phaseIndex: 2 }] },
+    { ...duplicate, settlementTxIds: [{ id: mixed, observedAt: 20, phaseIndex: 2 }] },
   ], 0, 200);
-  assert.equal(spelled.bundleCount, 0);
+  assert.deepEqual(cased.bundleRefs?.map((ref) => ref.id), ["a", "b"]);
+  assert.deepEqual(cased.observedTransactionalVolume, [{ currency: "DEM", amount: "10.25" }]);
   // Two buyers' deals may share a jobId (dedupe keeps both); one settlement under both is a collision.
   const otherBuyer = { ...base, buyerBundleRef: locator(7), owners: { ...base.owners, buyer: `did:demos:agent:${"e".repeat(64)}` }, bundleContentHash: "e".repeat(64) };
   assert.equal(deriveSellerReputation([base, otherBuyer], 0, 200).bundleCount, 0);
@@ -890,7 +906,18 @@ test("SB-1 projects each signed TxRef arm to the pinned settlement-tx-id and ref
   for (const [ref, id] of projected) {
     assert.equal(settlementTxId(ref), id, JSON.stringify(ref));
     assert.ok(isCanonicalSettlementIdentity(id), `the pinned SDK accepts ${id}`);
+    assert.ok(isCanonicalSettlementTxId(id), `the stored-id check accepts ${id}`);
   }
+  // The stored-id check SB-2 admits by agrees with the pinned SDK's.
+  for (const id of [
+    `demos:0x${hash}`, `demos:${hash.toUpperCase()}`, `demos:${hash}0`, ` demos:${hash}`, `demos:${hash}\n`,
+    `evm:0:${hash}:0`, `evm:01:${hash}:0`, `evm:1:${hash}:01`, `evm:9007199254740992:${hash}:0`, `evm:1:${hash.toUpperCase()}:0`,
+    `solana:localnet:${signature}:0`, `solana:mainnet:${signature}:01`, `solana:mainnet:${"1".repeat(63)}:0`,
+    `solana:mainnet:${"1".repeat(65)}:0`, `solana:mainnet:0${signature.slice(1)}:0`, `solana:mainnet:${signature}`,
+    `solana:mainnet:${"f".repeat(87)}:0`, `solana:mainnet:${"F".repeat(64)}${"f".repeat(23)}:0`, `solana:mainnet:${"1".repeat(64)}:0`,
+    "tx", "", `x402:${hash}`,
+  ]) assert.equal(isCanonicalSettlementTxId(id), isCanonicalSettlementIdentity(id), JSON.stringify(id));
+  for (const value of [null, 7, { id: `demos:${hash}` }]) assert.equal(isCanonicalSettlementTxId(value), false);
   for (const ref of [
     { kind: "demos", txHash: hash, blockNumber: -1 },
     { kind: "demos", txHash: hash, extra: true },
@@ -957,6 +984,19 @@ test("SB-2 voids one settlement cited by two verified jobs in every TxRef shape,
   const batched = await indexTwoJobs([{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 4 }], [{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 5 }], "pay-evm-erc20");
   assert.equal(batched.reputation.bundleCount, 2);
   assert.equal(batched.listings[0].reputationHint!.bundleCount, 2);
+  // Base58 is case-sensitive: signatures that differ only in letter case
+  // (each decodes to 64 bytes) are two settlements, in every projection.
+  const solanaRef = (signature: string) => ({ kind: "solana-instruction", cluster: "mainnet", signature, instructionIndex: 0 });
+  const cased = await indexTwoJobs([solanaRef("f".repeat(87))], [solanaRef(`${"F".repeat(64)}${"f".repeat(23)}`)], "pay-solana-spl");
+  assert.deepEqual(cased.deals.map((deal) => deal.reputationEligible), [true, true]);
+  for (const result of [cased, rebuildCatalogObservations({ catalogVersion: "1", generatedAt: 10_000, sellers: [cased] }).sellers[0],
+    projectTestnetCatalog({ catalogVersion: "1", generatedAt: 10_000, sellers: [cased] }).sellers[0]]) {
+    assert.equal(result.reputation.bundleCount, 2);
+    assert.equal(result.reputation.completed, 2);
+    assert.deepEqual(result.reputation.bundleRefs?.map((ref) => ref.id).sort(), ["00RMM3D7M9Q2VC68EPBNNKEX3X", "00XF8J44TWQZHSE3REYKBEKRA9"]);
+    assert.deepEqual(result.reputation.transactionCountByCurrency, [{ currency: "DEM", count: 2 }]);
+    assert.equal(result.listings[0].reputationHint!.bundleCount, 2);
+  }
 });
 
 test("a deal whose settlement evidence cites a TxRef SB-1 cannot project here is not counted", async () => {
@@ -1087,6 +1127,9 @@ test("SB-2 counts one session's identical records once and excludes a session pr
     ["one settlement under two phase indices of one session", [deal(), deal({ settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 3 }] })], 0],
     ["one settlement under another job", [deal(), deal({ jobId: "01KTY8ZJ01CW7KSECW3FS6PQPK", bundleContentHash: "3".repeat(64) })], 0],
     ["one settlement under another buyer's job with the same jobId", [deal(), deal({ owners: { buyer: dids[2], seller: dids[1] }, bundleContentHash: "3".repeat(64) })], 0],
+    // A jobId is unique only per producer: the parties are part of the session.
+    ["another buyer's session reusing the jobId with its own settlement", [deal(), deal({ owners: { buyer: dids[2], seller: dids[1] },
+      bundleContentHash: "3".repeat(64), settlementTxIds: [{ id: `demos:${"cd".repeat(32)}`, observedAt: 100, phaseIndex: 2 }] })], 2],
   ];
   for (const [name, deals, expected] of cases) {
     for (const order of [deals, [...deals].reverse()]) {
@@ -1592,26 +1635,76 @@ test("SB-1 accepts the Standard PhaseType pay kind and binds success delivery ev
     assert.equal(record.listings[0].reputationHint!.bundleCount, 0, name);
   }
 
-  // The delivery arm alone decides `projected` when it is the only evidence.
+  // Beside a bound payment claim, the delivery arm alone decides `projected`.
   const fixture = await deliveredVector(jobId, 6200, "pay-dem", deliver);
-  const delivery = [{ raw: fixture.delivery }];
+  const payment = { raw: fixture.evidence, logicalAddress: evidenceAddresses.get(fixture.locators.evidence) };
+  const delivery = [payment, { raw: fixture.delivery }];
+  const pay = { index: 2, kind: "pay-dem", outcome: "ok" };
   const pipeline = fixture.listing.pipeline as Obj[];
   const context = { jobId, railId: "demos-native:DEM", railRegistryVersion: 1, phaseSummary: fixture.buyerBundle.phaseSummary, pipeline };
-  assert.deepEqual(settlementClaims(delivery, context), { settlementTxIds: [], projected: true });
-  assert.equal(settlementClaims(delivery, { ...context, phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }, null, { ...deliver, kind: "deliver" }] }).projected, true,
+  assert.deepEqual(settlementClaims(delivery, context),
+    { settlementTxIds: [{ id: `demos:${demosTxHash(jobId)}`, observedAt: 100, phaseIndex: 2 }], projected: true });
+  assert.equal(settlementClaims(delivery, { ...context, phaseSummary: [pay, null, { ...deliver, kind: "deliver" }] }).projected, true,
     "the pre-registry deliver label is accepted after a non-record entry");
   for (const [name, altered] of [
     ["no phase summary", { ...context, phaseSummary: undefined }],
-    ["no delivery phase", { ...context, phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }] }],
-    ["delivery phase of another kind", { ...context, phaseSummary: [{ ...deliver, kind: "deliver-storage-program" }] }],
-    ["delivery phase index is not a safe integer", { ...context, phaseSummary: [{ ...deliver, index: "3" }] }],
-    ["non-record summary entries only", { ...context, phaseSummary: [null, "deliver-attested-payload"] }],
+    ["no delivery phase", { ...context, phaseSummary: [pay] }],
+    ["delivery phase of another kind", { ...context, phaseSummary: [pay, { ...deliver, kind: "deliver-storage-program" }] }],
+    ["delivery phase index is not a safe integer", { ...context, phaseSummary: [pay, { ...deliver, index: "3" }] }],
+    ["non-record summary entries only", { ...context, phaseSummary: [pay, null, "deliver-attested-payload"] }],
     ["signed pipeline kind differs at the delivery index", { ...context, pipeline: [...pipeline.slice(0, 3), { kind: "deliver-storage-program" }] }],
     ["no signed pipeline phase at the delivery index", { ...context, pipeline: pipeline.slice(0, 3) }],
     ["no signed pipeline", { ...context, pipeline: undefined }],
   ] as const) assert.equal(settlementClaims(delivery, altered).projected, false, name);
   const { deliverableContentHash: _hash, ...unhashed } = fixture.delivery;
-  assert.equal(settlementClaims([{ raw: unhashed }], context).projected, false, "SDK-invalid delivery evidence");
+  assert.equal(settlementClaims([payment, { raw: unhashed }], context).projected, false, "SDK-invalid delivery evidence");
+});
+
+test("SB-1 refuses a signed ok payment phase that no bound payment evidence claims", async () => {
+  const jobId = "01KTY8ZJ03CW7KSECW3FS6PQPK";
+  const fixture = await deliveredVector(jobId, 6300, "pay-dem", { index: 3, kind: "deliver-attested-payload", outcome: "ok" });
+  const payment = { raw: fixture.evidence, logicalAddress: evidenceAddresses.get(fixture.locators.evidence) };
+  const delivery = { raw: fixture.delivery };
+  const pipeline = fixture.listing.pipeline as Obj[];
+  const context = { jobId, railId: "demos-native:DEM", railRegistryVersion: 1, phaseSummary: fixture.buyerBundle.phaseSummary, pipeline };
+  assert.equal(settlementClaims([payment, delivery], context).projected, true);
+  for (const [name, evidence, altered] of [
+    ["no evidence at all", [], context],
+    ["delivery evidence only", [delivery], context],
+    ["pre-registry settle label without evidence", [], { ...context, phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }] }],
+    ["pay kind named only by the signed pipeline", [], { ...context, phaseSummary: [{ index: 2, kind: "custom", outcome: "ok" }] }],
+    ["unsafe pay phase index", [], { ...context, phaseSummary: [{ index: "2", kind: "pay-dem", outcome: "ok" }] }],
+    ["withheld rail without evidence", [], { ...context, railId: "ap2:visa-direct",
+      phaseSummary: [{ index: 2, kind: "pay-ap2", outcome: "ok" }], pipeline: [{}, {}, { kind: "pay-ap2", parameters: { rail: "ap2:visa-direct" } }] }],
+    ["a second ok pay phase without its own claim", [payment], { ...context,
+      phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }, { index: 3, kind: "pay-dem", outcome: "ok" }] }],
+  ] as const) assert.equal(settlementClaims(evidence as never, altered).projected, false, name);
+  // A pay phase that did not succeed, and no pay phase at all, need no claim.
+  for (const phaseSummary of [[{ index: 2, kind: "pay-dem", outcome: "fail" }], [{ index: 0, kind: "commit-agreement", outcome: "ok" }], []]) {
+    assert.deepEqual(settlementClaims([], { ...context, phaseSummary }), { settlementTxIds: [], projected: true }, JSON.stringify(phaseSummary));
+  }
+
+  // End to end: a completed bundle signing an ok pay phase with no payment
+  // evidence counts nowhere.
+  for (const [role, where] of [["buyer", fixture.locators.buyer], ["seller", fixture.locators.seller]] as const) {
+    const scope = signedScope(maps.get(where)!, "bundle");
+    scope.settlementEvidence = [];
+    const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+    maps.set(where, bundle);
+    if (role === "buyer") fixture.buyerBundle = bundle;
+    else fixture.sellerBundle = bundle;
+  }
+  const record = await indexFixture(fixture, { deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)], bundleBindings: [
+    await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  assert.equal(record.deals[0].refsVerified, true);
+  assert.equal(record.deals[0].sellerOutcome, "completed");
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+  assert.deepEqual(record.reputation.observedTransactionalVolume, []);
+  assert.equal(record.listings[0].reputationHint!.bundleCount, 0);
   assert.equal(settlementClaims([{ raw: { ...fixture.delivery, phase: "deliver-unknown" } }], context).projected, false,
     "a delivery phase outside the PhaseType registry");
 });
@@ -1775,7 +1868,11 @@ test("a verified current abort without an agreement reports an unknown rail", as
       const scope = signedScope(raw, "bundle");
       delete scope.agreementRef;
       scope.outcome = role === "seller" ? "aborted-by-other" : "aborted-by-self";
-      if (!withPayment) scope.settlementEvidence = [];
+      // Without payment evidence the bundle signs no successful payment phase.
+      if (!withPayment) {
+        scope.settlementEvidence = [];
+        scope.phaseSummary = [];
+      }
       const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
       maps.set(at, bundle);
       bindings.push(await bindingFor("no-agreement-abort", role, at, bundle, role === "buyer" ? 0 : 1));

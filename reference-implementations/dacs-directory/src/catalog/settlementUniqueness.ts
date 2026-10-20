@@ -4,7 +4,7 @@ import { paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { isChainTxRef, isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 
 /** Bump whenever persisted settlement eligibility/identity rules change. */
-export const SETTLEMENT_PROJECTION_VERSION = 3;
+export const SETTLEMENT_PROJECTION_VERSION = 4;
 
 const CURRENT_OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate",
@@ -85,6 +85,20 @@ export function settlementTxId(ref: unknown): string | null {
 }
 
 /**
+ * True only for the exact SB-1 spelling `settlementTxId` produces (pinned SDK
+ * `isCanonicalSettlementIdentity`). SB-2 groups these bytes unchanged: a
+ * Solana Base58 signature is case-sensitive, so no id is ever re-spelled.
+ */
+export function isCanonicalSettlementTxId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 128) return false;
+  if (/^demos:[0-9a-f]{64}$/.test(value)) return true;
+  const evm = /^evm:([1-9][0-9]*):[0-9a-f]{64}:(0|[1-9][0-9]*)$/.exec(value);
+  if (evm) return isPositiveSafeInt(Number(evm[1])) && isSafeUint(Number(evm[2]));
+  const solana = /^solana:(?:mainnet|devnet|testnet):([1-9A-HJ-NP-Za-km-z]+):(0|[1-9][0-9]*)$/.exec(value);
+  return solana !== null && isSolanaSignature(solana[1]) && isSafeUint(Number(solana[2]));
+}
+
+/**
  * The rows of the DACS-4 §9.4.2 v0.1 registry (Standard
  * d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20) whose records this Directory
  * projects: a deliberate 8-of-13 subset. The other five rows are listed in
@@ -117,12 +131,15 @@ export const UNPROJECTED_PINNED_RAILS: Readonly<Record<string, string>> = {
   "ap2:stripe-paymentintents": "pay-ap2",
 };
 const JOB_ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
+/** A payment phase: a §9.4.2 handler kind, or the pre-registry `settle` label. */
+const isPayKind = (kind: unknown): boolean => kind === "settle" || (typeof kind === "string" && kind.startsWith("pay-"));
 
 /**
  * Project only SDK-valid success evidence whose anchor's storage metadata
- * carries a matching PC-2 tuple. The storage program's name and owner are not
- * checked against that address and the evidence signer (docs/TP-1.md,
- * deviation `sb1-evidence-anchor-metadata-unbound`).
+ * carries a matching PC-2 tuple, and only when every signed `ok` payment phase
+ * has such a claim. The storage program's name and owner are not checked
+ * against that address and the evidence signer (docs/TP-1.md, deviation
+ * `sb1-evidence-anchor-metadata-unbound`).
  */
 export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>; logicalAddress?: unknown }>, context: {
   jobId: unknown;
@@ -186,20 +203,27 @@ export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>;
       return id === null ? [] : [{ id, observedAt: Number(record.observedAt), phaseIndex }];
     });
   });
+  // Leaving the payment evidence out must never count where presenting it
+  // would not: each signed `ok` payment phase needs its own bound claim.
+  const claimedPhases = new Set(settlementTxIds.map((tx) => tx.phaseIndex));
+  const unclaimedPayPhase = Array.isArray(context.phaseSummary) && context.phaseSummary.some((phase) =>
+    isRecord(phase) && phase.outcome === "ok" && !claimedPhases.has(phase.index as number) &&
+    (isPayKind(phase.kind) || (isSafeUint(phase.index) && Array.isArray(context.pipeline) &&
+      isRecord(context.pipeline[phase.index]) && isPayKind(context.pipeline[phase.index].kind))));
+  if (unclaimedPayPhase) projected = false;
   return { settlementTxIds, projected };
 }
 
 /**
- * Collision grouping key. SB-1 renders hashes as lower-case hex without `0x`,
- * so spelling variants of one hash group together; grouping more never lets a
- * collision go uncounted.
+ * SB-2 groups the exact canonical ids `settlementClaims` stored. A stored id
+ * in any other spelling is not an SB-1 id: its deal neither counts nor voids
+ * another deal's settlement.
  */
-function settlementGroupKey(id: string): string {
-  return id.trim().replace(/(?:0x)?([0-9a-f]{64})/gi, (_match, hash: string) => hash.toLowerCase());
-}
-
-const isAdmissibleDeal = (deal: DealRecord): boolean =>
-  deal.refsVerified && Boolean(deal.reputationEligible) && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? "");
+const isAdmissibleDeal = (deal: DealRecord): boolean => {
+  const ids: unknown = deal.settlementTxIds ?? [];
+  return deal.refsVerified && Boolean(deal.reputationEligible) && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? "") &&
+    Array.isArray(ids) && ids.every((tx) => isRecord(tx) && isCanonicalSettlementTxId(tx.id));
+};
 
 /**
  * One commercial session. A jobId is unique only per producer, so the parties'
@@ -226,8 +250,7 @@ export function settlementCollisions(presentedDeals: DealRecord[]): SettlementEx
     // A record without a content hash is never provably identical to another.
     bundles.set(session, (bundles.get(session) ?? new Set()).add(deal.bundleContentHash ?? `unhashed:${index}`));
     for (const tx of deal.settlementTxIds ?? []) {
-      const key = settlementGroupKey(tx.id);
-      tuples.set(key, (tuples.get(key) ?? new Set()).add(JSON.stringify([session, tx.phaseIndex])));
+      tuples.set(tx.id, (tuples.get(tx.id) ?? new Set()).add(JSON.stringify([session, tx.phaseIndex])));
     }
   });
   const conflicting = (groups: Map<string, Set<string>>) =>
@@ -258,7 +281,7 @@ export function countableDeals(
 } {
   const eligible = deals.filter(isAdmissibleDeal);
   const admitted = eligible.filter((deal) => !excluded.sessions.has(sessionKey(deal)) &&
-    !(deal.settlementTxIds ?? []).some((tx) => excluded.settlementIds.has(settlementGroupKey(tx.id))));
+    !(deal.settlementTxIds ?? []).some((tx) => excluded.settlementIds.has(tx.id)));
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records

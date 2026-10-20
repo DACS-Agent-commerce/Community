@@ -108,6 +108,11 @@ reputation and in listing hints:
   rail/index tuple must match the signed job, agreement and bundle, and the bundle's phase
   at that index must be `ok` with the handler's PhaseType kind or the
   pre-registry `settle` label.
+- Every phase the bundle's phase summary marks `ok` whose kind is a payment
+  kind (`pay-*` or `settle`), or whose signed pipeline phase is a `pay-*`
+  handler, needs at least one such success payment evidence record at that
+  index. A completed bundle that leaves its payment evidence out does not
+  count, on any rail.
   Registry rail IDs and phase handlers are distinct: the pinned Standard table
   determines the handler, and the signed listing pipeline must bind that handler
   and rail at the same index. The Directory projects 8 of the 13 §9.4.2 rows:
@@ -134,7 +139,11 @@ reputation and in listing hints:
   gives `solana:{cluster}:{signature}:{instructionIndex}`. A record citing a
   reference that cannot be projected this way does not count.
 - The complete catalog set of otherwise countable records, across all sellers,
-  is grouped by that id before seller, category or window projection. A
+  is grouped by that exact id, byte for byte, before seller, category or
+  window projection. Hashes are already lower-case hex without `0x`, and a
+  Solana Base58 signature is case-sensitive, so no id is re-spelled for
+  grouping. A cached record holding an id in any other spelling does not
+  count and voids no other record. A
   session is its buyer and seller signing identities and `jobId`. Repeated
   presentation of one session's identical bundle (same content hash) counts
   once. A group claimed under more than one distinct `(session, phaseIndex)`
