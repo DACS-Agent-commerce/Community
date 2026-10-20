@@ -188,7 +188,9 @@
 #     §9.6.1 storage deliverables, while SB-1 keys a settlement on the phaseIndex of its PC-2 address.
 #     Where the signed pipeline has one pay-dem phase, PC-2 leaves the record one address, so the index
 #     is that phase's; a payload is read at the deliverableAnchor its evidence signer signed (§9.6.1
-#     step 5). A repeated pay-dem phase leaves no listed index, so every session on that listing is
+#     step 5). This is the Directory's own profile reading of SB-1 and §9.6.1, not an anchor recovery
+#     the pinned Standard defines; it holds until the Standard pins a payment and deliverable binding
+#     (follow-up). A repeated pay-dem phase leaves no listed index, so every session on that listing is
 #     indeterminate whatever its outcome. A bundle may also carry a BundleBinding-shaped AnchorBinding
 #     (src/catalog/anchorBinding.ts; SIG-4 domain "dacs-x-anchor-binding:v1:") in its `anchorBindings`
 #     member. It is a cross-check, never a source, and never needed: every entry must authenticate and

@@ -281,7 +281,8 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    (DEMOS-MAPPING §A.2) that the pinned Standard does not define for payment anchors. When the
    signed pipeline has one `pay-dem` phase, PC-2 leaves the record exactly one address, so the
    index is that phase's; a storage payload is read at the `deliverableAnchor` its evidence
-   signer put in the evidence (DACS-4 §9.6.1). A listing that repeats `pay-dem` gives no such
+   signer put in the evidence (DACS-4 §9.6.1). This is the Directory's own profile reading,
+   not an anchor recovery the pinned Standard defines. A listing that repeats `pay-dem` gives no such
    index, so every session on it is indeterminate, whatever its outcome. A bundle may also carry
    this Directory's own AnchorBinding extension in a signed `anchorBindings` member, in which the
    evidence's signer binds a record's native address and content hash to its logical address.

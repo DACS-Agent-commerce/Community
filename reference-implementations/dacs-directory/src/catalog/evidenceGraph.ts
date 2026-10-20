@@ -1133,7 +1133,8 @@ async function verifyCurrentEvidenceGraph(
     if (evidence.raw.phase !== "pay-dem") {
       return failSigned("payment verification is indeterminate: authoritative rail adapter is unavailable");
     }
-    // The shape admits exactly one transfer for a pay-dem success (DACS-4 §9.5.9).
+    // The shape admits exactly one transfer for a pay-dem success (DACS-4 §9.5.9 single payee; SB-1:
+    // a single native transfer is one settlement).
     const ref = arr(evidence.raw.paymentTxRefs)[0];
     const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
     if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
