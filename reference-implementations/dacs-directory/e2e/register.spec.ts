@@ -88,9 +88,9 @@ test("seller publication survives registration failure and reload without rebroa
     confirmationPosts++;
     return json(route, {
       confirmed: true,
-      state: "included-and-verified",
-      finality: "not-verified",
-      anchorReceipt: { receiptVersion: "1", state: "included", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
+      // The shape of a future verified receipt; the server issues none at this pin.
+      state: "finalized",
+      anchorReceipt: { receiptVersion: "1", state: "finalized", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
     });
   });
   await context.route("**/api/dacs/prepare-registration", (route) => json(route, {
@@ -146,7 +146,7 @@ test("seller publication survives registration failure and reload without rebroa
   await expect(page.getByText(anchorAddress, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Check chain and resume" }).click();
 
-  await expect(page.getByText(/included on-chain \(finality not verified\).*authenticated as a catalog candidate/)).toBeVisible();
+  await expect(page.getByText(/finalized on-chain.*authenticated as a catalog candidate/)).toBeVisible();
   await expect.poll(() => page.evaluate(() => (
     (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
       .filter((call) => call.method === "sendTransaction").length
@@ -197,4 +197,42 @@ test("unfinished publication blocks another wallet with actionable mobile-safe g
   await expect(page.getByRole("button", { name: "Continue" })).toHaveCount(0);
   const dimensions = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: window.innerWidth }));
   expect(dimensions.width).toBeLessThanOrEqual(dimensions.viewport);
+});
+
+
+test("an included receipt cannot advance publication to either registration endpoint", async ({ context, page }) => {
+  await page.addInitScript(({ key, savedClaim, savedAnchor, savedProgram, savedHash, address }) => {
+    localStorage.setItem(key, JSON.stringify({
+      version: 1, claim: savedClaim, listingId: "saved-service", listingVersion: 1,
+      anchorAddress: savedAnchor, programName: savedProgram, contentHash: savedHash,
+      signedListing: { dacsVersion: "1", listingId: "saved-service", listingVersion: 1, signature: {} },
+      transaction: null,
+      registration: { primaryClaim: savedClaim, displayName: "Saved service", listingAnchors: [savedAnchor], deals: [] },
+      stage: "confirming", createdAt: Date.now(),
+    }));
+    Object.assign(window, { demos: { request: async ({ method }: { method: string }) => {
+      if (method === "connect") return { success: true, data: { address } };
+      throw new Error(`unexpected wallet method ${method}`);
+    } } });
+  }, { key: LISTING_PUBLICATION_KEY, savedClaim: claim, savedAnchor: anchorAddress, savedProgram: programName, savedHash: contentHash, address: `0x${keyHex}` });
+  let preparePosts = 0;
+  let registrationPosts = 0;
+  await context.route("**/api/dacs/confirm-listing", (route) => json(route, {
+    confirmed: true, state: "included", anchorReceipt: { receiptVersion: "1", state: "included" },
+  }));
+  await context.route("**/api/dacs/prepare-registration", (route) => {
+    preparePosts++;
+    return json(route, { error: "registration must wait for finality" }, 500);
+  });
+  await context.route("**/api/dacs/register", (route) => {
+    registrationPosts++;
+    return json(route, { error: "registration must wait for finality" }, 500);
+  });
+  await page.goto("/register");
+  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
+  await page.getByRole("button", { name: "Check chain and resume" }).click();
+  await expect(page.locator(".progress-list li.failed")).toContainText("Confirm");
+  expect(preparePosts).toBe(0);
+  expect(registrationPosts).toBe(0);
+  expect(await page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();
 });

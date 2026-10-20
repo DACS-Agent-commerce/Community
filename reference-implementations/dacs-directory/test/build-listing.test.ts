@@ -206,7 +206,7 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
   }
 });
 
-test("publisher steps past an owner-held version whose artifact no longer authenticates", async () => {
+test("publisher refuses an invalid occupied version without skipping to the next version", async () => {
   const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
   const walletHex = (message: string) =>
     Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
@@ -257,17 +257,14 @@ test("publisher steps past an owner-held version whose artifact no longer authen
     };
     assert.equal(await verifyListing(occupied.data), null);
 
-    const preview = await (await POST(request(finalInput))).json() as Built;
-    assert.equal(preview.exists, false);
-    assert.equal(preview.listing.listingVersion, 2);
-    assert.match(preview.logicalAddress, /:metered-ap2:v2$/);
-    const builtResponse = await POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
-    assert.equal(builtResponse.status, 200);
-    const built = await builtResponse.json() as Built;
-    assert.equal(built.listing.listingVersion, 2);
-    assert.notEqual(built.programName, occupied.name);
-    assert.ok(built.tx, "the republished version is a new write");
-    assert.ok(await verifyListing(built.listing));
+    for (const input of [finalInput, { ...finalInput, listingSignature: walletHex(v1Preview.message) }]) {
+      const response = await POST(request(input));
+      assert.equal(response.status, 409);
+      const body = await response.json();
+      assert.match(body.error, /choose a new Service ID/);
+      assert.equal(body.tx, undefined, "no transaction can skip the occupied v1");
+      assert.equal(body.listing, undefined, "no v2 artifact is issued for signing");
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -487,6 +484,12 @@ test("publisher returns no transaction for a listing signature that does not ver
       assert.equal(response.status, 400, name);
       const body = await response.json() as { tx?: unknown };
       assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
+    }
+    // A signature that is not a string is a client error, never an unhandled 500.
+    for (const listingSignature of [7, null, ["ab".repeat(64)], { value: "ab".repeat(64) }]) {
+      const response = await POST(request({ ...finalInput, listingSignature }));
+      assert.equal(response.status, 400, JSON.stringify(listingSignature));
+      assert.equal((await response.json() as { tx?: unknown }).tx, undefined);
     }
   } finally {
     globalThis.fetch = originalFetch;

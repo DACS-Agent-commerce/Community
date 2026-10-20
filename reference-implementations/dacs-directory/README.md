@@ -128,7 +128,7 @@ continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SD
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
 | `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `83082fbb…7dd4`, the chain node2 serves. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
-| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 currently reports a dirty build, so **`npm run index` and `/api/dacs/reindex` fail without changing the catalog** until node2 is rebuilt clean or the operator pins that exact build |
+| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 currently reports a dirty build, so **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until node2 is rebuilt clean or the operator pins that exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
@@ -361,9 +361,9 @@ Production builds and served pages use those bundled fonts without a font-servic
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
-  otherwise propose the same next version. A version whose owner-held program no longer
-  authenticates (for example a Listing an earlier publisher signed with raw hex) is
-  stepped past, up to four per request.
+  otherwise propose the same next version. An occupied version whose owner-held program
+  no longer authenticates blocks publication for that listing ID. Recover by publishing
+  under a new listing ID; the publisher does not skip the occupied version.
 
 ## DACS surface / conformance declaration
 

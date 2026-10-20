@@ -48,7 +48,7 @@ globalThis.fetch = async (input) => {
   return Response.json({ success: true, owner: `0x${(at === locator(1) ? seller : buyer).slice(-64)}`, programName: "opaque", data: storage[at] });
 };
 
-interface Copy { role: "buyer" | "seller"; signers?: number[]; change?: (body: Obj) => void }
+interface Copy { role: "buyer" | "seller" | "orchestrator"; signers?: number[]; change?: (body: Obj) => void }
 
 /** A complete legacy graph: Listing, two-party agreement and one copy per role. */
 function legacyDeal(jobId: string, copies: [Copy, Copy]): RegisteredDeal {
@@ -95,11 +95,18 @@ async function indexed(deal: RegisteredDeal, primaryClaim = seller) {
 test("a fully signed legacy two-copy deal never counts: the pinned SDK authenticates no legacy agreement", async () => {
   // verifyBundleCore reports every legacy agreement reference as `signature-missing`
   // (legacy-agreement-signatures-missing), so the strict reference policy cannot pass.
-  const record = await indexed(legacyDeal("legacy-ok", [{ role: "buyer" }, { role: "seller" }]));
+  const registered = legacyDeal("legacy-ok", [{ role: "buyer" }, { role: "seller" }]);
+  const scope = { ...storage[registered.buyerBundleRef] };
+  delete scope.signatures;
+  delete scope.anchoredByRole;
+  const record = await indexed(registered);
   const [deal] = record.deals;
   assert.equal(deal.outcome, "completed", "the legacy reader read and shape-checked both copies");
   assert.equal(deal.signatureVerified, true, "both parties signed the copy");
   assert.equal(deal.anchoredByRole, "buyer", "no copy passed the strict policy, so the buyer copy is reported");
+  assert.equal(deal.bundleContentHash, contentHash(scope), "the root callback captures precisely the signed scope");
+  assert.equal(deal.finalisedAt, 1_700_000_000_000);
+  assert.equal(deal.sellerOutcome, "completed");
   assert.equal(deal.refsVerified, false);
   assert.equal(deal.reputationEligible, false);
   assert.equal(record.reputation.bundleCount, 0);
@@ -154,4 +161,113 @@ test("a legacy deal with only one verifiable copy keeps its signature verdict bu
   assert.equal(record.deals[0].refsVerified, false, "strict two-copy verification needs the seller copy");
   assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.bundleCount, 0);
+});
+
+test("legacy anchor names are the historical producer's raw-jobId names", () => {
+  // Literal names from the SDK-MVP producer this Directory indexed before this
+  // release (dacs-sdk 44d8ff2, src/agent/runSessionCore.ts sessionAnchorName).
+  // It never percent-encoded the job ID, so a delimiter stays raw.
+  assert.equal(legacySessionAnchorName.agreement("job-1"), "dacs3:agreement:job-1");
+  assert.equal(legacySessionAnchorName.evidence("job-1"), "dacs4:evidence:job-1");
+  assert.equal(legacySessionAnchorName.vet("job-1"), "dacs2:verifyrecord:job-1");
+  assert.equal(legacySessionAnchorName.vet("a:b"), "dacs2:verifyrecord:a:b");
+  assert.equal(legacySessionAnchorName.agreement("a:b%2F"), "dacs3:agreement:a:b%2F");
+});
+
+test("legacy public metadata distinguishes missing, malformed, and unsigned buyer copies", async () => {
+  for (const failure of ["missing", "malformed", "unsigned"] as const) {
+    const deal = legacyDeal(`legacy-${failure}`, [{ role: "buyer", signers: failure === "unsigned" ? [] : undefined }, { role: "seller" }]);
+    if (failure === "missing") delete storage[deal.buyerBundleRef];
+    if (failure === "malformed") storage[deal.buyerBundleRef] = { unexpected: true };
+    const raw = storage[deal.buyerBundleRef];
+    const [published] = (await indexed(deal)).deals;
+    assert.equal(published.signatureVerified, false, failure);
+    assert.equal(published.refsVerified, false, failure);
+    assert.equal(published.reputationEligible, false, failure);
+    if (failure !== "unsigned") {
+      assert.equal(published.outcome, undefined, failure);
+      assert.equal(published.anchoredByRole, undefined, failure);
+      assert.equal(published.bundleContentHash, undefined, failure);
+      assert.equal(published.finalisedAt, undefined, failure);
+    } else {
+      const scope = { ...raw };
+      delete scope.signatures;
+      delete scope.anchoredByRole;
+      assert.equal(published.outcome, "completed");
+      assert.equal(published.anchoredByRole, "buyer");
+      assert.equal(published.bundleContentHash, contentHash(scope));
+    }
+  }
+  const noDeals = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [] },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  assert.deepEqual(noDeals.deals, []);
+  assert.equal(noDeals.reputation.bundleCount, 0);
+});
+
+test("an unverified legacy orchestrator copy retains its reported role without reputation", async () => {
+  const registered = legacyDeal("legacy-orchestrator", [{ role: "orchestrator" }, { role: "seller" }]);
+  const [published] = (await indexed(registered)).deals;
+  assert.equal(published.anchoredByRole, "orchestrator");
+  assert.equal(published.signatureVerified, false);
+  assert.equal(published.refsVerified, false);
+  assert.equal(published.reputationEligible, false);
+});
+
+test("a rejected legacy verifier publishes a false signature verdict and no invented metadata", async () => {
+  const deal = legacyDeal("legacy-rejected-verifier", [{ role: "buyer" }, { role: "seller" }]);
+  reads = new Map();
+  let calls = 0;
+  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] },
+    undefined, async () => ({}), undefined, undefined, async () => {
+      calls++;
+      throw new Error("SDK read rejected");
+    });
+  assert.equal(calls, 2, "both verifier promises rejected");
+  assert.equal(record.deals.length, 1);
+  assert.equal(record.deals[0].signatureVerified, false, "there is no SDK verification result");
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.deals[0].outcome, undefined);
+  assert.equal(record.deals[0].bundleContentHash, undefined);
+  assert.equal(record.reputation.bundleCount, 0);
+  storage = {};
+});
+
+test("infrastructure errors during legacy verification abort indexing and preserve the persisted catalog", async () => {
+  const prior = { catalogVersion: "1" as const, generatedAt: 7, sellers: [] };
+  store.saveCatalog(prior);
+  for (const code of ["SQLITE_IOERR", "EIO", "ENOSPC"]) {
+    const deal = legacyDeal(`legacy-infrastructure-${code}`, [{ role: "buyer" }, { role: "seller" }]);
+    reads = new Map();
+    const failure = Object.assign(new Error("persistent storage unavailable"), { code });
+    const omissions: Array<[string, number]> = [];
+    await assert.rejects(indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] },
+      undefined, async () => ({}), undefined, (kind, count) => omissions.push([kind, count]), async () => { throw failure; }),
+    (error) => error === failure);
+    assert.deepEqual(store.loadCatalog(), prior);
+    assert.equal(omissions.some(([kind]) => kind === "deals"), false);
+    storage = {};
+  }
+});
+
+test("an ordinary per-deal exception reports exactly one omission and keeps the next deal", async () => {
+  const deal = legacyDeal("legacy-ordinary-error", [{ role: "buyer" }, { role: "seller" }]);
+  reads = new Map();
+  const next = { ...deal, jobId: "next-deal", buyerBundleRef: locator(90), sellerBundleRef: locator(91) };
+  let firstRead = true;
+  const originalRef = deal.buyerBundleRef;
+  Object.defineProperty(deal, "buyerBundleRef", { enumerable: true, get() {
+    if (firstRead) { firstRead = false; throw new Error("one deal cannot be processed"); }
+    return originalRef;
+  } });
+  const omissions: Array<[string, number]> = [];
+  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal, next] },
+    undefined, async () => ({}), undefined, (kind, count) => omissions.push([kind, count]));
+  assert.deepEqual(omissions.filter(([kind]) => kind === "deals"), [["deals", 1]]);
+  assert.equal(record.deals.length, 2);
+  assert.deepEqual(record.deals.map((d) => d.jobId), ["legacy-ordinary-error", "next-deal"]);
+  assert.equal(record.deals[0].signatureVerified, false);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  storage = {};
 });

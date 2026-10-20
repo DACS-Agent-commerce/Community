@@ -219,6 +219,8 @@ export interface DealRecord extends RegisteredDeal {
   reputationEligible?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
+  /** Authenticated absolute attribution from a current FaultAttestationBundle. */
+  faultedParty?: "buyer" | "seller" | "orchestrator" | "none";
   /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */
   anchorTimestamp?: number;
   /** Verified agreement price; only completed sessions contribute to volume. */

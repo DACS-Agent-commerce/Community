@@ -345,3 +345,25 @@ test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top
   assert.ok(await verifyListing(listingWith(identityBundleHash as never)), "SDK identityBundleHash");
   assert.equal(await verifyListing(listingWith(contentHash)), null, "contentHash strips the signature member");
 });
+
+
+test("legacy Listing admission enforces the exact 16 KiB UTF-8 boundary", async () => {
+  const scope = {
+    agentId: claim, serviceId: "legacy-size", name: "Legacy size boundary", description: "",
+    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
+    supportedDelivery: ["deliver-attested-payload"],
+  };
+  const signed = (description: string) => {
+    const body = { ...scope, description };
+    return { ...body, signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${contentHash(body)}`, "utf8"), privateKey)).toString("hex") };
+  };
+  const overhead = Buffer.byteLength(JSON.stringify(signed("")), "utf8");
+  const atLimit = signed("a".repeat(16_384 - overhead));
+  const overLimit = signed("a".repeat(16_385 - overhead));
+  assert.equal(Buffer.byteLength(JSON.stringify(atLimit), "utf8"), 16_384);
+  assert.equal((await verifyListingResult(atLimit)).ok, true);
+  assert.deepEqual(await verifyListingResult(overLimit), { ok: false, code: "LEGACY_LISTING_INVALID" });
+  const multibyte = signed("é".repeat(Math.ceil((16_385 - overhead) / 2)));
+  assert.ok(JSON.stringify(multibyte).length < 16_384);
+  assert.deepEqual(await verifyListingResult(multibyte), { ok: false, code: "LEGACY_LISTING_INVALID" });
+});

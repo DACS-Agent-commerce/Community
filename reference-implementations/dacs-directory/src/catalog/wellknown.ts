@@ -49,9 +49,20 @@ type ListingIndexEntry = {
   version?: unknown;
   contentHash?: unknown;
   anchor?: { kind?: unknown; locator?: unknown };
+  summary?: unknown;
   status?: unknown;
   revocation?: unknown;
 };
+
+/** §6.3.5 ListingIndexEntry.summary: `{ title, category, tags, priceHint? }`. */
+function isListingIndexSummary(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const summary = value as Record<string, unknown>;
+  return typeof summary.title === "string" &&
+    typeof summary.category === "string" &&
+    Array.isArray(summary.tags) && summary.tags.every((tag) => typeof tag === "string") &&
+    (summary.priceHint === undefined || typeof summary.priceHint === "string");
+}
 
 export type ListingIndexProjection =
   | { ok: true; listingAnchors: string[]; contentHashes: Record<string, string> }
@@ -78,6 +89,7 @@ export function projectActiveListingIndexEntries(
       !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       entry.anchor?.kind !== "storage-program" || typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) ||
       typeof entry.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(entry.contentHash) ||
+      !isListingIndexSummary(entry.summary) ||
       (entry.status !== "active" && entry.status !== "revoked")
     ) return { ok: false, error: "listings.json contains an invalid listing entry" };
 
@@ -163,8 +175,9 @@ export async function crawlDomain(
     return { domain, error: `indexHash mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)` };
   }
 
-  const idx = index.body as ListingIndex;
-  if (idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
+  const idx = index.body && typeof index.body === "object" && !Array.isArray(index.body)
+    ? index.body as ListingIndex : null;
+  if (!idx || idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
     return { domain, error: "listings.json has an invalid version or generatedAt" };
   }
   const seller = typeof idx.seller === "string" ? canonicalDemosAgentClaim(idx.seller) : null;

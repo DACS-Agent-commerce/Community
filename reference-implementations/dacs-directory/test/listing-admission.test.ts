@@ -327,10 +327,56 @@ test("the indexer publishes current-SDK listings under the registered identity a
       record.listings.map((listing) => listing.listingId).sort(),
       ["depth-128", "indexed-advisory", "indexed-pay-alternative"],
     );
+    // The seller record is keyed by the registered CF-3 identity; each §6.3.6
+    // summary carries its listing's exact `presentedBy` bytes (RB-2).
+    assert.equal(record.primaryClaim, seller);
     for (const listing of record.listings) {
       assert.equal(listing.status, "active", listing.listingId);
-      assert.equal(listing.seller.primaryClaim, seller, listing.listingId);
+      assert.equal(
+        listing.seller.primaryClaim,
+        listing.listingId === "indexed-advisory" ? advisory : seller,
+        listing.listingId,
+      );
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
+  const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
+  const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");
+  const pattern = new RegExp(listingRejectionDiagnosticSchema.properties.listingId.pattern);
+  for (const listingId of ["a".repeat(65), "A.b_c~d-".repeat(16), "x"]) {
+    assert.deepEqual(listingDiagnosticCoordinates({ listingId, listingVersion: 2 }), { listingId, listingVersion: 2 }, listingId);
+    assert.ok(pattern.test(listingId), listingId);
+  }
+  for (const listingId of ["a".repeat(129), "a/b", "a b", ""]) {
+    assert.equal(listingDiagnosticCoordinates({ listingId, listingVersion: 2 }), undefined, listingId);
+    assert.equal(pattern.test(listingId), false, listingId);
+  }
+});
+
+
+test("a declared content hash mismatch excludes a listing and a corrected declaration clears its diagnostic", async () => {
+  const at = `stor-${"e".repeat(40)}`;
+  const listing = signedListing("declared-hash", attested({ kind: "self-signed" }));
+  const { signature: _signature, ...scope } = listing;
+  const hash = contentHash(scope);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => String(input).endsWith(at)
+    ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: listing })
+    : new Response(null, { status: 404 });
+  try {
+    const registration = { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: [at] };
+    const mismatch = await indexRegistration({ ...registration, listingContentHashes: { [at]: "f".repeat(64) } });
+    assert.equal(mismatch.listings.length, 0);
+    assert.ok(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) =>
+      item.locator === at && item.code === "DECLARED_CONTENT_HASH_MISMATCH" && item.listingId === "declared-hash"));
+    const corrected = await indexRegistration({ ...registration, listingContentHashes: { [at]: `sha256-${hash.toUpperCase()}` } });
+    assert.equal(corrected.listings.length, 1);
+    assert.equal(corrected.listings[0].contentHash, hash);
+    assert.ok(!store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === at));
   } finally {
     globalThis.fetch = originalFetch;
   }

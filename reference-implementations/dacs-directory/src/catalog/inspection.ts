@@ -4,6 +4,7 @@ import type {
   DirectoryTransactionReadiness,
   ListingSummary,
 } from "./types.js";
+import { sellerIdentity } from "./discovery.js";
 
 export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
   disposition: "unassessed",
@@ -68,27 +69,27 @@ const limitations: DirectoryServiceProfile["limitations"] = [
 
 const encode = encodeURIComponent;
 
-export function servicePath(listing: ListingSummary): string {
-  return `/service/${encode(listing.seller.primaryClaim)}/${encode(listing.listingId)}/${listing.version}`;
+export function servicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/service/${encode(identity)}/${encode(listing.listingId)}/${listing.version}`;
 }
 
-export function listingJsonPath(listing: ListingSummary): string {
-  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+export function listingJsonPath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 
-export function inspectServicePath(listing: ListingSummary): string {
-  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+export function inspectServicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 
 export function inspectServiceUrl(origin: string, listing: ListingSummary): string {
   return `${origin}${inspectServicePath(listing)}`;
 }
 
-export function directoryInspectionAffordance(listing: ListingSummary): DirectoryInspectionAffordance {
+export function directoryInspectionAffordance(listing: ListingSummary, identity?: string): DirectoryInspectionAffordance {
   return {
     artifactType: "directory-service-profile",
     maturity: "listed",
-    href: inspectServicePath(listing),
+    href: inspectServicePath(listing, identity),
   };
 }
 
@@ -102,10 +103,10 @@ export function withDirectoryTransactionReadiness<T extends ListingSummary>(list
   return { ...listing, transactionReadiness: DIRECTORY_TRANSACTION_READINESS };
 }
 
-export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T): T {
+export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T, identity?: string): T {
   return {
     ...withDirectoryTransactionReadiness(listing),
-    inspection: directoryInspectionAffordance(listing),
+    inspection: directoryInspectionAffordance(listing, identity),
   };
 }
 

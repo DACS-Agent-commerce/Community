@@ -185,7 +185,8 @@ export default function Register() {
         }),
       });
       const body = await response.json();
-      if (response.ok && body.confirmed === true && objectValue(body.anchorReceipt)) {
+      // DACS-1 LP-1: only a verified `finalized` receipt lets the browser register.
+      if (response.ok && body.confirmed === true && objectValue(body.anchorReceipt)?.state === "finalized") {
         return body.anchorReceipt as Record<string, unknown>;
       }
       if (response.status !== 202) {
@@ -206,7 +207,7 @@ export default function Register() {
     }
     onStep?.("registering");
     setPublishStep("registering");
-    setStatus("One final wallet signature connects this included (finality not verified), authenticated catalog candidate to the directory.");
+    setStatus("One final wallet signature connects this finalized, authenticated catalog candidate to the directory.");
     const prepared = await fetch("/api/dacs/prepare-registration", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -239,7 +240,7 @@ export default function Register() {
     clearPendingListingPublication(window.localStorage);
     setPendingPublication(null);
     setPublishStep("complete");
-    setStatus("Your signed listing is included on-chain (finality not verified), is authenticated as a catalog candidate, and is queued for the next index pass. Buyers still run their own SDK transaction-readiness checks.");
+    setStatus("Your signed listing is finalized on-chain, is authenticated as a catalog candidate, and is queued for the next index pass. Buyers still run their own SDK transaction-readiness checks.");
     setProfileUrl(`/seller/${encodeURIComponent(pending.claim)}`);
     setScreen("done");
   };

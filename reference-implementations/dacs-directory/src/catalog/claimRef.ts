@@ -50,17 +50,20 @@ function decodeParameterSegment(value: string): string | null {
 /** CF-2 parameters: non-empty, unique keys in code-point order. */
 function canonicalParameters(query: string): boolean {
   if (!query) return false;
-  const keys: string[] = [];
+  const keys = new Set<string>();
+  let previous: string | undefined;
   for (const parameter of query.split("&")) {
     const equals = parameter.indexOf("=");
     if (equals <= 0 || equals !== parameter.lastIndexOf("=")) return false;
     const key = decodeParameterSegment(parameter.slice(0, equals));
-    if (key === null || decodeParameterSegment(parameter.slice(equals + 1)) === null || keys.includes(key)) {
+    if (key === null || decodeParameterSegment(parameter.slice(equals + 1)) === null || keys.has(key)) {
       return false;
     }
-    keys.push(key);
+    if (previous !== undefined && compareCodePoints(previous, key) >= 0) return false;
+    keys.add(key);
+    previous = key;
   }
-  return keys.every((key, index) => index === 0 || compareCodePoints(keys[index - 1]!, key) < 0);
+  return true;
 }
 
 function parseDemosAgentClaim(value: string): { reference: string; identity: string } | null {

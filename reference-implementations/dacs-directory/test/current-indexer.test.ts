@@ -20,180 +20,12 @@ import { projectTestnetCatalog, rebuildCatalogObservations } from "../src/catalo
 import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { loadScanState, saveScanState } from "../src/catalog/store.js";
+import { admitRevocationCandidates, loadScanState, saveScanState } from "../src/catalog/store.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
 import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
-type Obj = Record<string, unknown>;
-const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
-const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
-const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
-const maps = new Map<string, Obj>();
-const evidenceAddresses = new Map<string, string>();
-const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
-  const hash = artifactHash(raw, kind);
-  const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
-  const prefix = kind === "agreement" && raw.payeeBoundAgreementVersion === "1"
-    ? "dacs-payee-bound-agreement:v1:"
-    : kind === "bundle" && raw.faultBundleVersion === "1"
-      ? "dacs-fault-bundle:v1:"
-      : prefixes[kind];
-  // Current Listings and evidence carry CORE §B.7 SIG-6 base64url.
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer])))
-    .toString(kind === "listing" || kind === "evidence" ? "base64url" : "hex");
-  return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
-};
-const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
-  anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
-});
-
-/** A distinct, canonical Demos transaction hash per job. */
-const demosTxHash = (jobId: string) => createHash("sha256").update(jobId).digest("hex");
-
-async function vector(jobId = "0009NBCEE23QWAN075F29Q1AEV", offset = 0, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: demosTxHash(jobId) }], rail = "pay-dem", evidencePhase = rail, phaseIndex = 2, sellerIndex = 1) {
-  maps.clear();
-  const railId = ({ "pay-dem": "demos-native:DEM", "pay-evm-erc20": "evm-erc20:8453:USDC",
-    "pay-solana-spl": "solana-spl:mainnet:USDC", "pay-x402": "x402:default" } as Record<string, string>)[rail] ?? rail;
-  const at = (n: number) => locator(offset + n);
-  const listingScope: Obj = {
-    dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
-    seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
-    buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail, parameters: { rail: railId } }, { kind: "deliver-attested-payload" }],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId }], terms: {}, validity: { notBefore: 1 },
-  };
-  // Listing verifier requires a presentation signature for the seller claim.
-  const identity = (listingScope.seller as Obj).identity as Obj;
-  const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
-  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[sellerIndex]))).toString("hex");
-  (identity.presentation as Obj).signatures = [{ ref: dids[sellerIndex], signature: identitySig }];
-  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", sellerIndex) }; maps.set(at(1), listing);
-  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
-  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
-    terms: {
-      price: { amount: "1.25", currency: "DEM" },
-      rail: { railId },
-    } };
-  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", sellerIndex, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: evidencePhase, outcome: "success", paymentTxRefs, paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
-  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", sellerIndex) }; maps.set(at(3), evidence);
-  evidenceAddresses.set(at(3), paymentEvidenceAddress(jobId, railId, phaseIndex));
-  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[sellerIndex], targetRole: "seller", value: 5, ratedAt: 110 };
-  const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
-  const bundleScope: Obj = { bundleVersion: "1", jobId, outcome: "completed", listingRef,
-    agreementRef: ref(at(2), agreement, "agreement"), parties: [
-      { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
-      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
-    ],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [],
-    settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
-    recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
-  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", sellerIndex, true)];
-  const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
-  const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
-  return {
-    listing, buyerBundle, sellerBundle, agreement, evidence, rating,
-    locators: { listing: at(1), agreement: at(2), evidence: at(3), rating: at(4), buyer: at(5), seller: at(6) },
-  };
-}
-
-async function bindingFor(
-  jobId: string,
-  role: "buyer" | "seller",
-  nativeAddress: string,
-  rawBundle: Obj,
-  signer: number,
-): Promise<BundleBinding> {
-  const scope = {
-    bindingVersion: "1" as const,
-    jobId,
-    role,
-    logicalAddress: logicalBundleAddress(jobId, role),
-    nativeAddress,
-    bundleContentHash: artifactHash(rawBundle, "bundle"),
-    signer: dids[signer],
-  };
-  const value = Buffer.from(await ed25519Sign(
-    Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`),
-    privateKeyFromSeed(seeds[signer]),
-  )).toString("base64url");
-  return { ...scope, signature: { algorithm: "ed25519", signer: dids[signer], value } };
-}
-
-async function installAgreement(
-  fixture: Awaited<ReturnType<typeof vector>>,
-  agreementScope: Obj,
-  signaturePrefix?: string,
-) {
-  const agreementSignatures = await Promise.all([0, 1].map(async (signer) => {
-    if (!signaturePrefix) return sign(agreementScope, "agreement", signer, true);
-    const value = Buffer.from(await ed25519Sign(
-      Buffer.from(signaturePrefix + artifactHash(agreementScope, "agreement")),
-      privateKeyFromSeed(seeds[signer]),
-    )).toString("hex");
-    return { party: dids[signer], algorithm: "ed25519", value };
-  }));
-  const agreement = { ...agreementScope, signatures: agreementSignatures };
-  maps.set(fixture.locators.agreement, agreement);
-
-  const installBundle = async (raw: Obj, role: "buyer" | "seller") => {
-    const scope = signedScope(raw, "bundle");
-    scope.agreementRef = ref(fixture.locators.agreement, agreement, "agreement");
-    const signatures = [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)];
-    const bundle = { ...scope, signatures, anchoredByRole: role };
-    maps.set(role === "buyer" ? fixture.locators.buyer : fixture.locators.seller, bundle);
-    return bundle;
-  };
-  fixture.agreement = agreement;
-  fixture.buyerBundle = await installBundle(fixture.buyerBundle, "buyer");
-  fixture.sellerBundle = await installBundle(fixture.sellerBundle, "seller");
-}
-
-async function payeeBoundVector(jobId = "005J5EPZZ9TY1GDBK93GTS6RAR", offset = 0) {
-  const fixture = await vector(jobId, offset);
-  const listingScope = signedScope(fixture.listing, "listing");
-  listingScope.pipeline = (listingScope.pipeline as Obj[]).map((phase) =>
-    phase.kind === "commit-agreement" ? { ...phase, kind: "commit-payee-bound-agreement" } : phase);
-  const listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
-  maps.set(fixture.locators.listing, listing);
-  fixture.listing = listing;
-
-  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
-  const agreementScope: Obj = {
-    payeeBoundAgreementVersion: "1",
-    jobId,
-    listingRef,
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
-    terms: {
-      price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "demos-native:DEM" },
-      payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] }],
-    },
-  };
-
-  const updateListingRef = (raw: Obj) => {
-    const scope = signedScope(raw, "bundle");
-    scope.listingRef = listingRef;
-    return { ...scope, signatures: raw.signatures, anchoredByRole: raw.anchoredByRole };
-  };
-  fixture.buyerBundle = updateListingRef(fixture.buyerBundle);
-  fixture.sellerBundle = updateListingRef(fixture.sellerBundle);
-  await installAgreement(fixture, agreementScope);
-  return fixture;
-}
-
-async function graphAt(at: string, listing: Obj, listingLocator: string) {
-  return buildCurrentEvidenceGraph(at, {
-    read: async (locatorValue) => maps.get(locatorValue) ?? null,
-    resolveListing: async () => ({ locator: listingLocator, raw: listing }),
-  });
-}
-
-function registeredDeal(jobId: string, buyer: string, seller: string): RegisteredDeal {
-  return { jobId, rail: "pay-dem", buyerBundleRef: buyer, sellerBundleRef: seller, owners: { buyer: dids[0], seller: dids[1] } };
-}
+import { type Obj, seeds, dids, locator, maps, evidenceAddresses, sign, ref, demosTxHash, vector, bindingFor,
+  installAgreement, payeeBoundVector, graphAt, registeredDeal } from "./fixtures/current-evidence.js";
 
 test("listing Gate-2 binding failures have stable rejection classes", () => {
   assert.equal(listingBindingRejection(
@@ -1264,7 +1096,7 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
 });
 
 /** Index the seller's registration over the fixture's stubbed storage. */
-async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Partial<Registration> = {}) {
+async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Partial<Registration> = {}, resolveRecipe?: (scheme: string, version: number) => Promise<RecipePolicy | null>) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = maps.get(String(input).split("/").pop() ?? "");
@@ -1273,7 +1105,7 @@ async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: 
   };
   try {
     return await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], ...extra },
-      undefined, async () => { throw new Error("identity unavailable"); });
+      undefined, async () => { throw new Error("identity unavailable"); }, resolveRecipe);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1306,6 +1138,125 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
   assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
     { categoryScope: "services.test", completionRate: null, averageSellerRating: null, bundleCount: 1 });
   assert.equal(record.reputation.bundleCount, 1);
+});
+
+test("signed evidence with absent or malformed transaction refs cannot deduplicate independent jobs", async () => {
+  for (const refs of [undefined, null, { txId: "not-an-array" }, [{}, null, { txId: null }, { id: null }, { txId: "" }, { id: "" }]]) {
+    const allMaps = new Map<string, Obj>();
+    const fixtures: Awaited<ReturnType<typeof vector>>[] = [];
+    const deals: RegisteredDeal[] = [];
+    const bindings: BundleBinding[] = [];
+    for (let index = 0; index < 2; index++) {
+      const jobId = `0${index}EMPTYTXREFS0000000000000`;
+      const fixture = await vector(jobId, 300 + index * 10);
+      const evidenceScope = signedScope(fixture.evidence, "evidence");
+      if (refs === undefined) delete evidenceScope.paymentTxRefs;
+      else evidenceScope.paymentTxRefs = refs;
+      const evidence = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) };
+      maps.set(fixture.locators.evidence, evidence);
+      for (const [role, raw, at] of [["buyer", fixture.buyerBundle, fixture.locators.buyer],
+        ["seller", fixture.sellerBundle, fixture.locators.seller]] as const) {
+        const scope = signedScope(raw, "bundle");
+        scope.settlementEvidence = [ref(fixture.locators.evidence, evidence, "evidence")];
+        const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+        maps.set(at, bundle);
+        bindings.push(await bindingFor(jobId, role, at, bundle, role === "buyer" ? 0 : 1));
+      }
+      fixtures.push(fixture);
+      deals.push(registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller));
+      for (const [at, raw] of maps) allMaps.set(at, raw);
+    }
+    maps.clear();
+    for (const [at, raw] of allMaps) maps.set(at, raw);
+    const record = await indexFixture(fixtures[0], { deals, bundleBindings: bindings });
+    assert.equal(record.deals.length, 2);
+    for (const published of record.deals) {
+      assert.equal(published.signatureVerified, true, JSON.stringify(refs));
+      assert.equal(published.refsVerified, true, JSON.stringify(refs));
+      // SB-1: success evidence without a projectable TxRef is not counted at all.
+      assert.equal(published.reputationEligible, false, JSON.stringify(refs));
+      assert.deepEqual(published.settlementTxIds, [], "no settlement id may be fabricated");
+    }
+    assert.equal(record.reputation.bundleCount, 0, JSON.stringify(refs));
+    assert.equal(record.reputation.completed, 0);
+    assert.equal(record.reputation.completionRate, null);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, []);
+  }
+});
+
+test("listing reputation includes exact categories and dot descendants, with testnet rates unavailable", async () => {
+  const allMaps = new Map<string, Obj>();
+  const fixtures: Awaited<ReturnType<typeof vector>>[] = [];
+  const deals: RegisteredDeal[] = [];
+  const bindings: BundleBinding[] = [];
+  const categories = ["services.test", "services.test.child", "services.testing", "other.services.test"];
+  for (const [index, category] of categories.entries()) {
+    const jobId = `0${index}CATEGQRY0000000000000000`;
+    const fixture = await vector(jobId, 400 + index * 10);
+    const listingScope = signedScope(fixture.listing, "listing");
+    listingScope.listingId = `svc-${index}`;
+    listingScope.offering = { ...listingScope.offering as Obj, category };
+    fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    const listingRef = { listingId: `svc-${index}`, version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+    fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+    await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+    for (const [role, at] of [["buyer", fixture.locators.buyer], ["seller", fixture.locators.seller]] as const) {
+      const scope = signedScope(maps.get(at)!, "bundle");
+      // One descendant is a seller failure, the lookalikes are completions.
+      if (index === 1) scope.outcome = role === "seller" ? "failed-perm" : "failed-counterparty";
+      const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+      maps.set(at, bundle);
+      bindings.push(await bindingFor(jobId, role, at, bundle, role === "buyer" ? 0 : 1));
+    }
+    fixtures.push(fixture);
+    deals.push(registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller));
+    for (const [at, raw] of maps) allMaps.set(at, raw);
+  }
+  maps.clear();
+  for (const [at, raw] of allMaps) maps.set(at, raw);
+  const record = await indexFixture(fixtures[0], { listingAnchors: fixtures.map((f) => f.locators.listing), deals, bundleBindings: bindings });
+  assert.equal(record.reputation.bundleCount, 4);
+  assert.equal(record.reputation.completed, 3);
+  assert.equal(record.reputation.completionRate, null);
+  assert.deepEqual(record.listings.map((l) => ({ category: l.offering.category,
+    count: l.reputationHint!.bundleCount, rate: l.reputationHint!.completionRate })), [
+    { category: "services.test", count: 2, rate: null },
+    { category: "services.test.child", count: 1, rate: null },
+    { category: "services.testing", count: 1, rate: null },
+    { category: "other.services.test", count: 1, rate: null },
+  ]);
+});
+
+test("a divergent two-copy deal in the listing's category never enters its reputationHint", async () => {
+  // Each copy verifies on its own, but the seller copy reports another outcome
+  // (#230), so the deal is unverified: neither the seller's reputation nor the
+  // listing's hint may count it.
+  const fixture = await vector("hint-divergent-job", 140);
+  const sellerScope = signedScope(fixture.sellerBundle, "bundle");
+  sellerScope.outcome = "failed-counterparty";
+  sellerScope.phaseSummary = [{ index: 2, kind: "settle", outcome: "fail", errorClass: "counterparty" }];
+  const divergentSellerCopy = {
+    ...sellerScope,
+    signatures: [await sign(sellerScope, "bundle", 0, true), await sign(sellerScope, "bundle", 1, true)],
+    anchoredByRole: "seller",
+  };
+  maps.set(fixture.locators.seller, divergentSellerCopy);
+  const deal = registeredDeal("hint-divergent-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, divergentSellerCopy, 1),
+  ] });
+  const [published] = record.deals;
+  assert.deepEqual(
+    { refsVerified: published.refsVerified, reputationEligible: published.reputationEligible, category: published.category },
+    { refsVerified: false, reputationEligible: false, category: "services.test" },
+  );
+  const { categoryScope, completionRate, averageSellerRating, bundleCount } = record.listings[0].reputationHint!;
+  assert.deepEqual({ categoryScope, completionRate, averageSellerRating, bundleCount },
+    { categoryScope: "services.test", completionRate: null, averageSellerRating: null, bundleCount: 0 });
+  assert.equal(record.reputation.bundleCount, 0);
 });
 
 test("a BundleBinding resolves only to the copy anchored by the role it names", async () => {
@@ -1473,4 +1424,199 @@ test("SB-1 keeps registry identity, pinned handler and signed pipeline context d
     "an artifact annotation cannot replace the anchor metadata-of-record");
   assert.equal(settlementClaims([{ ...evidence[0], raw: { ...fixture.evidence, phaseIndex: 2 } }], context).projected, false,
     "the SDK-refused phaseIndex field cannot repair or replace address binding");
+});
+
+test("indexed CCI badges preserve each claim's proof and destination despite malformed preceding rows", async () => {
+  const evm = "0x" + "12".repeat(20);
+  const solana = "So1anaAddr11111111111111111111111111111";
+  const payload = {
+    web2: {
+      github: [null, {}, { username: 12 }, { username: "MiXeD", proof: "https://proof.test/one" },
+        { username: "OtHeR", proof: "https://proof.test/two" }],
+      twitter: [{ username: "TwIt", proof: "https://proof.test/twitter" }],
+      discord: [{ username: "chat" }], unknown: [{ username: "ignored" }],
+    },
+    xm: { evm: { mainnet: [{ address: evm }] }, solana: { mainnet: [solana] }, cosmos: { mainnet: ["cosmos123"] } },
+    linkedSocials: { telegram: "messenger" },
+    ud: [{ domain: "alice.crypto" }],
+  };
+  const reg = { primaryClaim: dids[1], displayName: "Seller", listingAnchors: [] };
+  const expected = [
+    { kind: "web2", platform: "discord", handle: "chat", ref: "cci-web2:discord:chat", proofUrl: undefined, linkUrl: undefined },
+    { kind: "web2", platform: "github", handle: "MiXeD", ref: "cci-web2:github:MiXeD", proofUrl: "https://proof.test/one", linkUrl: "https://github.com/MiXeD" },
+    { kind: "web2", platform: "github", handle: "OtHeR", ref: "cci-web2:github:OtHeR", proofUrl: "https://proof.test/two", linkUrl: "https://github.com/OtHeR" },
+    { kind: "web2", platform: "telegram", handle: "messenger", ref: "cci-web2:telegram:messenger", proofUrl: undefined, linkUrl: undefined },
+    { kind: "web2", platform: "twitter", handle: "TwIt", ref: "cci-web2:twitter:TwIt", proofUrl: "https://proof.test/twitter", linkUrl: "https://x.com/TwIt" },
+    { kind: "wallet", platform: "cosmos", handle: "cosmos123", ref: "cci-xm:cosmos:mainnet:cosmos123", linkUrl: undefined },
+    { kind: "wallet", platform: "evm", handle: evm, ref: `cci-xm:evm:mainnet:${evm}`, linkUrl: `https://etherscan.io/address/${evm}` },
+    { kind: "wallet", platform: "solana", handle: solana, ref: `cci-xm:solana:mainnet:${solana}`, linkUrl: `https://solscan.io/account/${solana}` },
+  ];
+  for (const resolved of [{ result: 200, response: payload }, payload, { response: { response: payload } }]) {
+    const record = await indexRegistration(reg, undefined, async (hex) => {
+      assert.equal(hex, dids[1].slice(-64));
+      return resolved;
+    });
+    assert.deepEqual(record.cci, expected);
+    assert.equal(record.identityLinksPresent, true);
+    const unavailable = await indexRegistration(reg, record, async () => { throw new Error("resolver unavailable"); });
+    assert.deepEqual(unavailable.cci, expected);
+    assert.equal(unavailable.identityLinksPresent, true);
+  }
+  for (const empty of [{}, { response: {} }]) {
+    const record = await indexRegistration(reg, undefined, async () => empty);
+    assert.deepEqual(record.cci, []);
+    assert.equal(record.identityLinksPresent, false);
+  }
+});
+
+test("indexRegistration publishes verified and institutional tiers with institutional precedence", async () => {
+  const fixture = await vector("identity-output", 500);
+  const now = Date.now();
+  const policies: RecipePolicy[] = [];
+  const claims: Obj[] = [];
+  for (const [index, scheme, identifier] of [[0, "domain", "verified.example"], [1, "lei", "5493001KJTIIGC8Y1R12"]] as const) {
+    const attestation = { authority: scheme };
+    const attestationAt = locator(520 + index * 2);
+    const resultAt = locator(521 + index * 2);
+    maps.set(attestationAt, attestation);
+    const scope = { resultVersion: "1", scheme, identifier, recipeVersion: 2, method: "consensus-backed-proxy",
+      decision: "pass", reason: "found", fetchedAt: now - 20, verifiedAt: now - 10, validUntil: now + 60_000,
+      attestation: { anchor: { kind: "storage-program", locator: attestationAt }, contentHash: contentHash(attestation) } };
+    const result = { ...scope, signature: await sign(scope, "verify-result", 0) };
+    maps.set(resultAt, result);
+    claims.push({ ref: `${scheme}:${identifier}`, verifiedBy: ref(resultAt, result, "verify-result", { recipeVersion: 2 }) });
+    policies.push({ scheme, recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60,
+      availability: "live", trustedResultSigners: [dids[0]] });
+  }
+  const listings: string[] = [];
+  for (const [index, claim] of claims.entries()) {
+    const scope = structuredClone(signedScope(fixture.listing, "listing"));
+    scope.listingId = `identity-${index}`;
+    const identity = (scope.seller as Obj).identity as Obj;
+    identity.claims = [...identity.claims as Obj[], claim];
+    const identityScope = { ...identity };
+    delete identityScope.presentation;
+    const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+    identity.presentation = { kind: "per-claim", signatures: [{ ref: dids[1], signature }] };
+    const at = locator(530 + index);
+    maps.set(at, { ...scope, signature: await sign(scope, "listing", 1) });
+    listings.push(at);
+  }
+  const resolve = async (scheme: string, version: number) => policies.find((p) => p.scheme === scheme && p.recipeVersion === version) ?? null;
+  assert.equal((await indexFixture(fixture, { listingAnchors: [listings[0]] }, resolve)).identityTier, "verified");
+  assert.equal((await indexFixture(fixture, { listingAnchors: [listings[1]] }, resolve)).identityTier, "institutional");
+  for (const listingAnchors of [listings, [...listings].reverse()]) {
+    const record = await indexFixture(fixture, { listingAnchors }, resolve);
+    assert.equal(record.listings.length, 2);
+    assert.equal(record.identityTier, "institutional");
+  }
+});
+
+test("a readable invalid owner marker differs from an unavailable owner marker", async () => {
+  const fixture = await vector("marker-output", 600);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "owner-marker-output";
+  fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const markerAt = locator(610);
+  admitRevocationCandidates(artifactHash(fixture.listing, "listing"), [{ locator: markerAt,
+    owner: `0x${dids[1].slice(-64)}`, contentHash: "c".repeat(64) }]);
+  assert.equal((await indexFixture(fixture)).listings.length, 0, "unreadable owner evidence is indeterminate");
+  maps.set(markerAt, { revocationVersion: "1", signature: "invalid" });
+  const record = await indexFixture(fixture);
+  assert.equal(record.listings.length, 1, "a readable rejected candidate does not withhold an active listing");
+  assert.equal(record.listings[0].status, "active");
+});
+
+test("seller format probes route both signed current discriminators without retrying legacy", async () => {
+  for (const fault of [false, true]) for (const malformed of [false, true]) {
+    const fixture = await vector(`format-probe-${fault}-${malformed}`, 620);
+    const scope = signedScope(fixture.sellerBundle, "bundle");
+    if (fault) {
+      delete scope.bundleVersion;
+      scope.faultBundleVersion = "1";
+      scope.faultedParty = "none";
+    }
+    if (malformed) scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+    maps.set(fixture.locators.seller, { ...scope,
+      signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "seller" });
+    const reads = new Map<string, number>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const at = String(input).split("/").pop() ?? "";
+      const count = (reads.get(at) ?? 0) + 1;
+      reads.set(at, count);
+      const data = at === fixture.locators.buyer && count === 1 ? null : maps.get(at);
+      return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data })
+        : new Response(null, { status: 503 });
+    };
+    try {
+      const deal = registeredDeal(`format-probe-${fault}-${malformed}`, fixture.locators.buyer, fixture.locators.seller);
+      const record = await indexRegistration({ primaryClaim: dids[1], displayName: "Seller",
+        listingAnchors: [fixture.locators.listing], deals: [deal] }, undefined, async () => ({}));
+      assert.equal(reads.get(fixture.locators.buyer), 1, "no legacy root retry after the seller probe");
+      assert.equal(reads.get(fixture.locators.seller), 1);
+      assert.equal(record.deals.length, 1);
+      assert.equal(record.deals[0].signatureVerified, false);
+      assert.equal(record.deals[0].refsVerified, false);
+      assert.equal(record.deals[0].reputationEligible, false);
+      assert.equal(record.deals[0].outcome, undefined);
+      assert.equal(record.deals[0].anchoredByRole, undefined);
+      assert.equal(record.reputation.bundleCount, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test("a verified current abort without an agreement reports an unknown rail", async () => {
+  for (const withPayment of [false, true]) {
+    const fixture = await vector("no-agreement-abort", 640);
+    const bindings: BundleBinding[] = [];
+    for (const [role, raw, at] of [["buyer", fixture.buyerBundle, fixture.locators.buyer],
+      ["seller", fixture.sellerBundle, fixture.locators.seller]] as const) {
+      const scope = signedScope(raw, "bundle");
+      delete scope.agreementRef;
+      scope.outcome = role === "seller" ? "aborted-by-other" : "aborted-by-self";
+      if (!withPayment) scope.settlementEvidence = [];
+      const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+      maps.set(at, bundle);
+      bindings.push(await bindingFor("no-agreement-abort", role, at, bundle, role === "buyer" ? 0 : 1));
+    }
+    const deal = registeredDeal("no-agreement-abort", fixture.locators.buyer, fixture.locators.seller);
+    const record = await indexFixture(fixture, { deals: [deal], bundleBindings: bindings });
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].signatureVerified, true);
+    assert.equal(record.deals[0].refsVerified, true);
+    // Success payment evidence with no agreement rail has no SB-1 projection, so it is not counted.
+    assert.equal(record.deals[0].reputationEligible, !withPayment, String(withPayment));
+    assert.equal(record.deals[0].sellerOutcome, "aborted-by-other");
+    assert.equal(record.deals[0].rail, "unknown");
+    assert.equal(record.deals[0].agreementPrice, undefined);
+  }
+});
+
+test("indexRegistration projects authenticated orchestrator faults and neutral listing hints", async () => {
+  const fixture = await vector("01QRCHESTRAT0RQVTPVT00000Q", 660);
+  const bindings: BundleBinding[] = [];
+  for (const [role, raw, at] of [["buyer", fixture.buyerBundle, fixture.locators.buyer],
+    ["seller", fixture.sellerBundle, fixture.locators.seller]] as const) {
+    const scope = signedScope(raw, "bundle");
+    delete scope.bundleVersion;
+    Object.assign(scope, { faultBundleVersion: "1", faultedParty: "orchestrator", outcome: "failed-counterparty" });
+    scope.parties = [...scope.parties as Obj[], { role: "orchestrator", primaryClaim: dids[2], bundleHash: "c".repeat(64) }];
+    const bundle = { ...scope, signatures: await Promise.all([0, 1, 2].map((n) => sign(scope, "bundle", n, true))), anchoredByRole: role };
+    maps.set(at, bundle);
+    bindings.push(await bindingFor("01QRCHESTRAT0RQVTPVT00000Q", role, at, bundle, role === "buyer" ? 0 : 1));
+  }
+  const deal = registeredDeal("01QRCHESTRAT0RQVTPVT00000Q", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: bindings });
+  assert.equal(record.deals[0].refsVerified, true);
+  assert.equal(record.deals[0].reputationEligible, true);
+  assert.equal(record.deals[0].faultedParty, "orchestrator");
+  assert.equal(record.reputation.bundleCount, 1);
+  assert.equal(record.reputation.completionRate, null);
+  assert.equal(record.reputation.counterpartyFaultRate, null);
+  assert.equal(record.listings[0].reputationHint!.bundleCount, 1);
+  assert.equal(record.listings[0].reputationHint!.completionRate, null);
 });

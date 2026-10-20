@@ -145,19 +145,23 @@ test("a source build is accepted only from a clean pinned checkout whose output 
   assert.match(rebuilt.manifest ?? "", /^[0-9a-f]{64} {2}index\.js\n$/);
 });
 
-test("the digest CLI prints the digest from an app path with spaces, # or %", () => {
-  for (const name of ["app 1", "app#1", "app%1", "app%23"]) {
-    const root = join(mkdtempSync(join(tmpdir(), "dacs-digest-cli-")), name);
+test("the digest CLI prints the digest from an app path with spaces, # or %, or through a symlink", () => {
+  for (const name of ["app 1", "app#1", "app%1", "app%23", "linked app"]) {
+    const scratch = mkdtempSync(join(tmpdir(), "dacs-digest-cli-"));
+    const real = join(scratch, name === "linked app" ? "real app" : name);
+    // The app is run through a symlinked path; Node loads the script from its real path.
+    const root = join(scratch, name);
     try {
-      mkdirSync(join(root, "scripts"), { recursive: true });
-      mkdirSync(join(root, "dist"));
-      writeFileSync(join(root, "dist/index.js"), builtIndex);
-      copyFileSync(digestScript, join(root, "scripts/sdk-dist-digest.mjs"));
+      mkdirSync(join(real, "scripts"), { recursive: true });
+      mkdirSync(join(real, "dist"));
+      writeFileSync(join(real, "dist/index.js"), builtIndex);
+      copyFileSync(digestScript, join(real, "scripts/sdk-dist-digest.mjs"));
+      if (root !== real) symlinkSync(real, root);
       const run = spawnSync(process.execPath, [join(root, "scripts/sdk-dist-digest.mjs"), join(root, "dist")], { encoding: "utf8" });
       assert.equal(run.status, 0, `${name}: ${run.stderr}`);
       assert.equal(run.stdout, `${fixtureSha}\n`, name);
     } finally {
-      rmSync(join(root, ".."), { recursive: true, force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 });

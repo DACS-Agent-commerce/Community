@@ -159,7 +159,7 @@ export const listingRejectionDiagnosticSchema = {
   required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    listingId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" },
+    listingId: { type: "string", pattern: "^[A-Za-z0-9._~-]{1,128}$" },
     listingVersion: { type: "integer", minimum: 1 },
     code: { enum: LISTING_REJECTION_CODES },
     message: { type: "string", description: "Public-safe explanation of the failed listing admission." },

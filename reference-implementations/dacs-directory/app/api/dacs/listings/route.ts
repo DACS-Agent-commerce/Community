@@ -3,7 +3,7 @@
  * Normative filters plus q/profile directory extensions.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { activeCatalogListings, primaryClaimMatches } from "@/src/catalog/discovery";
+import { MAX_CLAIM_QUERY_BYTES, primaryClaimPredicate } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
@@ -23,6 +23,10 @@ export async function GET(req: NextRequest) {
   const tags = q.getAll("tag");
   const credential = q.get("credential");
   const primaryClaim = q.get("primaryClaim");
+  if (primaryClaim && Buffer.byteLength(primaryClaim, "utf8") > MAX_CLAIM_QUERY_BYTES) {
+    return NextResponse.json({ error: "primaryClaim exceeds 1024 bytes" }, { status: 400 });
+  }
+  const matchesClaim = primaryClaim ? primaryClaimPredicate(primaryClaim) : undefined;
   const priceMax = q.get("priceMax");
   const query = q.get("q")?.trim().toLowerCase();
   const profile = q.get("profile");
@@ -51,14 +55,16 @@ export async function GET(req: NextRequest) {
   const catalog = loadCatalog();
   // Discovery only advertises offers that remain active. Revoked listings stay
   // available on the seller history/detail surfaces with an explicit status.
-  const all = activeCatalogListings(catalog);
-  const tierByClaim = new Map(catalog.sellers.map((seller) => [seller.primaryClaim, seller.identityTier ?? "self-declared"]));
-  const filtered = all.filter((l) => {
+  const all = catalog.sellers
+    .filter((seller) => (!identityTier || (seller.identityTier ?? "self-declared") === identityTier) &&
+      (!matchesClaim || matchesClaim(seller.primaryClaim)))
+    .flatMap((seller) => seller.listings
+      .filter((listing) => listing.status === "active")
+      .map((listing) => ({ listing, identity: seller.primaryClaim })));
+  const filtered = all.filter(({ listing: l }) => {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;
     if (rail && !(l.offering.rails ?? []).includes(rail)) return false;
     if (profile && l.artifactProfile !== profile) return false;
-    if (identityTier && tierByClaim.get(l.seller.primaryClaim) !== identityTier) return false;
-    if (primaryClaim && !primaryClaimMatches(l.seller.primaryClaim, primaryClaim)) return false;
     if (credential) {
       const required = Array.isArray(l.buyerRequirement?.required)
         ? l.buyerRequirement.required as Array<Record<string, unknown>> : [];
@@ -81,7 +87,7 @@ export async function GET(req: NextRequest) {
   const origin = requestBaseUrl(req);
   const page = filtered
     .slice(cursor, cursor + limit)
-    .map((listing) => withDirectoryInspectionAffordance(listing));
+    .map(({ listing, identity }) => withDirectoryInspectionAffordance(listing, identity));
   const body = {
     listings: page,
     cursor: cursor + limit < filtered.length ? String(cursor + limit) : undefined,

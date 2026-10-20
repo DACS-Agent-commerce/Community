@@ -50,8 +50,6 @@ import {
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
-/** Owner-held versions that no longer authenticate and may be stepped past per request. */
-const MAX_OCCUPIED_VERSIONS = 4;
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
 async function accountNonce(addressHex: string): Promise<number> {
@@ -313,21 +311,16 @@ export async function POST(req: NextRequest) {
     verified.scope.listingId === serviceId &&
     verified.scope.listingVersion === listingVersion,
   );
-  // Versions are immutable. A program at this owner's name whose artifact no
-  // longer authenticates (for example a Listing an earlier publisher signed
-  // with raw hex) occupies that version permanently and leaves the catalog, so
-  // step past a bounded number of them instead of refusing republication.
-  let resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
-  for (let skipped = 0; skipped < MAX_OCCUPIED_VERSIONS && resolution.status === "present"; skipped += 1) {
-    if (recoverable(await verifyListing(resolution.record.data))) break;
-    listingVersion += 1;
-    listing.listingVersion = listingVersion;
-    resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
-  }
+  // An occupied but invalid version cannot establish a conforming version
+  // sequence. Refuse it below; recovery requires a fresh listing ID.
+  const resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
   let signedCandidate: Record<string, unknown> | undefined;
   if (body.listingSignature !== undefined) {
+    if (typeof body.listingSignature !== "string") {
+      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+    }
     const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
     if (!/^[0-9a-fA-F]{128}$/.test(listingSigHex)) {
       return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
@@ -372,7 +365,7 @@ export async function POST(req: NextRequest) {
     const verified = await verifyListing(resolution.record.data);
     if (!verified || !recoverable(verified)) {
       return NextResponse.json(
-        { error: "the existing owner-bound program does not contain the expected authenticated listing candidate" },
+        { error: "the existing owner-bound program does not contain the expected authenticated listing candidate; choose a new Service ID" },
         { status: 409 },
       );
     }

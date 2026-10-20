@@ -27,7 +27,8 @@ export function listingDiagnosticCoordinates(
       ? raw.serviceId
       : undefined;
   const version = raw.listingVersion ?? raw.version ?? 1;
-  return listingId && /^[a-z0-9-]{1,64}$/.test(listingId) &&
+  // DACS-1 Listing schema: URL-safe ASCII, at most 128 characters.
+  return listingId && /^[A-Za-z0-9._~-]{1,128}$/.test(listingId) &&
       Number.isSafeInteger(version) && Number(version) >= 1
     ? { listingId, listingVersion: Number(version) }
     : undefined;

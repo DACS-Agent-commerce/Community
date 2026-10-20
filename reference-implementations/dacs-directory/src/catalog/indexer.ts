@@ -53,12 +53,12 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
 import { countableDeals, inCategory, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
 import { observedOutcomesLabel, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
   bundleBindingOverflowKey,
   resolveBundleSide,
@@ -146,6 +146,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -155,11 +156,8 @@ export async function indexRegistration(
   try {
     const resolved = await resolveIdentities(hex);
     const record = parseCciRecord(reg.primaryClaim, resolved);
-    // Proof URLs live in the raw GCR payload (web2.<platform>[].proof).
-    const rawWeb2 = ((resolved as { response?: { web2?: Record<string, Array<{ username?: string; proof?: string }>> } })
-      ?.response?.web2) ?? {};
-    const proofFor = (platform: string, handle: string): string | undefined =>
-      rawWeb2[platform]?.find((e) => e?.username?.toLowerCase() === handle.toLowerCase())?.proof;
+    // The SDK already associates each proof with its parsed claim across all
+    // supported GCR envelopes, and skips malformed preceding rows.
     const profileFor = (platform: string, handle: string): string | undefined =>
       platform === "github" ? `https://github.com/${handle}` :
       platform === "twitter" ? `https://x.com/${handle}` : undefined;
@@ -168,7 +166,7 @@ export async function indexRegistration(
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
     cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
-          proofUrl: proofFor(c.platform, c.handle), linkUrl: profileFor(c.platform, c.handle) }
+          proofUrl: c.proof, linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
           linkUrl: explorerFor(c.chainType, c.address) });
   } catch {
@@ -275,7 +273,14 @@ export async function indexRegistration(
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
-      seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
+      // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
+      // match the revocation binding against, the exact `presentedBy` bytes.
+      seller: {
+        primaryClaim: verified.profile === "dacs-v0.1"
+          ? verified.listing.seller.identity.presentedBy
+          : reg.primaryClaim,
+        displayName: reg.displayName,
+      },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {
@@ -460,6 +465,8 @@ export async function indexRegistration(
         bundleContentHash: authoritative?.bundleContentHash,
         reputationEligible: refsVerified && projected,
         cancellationNeutral,
+        faultedParty: authoritative?.bundle.faultBundleVersion === "1"
+          ? authoritative.bundle.faultedParty as DealRecord["faultedParty"] : undefined,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
@@ -473,7 +480,7 @@ export async function indexRegistration(
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
       let rawBundle: Record<string, unknown> | null = null;
-      const verification = await verifyBundleCore(ref, {
+      const verification = await verifyLegacyBundle(ref, {
         readArtifact: async (r) => {
           const raw = await readAnchor(r);
           if (r === ref) rawBundle = raw;
@@ -494,7 +501,10 @@ export async function indexRegistration(
         resolvePublicKey: async (claim) =>
           (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
-      }).catch(() => null);
+      }).catch((error) => {
+        throwIfInfrastructureError(error);
+        return null;
+      });
       const bundle = verification && isLegacyMvpAttestationBundle(verification.bundle)
         ? verification.bundle
         : undefined;
@@ -503,31 +513,22 @@ export async function indexRegistration(
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
+      const refsOk = verification && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole)
         ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
       return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
     const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
-    const divergent = Boolean(
-      buyerCopy.refsOk && sellerCopy?.refsOk &&
-      buyerCopy.bundle && sellerCopy.bundle && currentBundleCopiesDiverge(
-        buyerCopy.bundle as unknown as Record<string, unknown>,
-        sellerCopy.bundle as unknown as Record<string, unknown>,
-      ),
-    );
-    const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+    const { authoritative, refsVerified: strictRefsVerified, sellerOutcome, reputationEligible } =
+      reconcileLegacyCopies(buyerCopy, sellerCopy);
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {
       delete signedBundleScope.signatures;
       delete signedBundleScope.anchoredByRole;
     }
-    const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
-    const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = verifiedListingTerms(
       authoritative.verification,
@@ -554,8 +555,9 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? "") && projected,
+      reputationEligible: reputationEligible && projected,
       cancellationNeutral,
+      faultedParty: undefined,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       settlementTxIds,
