@@ -15,7 +15,7 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
-import { settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
+import { inCategory, settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
 import { projectTestnetCatalog, rebuildCatalogObservations } from "../src/catalog/testnetMetrics.js";
 import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
@@ -885,6 +885,7 @@ test("SB-1 projects each signed TxRef arm to the pinned settlement-tx-id and ref
     [{ kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 3 }, `evm:8453:${hash}:3`],
     [{ kind: "x402-event", httpResource: "https://seller.example/r", paymentReceiptHash: "cd".repeat(32), settlementTxHash: hash, chainId: 8453, logIndex: 0, protocolVersion: "2" }, `evm:8453:${hash}:0`],
     [{ kind: "solana-instruction", cluster: "devnet", signature, instructionIndex: 1 }, `solana:devnet:${signature}:1`],
+    [{ kind: "solana-instruction", cluster: "testnet", signature, instructionIndex: 0 }, `solana:testnet:${signature}:0`],
   ];
   for (const [ref, id] of projected) {
     assert.equal(settlementTxId(ref), id, JSON.stringify(ref));
@@ -1424,6 +1425,104 @@ test("SB-1 keeps registry identity, pinned handler and signed pipeline context d
     "an artifact annotation cannot replace the anchor metadata-of-record");
   assert.equal(settlementClaims([{ ...evidence[0], raw: { ...fixture.evidence, phaseIndex: 2 } }], context).projected, false,
     "the SDK-refused phaseIndex field cannot repair or replace address binding");
+});
+
+/**
+ * A current deal shaped like the pinned SDK producer's: the bundle names its
+ * phases with Standard PhaseType kinds and also signs success delivery evidence.
+ */
+async function deliveredVector(jobId: string, offset: number, payKind: string, deliveryPhase: Obj | null) {
+  const fixture = await vector(jobId, offset);
+  const at = (n: number) => locator(offset + n);
+  const payload: Obj = { jobId, result: "delivered" };
+  maps.set(at(7), payload);
+  const attestationRef = { anchor: { kind: "storage-program", locator: at(7) }, contentHash: contentHash(payload) };
+  const deliveryScope: Obj = { evidenceVersion: "1", jobId, phase: "deliver-attested-payload", outcome: "success",
+    deliverableContentHash: contentHash(payload), deliverableAnchor: attestationRef.anchor, attestationRef, observedAt: 105 };
+  const delivery: Obj = { ...deliveryScope, signature: await sign(deliveryScope, "evidence", 1) };
+  maps.set(at(8), delivery);
+  for (const [role, where] of [["buyer", fixture.locators.buyer], ["seller", fixture.locators.seller]] as const) {
+    const scope = signedScope(maps.get(where)!, "bundle");
+    scope.phaseSummary = [{ index: 2, kind: payKind, outcome: "ok" }, ...(deliveryPhase ? [deliveryPhase] : [])];
+    scope.settlementEvidence = [ref(fixture.locators.evidence, fixture.evidence, "evidence"), ref(at(8), delivery, "evidence")];
+    const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+    maps.set(where, bundle);
+    if (role === "buyer") fixture.buyerBundle = bundle;
+    else fixture.sellerBundle = bundle;
+  }
+  return { ...fixture, delivery };
+}
+
+test("SB-1 accepts the Standard PhaseType pay kind and binds success delivery evidence to its signed phase", async () => {
+  const jobId = "01KTY8ZJ02CW7KSECW3FS6PQPK";
+  const deliver = { index: 3, kind: "deliver-attested-payload", outcome: "ok" };
+  const indexDelivered = async (offset: number, payKind: string, deliveryPhase: Obj | null) => {
+    const fixture = await deliveredVector(jobId, offset, payKind, deliveryPhase);
+    assert.ok(isSettlementEvidence(fixture.delivery), "the delivery evidence passes the pinned SDK validator");
+    return indexFixture(fixture, { deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)], bundleBindings: [
+      await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ] });
+  };
+  for (const [name, payKind, deliveryPhase] of [
+    ["PhaseType pay and delivery kinds", "pay-dem", deliver],
+    ["pre-registry settle and deliver labels", "settle", { ...deliver, kind: "deliver" }],
+  ] as const) {
+    const record = await indexDelivered(6000, payKind, deliveryPhase);
+    const [deal] = record.deals;
+    assert.equal(deal.refsVerified, true, name);
+    assert.equal(deal.reputationEligible, true, name);
+    assert.deepEqual(deal.settlementTxIds, [{ id: `demos:${demosTxHash(jobId)}`, observedAt: 100, phaseIndex: 2 }],
+      `${name}: delivery evidence adds no settlement id`);
+    assert.equal(record.reputation.bundleCount, 1, name);
+    assert.equal(record.reputation.completed, 1, name);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, 1, name);
+  }
+  for (const [name, payKind, deliveryPhase] of [
+    ["delivery evidence without a delivery phase", "pay-dem", null],
+    ["delivery phase of another kind", "pay-dem", { ...deliver, kind: "deliver-storage-program" }],
+    ["another rail's PhaseType at the pay index", "pay-x402", deliver],
+  ] as const) {
+    const record = await indexDelivered(6100, payKind, deliveryPhase);
+    const [deal] = record.deals;
+    assert.equal(deal.refsVerified, true, name);
+    assert.equal(deal.reputationEligible, false, name);
+    assert.equal(record.reputation.bundleCount, 0, name);
+    assert.equal(record.reputation.completed, 0, name);
+    assert.deepEqual(record.reputation.bundleRefs, [], name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [], name);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, 0, name);
+  }
+
+  // The delivery arm alone decides `projected` when it is the only evidence.
+  const fixture = await deliveredVector(jobId, 6200, "pay-dem", deliver);
+  const delivery = [{ raw: fixture.delivery }];
+  const pipeline = fixture.listing.pipeline as Obj[];
+  const context = { jobId, railId: "demos-native:DEM", railRegistryVersion: 1, phaseSummary: fixture.buyerBundle.phaseSummary, pipeline };
+  assert.deepEqual(settlementClaims(delivery, context), { settlementTxIds: [], projected: true });
+  assert.equal(settlementClaims(delivery, { ...context, phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }, null, { ...deliver, kind: "deliver" }] }).projected, true,
+    "the pre-registry deliver label is accepted after a non-record entry");
+  for (const [name, altered] of [
+    ["no phase summary", { ...context, phaseSummary: undefined }],
+    ["no delivery phase", { ...context, phaseSummary: [{ index: 2, kind: "pay-dem", outcome: "ok" }] }],
+    ["delivery phase of another kind", { ...context, phaseSummary: [{ ...deliver, kind: "deliver-storage-program" }] }],
+    ["delivery phase index is not a safe integer", { ...context, phaseSummary: [{ ...deliver, index: "3" }] }],
+    ["non-record summary entries only", { ...context, phaseSummary: [null, "deliver-attested-payload"] }],
+    ["signed pipeline kind differs at the delivery index", { ...context, pipeline: [...pipeline.slice(0, 3), { kind: "deliver-storage-program" }] }],
+    ["no signed pipeline phase at the delivery index", { ...context, pipeline: pipeline.slice(0, 3) }],
+    ["no signed pipeline", { ...context, pipeline: undefined }],
+  ] as const) assert.equal(settlementClaims(delivery, altered).projected, false, name);
+  const { deliverableContentHash: _hash, ...unhashed } = fixture.delivery;
+  assert.equal(settlementClaims([{ raw: unhashed }], context).projected, false, "SDK-invalid delivery evidence");
+  assert.equal(settlementClaims([{ raw: { ...fixture.delivery, phase: "deliver-unknown" } }], context).projected, false,
+    "a delivery phase outside the PhaseType registry");
+});
+
+test("category scope never matches, or throws on, a deal without a category", () => {
+  const deal = { category: undefined } as unknown as DealRecord;
+  assert.equal(inCategory(deal, "services"), false);
+  assert.equal(inCategory({ category: "services.test" } as DealRecord, "services"), true);
+  assert.equal(inCategory({ category: "servicesx" } as DealRecord, "services"), false);
 });
 
 test("indexed CCI badges preserve each claim's proof and destination despite malformed preceding rows", async () => {
