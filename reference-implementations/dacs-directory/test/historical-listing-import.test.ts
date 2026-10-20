@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "../src/catalog/canonical.js";
-import { verifyListing, verifyStoredListing } from "../src/catalog/listingVerification.js";
+import {
+  verifyListing,
+  verifyListingResult,
+  verifyStoredListing,
+  verifyStoredListingResult,
+} from "../src/catalog/listingVerification.js";
 import { verifyReferencedArtifactSignature } from "../src/catalog/bundlePolicy.js";
 
 // A Listing the pinned SDK reader admits; only its envelope is re-encoded as historical hex below.
@@ -65,6 +71,85 @@ test("historical import is explicit, exact and re-verifies the original signed s
       `stor-${n.toString(16).padStart(40, "0")}`, pin,
     ])));
     assert.equal(await verifyStoredListing(raw, at), null, "provenance inventory is bounded");
+  } finally {
+    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
+});
+
+// The earlier /register publisher wrote the wallet's hex into the identity
+// presentation as well as the ListingSignature (main f13f233 build-listing).
+const oldSeed = Uint8Array.from(Buffer.alloc(32, 41));
+const oldKey = privateKeyFromSeed(oldSeed);
+const oldClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(oldSeed))).toString("hex")}`;
+const signHex = (message: string, key = oldKey) =>
+  Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), key)).toString("hex");
+
+function oldPublisherListing(
+  presentation: (hex: string) => string = (hex) => hex,
+  listing: (hex: string) => string = (hex) => hex,
+  presentationKey = oldKey,
+) {
+  const identity: Record<string, unknown> = { bundleVersion: "1", presentedBy: oldClaim, presentedAt: 1, claims: [{ ref: oldClaim }] };
+  identity.presentation = { kind: "per-claim", signatures: [{ ref: oldClaim,
+    signature: presentation(signHex(`dacs-bundle-presentation:v1:${contentHash(identity)}`, presentationKey)) }] };
+  const scope = {
+    dacsVersion: "1", listingVersion: 1, listingId: "old-publisher",
+    seller: { displayName: "Old", identity },
+    offering: { title: "Old", description: "published before the upgrade", category: "services.other", tags: [],
+      deliverable: { kind: "storage-program" } },
+    buyerRequirement: { requirementVersion: "1", required: [] },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } }, { kind: "deliver-storage-program" }],
+    pricing: { kind: "fixed", price: { amount: "1", currency: "USDC" } },
+    acceptedRails: [{ railId: "pay-x402", kind: "x402" }], terms: { refundPolicy: "none" }, validity: { notBefore: 1 },
+  };
+  const hash = contentHash(scope);
+  const value = listing(signHex(`dacs-listing:v1:${hash}`));
+  return { raw: { ...scope, signature: { algorithm: "ed25519", signer: oldClaim, value } } as Record<string, unknown>, hash };
+}
+
+test("a pin retains a Listing the earlier publisher wrote with wallet hex in both signatures", async () => {
+  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  const configure = (hash: string) => {
+    process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [at]: { encoding: "lowercase-hex",
+      sellerPrimaryClaim: oldClaim, listingId: "old-publisher", listingVersion: 1, contentHash: hash } });
+  };
+  try {
+    const { raw: old, hash } = oldPublisherListing();
+    const original = JSON.stringify(old);
+    delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    assert.deepEqual(await verifyStoredListingResult(old, at), { ok: false, code: "LISTING_SIGNATURE_INVALID" },
+      "without a pin the hex Listing stays excluded");
+    configure(hash);
+    const imported = await verifyStoredListingResult(old, at);
+    assert.equal(imported.ok, true, JSON.stringify(imported));
+    assert.equal(imported.ok && imported.value.contentHash, hash);
+    assert.equal(imported.ok && imported.value.sellerClaim, oldClaim);
+    assert.equal(imported.ok && imported.value.profile, "dacs-v0.1");
+    assert.equal(await verifyReferencedArtifactSignature({ kind: "dacs-1-listing", raw: old, locator: at }), true,
+      "deal evidence reads the pinned Listing through the same import");
+    assert.equal(JSON.stringify(old), original, "stored bytes stay intact");
+    assert.equal(await verifyStoredListing(old, `stor-${"7".repeat(40)}`), null, "native pointer is pinned");
+
+    // Each variant is re-signed and re-pinned, so only the presentation spelling or key differs.
+    for (const [label, variant] of [
+      ["uppercase hex", oldPublisherListing((hex) => hex.toUpperCase())],
+      ["0x hex", oldPublisherListing((hex) => `0x${hex}`)],
+      ["truncated hex", oldPublisherListing((hex) => hex.slice(2))],
+      ["padded base64", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64"))],
+      ["another key", oldPublisherListing(undefined, undefined, privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 42))))],
+    ] as const) {
+      configure(variant.hash);
+      assert.equal(await verifyStoredListing(variant.raw, at), null, `pinned presentation: ${label}`);
+    }
+
+    // The pin never reaches strict admission: a canonical ListingSignature with a
+    // hex presentation is read as SDK readers read it, pinned or not.
+    const strict = oldPublisherListing(undefined, (hex) => Buffer.from(hex, "hex").toString("base64url"));
+    configure(strict.hash);
+    assert.deepEqual(await verifyStoredListingResult(strict.raw, at), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" });
+    assert.deepEqual(await verifyListingResult(strict.raw), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" });
   } finally {
     if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
     else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;

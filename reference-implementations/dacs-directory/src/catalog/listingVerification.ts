@@ -26,7 +26,12 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
+import {
+  canonicalSignatureBytes,
+  importLegacySignatureValue,
+  legacySignatureBytes,
+  type LegacySignatureEncoding,
+} from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -139,16 +144,21 @@ function invalid(
  * SDK reader's presentation verifier reads it (sdkReaderVerifiers.ts): the
  * entry whose `ref` is the exact `presentedBy` bytes, carrying a CORE §B.7
  * SIG-6 value. Accepting raw hex here would admit a Listing SDK readers refuse.
+ * `pinned` is set only by importPinnedListing: an operator pin whose exact
+ * contentHash covers this presentation also admits its declared spelling.
  */
 export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
   presentedBy: string,
   resolveKey: ResolvePrimaryClaimKey,
+  pinned?: LegacySignatureEncoding,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
   const entry = presentation.signatures.map(record).find((item) => item?.ref === presentedBy);
-  const sig = typeof entry?.signature === "string" ? canonicalSignatureBytes(entry.signature) : null;
+  const value = typeof entry?.signature === "string" ? entry.signature : null;
+  const sig = value === null ? null : canonicalSignatureBytes(value) ??
+    (pinned ? canonicalSignatureBytes(importLegacySignatureValue(value, pinned)) : null);
   if (!sig) return null;
   // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
   // member is bundle content, unlike in contentHash.
@@ -179,6 +189,7 @@ export async function verifyListingResult(
 async function verifyListingArtifact(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey,
+  pinnedPresentation?: LegacySignatureEncoding,
 ): Promise<ListingVerificationResult> {
   if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
   // Select the profile before validating it. A failed current artifact must
@@ -235,6 +246,7 @@ async function verifyListingArtifact(
       identity,
       listing.seller.identity.presentedBy,
       resolveKey,
+      pinnedPresentation,
     );
     if (!verifiedSeller) return invalid("IDENTITY_PRESENTATION_INVALID");
     const scope = stripSignature(raw) as Record<string, unknown>;
@@ -312,7 +324,8 @@ export async function verifyListing(
  * out-of-band pre-upgrade inventory can select the old Directory hex importer;
  * artifact fields, timestamps and a failed signature never grant that authority.
  * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
- * Every read still verifies the complete current schema and both signatures.
+ * Every read still verifies the complete current schema, the Listing signature
+ * and the identity presentation; the pin's declared encoding applies to both.
  */
 export async function verifyStoredListing(
   raw: Record<string, unknown>,
@@ -358,7 +371,14 @@ async function importPinnedListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    // The earlier publisher wrote the presentation in the same wallet hex; it is
+    // signed scope, so the pinned contentHash fixes its exact spelling.
+    const result = await verifyListingArtifact(
+      { ...raw, signature: { ...signature, value } },
+      resolveKey,
+      pin.encoding,
+    );
+    const verified = result.ok ? result.value : null;
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
       ? verified : null;
