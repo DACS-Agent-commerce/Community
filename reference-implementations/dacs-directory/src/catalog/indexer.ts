@@ -74,7 +74,8 @@ import {
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { publisherListingAnchors, type ResolvePublisherListingAnchors } from "./publisherListings.js";
-import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
+import { deriveIdentityTier, sellerIdentityTier, type ResolveRecipe } from "./identityVerification.js";
+import type { VerifyAuthorityAttestation } from "./authorityAttestation.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -185,6 +186,9 @@ export async function indexRegistration(
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
   listingAnchorsFor: ResolvePublisherListingAnchors = publisherListingAnchors(),
+  /** Authority-proof verifier for identity tiers; omitted, every tier is self-declared. reindexAll and
+   * index-now pass the one DACS_AUTHORITY_VERIFIER configures (loadAuthorityVerifier); none ships. */
+  verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -644,9 +648,8 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
-  const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
-  const identityTier = identityTiers.includes("institutional") ? "institutional"
-    : identityTiers.includes("verified") ? "verified" : "self-declared";
+  const identityTier = sellerIdentityTier(await Promise.all(identityBundles.map((bundle) =>
+    deriveIdentityTier(bundle, resolveRecipe, now, readAnchor, resolveDemosPrimaryClaimKey, verifyAttestation))));
 
   return {
     primaryClaim: reg.primaryClaim,

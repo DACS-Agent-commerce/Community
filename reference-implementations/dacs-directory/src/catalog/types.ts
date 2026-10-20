@@ -261,6 +261,8 @@ export interface Catalog {
   catalogVersion: "1";
   generatedAt: number;
   sellers: SellerRecord[];
+  /** DACS_AUTHORITY_VERIFIER module the identity tiers were derived with; absent: none. Not served. */
+  identityTierVerifier?: string;
 }
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */

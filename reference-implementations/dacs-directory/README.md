@@ -22,7 +22,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
 | Seller publication | DACS-1 §6.3.4 | `/register` builds and wallet-signs a current Listing, creates its StorageProgram with the live next-nonce/empty-salt mapping from SDK #70, persists non-secret recovery coordinates before broadcast, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
-| Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
+| Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit live recipe policy, with its authority proof hash-checked and authenticated by the verifier module `DACS_AUTHORITY_VERIFIER` names. None ships: without one configured, every tier is `self-declared` |
 | Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
@@ -126,6 +126,7 @@ vendor directory.
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
 | `DACS_RAIL_SNAPSHOTS` | For positive payment verdicts | Operator-authenticated PA-1 registry snapshots (`registryVersion`, `rails` with exact `railId`, `railVersion`, `phaseHandler`, `railType`, `asset`, `network`, `parameters`, `availability`); absent/unknown versions remain indeterminate. Provision only after authenticating the registry index and definitions. Only live native DEM definitions have a settlement adapter. |
 | `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers; session admission does not use this policy |
+| `DACS_AUTHORITY_VERIFIER` | For identity tiers above `self-declared` | ES module (absolute path, path relative to the working directory, or `file:` URL) exporting `verifyAuthorityAttestation(raw, ref, result)`, the deployment's method-specific authority-proof verifier; none ships. Unset: no verifier. `none`: no verifier, on purpose. Give the indexer and the server the same value; see the limits below |
 | `DACS_RECIPE_SNAPSHOTS` | For session vetting | Operator-authenticated JSON array of historical `{registryVersion, recipes}` snapshots; `recipes` uses the same policy shape. Session pins select exact snapshots; unversioned requirements select the latest recipe in that snapshot. Missing snapshots remain indeterminate. Vet admission also needs the presenter-control and challenge adapters described below. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
@@ -349,13 +350,25 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   and trust its authenticated signer, including results with an explicit expiry. Every
   included result, even an optional one, needs a valid live policy. Missing, invalid and
   non-live recipes remain indeterminate until the catalog can disclose each result's availability.
-  This live-only session policy does not change the tier path's availability handling.
-- **Authority proof integration is pending (split 4/5).** The session evidence graph
-  authenticates VerifyResult authority evidence only through `EvidenceGraphDeps.verifyAttestation`,
-  a method-specific verifier for the original proof/hash/signer/validator-epoch scope, and fails
-  closed without one. No production verifier is installed. Identity-tier derivation still
-  checks authority content hashes only. A result signer's signature and a matching authority
-  hash do not establish that authority proof.
+  Identity tiers follow the same live-only rule: a non-live recipe never raises a tier.
+- **Authority proofs need a method-specific deployment verifier; none ships.** Both the
+  session evidence graph (`EvidenceGraphDeps.verifyAttestation`) and identity-tier derivation
+  first check the proof's JSON content hash against its AttestationRef (DACS-2 §7.5.2 step 2), then
+  require that verifier to authenticate the proof's signer, validator roster/epoch and cryptographic
+  proof. Without one they fail closed: every seller is `self-declared`. A result
+  signer's signature and a matching authority hash do not establish that authority proof. Raw-byte
+  proofs have no reader here and never count. A verifier that has not answered within 30 seconds
+  has not authenticated the proof. For identity tiers a deployment names its verifier
+  module in `DACS_AUTHORITY_VERIFIER`. Each indexing process loads it itself: the reindex CLI
+  (`npm run index`), `POST /api/dacs/reindex` and `POST /api/dacs/index-now`. `scripts/start-railway.sh`
+  starts the indexer and the server from one environment. A value that cannot be loaded stops
+  indexing before any write: the CLI exits 1, and both routes answer 503. The catalog records
+  which verifier its tiers were derived with. A full reindex may switch to another verifier,
+  but it refuses to drop the recorded one while the variable is unset; set it to `none` to drop it.
+  `index-now` re-derives one seller, so it answers 409 when its verifier differs from the recorded one.
+  A process missing the configuration therefore cannot undo tiers derived with a verifier. The
+  record names the module's file URL, not its contents, so give every process the same file.
+  Session vetting does not use this verifier: it has its own `EvidenceGraphDeps.verifyAttestation`.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
   canonical hashing. The pinned serializer supports integer JSON numbers only:
@@ -405,8 +418,8 @@ admits session Vet through historical identity, challenge and recipe-snapshot ch
 with deployment adapters. It verifies native DEM payment inclusion against
 operator-provisioned rail snapshots, storage delivery cleartext and ACLs, and DACS-3
 §8.5.2 agreement conformance, including buyer-published procurement. `SPEC_PIN` records
-the profile limits and deviations. Authority-proof authentication remains pending
-integration (split 4/5). Catalog computations are advisory and independently
+the profile limits and deviations. Authority proofs need a method-specific deployment
+verifier (`DACS_AUTHORITY_VERIFIER`). None ships, so without one identity tiers stay self-declared. Catalog computations are advisory and independently
 reproducible from their refs; reference verification alone does not establish payment
 or delivery.
 

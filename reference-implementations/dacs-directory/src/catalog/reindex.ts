@@ -4,6 +4,9 @@
  *
  *   DEMOS_RPC=… npm run index
  *
+ * Identity tiers use the DACS_AUTHORITY_VERIFIER module, read by reindexAll as the
+ * reindex and index-now routes read it; one that cannot load exits 1 before any write.
+ *
  * CCI resolution uses the timestamp-bound authenticated fetch path in gcr.ts.
  * Keeping the CLI on this narrow protocol surface avoids installing the Demos
  * client's unrelated multichain/bridge dependency tree.

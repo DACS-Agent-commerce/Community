@@ -4,10 +4,12 @@ import { nativeNodeFixture } from "./helpers/native-node.js";
 import { deliverableAnchorBinding, OPAQUE_PROGRAM_NAME, paymentAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { NextRequest } from "next/server";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement, type EvidenceGraphDeps } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
+import { AUTHORITY_VERIFIER_ENV, AuthorityVerifierUnavailable } from "../src/catalog/authorityVerifierConfig.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 import { indexRegistration, listingBindingRejection, MAX_PUBLISHER_LISTING_READS } from "../src/catalog/indexer.js";
@@ -920,10 +922,13 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
-    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
-  assert.equal(tampered.ok, false);
-  assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  // DACS-2 §7.5.2 step 2: the proof's content hash is checked before, and whatever, the adapter answers.
+  for (const verifyAttestation of [undefined, async () => true]) {
+    const tampered = await buildCurrentEvidenceGraph(locator(5), { verifyAttestation, resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+      resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+    assert.equal(tampered.ok, false, verifyAttestation ? "an accepting adapter" : "no adapter");
+    assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  }
 });
 
 test("current evidence graph caps attacker-controlled transitive work", async () => {
@@ -1391,23 +1396,166 @@ test("current pre-commit policy cancellations are reputation-neutral", () => {
 });
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {
-  maps.clear(); const attested = { authority: "ok" }; maps.set(locator(8), attested);
-  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass", reason: "found",
-    attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: contentHash(attested) }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
+  maps.clear(); const attested = authorityProof({ authority: "ok" }); maps.set(locator(8), attested);
+  // A did:demos:agent proof signer models a verifiable-credential issuer; consensus-backed-proxy would need a
+  // substrate-validator-set signer and roster (DACS-2 §7.5).
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
+    attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: proofHash(attested), signer: authoritySigner }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
   const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(9), result);
   const identity = { claims: [{ ref: "lei:123", verifiedBy: ref(locator(9), result, "verify-result", { recipeVersion: 2 }) }] };
-  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
-  const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null);
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority);
   assert.equal(tier, "institutional");
   const mixedScheme = structuredClone(result);
   (mixedScheme.signature as Obj).signer = `DID:demos:agent:${dids[0].slice(-64)}`;
   maps.set(locator(9), mixedScheme);
   assert.equal(
-    await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null),
+    await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority),
     "institutional",
     "trusted signer comparison uses its resolved canonical identity",
   );
-  assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+  assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority), "self-declared");
+});
+
+/** A seller with a plain listing and a listing whose signed IdentityBundle carries a verified lei claim,
+ * served through a stubbed storage node. Call `restore()` when done. */
+async function verifiedLeiSeller() {
+  const fixture = await vector();
+  const issued = Date.now() - 1_000;
+  const proof = authorityProof({ authority: "gleif", record: "123" }); maps.set(locator(80), proof);
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
+    attestation: { anchor: { kind: "storage-program", locator: locator(80) }, contentHash: proofHash(proof), signer: authoritySigner },
+    fetchedAt: issued - 10, verifiedAt: issued, validUntil: issued + 3_600_000 };
+  const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(81), result);
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const resolveRecipe = async (scheme: string, version: number) => scheme === "lei" && version === 2 ? policy : null;
+  // A second listing whose signed seller IdentityBundle also carries the verified lei claim.
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "svc-lei";
+  const identity: Obj = { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1,
+    claims: [{ ref: dids[1] }, { ref: "lei:123", verifiedBy: ref(locator(81), result, "verify-result", { recipeVersion: 2 }) }] };
+  const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+  scope.seller = { displayName: "seller", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[1], signature: presentation }] } } };
+  maps.set(locator(82), { ...scope, signature: await sign(scope, "listing", 1) });
+  const [plain, lei] = [fixture.locators.listing, locator(82)];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
+    const data = maps.get(path.split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  const store = await import("../src/catalog/store.js");
+  const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
+  // A fresh scan over just this seller.
+  store.saveDomains([]);
+  store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+  store.saveRegistrations([{ primaryClaim: dids[1], displayName: "seller", listingAnchors: [lei, plain], deals: [] }]);
+  const priorVerifier = process.env[AUTHORITY_VERIFIER_ENV];
+  /** Sets this process's DACS_AUTHORITY_VERIFIER; undefined unsets it. */
+  const configureVerifier = (value: string | undefined) => {
+    if (value === undefined) delete process.env[AUTHORITY_VERIFIER_ENV]; else process.env[AUTHORITY_VERIFIER_ENV] = value;
+  };
+  return {
+    plain, lei, policy, resolveRecipe, configureVerifier,
+    savedTier: () => store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.identityTier,
+    restore() {
+      globalThis.fetch = originalFetch; configureVerifier(priorVerifier);
+      store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+      store.saveCatalog(priorCatalog);
+    },
+  };
+}
+const acceptingVerifier = new URL("./fixtures/authority-verifier/accepts.ts", import.meta.url).href;
+const rejectingVerifier = new URL("./fixtures/authority-verifier/rejects.ts", import.meta.url).href;
+const missingVerifier = new URL("./fixtures/authority-verifier/missing.ts", import.meta.url).href;
+
+test("indexing and reindexing raise a seller's tier only through the deployment's authority adapter", async () => {
+  const { plain, lei, resolveRecipe, savedTier, configureVerifier, restore } = await verifiedLeiSeller();
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const store = await import("../src/catalog/store.js");
+  const reindex = () => reindexAll({ log: () => {}, resolveIdentities: async () => [], resolveRecipe });
+  try {
+    const tierOf = async (listingAnchors: string[], verifyAttestation?: typeof verifyTestAuthority) => (await indexRegistration(
+      { primaryClaim: dids[1], displayName: "seller", listingAnchors, deals: [] }, undefined, async () => [], resolveRecipe, undefined, () => [], verifyAttestation)).identityTier;
+    // The seller tier is the highest across every listing's bundle, whichever listing carries the claim.
+    assert.equal(await tierOf([lei, plain], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain, lei], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain], verifyTestAuthority), "self-declared");
+    assert.equal(await tierOf([lei, plain]), "self-declared", "no adapter: fails closed");
+    assert.equal(await tierOf([lei, plain], async () => false), "self-declared");
+    configureVerifier(acceptingVerifier);
+    await reindex();
+    assert.equal(savedTier(), "institutional", "the batch pass uses the configured verifier");
+    assert.equal(store.loadCatalog().identityTierVerifier, acceptingVerifier, "and records it with the catalog");
+    // A pass that would drop or cannot load the catalog's verifier stops before it reads or writes anything.
+    const before = { catalog: store.loadCatalog(), state: store.loadScanState() };
+    for (const [value, reason] of [[undefined, /derived with file:.*accepts\.ts, and DACS_AUTHORITY_VERIFIER is unset/],
+      [missingVerifier, /DACS_AUTHORITY_VERIFIER file:.*missing\.ts could not be loaded/]] as const) {
+      configureVerifier(value);
+      await assert.rejects(reindex(), (error: unknown) => error instanceof AuthorityVerifierUnavailable && reason.test(error.message));
+      assert.deepEqual({ catalog: store.loadCatalog(), state: store.loadScanState() }, before, String(value));
+    }
+    // A full reindex may switch verifier; the new one governs every tier and is recorded.
+    configureVerifier(rejectingVerifier);
+    await reindex();
+    assert.equal(savedTier(), "self-declared", "the configured verifier governs the tier");
+    assert.equal(store.loadCatalog().identityTierVerifier, rejectingVerifier);
+    configureVerifier("none");
+    await reindex();
+    assert.equal(savedTier(), "self-declared", "none drops the verifier deliberately");
+    assert.equal(store.loadCatalog().identityTierVerifier, undefined);
+    configureVerifier(undefined);
+    await reindex();
+    assert.equal(savedTier(), "self-declared", "the shipped default: no verifier configured");
+  } finally { restore(); }
+});
+
+test("the reindex and index-now routes derive a seller's tier with the one configured verifier", async () => {
+  // Shipped entry points take no options: recipe policy and the verifier both come from the environment.
+  const { policy, savedTier, configureVerifier, restore } = await verifiedLeiSeller();
+  const { POST: reindex } = await import("../app/api/dacs/reindex/route.js");
+  const { POST: indexNow } = await import("../app/api/dacs/index-now/route.js");
+  const post = async (route: typeof reindex, path: string, status: number) => {
+    const body = path === "index-now" ? { body: JSON.stringify({ claim: dids[1] }) } : {};
+    const response = await route(new NextRequest(`http://directory.test/api/dacs/${path}`, { method: "POST", ...body }));
+    assert.equal(response.status, status, `${path}: ${await response.clone().text()}`);
+    return String((await response.json() as { error?: unknown }).error);
+  };
+  const priorPolicies = process.env.DACS_RECIPE_POLICIES; const priorLog = console.log;
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([policy]); console.log = () => {};
+  try {
+    configureVerifier(acceptingVerifier);
+    await post(reindex, "reindex", 200);
+    assert.equal(savedTier(), "institutional", "batch reindex uses the configured verifier");
+    await post(indexNow, "index-now", 200);
+    assert.equal(savedTier(), "institutional", "immediate indexing keeps the batch tier");
+    // A route process started without the configuration, or with one that cannot load, saves nothing.
+    configureVerifier(undefined);
+    assert.match(await post(indexNow, "index-now", 409), /derived with file:.*accepts\.ts, and this process has none/);
+    assert.match(await post(reindex, "reindex", 503), /DACS_AUTHORITY_VERIFIER is unset/);
+    assert.equal(savedTier(), "institutional", "an immediate index cannot undo the batch tier");
+    configureVerifier(missingVerifier);
+    assert.match(await post(indexNow, "index-now", 503), /missing\.ts could not be loaded/);
+    assert.match(await post(reindex, "reindex", 503), /missing\.ts could not be loaded/);
+    assert.equal(savedTier(), "institutional");
+    // Dropping the verifier is a deliberate full reindex; the immediate path then matches it.
+    configureVerifier("none");
+    await post(reindex, "reindex", 200);
+    assert.equal(savedTier(), "self-declared");
+    configureVerifier(undefined);
+    await post(indexNow, "index-now", 200);
+    assert.equal(savedTier(), "self-declared", "the shipped default: no verifier configured");
+    configureVerifier(acceptingVerifier);
+    assert.match(await post(indexNow, "index-now", 409), /derived with no authority verifier, and this process has file:.*accepts\.ts/);
+    assert.equal(savedTier(), "self-declared", "a verifier is adopted by a full reindex, never one seller at a time");
+  } finally {
+    console.log = priorLog;
+    if (priorPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = priorPolicies;
+    restore();
+  }
 });
 
 test("a mixed pair indexes the fault copy's advisory fields and hash even when it is the buyer copy", async () => {

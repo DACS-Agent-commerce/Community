@@ -23,6 +23,7 @@ import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
+import { assertBatchTierVerifier, loadAuthorityVerifier } from "./authorityVerifierConfig";
 import {
   loadCatalog,
   loadDomains,
@@ -72,6 +73,10 @@ export interface ReindexOptions {
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
   const log = opts.log ?? console.log;
+  // Identity tiers use the DACS_AUTHORITY_VERIFIER verifier, as index-now does. One that cannot load, or a
+  // catalog derived with a verifier this process lacks, stops the pass before it scans or writes anything.
+  const authority = await loadAuthorityVerifier();
+  assertBatchTierVerifier(loadCatalog(), authority);
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
   const regs: (Registration & { discovered?: boolean })[] = [];
   for (const raw of loadRegistrations()) {
@@ -422,7 +427,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, listingAnchorsFor).catch((error: unknown) => {
+      }, listingAnchorsFor, authority.verify).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
@@ -460,7 +465,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers,
+      ...(authority.id ? { identityTierVerifier: authority.id } : {}) });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 
