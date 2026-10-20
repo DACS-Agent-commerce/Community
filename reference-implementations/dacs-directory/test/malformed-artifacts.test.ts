@@ -353,7 +353,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const identity = (listingRaw.seller as Obj).identity as Obj;
   const identityScope = { ...identity };
   delete identityScope.presentation;
-  (identity.presentation as Obj).signatures = [{ ref: seller, signature: await signature(contentHash(identityScope), "dacs-bundle-presentation:v1:", 1) }];
+  (identity.presentation as Obj).signatures = [{ ref: seller, signature: await signature(contentHash(identityScope), "dacs-bundle-presentation:v1:", 1, "base64url") }];
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {

@@ -81,7 +81,7 @@ test("listing verification accepts a current structured listing and verifies its
   const identitySignature = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const currentScope = {
     dacsVersion: "1",
     listingVersion: 1,
@@ -897,7 +897,7 @@ test("listing verification is open-world: an unknown additive top-level field is
   const identitySignature = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const baseScope = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: {

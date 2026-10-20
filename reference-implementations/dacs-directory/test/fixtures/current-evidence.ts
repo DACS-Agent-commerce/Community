@@ -40,7 +40,7 @@ export async function vector(jobId = "job-1", offset = 0) {
   // Listing verifier requires a presentation signature for the seller claim.
   const identity = (listingScope.seller as Obj).identity as Obj;
   const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
-  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
   (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };

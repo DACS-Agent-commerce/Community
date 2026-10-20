@@ -31,10 +31,10 @@ import type { RevocationBinding } from "./types.js";
 const SEPARATOR = "dacs-listing:v1:";
 
 /**
- * Legacy-MVP raw hex or base64url. Used for legacy Listings, identity
- * presentations (whose encoding the SDK leaves to the presentation verifier)
- * and revocation markers, where accepting either encoding can only withdraw a
- * Listing. Never used for a current Listing's own signature.
+ * Legacy-MVP raw hex or base64url. Used for legacy-MVP Listings, whose
+ * signatures are raw hex, and for revocation markers, where accepting either
+ * encoding can only withdraw a Listing. Never used for a current Listing's
+ * own signature or its identity presentation.
  */
 function decodeSignature(value: string): Uint8Array | null {
   const hex = value.replace(/^(0x)+/i, "");
@@ -102,36 +102,29 @@ function invalid(
   return { ok: false, code };
 }
 
-async function verifyEd25519(
-  message: Uint8Array,
-  signer: string,
-  value: unknown,
-  resolveKey: ResolvePrimaryClaimKey,
-): Promise<ResolvedPrimaryClaimKey | null> {
-  const sig = typeof value === "string" ? decodeSignature(value) : null;
-  return sig
-    ? verifyPrimaryClaimSignature(message, sig, signer, "ed25519", resolveKey)
-    : null;
-}
-
+/**
+ * DACS-1 §6.3.2 per-claim presentation by the presenting claim, read as the
+ * SDK reader's presentation verifier reads it (sdkReaderVerifiers.ts): the
+ * entry whose `ref` is the exact `presentedBy` bytes, carrying a CORE §B.7
+ * SIG-6 value. Accepting raw hex here would admit a Listing SDK readers refuse.
+ */
 async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
-  sellerClaim: string,
+  presentedBy: string,
   resolveKey: ResolvePrimaryClaimKey,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
-  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
-  const signature = presentation.signatures.map(record).find((item) =>
-    typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === sellerIdentity);
-  if (!signature) return null;
+  const entry = presentation.signatures.map(record).find((item) => item?.ref === presentedBy);
+  const sig = typeof entry?.signature === "string" ? decodeComponentSignature(entry.signature) : null;
+  if (!sig) return null;
   // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
   // member is bundle content, unlike in contentHash.
   const message = Buffer.from(
     `dacs-bundle-presentation:v1:${identityBundleHash(identity as unknown as IdentityBundle)}`,
     "utf8",
   );
-  return verifyEd25519(message, sellerClaim, signature.signature, resolveKey);
+  return verifyPrimaryClaimSignature(message, sig, presentedBy, "ed25519", resolveKey);
 }
 
 /**

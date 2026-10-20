@@ -28,7 +28,7 @@ const identity = {
 const identitySignature = Buffer.from(ed25519Sign(
   Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "utf8"),
   privateKey,
-)).toString("hex");
+)).toString("base64url");
 const scope = {
   dacsVersion: "1",
   listingId: "verified-service",

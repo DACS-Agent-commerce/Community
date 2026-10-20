@@ -1167,7 +1167,7 @@ test("indexRegistration publishes verified and institutional tiers with institut
     identity.claims = [...identity.claims as Obj[], claim];
     const identityScope = { ...identity };
     delete identityScope.presentation;
-    const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+    const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
     identity.presentation = { kind: "per-claim", signatures: [{ ref: dids[1], signature }] };
     const at = locator(530 + index);
     maps.set(at, { ...scope, signature: await sign(scope, "listing", 1) });
