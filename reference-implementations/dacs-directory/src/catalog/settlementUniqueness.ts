@@ -52,8 +52,9 @@ function isSolanaSignature(value: unknown): value is string {
 export function settlementTxId(ref: unknown): string | null {
   if (!isRecord(ref)) return null;
   // Frozen legacy MVP TxRef `{ rail, txHash, kind }`: a native Demos transfer is one settlement.
-  // The id is kept as deal history only. `settlementClaims` never counts it:
-  // the pinned SDK's `isSettlementEvidence` refuses this shape, and `pay-dem`
+  // This spells its SB-1 id only. No catalog path stores or counts it:
+  // `settlementClaims` runs only on evidence the pinned SDK's
+  // `isSettlementEvidence` accepts, which refuses this shape, and `pay-dem`
   // accepts only the current `demos` arm.
   if (typeof ref.rail === "string") {
     const hash = ref.kind === "settlement" && ref.rail === "demos" &&
@@ -84,11 +85,13 @@ export function settlementTxId(ref: unknown): string | null {
 }
 
 /**
- * Pinned registry identity to handler mapping.
+ * The rows of the DACS-4 §9.4.2 v0.1 registry (Standard
+ * d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20) whose records this Directory
+ * projects: a deliberate 8-of-13 subset. The other five rows are listed in
+ * UNPROJECTED_PINNED_RAILS. Their records, and any unknown or custom registry
+ * entry, are withheld from every count.
  */
-// DACS-4 §9.4.2 at Standard d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20.
-// Unknown/custom registry entries need authenticated resolution before use.
-const PINNED_RAIL_HANDLERS: Readonly<Record<string, string>> = {
+export const PINNED_RAIL_HANDLERS: Readonly<Record<string, string>> = {
   "demos-native:DEM": "pay-dem",
   "evm-erc20:1:USDC": "pay-evm-erc20",
   "evm-erc20:8453:USDC": "pay-evm-erc20",
@@ -98,12 +101,28 @@ const PINNED_RAIL_HANDLERS: Readonly<Record<string, string>> = {
   "solana-spl:mainnet:USDT": "pay-solana-spl",
   "x402:default": "pay-x402",
 };
+
+/**
+ * Registered §9.4.2 rows that are known but not projected. Cross-chain HTLC
+ * and liquidity-tank payments settle in two legs resolved under ST-8, and the
+ * AP2 rails settle through card and payment-processor networks; none has a
+ * signed TxRef arm this Directory can turn into an SB-1 id without ledger
+ * data it does not read. docs/TP-1.md lists them.
+ */
+export const UNPROJECTED_PINNED_RAILS: Readonly<Record<string, string>> = {
+  "cross-chain-htlc:USDC": "pay-cross-chain-htlc",
+  "cross-chain-liquidity-tank:USDC": "pay-cross-chain-liquidity-tank",
+  "ap2:visa-direct": "pay-ap2",
+  "ap2:mastercard-send": "pay-ap2",
+  "ap2:stripe-paymentintents": "pay-ap2",
+};
 const JOB_ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 /**
  * Project only SDK-valid success evidence whose anchor's storage metadata
  * carries a matching PC-2 tuple. The storage program's name and owner are not
- * yet checked against that address and the evidence signer (docs/TP-1.md).
+ * checked against that address and the evidence signer (docs/TP-1.md,
+ * deviation `sb1-evidence-anchor-metadata-unbound`).
  */
 export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>; logicalAddress?: unknown }>, context: {
   jobId: unknown;
@@ -223,7 +242,7 @@ export function settlementCollisions(presentedDeals: DealRecord[]): SettlementEx
  * DACS-4 SB-2: the complete presented set of admissible records is grouped by
  * settlement id before the window is applied. Repeated presentation of one
  * session's identical bundle is idempotent and counts once. A group claimed
- * under two or more distinct (jobId, phaseIndex) tuples is indeterminate
+ * under two or more distinct (session, phaseIndex) tuples is indeterminate
  * without settlement-side binding authority, which this Directory does not
  * verify, so no member counts. A session presented as two different bundles
  * is excluded from every count, as DACS-5 §10.4.3(d) excludes a divergent

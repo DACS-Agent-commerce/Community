@@ -15,7 +15,7 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
-import { inCategory, settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
+import { inCategory, PINNED_RAIL_HANDLERS, settlementTxId, settlementClaims, SETTLEMENT_PROJECTION_VERSION, UNPROJECTED_PINNED_RAILS } from "../src/catalog/settlementUniqueness.js";
 import { projectTestnetCatalog, rebuildCatalogObservations } from "../src/catalog/testnetMetrics.js";
 import { isCanonicalSettlementIdentity } from "../vendor/dacs-sdk/dist/agent/settlementIdentity.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
@@ -1481,6 +1481,48 @@ test("SB-1 keeps registry identity, pinned handler and signed pipeline context d
     "an artifact annotation cannot replace the anchor metadata-of-record");
   assert.equal(settlementClaims([{ ...evidence[0], raw: { ...fixture.evidence, phaseIndex: 2 } }], context).projected, false,
     "the SDK-refused phaseIndex field cannot repair or replace address binding");
+  // SB-1 / CORE JID-1: the pinned SDK checks only that jobId is a non-empty
+  // string, so a tuple that agrees everywhere on a non-JID-1 jobId must still
+  // mint no settlement id.
+  const validJobId = String(fixture.evidence.jobId);
+  for (const jobId of [
+    validJobId.toLowerCase(), `8${validJobId.slice(1)}`, `${validJobId.slice(0, 25)}U`, `${validJobId}0`,
+  ]) {
+    const claims = settlementClaims(
+      [{ raw: { ...fixture.evidence, jobId }, logicalAddress: paymentEvidenceAddress(jobId, "demos-native:DEM", 2) }],
+      { ...context, jobId },
+    );
+    assert.deepEqual(claims, { settlementTxIds: [], projected: false }, jobId);
+  }
+});
+
+test("the rail tables split the pinned DACS-4 §9.4.2 registry into 8 projected and 5 withheld rows", async () => {
+  // DACS-4-SETTLE.md §9.4.2 at d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20, in table order.
+  const pinnedRegistry: Record<string, string> = {
+    "evm-erc20:1:USDC": "pay-evm-erc20", "evm-erc20:8453:USDC": "pay-evm-erc20",
+    "evm-erc20:42161:USDC": "pay-evm-erc20", "evm-erc20:137:USDC": "pay-evm-erc20",
+    "solana-spl:mainnet:USDC": "pay-solana-spl", "solana-spl:mainnet:USDT": "pay-solana-spl",
+    "cross-chain-htlc:USDC": "pay-cross-chain-htlc",
+    "cross-chain-liquidity-tank:USDC": "pay-cross-chain-liquidity-tank",
+    "demos-native:DEM": "pay-dem", "ap2:visa-direct": "pay-ap2", "ap2:mastercard-send": "pay-ap2",
+    "ap2:stripe-paymentintents": "pay-ap2", "x402:default": "pay-x402",
+  };
+  assert.deepEqual(Object.keys(PINNED_RAIL_HANDLERS).filter((rail) => Object.hasOwn(UNPROJECTED_PINNED_RAILS, rail)), []);
+  assert.deepEqual({ ...PINNED_RAIL_HANDLERS, ...UNPROJECTED_PINNED_RAILS }, pinnedRegistry);
+  assert.equal(Object.keys(PINNED_RAIL_HANDLERS).length, 8);
+
+  const fixture = await vector("01KTY8ZJ00CW7KSECW3FS6PQPK", 5000);
+  for (const [railId, handler] of Object.entries(UNPROJECTED_PINNED_RAILS)) {
+    // Every signed field agrees on the withheld rail and handler; it still mints nothing.
+    const jobId = String(fixture.evidence.jobId);
+    const raw = { ...fixture.evidence, phase: handler };
+    const claims = settlementClaims([{ raw, logicalAddress: paymentEvidenceAddress(jobId, railId, 2) }], {
+      jobId, railId, railRegistryVersion: 1,
+      phaseSummary: [{ index: 2, kind: handler, outcome: "ok" }],
+      pipeline: [{}, {}, { kind: handler, parameters: { rail: railId } }],
+    });
+    assert.deepEqual(claims, { settlementTxIds: [], projected: false }, railId);
+  }
 });
 
 /**
