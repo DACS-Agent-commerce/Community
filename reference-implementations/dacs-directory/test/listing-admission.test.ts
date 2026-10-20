@@ -343,6 +343,31 @@ test("the indexer publishes current-SDK listings under the registered identity a
   }
 });
 
+test("the indexer withholds a signed Listing until its notBefore, then publishes it", async (t) => {
+  // DACS-1 reader step 3: a Listing is not effective before validity.notBefore.
+  const notBefore = Date.now() + 24 * 60 * 60 * 1000;
+  const anchor = `stor-${"e".repeat(40)}`;
+  const listing = signedListing("indexed-future", attested({ kind: "self-signed" }), { validity: { notBefore } });
+  assert.equal(isListing(listing), true);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => String(input).endsWith(`/${anchor}`)
+    ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: listing })
+    : new Response(null, { status: 404 });
+  const index = () => indexRegistration(
+    { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: [anchor] },
+    undefined,
+    async () => { throw new Error("identity unavailable"); },
+  );
+  try {
+    assert.deepEqual((await index()).listings, []);
+    t.mock.method(Date, "now", () => notBefore);
+    const effective = await index();
+    assert.deepEqual(effective.listings.map((summary) => [summary.listingId, summary.status]), [["indexed-future", "active"]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
   const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
   const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");

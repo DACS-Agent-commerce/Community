@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
+// First: the store must open in a fresh directory, never the checkout's data/.
+import "./fixtures/isolated-data-dir.js";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import {

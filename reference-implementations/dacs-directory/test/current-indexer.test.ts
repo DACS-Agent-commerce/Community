@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+// First: the store must open in a fresh directory, never the checkout's data/.
+import { isolatedDataDir } from "./fixtures/isolated-data-dir.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
@@ -14,12 +16,18 @@ import {
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { admitRevocationCandidates, loadScanState, saveScanState } from "../src/catalog/store.js";
+import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
 import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 import { type Obj, seeds, dids, locator, maps, sign, ref, vector, bindingFor, installAgreement,
   payeeBoundVector, graphAt, registeredDeal } from "./fixtures/current-evidence.js";
+
+test("the catalog store opens in this run's own directory", () => {
+  // Revocation-candidate rows persist; a shared data/ made the owner-marker
+  // test below pass only on the first run in a checkout.
+  assert.equal(DATA_DIR, isolatedDataDir);
+});
 
 test("listing Gate-2 binding failures have stable rejection classes", () => {
   assert.equal(listingBindingRejection(

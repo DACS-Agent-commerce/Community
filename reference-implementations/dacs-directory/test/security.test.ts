@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
+// First: the store must open in a fresh directory, never the checkout's data/.
+import "./fixtures/isolated-data-dir.js";
 
 import { listingPresentation } from "../src/catalog/listingMetadata.js";
 import {
