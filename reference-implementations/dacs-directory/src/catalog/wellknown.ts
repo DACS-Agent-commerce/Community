@@ -58,6 +58,9 @@ interface ListingIndex {
   }>;
 }
 
+/** The crawler rejects a listings.json with more entries; the generator refuses to emit one. */
+export const MAX_INDEX_LISTINGS = 200;
+
 export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
   binding.sellerPrimaryClaim, binding.listingId, binding.listingVersion, binding.listingContentHash,
   binding.logicalAddress, binding.markerAnchor.kind, binding.markerAnchor.locator, binding.markerContentHash,
@@ -138,8 +141,8 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
   if (typeof seller !== "string" || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
     return { domain, error: "listings.json has no canonical Demos seller claim" };
   }
-  if (!Array.isArray(idx.listings) || idx.listings.length > 200) {
-    return { domain, error: "listings.json must contain at most 200 listings" };
+  if (!Array.isArray(idx.listings) || idx.listings.length > MAX_INDEX_LISTINGS) {
+    return { domain, error: `listings.json must contain at most ${MAX_INDEX_LISTINGS} listings` };
   }
   const signature = dacs.listings.publisherSignature;
   const withdrawalAuthenticated = typeof signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(signature) &&

@@ -48,7 +48,7 @@ test("authenticated withdrawal discovery survives incomplete bindings and full r
     assert.deepEqual(active.listings.map((l) => l.status), ["active", "active"], "positive control: cached offers are admitted");
     const revoked = { ...active, listings: [{ ...active.listings[0], status: "revoked" as const, revocation: binding }, active.listings[1]] };
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [revoked] });
-    const { files, withdrawalSigning } = await (await wellKnown(new NextRequest(`https://directory.example/api/dacs/wellknown-files?claim=${claim}&domain=agent.example`))).json();
+    const { files, withdrawalSigning } = await (await wellKnown(new NextRequest(`https://directory.example/api/dacs/wellknown-files?claim=${claim}&domain=agent.example&a2aEndpoint=https://agent.example/a2a&a2aTransport=JSONRPC`))).json();
     const index = JSON.parse(files["/.well-known/dacs/listings.json"]);
     assert.deepEqual(index.listings[0].revocation, binding);
     assert.equal(withdrawalSigning.message, wellKnownWithdrawalMessage("agent.example", sha256Hex(files["/.well-known/dacs/listings.json"])));

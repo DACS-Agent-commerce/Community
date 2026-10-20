@@ -270,15 +270,19 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   in string values and property names before canonical hashing. This publisher's pinned serializer
   supports integer negotiation percentages; fractional percentages receive HTTP 400. This is a
   narrower publication profile than the Standard's fractional-percentage inputs.
-- **Discovery keeps withdrawals.** Machine catalog and well-known listing indexes retain revoked
-  versions with `revocation`; active skills and sitemap links use executable offers. Crawled
-  withdrawals enter the marker verification queue; unreadable proofs withhold active admission.
-  Cached `revocationBinding` summaries migrate to the normative wire field on read.
-- **A2A cards require an actual service endpoint.** The well-known generator accepts `a2aEndpoint`
-  and `a2aTransport` (`JSONRPC`, `GRPC`, or `HTTP+JSON`) together. The endpoint may be hosted
-  separately from the discovery domain. Without them it emits a DACS discovery descriptor at
-  `agent.json`, with no A2A transport declaration or `agent-card.json` file. Endpoint configuration
-  is the publisher's declaration; generation does not probe its protocol implementation.
+- **Discovery keeps withdrawals.** The machine catalog, seller API and well-known listing index
+  retain revoked versions with `revocation`; active skills and sitemap links use executable offers.
+  A withdrawal cached before bindings were recorded stays `revoked` without a binding in the
+  well-known index, which readers treat as indeterminate. Crawled withdrawals enter the marker
+  verification queue; unreadable proofs withhold active admission. Cached `revocationBinding`
+  summaries migrate to the normative wire field on read.
+- **Well-known files extend an A2A agent card.** DACS-1 §6.3.5 adds the `dacs` block to the
+  agent's A2A card, so the well-known generator requires `a2aEndpoint` and `a2aTransport`
+  (`JSONRPC`, `GRPC`, or `HTTP+JSON`) and emits a complete A2A v0.3.0 AgentCard (pinned in
+  `SPEC_PIN`) at both `agent.json` and `agent-card.json`. The endpoint may be hosted separately
+  from the discovery domain. A seller without an A2A service is discovered through the catalog
+  API. Endpoint configuration is the publisher's declaration; generation does not probe its
+  protocol implementation.
 - **Storage delivery is verified from readable cleartext and node access metadata.**
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
@@ -360,7 +364,10 @@ MIT. This in-tree submission is covered by the Community repository's root
 Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, paired with
 `pay-dem` and `pay-x402` phase kinds. Historical current-profile listings signed with phase
 names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
-a new signed listing version to make those offers executable.
+a new signed listing version to make those offers executable. Historical listings remain
+available on explicitly archival seller and service pages. Skills, the sitemap and the
+discovery pages advertise executable offers only; the machine catalog, seller API and
+well-known index also retain withdrawn versions as tombstones.
 
 Native DEM success requires public transaction and block reads confirming inclusion, the payer
 and payee, and the exact agreed amount (1 DEM = 10^9 OS). The stored RPC amount is OS,
@@ -368,8 +375,6 @@ carried as a safe integer or an exact string; the send payload must contain a ca
 string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
 All other current payment rails and paid SDK legacy sessions remain indeterminate until their
 authoritative settlement adapters are available. They contribute no completion or volume.
-Historical listings remain available on explicitly archival seller and service pages; the
-well-known index, skills, seller API and sitemap advertise executable offers only.
 
 Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
 verifier-issued nonce against its job, party, issuance window, authenticated first consumption
@@ -391,13 +396,19 @@ index can carry independently verified tombstones for known listings, but cannot
 introduce executable offers. A pinned unsigned index retains incomplete withdrawal
 checks until a completed check from that same source or a verified revocation.
 
-For publisher signatures,
-The well-known file export returns `withdrawalSigning.message`: sign those exact UTF-8
-bytes with the seller's ed25519 key and place the unpadded base64url signature in
-`dacs.listings.publisherSignature` in `agent.json` (and the identical A2A alias, when
-present). Keep `listings.json` byte-exact. The signing message binds the normalized
-HTTPS domain and SHA-256 hash of that index; generate a new signature whenever either
-changes. The registration page displays this message and the completion instructions.
+For publisher signatures, the well-known file export returns `withdrawalSigning.message`:
+sign those exact UTF-8 bytes with the seller's ed25519 key and place the unpadded base64url
+signature in `dacs.listings.publisherSignature` in `agent.json` and `agent-card.json`. Keep
+`listings.json` byte-exact. The signing message binds the normalized HTTPS domain and
+SHA-256 hash of that index, and every generation is a new index: sign each one before
+hosting it. Once a signed index has been crawled, hosting an unsigned one withholds every
+listing in that signed index until a newer signed index is crawled. The registration page
+displays the message and can sign it with the connected Demos wallet; it converts the
+wallet's hex signature and verifies it before filling in both cards. An offer whose anchor
+no longer holds the indexed listing is left out of the index and reported; a failed node
+read refuses the export rather than offering a partial index for signing. Submit the
+hosted domain to `POST /api/dacs/register-domain`.
+
 Before queuing a carried marker, the crawler independently verifies the listing's
 publisher, chain owner, content hash, ID and version. Unsigned Standard indexes can
 discover independently verified seller-signed tombstones. A listing's `seller.publicEndpoint`

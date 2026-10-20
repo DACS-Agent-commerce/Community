@@ -70,6 +70,9 @@
 #     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
 #   Anonymous restricted-program reads on node ac8f45f are denied: buyer-only is indeterminate
 #     on that deployment. ACL-success tests model a hypothetical readable metadata contract.
+#   §6.3.5/RB-3 well-known export: a withdrawal cached by releases before revocation bindings were
+#     recorded has no binding. The generator retains it as `status: "revoked"` without `revocation`
+#     (readers return indeterminate under RB-5) rather than dropping the withdrawal from the index.
 #   Revocation candidates: discovered markers returning NOT_FOUND, PERMISSION_DENIED or a transport
 #     failure stay pending/indeterminate. Persistent 1–60 second exponential backoff bounds retries.
 #     Only successfully read invalid content can reject a candidate; verified revocation is retained.
@@ -105,6 +108,10 @@
 #   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
 #   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
 #   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
+# A2A protocol v0.3.0 (github.com/a2aproject/A2A, tag v0.3.0 = 8d57eba286de756176892518a8fc39b0ac2ccefb,
+#   Apache-2.0): generated agent cards (src/catalog/a2a.ts) are validated against its AgentCard schema
+#   (test/discovery-exports.test.ts). Vendored byte-identical at test/fixtures/a2a/:
+#   specification/json/a2a.json 97d6e2435336836cd1d41dffacf83a1a97902b62b826ef14ec5704db85c95f17
 
 # Additional consumer/publisher profile:
 #   Canonical hashing rejects lone UTF-16 surrogates in values and keys (server and browser).
@@ -113,5 +120,7 @@
 #   Authority evidence needs a method-specific authenticated proof/hash/signer/validator-epoch adapter.
 #   No production authority adapter is installed; identity tiers and session evidence fail closed.
 #   Listing discovery retains revoked tombstones with the normative `revocation` binding.
-#   Generated A2A cards require an explicit service endpoint and transport; otherwise only the
-#   DACS discovery descriptor is emitted, without claiming an A2A service at the hosting origin.
+#   §6.3.5 extends an A2A agent card, so well-known generation requires the publisher's A2A service
+#   endpoint and transport and emits a complete A2A v0.3.0 AgentCard; it never claims an A2A service
+#   at the hosting origin. A seller without an A2A service is discovered through the catalog API.
+#   The endpoint's transport support is the publisher's declaration; generation does not probe it.
