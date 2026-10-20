@@ -30,9 +30,10 @@ export function unavailableMetricQuery(params: URLSearchParams): string | undefi
     "completionrate", "counterpartyadjustedcompletionrate", "counterpartyfaultrate",
     "averagebuyerrating", "averagesellerrating", "reputationscore",
   ]);
-  const rankingKeys = new Set(["sort", "sortby", "order", "orderby", "rank", "rankby"]);
+  const rankingKeys = new Set(["sort", "sortby", "order", "orderby", "rank", "rankby", "ranking"]);
   for (const name of params.keys()) {
-    const key = name.replace(/(?:\[\])+$/, "").toLowerCase();
+    // A bracketed form (`[]`, `[0]`, `[gte]`) and `_`/`-` separators spell the same filter.
+    const key = name.replace(/\[.*$/s, "").toLowerCase().replace(/[_-]/g, "");
     if (metricKeys.has(key)) {
       return `Rate and score filters are unavailable on testnet under TP-1. ${COMPLETION_VERIFICATION_UNAVAILABLE}.`;
     }

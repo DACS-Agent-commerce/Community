@@ -289,6 +289,11 @@ test("the published hint schema matches emitted hints and requires every field t
   assert.equal(sdkStatus, "ok");
   assert.deepEqual(Object.keys(hint).filter((key) => !(key in properties)), [], "additionalProperties: false");
   for (const key of schema.required) assert.ok(key in hint, `emitted hint lacks required ${key}`);
+  // TP-1: all five metrics are present and null on every surface, so the schema requires each one.
+  for (const key of ["completionRate", "counterpartyAdjustedCompletionRate", "counterpartyFaultRate", "averageBuyerRating", "averageSellerRating"]) {
+    assert.ok((schema.required as readonly string[]).includes(key), `schema requires ${key}`);
+    assert.equal(properties[key].type, "null", key);
+  }
   for (const [key, rule] of Object.entries(properties)) {
     const value = hint[key];
     if ("const" in rule) assert.equal(value, rule.const, key);
@@ -335,6 +340,10 @@ test("rate and score filters and ordering return a clear 400 even with empty, re
     "minCompletionRate%5B%5D=", "sort=price", "order=asc", "rank%5B%5D=price",
     "faultRate=0.1", "completionRate=1", "counterpartyAdjustedCompletionRate=1", "counterpartyFaultRate=0",
     "averageBuyerRating=5", "averageSellerRating=5",
+    // Every bracketed form and separator spelling names the same refused filter.
+    "minCompletionRate%5B0%5D=0.5", "minRating%5Bgte%5D=4", "minRating%5B%5Dx=4", "min_rating=4",
+    "min-completion-rate=0.5", "MIN_COMPLETION_RATE=0.5", "sort%5Bby%5D=x", "sort_by=completionRate",
+    "order-by=price", "ranking=1",
   ]) {
     const response = await getListings(new NextRequest(`https://directory.example/api/dacs/listings?${query}`));
     assert.equal(response.status, 400, query);

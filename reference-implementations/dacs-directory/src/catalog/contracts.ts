@@ -93,7 +93,8 @@ export const listingSummarySchema = {
       description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. bundleCount is recomputed on read from the retained records the seller reputation counts, after the DACS-4 SB-2 settlement-collision exclusion; a missing or malformed cached hint uses the listing category and the catalog snapshot window. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
       additionalProperties: false,
       required: [
-        "categoryScope", "completionRate", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
+        "categoryScope", "completionRate", "counterpartyAdjustedCompletionRate", "counterpartyFaultRate",
+        "averageBuyerRating", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
         "computedAt", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel",
       ],
       properties: {
