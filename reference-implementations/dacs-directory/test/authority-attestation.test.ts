@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { authenticateAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
+import { authenticateAuthorityAttestation, installAuthorityVerifier, installedAuthorityVerifier } from "../src/catalog/authorityAttestation.js";
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority } from "./helpers/authority.js";
+
+test("one deployment verifier is installed per process; none ships and a non-function is refused", () => {
+  assert.equal(installedAuthorityVerifier(), undefined, "the shipped build installs none");
+  try {
+    installAuthorityVerifier(verifyTestAuthority);
+    assert.equal(installedAuthorityVerifier(), verifyTestAuthority);
+    for (const value of [true, "verify", {}, null]) {
+      assert.throws(() => installAuthorityVerifier(value as never), /authority verifier must be a function/, String(value));
+      assert.equal(installedAuthorityVerifier(), verifyTestAuthority, "a refused install leaves the installed verifier");
+    }
+  } finally { installAuthorityVerifier(undefined); }
+  assert.equal(installedAuthorityVerifier(), undefined);
+});
 
 test("authority authentication fails without an adapter and on adapter failure or exception", async () => {
   const raw = authorityProof({ subject: "lei:ABC", status: "active" });

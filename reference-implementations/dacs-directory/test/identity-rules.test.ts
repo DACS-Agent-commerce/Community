@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import type { VerifyAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
+import { installAuthorityVerifier, type VerifyAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
 import { artifactHash } from "../src/catalog/evidenceGraph.js";
 import { deriveIdentityTier, resolveConfiguredRecipe, sellerIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 
@@ -65,6 +65,16 @@ test("an institutional scheme verified under a live recipe gives the institution
   assert.equal(await deriveIdentityTier(undefined), "self-declared");
   assert.equal(await deriveIdentityTier({ claims: "lei" }), "self-declared");
   assert.equal(await deriveIdentityTier({ claims: [null, "lei"] }), "self-declared");
+});
+
+test("without an explicit adapter the tier uses the installed deployment verifier, and none ships", async () => {
+  assert.equal(await tier({ authenticate: false }), "self-declared", "none installed");
+  installAuthorityVerifier(verifyTestAuthority);
+  try {
+    assert.equal(await tier({ authenticate: false }), "institutional");
+    assert.equal(await tier({ adapter: async () => false }), "self-declared", "an explicit adapter governs");
+  } finally { installAuthorityVerifier(undefined); }
+  assert.equal(await tier({ authenticate: false }), "self-declared");
 });
 
 test("each claim, VerifyResult, recipe, freshness and authority-proof rule withholds the tier when it fails", async () => {

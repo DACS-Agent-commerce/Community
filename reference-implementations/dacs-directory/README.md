@@ -342,11 +342,14 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   Identity tiers follow the same live-only rule: a non-live recipe never raises a tier.
 - **Authority proofs need a method-specific deployment verifier; none is installed.** Both the
   session evidence graph (`EvidenceGraphDeps.verifyAttestation`) and identity-tier derivation
-  (`indexRegistration` / `ReindexOptions.verifyAttestation`) first check the proof's JSON content
-  hash against its AttestationRef (DACS-2 §7.5.2 step 2), then require that verifier to authenticate
-  the proof's signer, validator roster/epoch and cryptographic proof. Without one they fail closed:
-  this build's sellers are all `self-declared`. A result signer's signature and a matching authority
-  hash do not establish that authority proof. Raw-byte proofs have no reader here and never count.
+  first check the proof's JSON content hash against its AttestationRef (DACS-2 §7.5.2 step 2), then
+  require that verifier to authenticate the proof's signer, validator roster/epoch and cryptographic
+  proof. Without one they fail closed: this build's sellers are all `self-declared`. A result
+  signer's signature and a matching authority hash do not establish that authority proof. Raw-byte
+  proofs have no reader here and never count. For identity tiers a deployment installs its verifier
+  once per process with `installAuthorityVerifier` (a Next.js instrumentation `register()` hook for
+  the routes; the indexing CLI before `reindexAll`). The reindex CLI, `POST /api/dacs/reindex` and
+  `POST /api/dacs/index-now` all read that one instance, so an immediate index cannot undo a batch tier.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
   canonical hashing. The pinned serializer supports integer JSON numbers only:

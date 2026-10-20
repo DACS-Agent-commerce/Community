@@ -4,10 +4,12 @@ import { nativeNodeFixture } from "./helpers/native-node.js";
 import { deliverableAnchorBinding, OPAQUE_PROGRAM_NAME, paymentAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { NextRequest } from "next/server";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement, type EvidenceGraphDeps } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
+import { installAuthorityVerifier } from "../src/catalog/authorityAttestation.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 import { indexRegistration, listingBindingRejection, MAX_PUBLISHER_LISTING_READS } from "../src/catalog/indexer.js";
@@ -1415,7 +1417,9 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority), "self-declared");
 });
 
-test("indexing and reindexing raise a seller's tier only through the deployment's authority adapter", async () => {
+/** A seller with a plain listing and a listing whose signed IdentityBundle carries a verified lei claim,
+ * served through a stubbed storage node. Call `restore()` when done. */
+async function verifiedLeiSeller() {
   const fixture = await vector();
   const issued = Date.now() - 1_000;
   const proof = authorityProof({ authority: "gleif", record: "123" }); maps.set(locator(80), proof);
@@ -1443,9 +1447,26 @@ test("indexing and reindexing raise a seller's tier only through the deployment'
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   const store = await import("../src/catalog/store.js");
-  const { reindexAll } = await import("../src/catalog/reindexCore.js");
   const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
   const priorCatalog = store.loadCatalog();
+  // A fresh scan over just this seller.
+  store.saveDomains([]);
+  store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+  store.saveRegistrations([{ primaryClaim: dids[1], displayName: "seller", listingAnchors: [lei, plain], deals: [] }]);
+  return {
+    plain, lei, policy, resolveRecipe,
+    savedTier: () => store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.identityTier,
+    restore() {
+      globalThis.fetch = originalFetch; installAuthorityVerifier(undefined);
+      store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+      store.saveCatalog(priorCatalog);
+    },
+  };
+}
+
+test("indexing and reindexing raise a seller's tier only through the deployment's authority adapter", async () => {
+  const { plain, lei, resolveRecipe, savedTier, restore } = await verifiedLeiSeller();
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
   try {
     const tierOf = async (listingAnchors: string[], verifyAttestation?: typeof verifyTestAuthority) => (await indexRegistration(
       { primaryClaim: dids[1], displayName: "seller", listingAnchors, deals: [] }, undefined, async () => [], resolveRecipe, undefined, () => [], verifyAttestation)).identityTier;
@@ -1455,17 +1476,47 @@ test("indexing and reindexing raise a seller's tier only through the deployment'
     assert.equal(await tierOf([plain], verifyTestAuthority), "self-declared");
     assert.equal(await tierOf([lei, plain]), "self-declared", "no adapter installed: the shipped default fails closed");
     assert.equal(await tierOf([lei, plain], async () => false), "self-declared");
-    store.saveDomains([]);
-    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
-    store.saveRegistrations([{ primaryClaim: dids[1], displayName: "seller", listingAnchors: [lei, plain], deals: [] }]);
+    installAuthorityVerifier(verifyTestAuthority);
+    assert.equal(await tierOf([lei, plain]), "institutional", "indexRegistration defaults to the installed verifier");
+    assert.equal(await tierOf([lei, plain], async () => false), "self-declared", "an explicit adapter still governs");
     for (const [verifyAttestation, want] of [[verifyTestAuthority, "institutional"], [undefined, "self-declared"]] as const) {
-      await reindexAll({ log: () => {}, resolveIdentities: async () => [], resolveRecipe, verifyAttestation });
-      assert.equal(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.identityTier, want);
+      installAuthorityVerifier(verifyAttestation);
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [], resolveRecipe });
+      assert.equal(savedTier(), want);
     }
+  } finally { restore(); }
+});
+
+test("the reindex and index-now routes derive a seller's tier with the one installed verifier", async () => {
+  // Shipped entry points take no options: recipe policy comes from the environment, the verifier from the install.
+  const { policy, savedTier, restore } = await verifiedLeiSeller();
+  const { POST: reindex } = await import("../app/api/dacs/reindex/route.js");
+  const { POST: indexNow } = await import("../app/api/dacs/index-now/route.js");
+  const post = async (route: typeof reindex, path: string, body?: Obj) => {
+    const response = await route(new NextRequest(`http://directory.test/api/dacs/${path}`, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }));
+    assert.equal(response.status, 200, `${path}: ${await response.clone().text()}`);
+  };
+  const priorPolicies = process.env.DACS_RECIPE_POLICIES; const priorLog = console.log;
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([policy]); console.log = () => {};
+  try {
+    installAuthorityVerifier(verifyTestAuthority);
+    await post(reindex, "reindex");
+    assert.equal(savedTier(), "institutional", "batch reindex uses the installed verifier");
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "institutional", "immediate indexing keeps the batch tier");
+    installAuthorityVerifier(undefined);
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "self-declared", "without an installed verifier the immediate path fails closed");
+    installAuthorityVerifier(verifyTestAuthority);
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "institutional");
+    installAuthorityVerifier(undefined);
+    await post(reindex, "reindex");
+    assert.equal(savedTier(), "self-declared", "the shipped default: no verifier installed");
   } finally {
-    globalThis.fetch = originalFetch;
-    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
-    store.saveCatalog(priorCatalog);
+    console.log = priorLog;
+    if (priorPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = priorPolicies;
+    restore();
   }
 });
 

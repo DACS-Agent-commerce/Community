@@ -51,7 +51,8 @@
 #   schemes unverified, BR-4), decided pass, signed by a trusted signer under a live
 #   exact-version recipe, fresh in the min(expiresAt, validUntil ?? verifiedAt + defaultMaxAgeSec)
 #   window, and backed by an authority proof the deployment verifier authenticates
-#   (indexRegistration / ReindexOptions.verifyAttestation). A presenter identityTier is ignored.
+#   (installAuthorityVerifier; the reindex CLI, reindex and index-now routes all read that one
+#   instance as deriveIdentityTier's default). A presenter identityTier is ignored.
 #   The seller tier is the highest across its listings' bundles (a Directory extension).
 #   test/identity-rules.test.ts, test/current-indexer.test.ts, test/malformed-artifacts.test.ts
 #   and test/standard-vectors.test.ts (identity-tier-self-asserted-ignored).
@@ -116,14 +117,14 @@
 #     remain indeterminate. This applies to every included VerifyResult, optional ones too:
 #     each needs a valid live recipe policy.
 #     Wrapper expiry and listing maxAge only narrow that authority window.
+#     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
+#     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
 #   Identity tiers (DACS-1 §6.3.2) are stricter than the freshness text in two fail-closed ways:
 #     a VerifyResult whose verifiedAt is later than the reader's clock never counts (an unbounded
 #     clock-skew allowance would let a forward-dated result start its window early), and a
 #     present but non-numeric wrapper issuedAt or expiresAt makes the claim unverified rather
 #     than ignored. A numeric issuedAt is ignored, as the Standard requires. RAV-2: tiers cannot
 #     disclose per-result availability, so only live recipes raise a tier.
-#     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
-#     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
 #   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. The DV-1 hash covers
 #     the complete NFC/JCS payload, including any signature/signatures fields (the pinned SDK's
 #     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
@@ -177,9 +178,9 @@
 #     the Directory publishes no rate for them rather than counting only their failures.
 #
 # No production method-specific authority-proof verifier is installed. The session graph
-# (EvidenceGraphDeps.verifyAttestation) and identity tiers (indexRegistration /
-# ReindexOptions.verifyAttestation) fail closed without one: every shipped seller tier is
-# self-declared, and a session graph that cites an authority proof does not verify.
+# (EvidenceGraphDeps.verifyAttestation) and identity tiers (installAuthorityVerifier, read by
+# deriveIdentityTier on every indexing entry point) fail closed without one: every shipped seller
+# tier is self-declared, and a session graph that cites an authority proof does not verify.
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
