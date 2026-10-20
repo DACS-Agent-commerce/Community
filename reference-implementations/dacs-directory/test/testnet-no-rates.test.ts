@@ -344,6 +344,10 @@ test("rate and score filters and ordering return a clear 400 even with empty, re
     "minCompletionRate%5B0%5D=0.5", "minRating%5Bgte%5D=4", "minRating%5B%5Dx=4", "min_rating=4",
     "min-completion-rate=0.5", "MIN_COMPLETION_RATE=0.5", "sort%5Bby%5D=x", "sort_by=completionRate",
     "order-by=price", "ranking=1",
+    // Nested, dotted and suffixed spellings name the same refused filter or ordering.
+    "filter%5BminCompletionRate%5D=0.9", "filter%5BminRating%5D=4", "filters%5BtrackRecord%5D=1",
+    "page%5Bsort%5D=price", "where%5BcompletionRate%5D%5Bgte%5D=0.5", "minCompletionRate.gte=0.5",
+    "min.rating=4", "ratingMin=4", "completionRateMin=0.5", "minAverageSellerRating=4",
   ]) {
     const response = await getListings(new NextRequest(`https://directory.example/api/dacs/listings?${query}`));
     assert.equal(response.status, 400, query);

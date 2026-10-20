@@ -31,13 +31,17 @@ export function unavailableMetricQuery(params: URLSearchParams): string | undefi
     "averagebuyerrating", "averagesellerrating", "reputationscore",
   ]);
   const rankingKeys = new Set(["sort", "sortby", "order", "orderby", "rank", "rankby", "ranking"]);
+  // No listing query parameter contains these words, so any name that does is
+  // a rate, rating or score filter however it is nested or suffixed.
+  const metricWord = /completionrate|faultrate|rating|score|trackrecord/;
   for (const name of params.keys()) {
-    // A bracketed form (`[]`, `[0]`, `[gte]`) and `_`/`-` separators spell the same filter.
-    const key = name.replace(/\[.*$/s, "").toLowerCase().replace(/[_-]/g, "");
-    if (metricKeys.has(key)) {
+    // Bracketed (`filter[x]`, `x[gte]`) and dotted (`x.gte`) forms and `_`/`-`
+    // separators spell the same filter, so every segment is checked.
+    const segments = name.toLowerCase().replace(/[_-]/g, "").split(/[[\].]+/).filter(Boolean);
+    if (segments.some((segment) => metricKeys.has(segment)) || metricWord.test(segments.join(""))) {
       return `Rate and score filters are unavailable on testnet under TP-1. ${COMPLETION_VERIFICATION_UNAVAILABLE}.`;
     }
-    if (rankingKeys.has(key)) {
+    if (segments.some((segment) => rankingKeys.has(segment))) {
       return "Sorting and ranking are unavailable on testnet under TP-1.";
     }
   }
