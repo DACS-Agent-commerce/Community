@@ -936,10 +936,11 @@ test("SB-2 voids one settlement cited by two verified jobs in every TxRef shape,
   ];
   const x402 = { kind: "x402-event", chainId: 8453, settlementTxHash: hash, logIndex: 4,
     httpResource: "https://seller.example/pay", paymentReceiptHash: "cd".repeat(32), protocolVersion: "2" };
-  const solana = { kind: "solana-instruction", cluster: "devnet", instructionIndex: 1,
+  // The fixture's Solana rail is `solana-spl:mainnet:USDC`, so its TxRef is on mainnet.
+  const solana = { kind: "solana-instruction", cluster: "mainnet", instructionIndex: 1,
     signature: "99eUso3aSbE9tqGSTXzo3TLfKb9RkMTURrHKQ1K7Zh3BbeqPevr5E1iCbpTjqHuTFLtfxTTD5ekfVuZFzQyEQf8" };
   cases.push(["x402-event", x402, x402, `evm:8453:${hash}:4`]);
-  cases.push(["solana-instruction", solana, solana, `solana:devnet:${solana.signature}:1`]);
+  cases.push(["solana-instruction", solana, solana, `solana:mainnet:${solana.signature}:1`]);
   const rails: Record<string, string> = {
     "evm-event": "pay-evm-erc20", "x402-event": "pay-x402", "solana-instruction": "pay-solana-spl",
   };
@@ -981,6 +982,9 @@ test("success payment claims require nonempty exact TxRefs matching the signed a
   const hash = "ab".repeat(32);
   const evm = { kind: "evm-event", chainId: 8453, txHash: hash, logIndex: 0 };
   const demos = { kind: "demos", txHash: hash };
+  // The fixture rails are `evm-erc20:8453:USDC` and `solana-spl:mainnet:USDC`.
+  const solana = { kind: "solana-instruction", cluster: "mainnet", instructionIndex: 1,
+    signature: "99eUso3aSbE9tqGSTXzo3TLfKb9RkMTURrHKQ1K7Zh3BbeqPevr5E1iCbpTjqHuTFLtfxTTD5ekfVuZFzQyEQf8" };
   const cases: Array<[string, unknown[], string, string, number?]> = [
     ["empty payment refs", [], "pay-dem", "pay-dem"],
     ["non-array payment refs", null as unknown as unknown[], "pay-dem", "pay-dem"],
@@ -992,12 +996,15 @@ test("success payment claims require nonempty exact TxRefs matching the signed a
     ["unknown nested field", [{ ...demos, extra: true }], "pay-dem", "pay-dem"],
     ["invalid optional field", [{ ...demos, blockNumber: -1 }], "pay-dem", "pay-dem"],
     ["missing x402 receipt fields", [{ kind: "x402-event", chainId: 8453, settlementTxHash: hash, logIndex: 0 }], "pay-x402", "pay-x402"],
+    ["EVM ref on another chain than the rail", [{ ...evm, chainId: 1 }], "pay-evm-erc20", "pay-evm-erc20"],
+    ["Solana ref on another cluster than the rail", [{ ...solana, cluster: "devnet" }], "pay-solana-spl", "pay-solana-spl"],
   ];
   for (const [name, refs, rail, phase, phaseIndex] of cases) await t.test(name, async () => {
     const valid = rail === "pay-dem" ? { ...demos, txHash: demosTxHash("other") } :
       rail === "pay-x402" ? { kind: "x402-event", chainId: 8453, settlementTxHash: demosTxHash("other"), logIndex: 0,
         httpResource: "https://seller.example/pay", paymentReceiptHash: "cd".repeat(32), protocolVersion: "2" } :
-        { ...evm, txHash: demosTxHash("other") };
+        rail === "pay-solana-spl" ? { ...solana, instructionIndex: 2 } :
+          { ...evm, txHash: demosTxHash("other") };
     const record = await indexTwoJobs(refs, [valid], rail, phase, phaseIndex);
     assert.equal(record.deals[0].refsVerified, true, name);
     assert.equal(record.deals[0].reputationEligible, false, name);

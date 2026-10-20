@@ -93,7 +93,11 @@ reputation and in listing hints:
   and rail at the same index. Unknown registry entries/versions and unsupported
   ST-8 resolved records are withheld until their authority can be resolved.
   Demos, EVM ERC-20, Solana SPL and x402 rails accept only their corresponding
-  TxRef arms. A mismatch excludes the deal from every aggregate.
+  TxRef arms. An EVM ERC-20 TxRef's `chainId` and a Solana SPL TxRef's
+  `cluster` must equal the network the rail ID names (`evm-erc20:8453:USDC`
+  means chain 8453, `solana-spl:mainnet:USDC` means `mainnet`). The
+  `x402:default` rail names no network, so an x402 TxRef's chain is not
+  compared with it. A mismatch excludes the deal from every aggregate.
 - Success delivery evidence (`deliver-*`) must be SDK-valid and match a
   delivery phase in both the bundle's phase summary and the signed listing
   pipeline; otherwise the deal does not count. It adds no settlement id.

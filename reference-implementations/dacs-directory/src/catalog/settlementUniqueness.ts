@@ -3,7 +3,7 @@ import { paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { isChainTxRef, isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 
 /** Bump whenever persisted settlement eligibility/identity rules change. */
-export const SETTLEMENT_PROJECTION_VERSION = 2;
+export const SETTLEMENT_PROJECTION_VERSION = 3;
 
 const CURRENT_OUTCOMES = new Set([
   "completed", "failed-perm", "failed-counterparty", "failed-substrate",
@@ -51,6 +51,9 @@ function isSolanaSignature(value: unknown): value is string {
 export function settlementTxId(ref: unknown): string | null {
   if (!isRecord(ref)) return null;
   // Frozen legacy MVP TxRef `{ rail, txHash, kind }`: a native Demos transfer is one settlement.
+  // The id is kept as deal history only. `settlementClaims` never counts it:
+  // the pinned SDK's `isSettlementEvidence` refuses this shape, and `pay-dem`
+  // accepts only the current `demos` arm.
   if (typeof ref.rail === "string") {
     const hash = ref.kind === "settlement" && ref.rail === "demos" &&
       Object.keys(ref).every((key) => ["kind", "rail", "txHash"].includes(key))
@@ -110,6 +113,9 @@ export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>;
   let projected = true;
   const handler = context.railRegistryVersion === 1 && context.railId !== null &&
     Object.hasOwn(PINNED_RAIL_HANDLERS, context.railId) ? PINNED_RAIL_HANDLERS[context.railId] : null;
+  // A pinned EVM or Solana rail id names its network (`evm-erc20:{chainId}:…`,
+  // `solana-spl:{cluster}:…`); a TxRef on another network is not its payment.
+  const railNetwork = handler ? context.railId?.split(":")[1] : undefined;
   const settlementTxIds = evidence.filter(({ raw }) => raw.outcome === "success").flatMap(({ raw: record, logicalAddress }) => {
     // Delivery evidence cannot replace payment evidence in a settlement phase.
     if (typeof record.phase === "string" && record.phase.startsWith("deliver-")) {
@@ -147,11 +153,11 @@ export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>;
     const refs = record.paymentTxRefs as unknown[];
     return refs.flatMap((ref) => {
       const id = settlementTxId(ref);
-      const kind = isRecord(ref) ? ref.kind : undefined;
-      const railMatches = handler === "pay-dem" ? kind === "demos"
-        : handler === "pay-evm-erc20" ? kind === "evm-event"
-          : handler === "pay-solana-spl" ? kind === "solana-instruction"
-            : handler === "pay-x402" && kind === "x402-event";
+      const railMatches = !isRecord(ref) ? false
+        : handler === "pay-dem" ? ref.kind === "demos"
+          : handler === "pay-evm-erc20" ? ref.kind === "evm-event" && ref.chainId === Number(railNetwork)
+            : handler === "pay-solana-spl" ? ref.kind === "solana-instruction" && ref.cluster === railNetwork
+              : handler === "pay-x402" && ref.kind === "x402-event";
       if (id === null || !railMatches) projected = false;
       return id === null ? [] : [{ id, observedAt: Number(record.observedAt), phaseIndex }];
     });
