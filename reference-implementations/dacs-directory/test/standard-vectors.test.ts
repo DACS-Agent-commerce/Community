@@ -15,6 +15,7 @@ import {
 } from "../src/catalog/evidenceGraph.js";
 import { admitSettlement, settlementTxId } from "../src/catalog/settlementKey.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
+import { deriveIdentityTier } from "../src/catalog/identityVerification.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
@@ -68,6 +69,7 @@ const VENDORED = [
   "signature-value-encoding-v0.1.json", "revocation-binding-v0.3.json", "sb2-settlement-uniqueness-v0.1.json",
   "agreement-listing-v0.1.json", "mixed-version-reconciliation-v0.3.json", "fault-bundle-perspective-pair-v0.3.json",
   "payee-destination-binding-v0.1.json", "demos-agent-claim-reference.json", "listing-preserve-unknown-v0.1.json",
+  "identity-tier-self-declared.json",
 ];
 
 test("every vendored Standard file is the byte-identical copy SPEC_PIN records", () => {
@@ -274,6 +276,12 @@ test("SIG-5 listing-preserve-unknown-v0.1 through verifyListing", async () => {
     // An unknown phase kind is refused even under a valid signature (§11.1.2), as is any altered signed field.
     assert.equal(await verifyListing(listing, keys) ? "pass" : "fail", vector.expected, vector.name);
   }
+});
+
+test("DACS-1 §6.3.2.1 identity-tier-self-asserted-ignored (IT-2): a presenter's identityTier is recomputed", async () => {
+  const set = load<{ identityBundle: Obj; expectedIdentityTier: string }>("identity-tier-self-declared.json");
+  assert.equal(set.identityBundle.identityTier, "institutional");
+  assert.equal(await deriveIdentityTier(set.identityBundle), set.expectedIdentityTier);
 });
 
 test("did:demos:agent ClaimReference profile fixture (DACS-Standard #296 at 725fa78)", () => {

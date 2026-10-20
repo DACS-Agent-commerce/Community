@@ -51,6 +51,7 @@ import {
 } from "./store";
 import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
+import type { VerifyAuthorityAttestation } from "./authorityAttestation";
 
 export interface ReindexSummary {
   sellers: number;
@@ -66,6 +67,11 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /**
+   * Method-specific authority-proof verifier for identity tiers (DACS-2 §7.5.2). None ships:
+   * without one, every seller stays self-declared.
+   */
+  verifyAttestation?: VerifyAuthorityAttestation;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
@@ -422,7 +428,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, listingAnchorsFor).catch((error: unknown) => {
+      }, listingAnchorsFor, opts.verifyAttestation).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";

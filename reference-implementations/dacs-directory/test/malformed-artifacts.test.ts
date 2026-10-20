@@ -442,8 +442,8 @@ test("identity tier skips claims whose verification artifacts have no canonical 
   const read = async (at: string) => objects[at] ? JSON.parse(objects[at]) as Obj : null;
   const resultFor = async (attestation: string, attestationHash: string) => {
     const scope: Obj = {
-      resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass",
-      attestation: { anchor: { kind: "storage-program", locator: attestation }, contentHash: attestationHash, signer: authoritySigner }, verifiedAt: 20, validUntil: 200,
+      resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
+      attestation: { anchor: { kind: "storage-program", locator: attestation }, contentHash: attestationHash, signer: authoritySigner }, fetchedAt: 10, verifiedAt: 20, validUntil: 200,
     };
     return { ...scope, signature: await signArtifact(scope, "verify-result", 0) };
   };
@@ -457,7 +457,7 @@ test("identity tier skips claims whose verification artifacts have no canonical 
   objects[locator(75)] = withMember(valid, "1e400");
   const claim = (at: string, raw: Obj) => ({ ref: "lei:123", verifiedBy: ref(at, raw, "verify-result", { recipeVersion: 2 }) });
   const unhashableResult = { ref: "lei:123", verifiedBy: { anchor: { kind: "storage-program", locator: locator(75) }, contentHash: "f".repeat(64), recipeVersion: 2 } };
-  const policy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live" as const, trustedResultSigners: [buyer] };
+  const policy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live" as const, trustedResultSigners: [buyer] };
 
   const malformedOnly = { claims: [unhashableResult, claim(locator(74), malformedAttestation)] };
   assert.equal(await deriveIdentityTier(malformedOnly, async () => policy, 100, read, undefined, verifyTestAuthority), "self-declared");

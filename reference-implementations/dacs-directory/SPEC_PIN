@@ -39,10 +39,22 @@
 #   expiry/maxAge can only narrow it. See test/vet-claim-rules.test.ts.
 # - Recipe policy and historical snapshot resolvers:
 #   test/recipe-policy.test.ts and test/recipe-snapshot.test.ts.
-# - authenticateAuthorityAttestation adapter boundary: missing, rejecting
-#   or throwing adapters fail closed; adapters must authenticate original proof/hash
-#   scope, signer and validator epoch. test/authority-attestation.test.ts uses a
-#   signed fixture adapter; it is not a production method-specific verifier.
+# - authenticateAuthorityAttestation adapter boundary: the proof's JSON content hash
+#   (JCS of the whole object, signature fields included) must equal the AttestationRef's
+#   before any adapter runs (DACS-2 §7.5.2 step 2); missing, rejecting or throwing adapters
+#   fail closed; adapters must authenticate signer, validator epoch and proof.
+#   test/authority-attestation.test.ts uses a signed fixture adapter; it is not a
+#   production method-specific verifier.
+# - Seller identity tier (DACS-1 §6.3.2 / §6.3.2.1 IT-1..IT-3, split 4/5): each claim's
+#   verifiedBy is fetched, hash-checked, shape-checked (DACS-2 §7.5), matched to the claim in
+#   canonical form (scheme case, per-scheme identifier rules, parameters dropped; unregistered
+#   schemes unverified, BR-4), decided pass, signed by a trusted signer under a live
+#   exact-version recipe, fresh in the min(expiresAt, validUntil ?? verifiedAt + defaultMaxAgeSec)
+#   window, and backed by an authority proof the deployment verifier authenticates
+#   (indexRegistration / ReindexOptions.verifyAttestation). A presenter identityTier is ignored.
+#   The seller tier is the highest across its listings' bundles (a Directory extension).
+#   test/identity-rules.test.ts, test/current-indexer.test.ts, test/malformed-artifacts.test.ts
+#   and test/standard-vectors.test.ts (identity-tier-self-asserted-ignored).
 # - Session Vet admission in the current evidence graph. It resolves historical
 #   IdentityBundle bytes, authenticates the session challenge, selects the session's
 #   DACS_RECIPE_SNAPSHOTS roster and matches the listing requirement through
@@ -66,7 +78,8 @@
 #   test/current-indexer.test.ts.
 #
 # Recorded deviations (vectors: test/standard-vectors.test.ts; local guards: test/evidence-graph-rules.test.ts,
-# test/indexer-binding-rules.test.ts, test/legacy-deal-rules.test.ts and test/native-payment.test.ts):
+# test/indexer-binding-rules.test.ts, test/legacy-deal-rules.test.ts, test/native-payment.test.ts and
+# test/identity-rules.test.ts):
 #   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not
 #     reference: a session whose listing sets deadlineSecAfterCommit or validity.notAfter is
 #     indeterminate and never counted.
@@ -103,6 +116,12 @@
 #     remain indeterminate. This applies to every included VerifyResult, optional ones too:
 #     each needs a valid live recipe policy.
 #     Wrapper expiry and listing maxAge only narrow that authority window.
+#   Identity tiers (DACS-1 §6.3.2) are stricter than the freshness text in two fail-closed ways:
+#     a VerifyResult whose verifiedAt is later than the reader's clock never counts (an unbounded
+#     clock-skew allowance would let a forward-dated result start its window early), and a
+#     present but non-numeric wrapper issuedAt or expiresAt makes the claim unverified rather
+#     than ignored. A numeric issuedAt is ignored, as the Standard requires. RAV-2: tiers cannot
+#     disclose per-result availability, so only live recipes raise a tier.
 #     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
 #     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
 #   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. The DV-1 hash covers
@@ -157,13 +176,10 @@
 #     without this extension and is indeterminate whatever its outcome, so such sessions are neutral:
 #     the Directory publishes no rate for them rather than counting only their failures.
 #
-# Pending production integration (split 4/5): method-specific authority-proof
-# authentication. The session graph authenticates VerifyResult authority evidence only
-# through EvidenceGraphDeps.verifyAttestation and fails closed without it; no production
-# verifier is installed. Identity-tier derivation still checks authority content hashes
-# only, and the adapter is not wired into tiers.
-# Tier policy still accepts operator_gated/closed_data/bilateral without disclosing
-# per-result availability. Session admission uses a live-only profile.
+# No production method-specific authority-proof verifier is installed. The session graph
+# (EvidenceGraphDeps.verifyAttestation) and identity tiers (indexRegistration /
+# ReindexOptions.verifyAttestation) fail closed without one: every shipped seller tier is
+# self-declared, and a session graph that cites an authority proof does not verify.
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
@@ -195,6 +211,10 @@
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
 #     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
+#   golden identity-tier-* (DACS-1 §6.3.2.1): only identity-tier-self-asserted-ignored runs. The
+#     institutional and verified fixtures name VerifyResult locators without the VerifyResult or
+#     authority-proof bytes, and raw-key, highest-wins, stale-not-elevated and forged-unresolved
+#     have no fixture; test/identity-rules.test.ts pins those rules with signed local artifacts.
 #
 # Partially run vector sets at this pin (test/standard-vectors.test.ts):
 #   payee-destination-binding-v0.1: 14 of 28. Run: 8 current-reader agreement-artifact-gate cases and
@@ -219,6 +239,7 @@
 #   conformance/vectors/security/payee-destination-binding-v0.1.json cd83d95982d6529ac3f776d48df8d92c86b80806a88e96a62d80674563aaa779
 #   conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
 #   conformance/fixtures/identity/demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
+#   conformance/fixtures/identity/identity-tier-self-declared.json c0d517249f4ac015c8fa6884a5f415c7c4cadbb20c550b6d20facf1672fd0acc
 #   conformance/vectors/security/unresolved-vs-absent-v0.3.json 8a543319798cb60073631a9a2431f45e866f89db8b136a76b679780718a15b91
 #   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
 #   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009

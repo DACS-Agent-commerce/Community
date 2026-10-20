@@ -16,7 +16,7 @@ function claimRequirementShape(value: unknown): boolean {
 }
 
 /** Shape validation is independent of the caller's signature/authority authentication. */
-function verifyResultShape(value: unknown): boolean {
+export function verifyResultShape(value: unknown): boolean {
   const vr = rec(value);
   const attestation = rec(vr?.attestation); const anchor = rec(attestation?.anchor);
   const signature = rec(vr?.signature);
@@ -50,8 +50,8 @@ function domainIdentity(value: string): string | null {
   return domain.length <= 253 ? domain : null;
 }
 
-/** CF-1/CF-3: parameters are qualifiers, never part of the claim identity. */
-function claimIdentity(value: unknown): { scheme: string; identifier: string } | null {
+/** CF-1/CF-3: parameters are qualifiers, never part of the claim identity. Unregistered schemes are null (BR-4). */
+export function claimIdentity(value: unknown): { scheme: string; identifier: string } | null {
   const obj = rec(value);
   const parts = typeof value === "string" ? value.split("?", 1)[0].match(/^([^:]+):(.+)$/s) : null;
   const scheme = (parts?.[1] ?? obj?.scheme);

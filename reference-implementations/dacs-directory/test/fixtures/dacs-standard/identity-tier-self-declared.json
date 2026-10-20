@@ -1,0 +1,23 @@
+{
+  "expectedIdentityTier": "self-declared",
+  "identityBundle": {
+    "bundleVersion": "1",
+    "claims": [
+      {
+        "ref": "key:cccccccc"
+      }
+    ],
+    "identityTier": "institutional",
+    "presentation": {
+      "kind": "per-claim",
+      "signatures": []
+    },
+    "presentedAt": 1760000000000,
+    "presentedBy": "key:cccccccc"
+  },
+  "kind": "IdentityTierCase",
+  "note": "Self-asserted institutional tier is intentionally ignored because no verified institutional claim is present.",
+  "specRefs": [
+    "§6.3.2.1"
+  ]
+}

@@ -75,6 +75,7 @@ import {
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import { publisherListingAnchors, type ResolvePublisherListingAnchors } from "./publisherListings.js";
 import { deriveIdentityTier, sellerIdentityTier, type ResolveRecipe } from "./identityVerification.js";
+import type { VerifyAuthorityAttestation } from "./authorityAttestation.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
@@ -185,6 +186,8 @@ export async function indexRegistration(
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
   listingAnchorsFor: ResolvePublisherListingAnchors = publisherListingAnchors(),
+  /** Deployment authority-proof verifier for identity tiers; none ships, so tiers stay self-declared without one. */
+  verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -642,7 +645,8 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
-  const identityTier = sellerIdentityTier(await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe))));
+  const identityTier = sellerIdentityTier(await Promise.all(identityBundles.map((bundle) =>
+    deriveIdentityTier(bundle, resolveRecipe, now, readAnchor, resolveDemosPrimaryClaimKey, verifyAttestation))));
 
   return {
     primaryClaim: reg.primaryClaim,

@@ -920,10 +920,13 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
-    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
-  assert.equal(tampered.ok, false);
-  assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  // DACS-2 §7.5.2 step 2: the proof's content hash is checked before, and whatever, the adapter answers.
+  for (const verifyAttestation of [undefined, async () => true]) {
+    const tampered = await buildCurrentEvidenceGraph(locator(5), { verifyAttestation, resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+      resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+    assert.equal(tampered.ok, false, verifyAttestation ? "an accepting adapter" : "no adapter");
+    assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  }
 });
 
 test("current evidence graph caps attacker-controlled transitive work", async () => {
@@ -1392,11 +1395,13 @@ test("current pre-commit policy cancellations are reputation-neutral", () => {
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {
   maps.clear(); const attested = authorityProof({ authority: "ok" }); maps.set(locator(8), attested);
-  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass", reason: "found",
+  // A did:demos:agent proof signer models a verifiable-credential issuer; consensus-backed-proxy would need a
+  // substrate-validator-set signer and roster (DACS-2 §7.5).
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
     attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: proofHash(attested), signer: authoritySigner }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
   const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(9), result);
   const identity = { claims: [{ ref: "lei:123", verifiedBy: ref(locator(9), result, "verify-result", { recipeVersion: 2 }) }] };
-  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
   const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority);
   assert.equal(tier, "institutional");
   const mixedScheme = structuredClone(result);
@@ -1408,6 +1413,60 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority), "self-declared");
+});
+
+test("indexing and reindexing raise a seller's tier only through the deployment's authority adapter", async () => {
+  const fixture = await vector();
+  const issued = Date.now() - 1_000;
+  const proof = authorityProof({ authority: "gleif", record: "123" }); maps.set(locator(80), proof);
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
+    attestation: { anchor: { kind: "storage-program", locator: locator(80) }, contentHash: proofHash(proof), signer: authoritySigner },
+    fetchedAt: issued - 10, verifiedAt: issued, validUntil: issued + 3_600_000 };
+  const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(81), result);
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const resolveRecipe = async (scheme: string, version: number) => scheme === "lei" && version === 2 ? policy : null;
+  // A second listing whose signed seller IdentityBundle also carries the verified lei claim.
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "svc-lei";
+  const identity: Obj = { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1,
+    claims: [{ ref: dids[1] }, { ref: "lei:123", verifiedBy: ref(locator(81), result, "verify-result", { recipeVersion: 2 }) }] };
+  const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+  scope.seller = { displayName: "seller", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[1], signature: presentation }] } } };
+  maps.set(locator(82), { ...scope, signature: await sign(scope, "listing", 1) });
+  const [plain, lei] = [fixture.locators.listing, locator(82)];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
+    const data = maps.get(path.split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
+  try {
+    const tierOf = async (listingAnchors: string[], verifyAttestation?: typeof verifyTestAuthority) => (await indexRegistration(
+      { primaryClaim: dids[1], displayName: "seller", listingAnchors, deals: [] }, undefined, async () => [], resolveRecipe, undefined, () => [], verifyAttestation)).identityTier;
+    // The seller tier is the highest across every listing's bundle, whichever listing carries the claim.
+    assert.equal(await tierOf([lei, plain], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain, lei], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain], verifyTestAuthority), "self-declared");
+    assert.equal(await tierOf([lei, plain]), "self-declared", "no adapter installed: the shipped default fails closed");
+    assert.equal(await tierOf([lei, plain], async () => false), "self-declared");
+    store.saveDomains([]);
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    store.saveRegistrations([{ primaryClaim: dids[1], displayName: "seller", listingAnchors: [lei, plain], deals: [] }]);
+    for (const [verifyAttestation, want] of [[verifyTestAuthority, "institutional"], [undefined, "self-declared"]] as const) {
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [], resolveRecipe, verifyAttestation });
+      assert.equal(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.identityTier, want);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
+  }
 });
 
 test("a mixed pair indexes the fault copy's advisory fields and hash even when it is the buyer copy", async () => {

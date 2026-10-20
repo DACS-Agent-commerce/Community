@@ -14,6 +14,22 @@ test("authority authentication fails without an adapter and on adapter failure o
   assert.equal(await authenticateAuthorityAttestation(raw, ref, result, verifyTestAuthority), true);
 });
 
+test("the proof's content hash is checked before the adapter, so an accepting adapter cannot bypass it (DACS-2 §7.5.2 step 2)", async () => {
+  const raw = authorityProof({ subject: "lei:ABC", status: "active" });
+  const result = { method: "verifiable-credential" };
+  const accept = async () => true;
+  const check = (contentHash: unknown, value: Record<string, unknown> = raw) =>
+    authenticateAuthorityAttestation(value, { signer: authoritySigner, contentHash }, result, accept);
+  assert.equal(await check(proofHash(raw)), true);
+  assert.equal(await check(`sha256:${proofHash(raw).toUpperCase()}`), true, "the hash forms a VerifyResultRef accepts");
+  assert.equal(await check(`sha256-${proofHash(raw)}`), true);
+  for (const contentHash of ["0".repeat(64), proofHash({ ...raw, status: "revoked" }), "", 7, undefined]) {
+    assert.equal(await check(contentHash), false, String(contentHash));
+  }
+  assert.equal(await check(proofHash(raw), { ...raw, status: "revoked" }), false, "changed content");
+  assert.equal(await check(proofHash(raw), { ...raw, signature: "A".repeat(86) }), false, "the hash covers the proof's signature fields");
+});
+
 test("authority adapter authenticates original proof bytes, required signer and validator epoch", async () => {
   for (const field of ["signature", "proofSignature"]) {
     const raw = authorityProof({ subject: "lei:ABC", status: "active" }, 7, field);
