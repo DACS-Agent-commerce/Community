@@ -8,7 +8,7 @@
  * required; they are the publisher's declaration and are not probed. Index entries carry the
  * catalog's verified content hashes. Each active offer's anchor is re-read and must still hold
  * that exact verified listing: an offer whose anchor is gone or changed is omitted and reported,
- * and a failed read refuses the export, so a partial index is never offered for signing.
+ * and a failed read refuses the export with its cause, so a partial index is never offered for signing.
  * Withdrawn versions are retained whatever their anchors read now (RB-3). Host the files
  * byte-exact with the publisher signature, then submit the domain to POST /api/dacs/register-domain.
  */
@@ -16,7 +16,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { sha256Hex } from "../../../../src/catalog/canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { A2A_PROTOCOL_VERSION, a2aService } from "@/src/catalog/a2a";
-import { readAnchorResult } from "@/src/catalog/chain";
+import { vetPublicHttpsUrl } from "@/src/catalog/boundedHttps";
+import { readAnchorResult, type AnchorUnavailableReason } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
 import { activeOffer } from "@/src/catalog/discovery";
 import { verifyListing } from "@/src/catalog/listingVerification";
@@ -24,17 +25,29 @@ import { loadCatalog } from "@/src/catalog/store";
 import type { ListingSummary } from "@/src/catalog/types";
 import { MAX_INDEX_LISTINGS, normalizeSubmittedDomain, wellKnownWithdrawalMessage } from "@/src/catalog/wellknown";
 
+/** What a failed read means for the publisher: the last two persist until the anchor or the listing changes. */
+const UNAVAILABLE: Record<AnchorUnavailableReason, string> = {
+  timeout: "the node did not answer in time; retry later",
+  network: "the node could not be reached; retry later",
+  "node-error": "the node answered with an error; retry later",
+  malformed: "the node's answer could not be read; retry later",
+  denied: "the node refuses to serve this anchor, and every export fails until it is readable or the listing is withdrawn",
+  oversized: "the anchor exceeds this directory's size limits, and every export fails until it holds a smaller listing or the listing is withdrawn",
+};
+
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
   const claim = q.get("claim")?.trim();
   const hex = claim?.match(/([0-9a-fA-F]{64})$/)?.[1];
   if (!claim || !hex) return NextResponse.json({ error: "need ?claim=" }, { status: 400 });
-  // Validated exactly as POST /api/dacs/register-domain will validate it.
+  // The syntax and host rules of POST /api/dacs/register-domain. Registration also resolves the
+  // hostname and refuses one that resolves to a non-public address; generation does no DNS lookup.
   const submitted = q.get("domain")?.trim();
   if (!submitted || submitted.length > 253) return NextResponse.json({ error: "need ?domain= (the HTTPS hostname that will host these files)" }, { status: 400 });
   let origin: string;
   try {
     origin = normalizeSubmittedDomain(submitted);
+    vetPublicHttpsUrl(origin);
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "invalid domain" }, { status: 400 });
   }
@@ -64,8 +77,10 @@ export async function GET(req: NextRequest) {
     if (l.status !== "revoked") {
       const read = await readAnchorResult(l.anchor.locator);
       if (read.status === "unavailable") {
+        const cause = `${read.reason}${read.httpStatus ? `, HTTP ${read.httpStatus}` : ""}`;
         return NextResponse.json(
-          { error: `the node read for listing ${l.listingId} failed; retry later. A signed index without this offer would withhold it.` },
+          { error: `the node read for listing ${l.listingId} failed (${cause}): ${UNAVAILABLE[read.reason]}. A signed index without this offer would withhold it, so no files are generated.`,
+            listingId: l.listingId, reason: read.reason, ...(read.httpStatus ? { httpStatus: read.httpStatus } : {}) },
           { status: 503 },
         );
       }

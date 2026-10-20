@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { createElement, type ReactNode } from "react";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { applyPublisherSignature, WithdrawalSigningInstructions } from "../src/components/withdrawal-signing.js";
-import { requestWellKnownFiles, WellKnownFiles } from "../src/components/wellknown-files.js";
+import { OmittedOffers, requestWellKnownFiles, WellKnownFiles } from "../src/components/wellknown-files.js";
 import { sha256Hex } from "../src/catalog/canonical.js";
 import { crawlDomain, wellKnownWithdrawalMessage } from "../src/catalog/wellknown.js";
 
@@ -80,6 +80,17 @@ test("the register page's request never throws and surfaces every failure as an 
   }
   const query = new URL(asked[0], "https://directory.example").searchParams;
   assert.deepEqual([...query], [["claim", signer], ["domain", "agent.example"], ["a2aEndpoint", "https://agent.example/a2a"], ["a2aTransport", "HTTP+JSON"]]);
+});
+
+test("the omitted-offer alert names each offer and says that a signed index withholds an offer an earlier one listed", () => {
+  assert.equal(renderToStaticMarkup(createElement(OmittedOffers, { omitted: [] })), "", "no alert when every offer is in the index");
+  const rendered = renderToStaticMarkup(createElement(OmittedOffers, { omitted: [
+    { listingId: "beta", reason: "absent" }, { listingId: "gamma", reason: "changed" }, { listingId: "delta", reason: "invalid" }] }));
+  for (const required of ['role="alert"', "beta", "no longer on chain", "gamma", "no longer holds the indexed listing version", "delta",
+    "no longer holds a listing", "withholds any of these offers that an earlier signed index from this domain listed",
+    "until a later signed index lists it again", "wait for the next index pass and generate again"]) {
+    assert.ok(rendered.includes(required), `missing: ${required}`);
+  }
 });
 
 test("the register page asks for the A2A endpoint and offers every pinned transport", () => {

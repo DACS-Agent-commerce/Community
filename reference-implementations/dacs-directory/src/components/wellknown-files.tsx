@@ -32,6 +32,16 @@ export async function requestWellKnownFiles(request: WellKnownRequest, fetchImpl
   return { files: body.files, signing: body.withdrawalSigning, omitted: body.omitted };
 }
 
+/** Offers left out of the index, and what hosting it signed does to an offer an earlier signed index listed. */
+export function OmittedOffers({ omitted }: { omitted: OmittedOffer[] }) {
+  if (omitted.length === 0) return null;
+  return <div className="verdict err" role="alert">
+    <p>Not in this index:</p>
+    <ul>{omitted.map((offer) => <li key={offer.listingId}><span className="mono">{offer.listingId}</span>: {OMITTED_REASON[offer.reason] ?? offer.reason}</li>)}</ul>
+    <p>Once this index is signed, hosted and crawled, the directory withholds any of these offers that an earlier signed index from this domain listed, until a later signed index lists it again. For a changed anchor, wait for the next index pass and generate again.</p>
+  </div>;
+}
+
 export function WellKnownFiles({ claim, sign }: { claim: string | null; sign?: (message: string) => Promise<string | null> }) {
   const [domain, setDomain] = useState("");
   const [endpoint, setEndpoint] = useState("");
@@ -73,7 +83,7 @@ export function WellKnownFiles({ claim, sign }: { claim: string | null; sign?: (
       <div className="form-field"><label htmlFor="a2a-transport">A2A transport</label><select id="a2a-transport" className="form-control" value={transport} onChange={(event) => setTransport(event.target.value as A2aTransport)}>{A2A_TRANSPORTS.map((option) => <option key={option} value={option}>{option}</option>)}</select></div>
       <button className="btn" type="button" onClick={generate} disabled={busy !== null || !claim || !domain.trim() || !endpoint.trim()}>{busy === "generating" ? "Generating…" : "Generate .well-known files"}</button>
       {error && <p className="verdict err" role="alert">{error}</p>}
-      {generated && generated.omitted.length > 0 && <div className="verdict err" role="alert"><p>Not in this index:</p><ul>{generated.omitted.map((offer) => <li key={offer.listingId}><span className="mono">{offer.listingId}</span>: {OMITTED_REASON[offer.reason] ?? offer.reason}</li>)}</ul></div>}
+      {generated && <OmittedOffers omitted={generated.omitted} />}
       {generated && <WithdrawalSigningInstructions signing={generated.signing} />}
       {generated && sign && <div className="button-row"><button className="btn" type="button" onClick={signWithWallet} disabled={busy !== null || signed}>{signed ? "Signed" : busy === "signing" ? "Waiting for the wallet…" : "Sign with Demos wallet"}</button></div>}
       {signed && <p className="verdict ok" role="status">The signature is in agent.json and agent-card.json. Host all three files byte-exact.</p>}

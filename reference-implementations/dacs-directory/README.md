@@ -405,9 +405,16 @@ hosting it. Once a signed index has been crawled, hosting an unsigned one withho
 listing in that signed index until a newer signed index is crawled. The registration page
 displays the message and can sign it with the connected Demos wallet; it converts the
 wallet's hex signature and verifies it before filling in both cards. An offer whose anchor
-no longer holds the indexed listing is left out of the index and reported; a failed node
-read refuses the export rather than offering a partial index for signing. Submit the
-hosted domain to `POST /api/dacs/register-domain`.
+no longer holds the indexed listing is left out of the index and reported. If an earlier
+signed index from the same domain listed it, the directory withholds it once the new signed
+index is crawled, until a later signed index lists it again or a verified revocation
+resolves it. A failed node read refuses the export, naming the cause, rather than offering
+a partial index for signing. A timeout, a lost connection or a node error can clear on
+retry; an anchor the node refuses to serve or that exceeds the size limits fails every
+export until it is readable again or the listing is withdrawn. The export applies registration's syntax and host
+rules to the domain (no local hostname, no non-public IP address); registration also
+resolves the hostname and refuses a non-public answer. Submit the hosted domain to
+`POST /api/dacs/register-domain`.
 
 Before queuing a carried marker, the crawler independently verifies the listing's
 publisher, chain owner, content hash, ID and version. Unsigned Standard indexes can

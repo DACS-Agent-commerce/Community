@@ -13,7 +13,7 @@ process.env.DACS_DIRECTORY_DATA = directory;
 const store = await import("../src/catalog/store.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { verifyListing } = await import("../src/catalog/listingVerification.js");
-const { crawlDomains, wellKnownWithdrawalMessage } = await import("../src/catalog/wellknown.js");
+const { MAX_INDEX_LISTINGS, crawlDomain, crawlDomains, wellKnownWithdrawalMessage } = await import("../src/catalog/wellknown.js");
 const { GET: wellKnown } = await import("../app/api/dacs/wellknown-files/route.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
@@ -91,19 +91,63 @@ test("a withdrawal cached without its binding stays revoked in the export, so a 
 test("a failed node read refuses the export instead of offering a partial index for signing", async () => {
   const alpha = await signedListing("alpha"), beta = await signedListing("beta");
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([summary("alpha", alpha.hash, at(5)), summary("beta", beta.hash, at(6))])] });
-  for (const failure of [() => new Response("upstream", { status: 503 }),
-    () => Response.json({ success: false, errorCode: "INTERNAL_ERROR" }, { status: 500 }),
-    () => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 }),
-    () => { throw new TypeError("fetch failed"); }]) {
+  // The error keeps the read's cause, and says whether a retry can clear it.
+  const transient = /retry later/, persistent = /every export fails until/;
+  for (const [failure, reason, httpStatus, advice] of [
+    [() => new Response("upstream", { status: 503 }), "node-error", 503, transient],
+    [() => Response.json({ success: false, errorCode: "INTERNAL_ERROR" }, { status: 500 }), "node-error", 500, transient],
+    [() => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 }), "denied", 403, persistent],
+    [() => Response.json({ success: true, owner: `0x${key}`, data: { blob: "x".repeat(256 * 1024) } }), "oversized", undefined, persistent],
+    [() => new Response("{\"success\":tr"), "malformed", undefined, transient],
+    [() => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }, "timeout", undefined, transient],
+    [() => { throw new TypeError("fetch failed"); }, "network", undefined, transient],
+  ] as const) {
     await withNode({ [at(5)]: alpha.raw, [at(6)]: failure }, async () => {
       const response = await generate(`domain=agent.example&${a2a}`);
-      assert.equal(response.status, 503);
+      assert.equal(response.status, 503, reason);
       const body = await response.json();
       assert.match(body.error, /beta/);
+      assert.equal(body.listingId, "beta");
+      assert.equal(body.reason, reason);
+      assert.equal(body.httpStatus, httpStatus, reason);
+      assert.ok(body.error.includes(`(${reason}${httpStatus ? `, HTTP ${httpStatus}` : ""})`), body.error);
+      assert.match(body.error, advice, reason);
       assert.equal(body.files, undefined);
       assert.equal(body.withdrawalSigning, undefined, "no signing message for an incomplete index");
     });
   }
+});
+
+test("an index of more than MAX_INDEX_LISTINGS entries is refused, since the crawler would reject it", async () => {
+  const alpha = await signedListing("alpha");
+  // Withdrawn versions are published without a read, so the count alone decides.
+  const withdrawn = (count: number) => Array.from({ length: count }, (_, n) => summary(`gone-${n}`, alpha.hash, at(1000 + n), "revoked"));
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller(withdrawn(MAX_INDEX_LISTINGS + 1))] });
+  await withNode({}, async () => {
+    const response = await generate(`domain=agent.example&${a2a}`);
+    assert.equal(response.status, 422);
+    assert.match((await response.json()).error, new RegExp(`at most ${MAX_INDEX_LISTINGS} listings`));
+  });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller(withdrawn(MAX_INDEX_LISTINGS))] });
+  const { files } = await withNode({}, async () => {
+    const response = await generate(`domain=agent.example&${a2a}`);
+    assert.equal(response.status, 200, "positive control: exactly the limit is generated");
+    return response.json();
+  });
+  // The crawler applies the same limit: it accepts the generated index and refuses one more entry.
+  const crawl = (listingsJson: string) => {
+    const card = JSON.parse(files["/.well-known/agent.json"]);
+    card.dacs.listings.indexHash = `sha256-${sha256Hex(listingsJson)}`;
+    const hosted: Record<string, string> = { "/.well-known/agent.json": JSON.stringify(card), "/.well-known/dacs/listings.json": listingsJson };
+    return crawlDomain("agent.example", { validateUrl: async () => ({} as never), fetchJson: async (url: string) => {
+      const raw = hosted[new URL(url).pathname]; return raw ? { raw, body: JSON.parse(raw) } : null;
+    } });
+  };
+  const index = JSON.parse(files["/.well-known/dacs/listings.json"]);
+  assert.equal(index.listings.length, MAX_INDEX_LISTINGS);
+  assert.ok(!("error" in await crawl(files["/.well-known/dacs/listings.json"])));
+  const oneMore = await crawl(JSON.stringify({ ...index, listings: [...index.listings, index.listings[0]] }));
+  assert.ok("error" in oneMore && oneMore.error.includes(`at most ${MAX_INDEX_LISTINGS} listings`));
 });
 
 test("an offer whose anchor no longer holds the indexed listing is omitted, reported, and absent from skills", async () => {
@@ -133,6 +177,23 @@ test("the domain is validated like a domain registration before any file is gene
       assert.equal(response.status, 400, domain);
       assert.equal(typeof (await response.json()).error, "string", domain);
     }
+    // Hosts registration refuses before its DNS lookup: the same errors as crawlDomain's validatePublicHttpsUrl.
+    // (NextURL rewrites a 127.x.x.x anywhere in a request URL to "localhost", so loopback is covered by [::1].)
+    for (const [domain, error] of [["localhost", /local hostnames/], ["dev.localhost", /local hostnames/], ["agent.local", /local hostnames/],
+      ["169.254.169.254", /non-public address/], ["10.0.0.5", /non-public address/], ["[::1]", /non-public address/],
+      ["[::ffff:192.168.1.1]", /non-public address/]] as const) {
+      const response = await generate(`domain=${encodeURIComponent(domain)}&${a2a}`);
+      assert.equal(response.status, 400, domain);
+      assert.match((await response.json()).error, error, domain);
+      const registration = await crawlDomain(domain, { fetchJson: async () => assert.fail("refused before any request") });
+      assert.ok("error" in registration && error.test(registration.error), `registration refuses ${domain} the same way`);
+    }
+    const publicAddress = await generate(`domain=93.184.215.14&${a2a}`);
+    assert.equal(publicAddress.status, 200, "positive control: a public IP address passes the host rules");
+    assert.match((await publicAddress.json()).withdrawalSigning.message, /\ndomain:https:\/\/93\.184\.215\.14\n/);
+    const longest = ["a", "b", "c"].map((label) => label.repeat(63)).concat("d".repeat(61)).join(".");
+    assert.equal(longest.length, 253);
+    assert.equal((await generate(`domain=${longest}&${a2a}`)).status, 200, "positive control: a 253-character domain is accepted");
     for (const domain of ["HTTPS://Agent.Example.com", "agent.example.com/", " agent.example.com:443 "]) {
       const response = await generate(`domain=${encodeURIComponent(domain)}&${a2a}`);
       assert.equal(response.status, 200, domain);

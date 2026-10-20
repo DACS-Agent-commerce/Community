@@ -119,6 +119,14 @@ test("A2A generation requires the service endpoint and its declared transport to
       assert.equal(response.status, 400, query);
       assert.match((await response.json()).error, /a2aEndpoint/, query);
     }
+    // An endpoint is at most 2048 characters, the same ceiling as an outbound URL.
+    const endpointOf = (length: number) => `https://service.example/${"a".repeat(length - "https://service.example/".length)}`;
+    const tooLong = await generate(`a2aEndpoint=${encodeURIComponent(endpointOf(2049))}&a2aTransport=GRPC`);
+    assert.equal(tooLong.status, 400);
+    assert.match((await tooLong.json()).error, /a2aEndpoint/);
+    const longest = await generate(`a2aEndpoint=${encodeURIComponent(endpointOf(2048))}&a2aTransport=GRPC`);
+    assert.equal(longest.status, 200, "positive control: exactly 2048 characters is accepted");
+    assert.equal(JSON.parse((await longest.json()).files["/.well-known/agent-card.json"]).url, endpointOf(2048));
     // Every pinned transport is accepted, and the card carries the parsed URL a client will request.
     for (const [endpoint, transport, url] of [["https://service.example/a2a", "JSONRPC", "https://service.example/a2a"],
       ["https://service.example", "GRPC", "https://service.example/"], [" https://Service.Example/a2a ", "HTTP+JSON", "https://service.example/a2a"],

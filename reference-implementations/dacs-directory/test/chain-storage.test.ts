@@ -181,34 +181,58 @@ test("a storage read separates a definitive answer from a transport failure (RB-
   const at = "stor-4444444444444444444444444444444444444444";
   const body = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
   const nodeError = (status: number, errorCode: string) => body({ success: false, error: "storage program read failed", errorCode }, status);
+  // AbortSignal.timeout rejects the request, or a body read already under way, with a TimeoutError.
+  const timedOut = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  const stalled = () => new ReadableStream({ pull: (stream) => stream.error(timedOut()) });
+  // An unavailable read is expected as `unavailable/<reason>`.
   const cases: Array<[string, () => Response | Promise<Response>, string]> = [
     ["object data", () => body({ success: true, owner, programName, data: { marker: 1 } }), "present"],
     // The node's own answers are definitive.
     ["not found", () => nodeError(404, "NOT_FOUND"), "absent"],
-    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "unavailable"],
+    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "unavailable/denied"],
     // A 4xx without the node's matching errorCode is a proxy, a route or a mismatch: incomplete (RB-6).
-    ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable"],
-    ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable"],
-    ["a body-less 403", () => new Response(null, { status: 403 }), "unavailable"],
-    ["a 404 naming another error", () => nodeError(404, "PERMISSION_DENIED"), "unavailable"],
-    ["a 403 naming another error", () => nodeError(403, "NOT_FOUND"), "unavailable"],
-    ["a 404 reporting success", () => body({ success: true, errorCode: "NOT_FOUND" }, 404), "unavailable"],
-    ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable"],
-    ["invalid request", () => new Response(null, { status: 400 }), "unavailable"],
-    ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable"],
+    ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable/node-error"],
+    ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable/node-error"],
+    ["a body-less 403", () => new Response(null, { status: 403 }), "unavailable/denied"],
+    ["a 404 naming another error", () => nodeError(404, "PERMISSION_DENIED"), "unavailable/node-error"],
+    ["a 403 naming another error", () => nodeError(403, "NOT_FOUND"), "unavailable/denied"],
+    ["a 404 reporting success", () => body({ success: true, errorCode: "NOT_FOUND" }, 404), "unavailable/node-error"],
+    ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable/denied"],
+    ["invalid request", () => new Response(null, { status: 400 }), "unavailable/node-error"],
+    ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable/node-error"],
     ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "invalid"],
-    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable"],
-    ["node failure", () => new Response(null, { status: 503 }), "unavailable"],
-    ["rate limited", () => new Response(null, { status: 429 }), "unavailable"],
-    ["unsuccessful body", () => body({ success: false }), "unavailable"],
-    ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable"],
-    ["network error", () => { throw new TypeError("fetch failed"); }, "unavailable"],
+    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable/oversized"],
+    ["oversized artifact", () => body({ success: true, owner, programName, data: { blob: "x".repeat(256 * 1024) } }), "unavailable/oversized"],
+    ["node failure", () => new Response(null, { status: 503 }), "unavailable/node-error"],
+    ["rate limited", () => new Response(null, { status: 429 }), "unavailable/node-error"],
+    ["unsuccessful body", () => body({ success: false }), "unavailable/node-error"],
+    ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable/malformed"],
+    ["no body", () => new Response(null), "unavailable/malformed"],
+    ["network error", () => { throw new TypeError("fetch failed"); }, "unavailable/network"],
+    ["no answer in time", () => { throw timedOut(); }, "unavailable/timeout"],
+    ["a body that stops in time", () => new Response(stalled()), "unavailable/timeout"],
+    ["a 403 body that stops in time", () => new Response(stalled(), { status: 403 }), "unavailable/timeout"],
+    ["a body that breaks off", () => new Response(new ReadableStream({ pull: (stream) => stream.error(new TypeError("terminated")) })), "unavailable/network"],
   ];
   const originalFetch = globalThis.fetch;
   try {
     for (const [name, respond, expected] of cases) {
       globalThis.fetch = async () => respond();
-      assert.equal((await readAnchorResult(at)).status, expected, name);
+      const read = await readAnchorResult(at);
+      assert.equal(read.status === "unavailable" ? `unavailable/${read.reason}` : read.status, expected, name);
+    }
+    // The cause keeps the node's status when that status is the cause.
+    for (const [respond, expected] of [
+      [() => nodeError(403, "PERMISSION_DENIED"), { status: "unavailable", reason: "denied", httpStatus: 403 }],
+      [() => new Response(null, { status: 404 }), { status: "unavailable", reason: "node-error", httpStatus: 404 }],
+      [() => new Response(stalled(), { status: 404 }), { status: "unavailable", reason: "timeout", httpStatus: 404 }],
+      [() => new Response(null, { status: 503 }), { status: "unavailable", reason: "node-error", httpStatus: 503 }],
+      [() => body({ success: false }), { status: "unavailable", reason: "node-error" }],
+      [() => new Response("{\"success\":tr"), { status: "unavailable", reason: "malformed" }],
+      [() => { throw timedOut(); }, { status: "unavailable", reason: "timeout" }],
+    ] as const) {
+      globalThis.fetch = async () => respond();
+      assert.deepEqual(await readAnchorResult(at), expected);
     }
     assert.equal((await readAnchorResult("stor-../../admin")).status, "absent");
   } finally {

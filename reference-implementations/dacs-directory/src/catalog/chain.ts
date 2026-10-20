@@ -10,7 +10,7 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson } from "./artifactLimits.js";
+import { boundedJson, StorageResponseTooLarge, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
 import { gcrAuthHeaders } from "./gcr.js";
 
@@ -49,12 +49,26 @@ export interface AnchorRecord {
  * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * An unavailable read keeps its cause; `httpStatus` is the node's status when that status is the cause.
  */
 export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
   | { status: "invalid" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; reason: AnchorUnavailableReason; httpStatus?: number };
+
+/**
+ * `timeout`: no answer within the read deadline. `network`: the request failed without an answer.
+ * `denied`: a 401 or 403. `node-error`: any other answer that is not definitive (5xx, 429, an
+ * unconfirmed 404, an unsuccessful body). `malformed`: the body is missing or not JSON. `oversized`:
+ * the response or the artifact exceeds the byte or depth ceilings.
+ */
+export type AnchorUnavailableReason = "timeout" | "network" | "denied" | "node-error" | "malformed" | "oversized";
+
+const isTimeout = (error: unknown): boolean => (error as { name?: unknown } | null)?.name === "TimeoutError";
+/** fetch reports a connection lost mid-body as a TypeError. */
+const bodyFailure = (error: unknown): AnchorUnavailableReason => error instanceof StorageResponseTooLarge ? "oversized"
+  : isTimeout(error) ? "timeout" : error instanceof TypeError ? "network" : "malformed";
 
 export async function readAnchorResult(address: string): Promise<AnchorRead> {
   if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
@@ -64,32 +78,33 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return { status: "unavailable", reason: isTimeout(error) ? "timeout" : "network" };
   }
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
   // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
   // proxy's or a wrong route's, leaves the read incomplete (RB-6).
   if (res.status === 404 || res.status === 403) {
+    const reason = res.status === 403 ? "denied" : "node-error";
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
       const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
-      return res.status === 404 && answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
-    } catch {
-      return { status: "unavailable" };
+      return res.status === 404 && answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable", reason, httpStatus: res.status };
+    } catch (error) {
+      return { status: "unavailable", reason: isTimeout(error) ? "timeout" : reason, httpStatus: res.status };
     }
   }
-  if (!res.ok) return { status: "unavailable" };
+  if (!res.ok) return { status: "unavailable", reason: res.status === 401 ? "denied" : "node-error", httpStatus: res.status };
   let json: { success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown };
   try {
     json = (await storageResponseJson(res)) as typeof json;
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return { status: "unavailable", reason: bodyFailure(error) };
   }
-  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
+  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable", reason: "node-error" };
   const data = json.data;
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
-  if (boundedJson(data) === null) return { status: "unavailable" };
+  if (boundedJson(data) === null) return { status: "unavailable", reason: "oversized" };
   return { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } };
 }
 
