@@ -82,14 +82,21 @@ reputation and in listing hints:
 
 - Success payment evidence requires a nonempty array of exact TxRef shapes.
   The phase index comes from the evidence anchor's metadata-of-record PC-2
-  logical address, read with the verified signed bytes. Its complete canonical
-  job/CF-4 rail/index tuple must match the signed job, agreement and bundle.
+  logical address, taken from the same storage read as the verified signed
+  bytes. The storage program's name and owner are not yet checked against that
+  address and the evidence signer. The address's complete canonical job/CF-4
+  rail/index tuple must match the signed job, agreement and bundle, and the bundle's phase
+  at that index must be `ok` with the handler's PhaseType kind or the
+  pre-registry `settle` label.
   Registry rail IDs and phase handlers are distinct: the pinned Standard table
   determines the handler, and the signed listing pipeline must bind that handler
   and rail at the same index. Unknown registry entries/versions and unsupported
   ST-8 resolved records are withheld until their authority can be resolved.
   Demos, EVM ERC-20, Solana SPL and x402 rails accept only their corresponding
   TxRef arms. A mismatch excludes the deal from every aggregate.
+- Success delivery evidence (`deliver-*`) must be SDK-valid and match a
+  delivery phase in both the bundle's phase summary and the signed listing
+  pipeline; otherwise the deal does not count. It adds no settlement id.
 - Each `paymentTxRefs` entry of success-outcome payment evidence is
   projected to its SB-1 `settlement-tx-id`: `demos` gives `demos:{txHash}`;
   `evm-event` and
