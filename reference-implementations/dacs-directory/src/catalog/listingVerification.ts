@@ -10,7 +10,12 @@ import {
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
-import { identityBundleHash } from "@kynesyslabs/dacs/identity";
+// This module reaches the browser bundle (VerifyDeal → bundlePolicy). The
+// SDK's identity barrel also loads its domain-claim and job-ID modules, whose
+// node:util/node:crypto names the browser shims do not provide, so import the
+// leaf module. test/client-bundle-imports.test.ts pins this for every client
+// entry.
+import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
