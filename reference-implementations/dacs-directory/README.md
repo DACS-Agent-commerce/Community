@@ -524,7 +524,9 @@ revalidation of that source; an older index cannot silently replace it.
 Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
 fallback) are readable for listing discovery. Their deal evidence remains unverified
 and excluded from completion, ratings and volume until semantic agreement, settlement
-and delivery verification adapters support that combination.
+and delivery verification adapters support that combination. A negotiable listing whose
+RFQ step enables the fallback leaves every session free to choose it, so all of its
+sessions are excluded, RFQ agreements and pre-commit failures included (DACS-5 §10.5.1).
 
 Authenticated revocation bindings survive newer active index advertisements and
 process restarts. An unread marker continues to withhold the offer until a successful

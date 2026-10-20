@@ -1252,6 +1252,12 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     ["an accepted DEM rail version with no installed definition", (s) => { s.acceptedRails = [{ railId: "demos-native:DEM", railVersion: 2 }]; },
       [0, "negotiate-fixed-price"]],
     ["a listed price the DEM rail cannot settle", (s) => { s.pricing = { kind: "fixed", price: { amount: "2", currency: "USD" } }; }, [0, "negotiate-fixed-price"]],
+    // An RFQ step enabling the fixed-price fallback lets any session settle on a fixed-price agreement,
+    // which has no settlement semantics on a negotiable listing; the completion here is one.
+    ["an RFQ step that enables the fixed-price fallback on a negotiable listing", (s) => {
+      s.pricing = { kind: "negotiable", bandCenter: { amount: "2", currency: "DEM" }, minPct: 10, maxPct: 10 };
+      (s.pipeline as Obj[])[0] = { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60, fixedPriceFallback: true } };
+    }, [0, "negotiate-rfq"]],
     // DACS-4 §9.6.1: above the 128 KB cap the payload MUST be an extended pointer, whose external
     // cleartext this deployment cannot read; the honest completion delivers that pointer.
     ["a declared payload above the inline storage cap", (s) => { ((s.offering as Obj).deliverable as Obj).expectedSizeBytes = 500_000; }, [1, "commit-agreement"],

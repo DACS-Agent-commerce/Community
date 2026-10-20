@@ -2187,7 +2187,7 @@ test("RFQ fixed-price fallback remains discoverable but requires semantic settle
   }
 });
 
-test("RFQ fallback requires signed opt-in and the exact decimal center without restricting normal RFQ agreements", async () => {
+test("RFQ fallback requires signed opt-in and the exact decimal center, and leaves RFQ agreements without it unrestricted", async () => {
   // DEM has 9 decimals; at this magnitude a binary float cannot tell the center from its neighbour.
   const center = "1000000000.000000001";
   for (const profile of ["legacy", "payee-bound"] as const) {
@@ -2226,9 +2226,14 @@ test("RFQ fallback requires signed opt-in and the exact decimal center without r
         const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
         const label = `${profile}/${role}/${fallback}/${pattern}/${amount} ${currency}: ${graph.reason}`;
         assert.equal(graph.signaturesVerified, true, label);
-        assert.equal(graph.ok, accepted && pattern === "rfq", label);
-        assert.equal(graph.refsVerified, accepted && pattern === "rfq", label);
+        // §10.5.1: once the listing enables the fallback, any session may settle on a fixed-price
+        // agreement this profile cannot verify, so its RFQ agreements are excluded with it.
+        assert.equal(graph.ok, accepted && pattern === "rfq" && fallback !== true, label);
+        assert.equal(graph.refsVerified, accepted && pattern === "rfq" && fallback !== true, label);
         if (accepted && pattern === "fixed-price") assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
+        if (accepted && pattern === "rfq" && fallback === true) {
+          assert.equal(graph.reason, "session verification is indeterminate for every outcome on this listing: fixed-price agreements on negotiable listings have no settlement semantics", label);
+        }
         if (!accepted) assert.equal(graph.reason, `agreement fails listing conformance check: ${rejection}`, label);
       }
     }

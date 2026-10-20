@@ -137,8 +137,9 @@
 #     expectedSizeBytes above the 128 KB storage cap (§9.6.1 extended pointer), buyer-only delivery
 #     without an authenticated restricted reader (none is installed), or no payload reader;
 #     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
-#     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price on
-#     a negotiable listing. The agreed rail and price are checked for every session with an agreement.
+#     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price,
+#     or an RFQ step enabling the fixed-price fallback, on a negotiable listing. The agreed rail and
+#     price are checked for every session with an agreement.
 #     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
 #     or settle phase. Still per session: a transient read failure of one pass (node, payload), which
 #     the next pass rechecks, and the seller's own delivery choices the listing does not declare (an

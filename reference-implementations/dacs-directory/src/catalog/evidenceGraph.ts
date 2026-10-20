@@ -636,10 +636,12 @@ export async function deploymentVerifiability(
   if (rec(listing.terms)?.deadlineSecAfterCommit !== undefined || rec(listing.validity)?.notAfter !== undefined) {
     return "commitment-time bounds need the commitment's committedAt";
   }
-  // Every agreement on such a listing is fixed-price, which has no settlement semantics here. An RFQ
-  // step's fixed-price fallback is chosen per agreement during negotiation and is judged there.
+  // Fixed-price agreements on a negotiable listing have no settlement semantics here. With
+  // negotiate-fixed-price every agreement is one; an RFQ step that enables the fixed-price fallback
+  // lets any session choose one, and a pre-commit failure never says whether it would have.
   const negotiation = pipeline.find((phase) => String(phase.kind).startsWith("negotiate-"));
-  if (rec(listing.pricing)?.kind === "negotiable" && negotiation?.kind === "negotiate-fixed-price") {
+  if (rec(listing.pricing)?.kind === "negotiable" && (negotiation?.kind === "negotiate-fixed-price" ||
+      (negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true))) {
     return "fixed-price agreements on negotiable listings have no settlement semantics";
   }
   return null;
