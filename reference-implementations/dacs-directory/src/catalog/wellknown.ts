@@ -3,7 +3,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * §6.3.5 well-known crawler — the spec's federation mechanism.
  *
  * Give the catalog a DOMAIN; everything else is discovered and verified:
- *   https://<domain>/.well-known/agent.json          (A2A card + dacs block)
+ *   https://<domain>/.well-known/agent.json          (legacy DACS discovery profile)
  *     → dacs.listings.indexUrl + indexHash           (hash-bound index)
  *       → listings.json                              (sha256 MUST match)
  *         → per-entry on-chain anchors               (read + verified later
@@ -17,6 +17,7 @@ import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
 
 export { isPrivateAddress } from "./boundedHttps.js";
@@ -26,6 +27,8 @@ export interface WellKnownAgent {
   seller: string;
   displayName?: string;
   listingAnchors: string[];
+  /** Complete active rows that may introduce offers; other anchors are withdrawal carriage only. */
+  activeListingAnchors: string[];
   /** Per-anchor content hash asserted by the index (checked by the indexer). */
   contentHashes: Record<string, string>;
   revocations: RevocationBinding[];
@@ -48,18 +51,50 @@ interface ListingIndex {
   generatedAt?: number;
   seller?: string;
   listings?: Array<{
-    listingId?: string;
-    version?: number;
-    contentHash?: string;
-    anchor?: { kind?: string; locator?: string };
-    summary?: { title?: string };
-    status?: "active" | "revoked";
+    listingId: string;
+    version: number;
+    contentHash: string;
+    anchor: { kind: string; locator: string };
+    summary: { title: string; category: string; tags: string[]; priceHint?: string };
+    status: "active" | "revoked";
     revocation?: RevocationBinding;
   }>;
 }
 
 /** The crawler rejects a listings.json with more entries; the generator refuses to emit one. */
 export const MAX_INDEX_LISTINGS = 200;
+
+/** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
+function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
+  const hash = entry.contentHash.toLowerCase();
+  const binding = entry.revocation;
+  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
+    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
+    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
+    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
+    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
+    /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
+}
+
+/** Whether this record completes a withdrawal check; discovery alone grants no authority. */
+export function listingIndexEntryIsComplete(value: unknown, seller: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as NonNullable<ListingIndex["listings"]>[number];
+  const hash = typeof entry.contentHash === "string" ? entry.contentHash.toLowerCase() : null;
+  const summary = entry.summary;
+  if (typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+      !hash || !/^[0-9a-f]{64}$/.test(hash) || !entry.anchor || typeof entry.anchor !== "object" || Array.isArray(entry.anchor) ||
+      entry.anchor.kind !== "storage-program" ||
+      typeof entry.anchor.locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(entry.anchor.locator)) return false;
+  // RB-6: an authenticated but malformed record cannot complete a withdrawal check.
+  // Validate both statuses against the whole ListingIndexEntry, including optional known fields.
+  if (!summary || typeof summary !== "object" || Array.isArray(summary) || typeof summary.title !== "string" ||
+      typeof summary.category !== "string" || !Array.isArray(summary.tags) || summary.tags.some(tag => typeof tag !== "string") ||
+      (summary.priceHint !== undefined && typeof summary.priceHint !== "string")) return false;
+  if (entry.status === "active") return entry.revocation === undefined;
+  if (entry.status !== "revoked") return false;
+  return listingIndexRevocation(entry, seller) !== null;
+}
 
 export const revocationBindingKey = (binding: RevocationBinding): string => JSON.stringify([
   binding.sellerPrimaryClaim, binding.listingId, binding.listingVersion, binding.listingContentHash,
@@ -145,11 +180,14 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
     return { domain, error: `listings.json must contain at most ${MAX_INDEX_LISTINGS} listings` };
   }
   const signature = dacs.listings.publisherSignature;
-  const withdrawalAuthenticated = typeof signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(signature) &&
+  const signatureBytes = typeof signature === "string" && signature.length === 86 ? canonicalSignatureBytes(signature) : null;
+  const withdrawalAuthenticated = signatureBytes !== null &&
     Boolean(await verifyPrimaryClaimSignature(Buffer.from(wellKnownWithdrawalMessage(base, actual), "utf8"),
-      Buffer.from(signature, "base64url"), seller, "ed25519"));
+      signatureBytes, seller, "ed25519"));
 
   const listingAnchors: string[] = [];
+  const activeListingAnchors: string[] = [];
+  const withdrawalOnlyAnchors = new Set<string>();
   const revocations: RevocationBinding[] = [];
   const withdrawalHashes: string[] = [];
   const incompleteWithdrawalHashes: string[] = [];
@@ -160,29 +198,27 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
       ? entry.contentHash.toLowerCase() : null;
     if (hash) withdrawalHashes.push(hash);
     const locator = entry.anchor?.locator;
+    const complete = listingIndexEntryIsComplete(entry, seller);
+    // Conflicting rows in one index cannot lend active eligibility to each other.
+    if (typeof locator === "string" && (!complete || entry.status !== "active")) withdrawalOnlyAnchors.add(locator);
     if (
       typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       typeof locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(locator) || !hash
     ) { incompleteWithdrawalHashes.push(hash ?? "*"); continue; }
-    if (entry.status === "revoked") {
-      const binding = entry.revocation;
-      if (!binding || typeof binding !== "object" || Array.isArray(binding) || binding.sellerPrimaryClaim !== seller || binding.listingId !== entry.listingId ||
-          binding.listingVersion !== entry.version || binding.listingContentHash !== hash ||
-          binding.logicalAddress !== revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) ||
-          binding.markerAnchor?.kind !== "storage-program" || typeof binding.markerAnchor.locator !== "string" ||
-          !/^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) || typeof binding.markerContentHash !== "string" ||
-          !/^[0-9a-f]{64}$/.test(binding.markerContentHash)) incompleteWithdrawalHashes.push(hash);
-      else revocations.push(binding);
-    } else if (entry.revocation !== undefined || (entry.status !== undefined && entry.status !== "active")) {
-      incompleteWithdrawalHashes.push(hash);
-    }
+    if (!complete) incompleteWithdrawalHashes.push(hash);
+    if (complete && entry.status === "active") activeListingAnchors.push(locator);
+    // Completeness gates active discovery and absence/holds, never marker resolution.
+    // Ingest still verifies the listing publisher, owner, tuple, marker hash and signature.
+    const binding = listingIndexRevocation(entry, seller);
+    if (binding) revocations.push(binding);
     listingAnchors.push(locator);
     contentHashes[locator] = hash;
   }
   const rawName = (card.body as { name?: unknown })?.name;
   const displayName = typeof rawName === "string" && rawName.length <= 100 ? rawName : undefined;
   const bundleBindings: BundleBinding[] = [];
-  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)], contentHashes,
+  const agent = { domain: base, seller, displayName, listingAnchors: [...new Set(listingAnchors)],
+    activeListingAnchors: [...new Set(activeListingAnchors)].filter(anchor => !withdrawalOnlyAnchors.has(anchor)), contentHashes,
     revocations: [...new Map(revocations.map((binding) => [revocationBindingKey(binding), binding])).values()], bundleBindings,
     withdrawalAuthenticated, withdrawalHashes: [...new Set(withdrawalHashes)], incompleteWithdrawalHashes: [...new Set(incompleteWithdrawalHashes)],
     withdrawalIndex: { generatedAt: Number(idx.generatedAt), hash: actual } };

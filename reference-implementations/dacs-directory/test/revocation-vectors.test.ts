@@ -101,7 +101,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "a non-Ed25519 algorithm": await verdict(await signed(tuple, seed, { algorithm: "ecdsa-secp256k1" })),
     "a listing signed by someone else": await verdict(await signed(tuple), 2, { ...listing, signer: didOf(otherSeed) }),
     // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
-    // producer would emit; nothing but the CORE §B.2 magnitude bound can reject it.
+    // producer would emit. The canonicalizer may reject it before the explicit magnitude check.
     "a revokedAt beyond the safe-integer range": await (async () => {
       const unsafe: Obj = { ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 };
       const jcs = JSON.stringify(Object.fromEntries(Object.entries(unsafe).sort(([a], [b]) => a < b ? -1 : 1)));
@@ -142,4 +142,70 @@ test("RB-4: the first valid marker in the batch wins and the binding names it; u
   const reads: string[] = [];
   assert.equal(await findValidListingRevocation(["stor-bad", "stor-good"], listing, 2, async (at) => { reads.push(at); return stored[at]; }, undefined, undefined, 1), null);
   assert.deepEqual(reads, ["stor-bad"]);
+});
+
+test("the revocation fixture bytes match SPEC_PIN", () => {
+  const name = "revocation-binding-v0.3.json";
+  const raw = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
+  const pin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
+  const line = pin.split("\n").find(line => line.includes(name));
+  assert.ok(line);
+  assert.equal(createHash("sha256").update(raw).digest("hex"), line.trim().split(/\s+/).at(-1));
+});
+
+test("upstream well-known surface vectors exercise the actual entry parser and integrity gate", async t => {
+  const { listingIndexEntryIsComplete, crawlDomain } = await import("../src/catalog/wellknown.js");
+  const surfaceCases = vectors.vectors.filter(vector =>
+    vector.markerRead.status === "not-applicable" || SURFACE_ONLY.has(vector.want.failedAt ?? ""));
+  assert.equal(surfaceCases.length, 6);
+  for (const vector of surfaceCases) await t.test(vector.name, async t => {
+    if (vector.want.failedAt === "catalogFreshness") {
+      t.skip("Out of scope: Directory produces catalogs; it does not consume remote catalog records or their age.");
+      return;
+    }
+    if (vector.want.failedAt === "surfaceIntegrity") {
+      const result = await crawlDomain("fixture.example", { validateUrl: async () => ({} as never), fetchJson: async url => {
+        const body = url.endsWith("agent.json")
+          ? { dacs: { dacsVersion: "1", listings: { indexUrl: "https://fixture.example/listings.json", indexHash: `sha256-${"0".repeat(64)}` } } }
+          : { indexVersion: "1", generatedAt: 1, listings: [] };
+        return { body, raw: JSON.stringify(body) };
+      } });
+      assert.ok("error" in result);
+      assert.match(result.error, /indexHash mismatch/);
+      return;
+    }
+    const surfaces = (vector as unknown as { surfaces?: Array<{ status: string; binding?: string | null }> }).surfaces
+      ?? [vector.surface as { status: string; binding?: string | null }];
+    const complete = surfaces.map(surface => listingIndexEntryIsComplete({
+      listingId: fixtures.listing.listingId, version: fixtures.listing.listingVersion,
+      contentHash: fixtures.listing.listingContentHash,
+      anchor: { kind: "storage-program", locator: fixtures.bindings["opaque-name"].markerAnchor.locator },
+      summary: { title: "Service", category: "services.other", tags: [] },
+      status: surface.status,
+      ...(surface.binding ? { revocation: fixtures.bindings[surface.binding] } : {}),
+    }, fixtures.listing.sellerPrimaryClaim));
+    assert.equal(complete.every(Boolean) ? "absent" : "indeterminate", vector.want.revocationCheck);
+  });
+});
+
+
+test("both listing-index statuses require a complete summary before completing a withdrawal check", async () => {
+  const { listingIndexEntryIsComplete } = await import("../src/catalog/wellknown.js");
+  const binding = fixtures.bindings["opaque-name"];
+  const summary = { title: "Service", category: "services.other", tags: ["service"], priceHint: "1 DEM" };
+  for (const status of ["active", "revoked"]) {
+    const entry = { listingId: fixtures.listing.listingId, version: fixtures.listing.listingVersion,
+      contentHash: fixtures.listing.listingContentHash,
+      anchor: { kind: "storage-program", locator: binding.markerAnchor.locator },
+      summary, status, ...(status === "revoked" ? { revocation: binding } : {}) };
+    const complete = (value: unknown) => listingIndexEntryIsComplete(value, fixtures.listing.sellerPrimaryClaim);
+    assert.equal(complete(entry), true, `${status}: complete summary`);
+    for (const malformed of [undefined, null, [], "summary", {}, { ...summary, title: 7 },
+      { ...summary, category: null }, { ...summary, tags: "service" }, { ...summary, tags: [7] },
+      { ...summary, priceHint: 7 }]) {
+      assert.equal(complete({ ...entry, summary: malformed }), false, `${status}: ${JSON.stringify(malformed)}`);
+    }
+    assert.equal(complete({ ...entry, summary: { ...summary, future: { inert: true } } }), true);
+    assert.equal(complete({ ...entry, anchor: [] }), false);
+  }
 });

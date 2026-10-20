@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { canonicalDemosAgentClaim } from "../src/catalog/claimRef.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, type LegacySignatureEncoding } from "../src/catalog/signatureValue.js";
 import { resolveBundleSide, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import {
@@ -14,17 +15,53 @@ import {
 } from "../src/catalog/evidenceGraph.js";
 import { admitSettlement, settlementTxId } from "../src/catalog/settlementKey.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
+import { deriveIdentityTier } from "../src/catalog/identityVerification.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
+
+function fixture(name: string, hash: string) {
+  const bytes = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), hash, `${name} must remain byte-identical to its upstream pin`);
+  return JSON.parse(bytes.toString("utf8"));
+}
+
+test("pinned SIG-6 vectors exercise canonical decoding and declared legacy import", () => {
+  const set = fixture("signature-value-encoding-v0.1.json", "bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312");
+  assert.equal(set.vectors.length, set.count);
+  for (const vector of set.vectors) {
+    if (vector.mode === "legacy-import") {
+      const value = importLegacySignatureValue(vector.value, vector.declaredEncoding as LegacySignatureEncoding | undefined);
+      assert.equal(value !== null, vector.expected === "accept", vector.name);
+      if (value !== null) assert.equal(value, vector.want.canonicalValue, vector.name);
+    } else {
+      const bytes = canonicalSignatureBytes(vector.value);
+      assert.equal(bytes !== null, vector.expected === "accept", vector.name);
+      if (bytes) {
+        assert.equal(bytes.length, vector.want.decodedLength);
+        assert.equal(Buffer.from(bytes).toString("hex"), set.signatureBytesHex);
+      }
+    }
+  }
+});
+
+test("pinned Demos agent claim fixture exercises canonical claim resolution", () => {
+  const set = fixture("demos-agent-claim-reference.json", "0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933");
+  assert.equal(set.cases.length, 4);
+  for (const vector of set.cases) {
+    const claim = canonicalDemosAgentClaim(vector.input);
+    assert.equal(claim !== null, vector.expected.accepted, vector.id);
+    assert.equal(claim, vector.expected.canonical, vector.id);
+  }
+});
 
 // Upstream DACS-Standard conformance vectors (SPEC_PIN) run through adapters onto the Directory's own
 // decision functions. A vector set is often a projection of the full artifacts; each adapter maps the
 // projection onto the Directory's input shape and nothing else. A case the Directory does not decide
 // is listed with its reason, and a deliberate deviation is pinned with the Directory's own verdict.
 type Obj = Record<string, unknown>;
-const fixture = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, import.meta.url);
-const load = <T>(name: string) => JSON.parse(readFileSync(fixture(name), "utf8")) as T;
+const fixtureUrl = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, import.meta.url);
+const load = <T>(name: string) => JSON.parse(readFileSync(fixtureUrl(name), "utf8")) as T;
 const pinned = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
 const VENDORED = [
   "metered-pricing-v0.3.json", "phase-kind-divergence-v0.3.json",
@@ -32,11 +69,12 @@ const VENDORED = [
   "signature-value-encoding-v0.1.json", "revocation-binding-v0.3.json", "sb2-settlement-uniqueness-v0.1.json",
   "agreement-listing-v0.1.json", "mixed-version-reconciliation-v0.3.json", "fault-bundle-perspective-pair-v0.3.json",
   "payee-destination-binding-v0.1.json", "demos-agent-claim-reference.json", "listing-preserve-unknown-v0.1.json",
+  "identity-tier-self-declared.json",
 ];
 
 test("every vendored Standard file is the byte-identical copy SPEC_PIN records", () => {
   for (const name of VENDORED) {
-    const digest = createHash("sha256").update(readFileSync(fixture(name))).digest("hex");
+    const digest = createHash("sha256").update(readFileSync(fixtureUrl(name))).digest("hex");
     assert.match(pinned, new RegExp(`${name.replace(/[.]/g, "\\.")}\\s+${digest}`), name);
   }
 });
@@ -148,13 +186,50 @@ test("DACS-5 §10.4.3 mixed-version-reconciliation-v0.3 and fault-bundle-perspec
     if (want.scoredOutcome !== undefined) assert.equal(result.sellerOutcome, want.scoredOutcome, vector.name);
     if (want.reputationEffect !== undefined) assert.equal(result.refsVerified ? "include" : "exclude", want.reputationEffect, vector.name);
     if (want.faultedParty !== undefined && !result.divergent && result.refsVerified) assert.equal(result.authoritative.bundle.faultedParty, want.faultedParty, vector.name);
+    // Only an authoritative FaultAttestationBundle that faults the orchestrator is neutral.
+    assert.equal(result.orchestratorFaultNeutral, vector.name === "mixed-orchestrator-nondivergent", vector.name);
+    const rep = deriveSellerReputation([{ ...deal, sellerOutcome: result.sellerOutcome, orchestratorFaultNeutral: result.orchestratorFaultNeutral,
+      signatureVerified: true, refsVerified: true, reputationEligible: true, finalisedAt: 10, verifiedAt: 10 }], 0, 100);
     if (vector.name === "mixed-orchestrator-nondivergent") {
-      assert.equal(result.orchestratorFaultNeutral, true);
-      const rep = deriveSellerReputation([{ ...deal, sellerOutcome: result.sellerOutcome, orchestratorFaultNeutral: result.orchestratorFaultNeutral,
-        signatureVerified: true, refsVerified: true, reputationEligible: true, finalisedAt: 10, verifiedAt: 10 }], 0, 100);
       assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, null, null, null]);
     }
+    // A FAB-authoritative seller fault stays in both denominators.
+    if (vector.name === "mixed-nondivergent-fab-authoritative") {
+      assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, 0, 0, 0]);
+    }
   }
+});
+
+test("DACS-5 §10.4.3 divergence classes for failure and substrate outcomes, three-party faults and both mixed orientations", () => {
+  const two = [{ role: "buyer", primaryClaim: "did:demos:buyer" }, { role: "seller", primaryClaim: "did:demos:seller" }];
+  const three = [...two, { role: "orchestrator", primaryClaim: "did:demos:orchestrator" }];
+  const phaseSummary = [{ index: 0, kind: "deliver-storage-program", outcome: "ok" }];
+  const legacy = (anchoredByRole: string, outcome: string, parties = two): Obj => ({ bundleVersion: "1", anchoredByRole, outcome, parties, phaseSummary });
+  const fab = (anchoredByRole: string, outcome: string, faultedParty: string, parties = two): Obj =>
+    ({ faultBundleVersion: "1", anchoredByRole, outcome, faultedParty, parties, phaseSummary });
+  // [name, buyer copy, seller copy, diverges]
+  const cases: Array<[string, Obj, Obj, boolean]> = [
+    ["FAB failure pair faulting the seller", fab("buyer", "failed-counterparty", "seller"), fab("seller", "failed-perm", "seller"), false],
+    ["FAB substrate pair", fab("buyer", "failed-substrate", "none"), fab("seller", "failed-substrate", "none"), false],
+    ["legacy buyer substrate vs FAB seller substrate", legacy("buyer", "failed-substrate"), fab("seller", "failed-substrate", "none"), false],
+    ["FAB buyer substrate vs legacy seller substrate", fab("buyer", "failed-substrate", "none"), legacy("seller", "failed-substrate"), false],
+    ["FAB buyer abort faulting the seller vs legacy seller self-abort", fab("buyer", "aborted-by-other", "seller"), legacy("seller", "aborted-by-self"), false],
+    ["FAB buyer failure faulting the seller vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "seller"), legacy("seller", "failed-perm"), false],
+    ["legacy failure pair", legacy("buyer", "failed-counterparty"), legacy("seller", "failed-perm"), false],
+    ["three-party FAB pair faulting the orchestrator and the buyer", fab("buyer", "failed-counterparty", "orchestrator", three),
+      fab("seller", "failed-counterparty", "buyer", three), true],
+    ["FAB failure vs FAB abort, same fault", fab("buyer", "failed-counterparty", "seller"), fab("seller", "aborted-by-self", "seller"), true],
+    ["FAB buyer self-abort vs legacy seller self-abort", fab("buyer", "aborted-by-self", "buyer"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer completed vs legacy seller self-abort", fab("buyer", "completed", "none"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer faulting the orchestrator vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "orchestrator", three),
+      legacy("seller", "failed-perm", three), true],
+    ["legacy buyer failed-perm vs FAB seller faulting the orchestrator", legacy("buyer", "failed-perm", three),
+      fab("seller", "failed-counterparty", "orchestrator", three), true],
+    ["legacy buyer completed vs FAB seller substrate", legacy("buyer", "completed"), fab("seller", "failed-substrate", "none"), true],
+    ["FAB buyer substrate vs legacy seller completed", fab("buyer", "failed-substrate", "none"), legacy("seller", "completed"), true],
+    ["FAB completed vs FAB substrate", fab("buyer", "completed", "none"), fab("seller", "failed-substrate", "none"), true],
+  ];
+  for (const [name, buyer, seller, diverges] of cases) assert.equal(currentBundleCopiesDiverge(buyer, seller), diverges, name);
 });
 
 test("DACS-3 §8.5 payee-destination-binding-v0.1: artifact type and PB-1 payout coverage", () => {
@@ -201,6 +276,12 @@ test("SIG-5 listing-preserve-unknown-v0.1 through verifyListing", async () => {
     // An unknown phase kind is refused even under a valid signature (§11.1.2), as is any altered signed field.
     assert.equal(await verifyListing(listing, keys) ? "pass" : "fail", vector.expected, vector.name);
   }
+});
+
+test("DACS-1 §6.3.2.1 identity-tier-self-asserted-ignored (IT-2): a presenter's identityTier is recomputed", async () => {
+  const set = load<{ identityBundle: Obj; expectedIdentityTier: string }>("identity-tier-self-declared.json");
+  assert.equal(set.identityBundle.identityTier, "institutional");
+  assert.equal(await deriveIdentityTier(set.identityBundle), set.expectedIdentityTier);
 });
 
 test("did:demos:agent ClaimReference profile fixture (DACS-Standard #296 at 725fa78)", () => {

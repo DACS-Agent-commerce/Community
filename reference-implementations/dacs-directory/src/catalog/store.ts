@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
-import type { WithdrawalProvenance } from "./wellknown.js";
+import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
 import { deriveSellerReputation, reconcileCatalogReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
@@ -328,6 +328,14 @@ export const admitRevocationCandidates = db.transaction(
     }
   },
 );
+/** Call only with authenticated carriage bound to an independently verified listing. */
+export const admitWellKnownRevocationCandidates = db.transaction((listingHash: string, locators: string[]): void => {
+  admitRevocationCandidates(listingHash, locators.map((locator) => ({ locator })));
+  // A fresh signed binding can describe changed bytes at an old locator. Read
+  // again rather than trusting a rejection cached for its previous value.
+  const recheck = db.prepare("UPDATE revocation_candidates SET state='pending' WHERE listing_hash=? AND locator=? AND state='rejected'");
+  for (const locator of locators) recheck.run(listingHash, locator);
+});
 /** Candidate queues carried in scan-state JSON by earlier releases move into the table, in their stored order. */
 const ingestLegacyRevocations = (revocations: ScanState["revocations"]): void => {
   const artifact = db.prepare("SELECT owner, content_hash FROM artifacts WHERE locator = ?");
@@ -373,6 +381,21 @@ const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
 /** True while any candidate for a listing is unread or not yet examined, so its RB-4 check is incomplete. */
 export const hasPendingRevocationCandidates = (listingHash: string): boolean =>
   anyPendingCandidate.get(listingHash) !== undefined;
+
+/** Discovery bytes are retained so a carrier's later ACL change cannot erase a signed marker. */
+export function observedRevocationCandidate(locator: string): Record<string, unknown> | null {
+  const row = db.prepare("SELECT data_json FROM artifacts WHERE locator=? AND kind='listing-revocation'")
+    .get(locator) as { data_json: string | null } | undefined;
+  return row?.data_json ? JSON.parse(row.data_json) : null;
+}
+
+export function retainedListingRevocation(hash: string): RevocationBinding | null {
+  return getJson<{ binding: RevocationBinding } | null>(`listing-revocation:${hash}`, null)?.binding ?? null;
+}
+/** Call only after RB-4 verification against the independently verified listing signer. */
+export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
+  setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+}
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
@@ -383,8 +406,23 @@ const scheduleRevocationRetry = db.prepare(`INSERT INTO revocation_candidate_ret
 const clearRevocationRetry = db.prepare("DELETE FROM revocation_candidate_retries WHERE listing_hash=? AND locator=?");
 /** Unread candidates stay pending, move to the back, and retry with exponential 1–60 second backoff. */
 export const recordRevocationProgress = db.transaction(
-  (listingHash: string, progress: { unread: readonly string[]; rejected: readonly string[] }): void => {
+  (listingHash: string, progress: { unread: readonly string[]; rejected: readonly string[] },
+    examinedBindings: readonly RevocationBinding[] = [], sourceRevision = -1): void => {
     for (const locator of progress.rejected) { rejectCandidate.run(listingHash, locator); clearRevocationRetry.run(listingHash, locator); }
+    if (progress.rejected.length > 0 && examinedBindings.length > 0 && sourceRevision === wellKnownWithdrawalRevision()) {
+      // Callers must reject these bindings only after a current marker read,
+      // never from an older scanner observation. Compare exact binding
+      // identities captured before the read. A slow
+      // rejection must not erase a newer binding at the same marker address.
+      // The source revision also protects a newer advertisement of identical
+      // scope bytes whose previously invalid signature may have been repaired.
+      const rejectedBindings = new Set(examinedBindings.filter((binding) =>
+        binding.listingContentHash === listingHash && progress.rejected.includes(binding.markerAnchor.locator)).map(revocationBindingKey));
+      const sources = withdrawalSources();
+      for (const source of sources) source.bindings = (source.bindings ?? []).filter((binding) =>
+        !rejectedBindings.has(revocationBindingKey(binding)));
+      saveWithdrawalSources(sources);
+    }
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
     for (const locator of progress.unread) {
       requeueCandidate.run(seq++, listingHash, locator);
@@ -451,6 +489,7 @@ export const saveScanState = db.transaction((state: ScanState): void => {
  * not rewrite an old failure's origin time as the rebuild time.
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'").run();
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
@@ -464,7 +503,12 @@ interface WithdrawalSource { domain: string; seller: string; hashes: string[]; i
   bindings?: RevocationBinding[];
   index?: { generatedAt: number; hash: string } }
 const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
-/** A source can clear its own incomplete checks only with another authenticated index. */
+export const wellKnownWithdrawalRevision = (): number => getJson("withdrawal-source-revision", 0);
+const saveWithdrawalSources = (sources: WithdrawalSource[]): void => {
+  setJson("withdrawal-sources", sources);
+  setJson("withdrawal-source-revision", wellKnownWithdrawalRevision() + 1);
+};
+/** Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. */
 export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
   hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
   bindings: NonNullable<WithdrawalSource["bindings"]> = [],
@@ -475,20 +519,27 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
     const prior = sources.find((source) => source.domain === domain && source.seller === seller);
     if (!index || (prior?.index && (index.generatedAt < prior.index.generatedAt ||
         (index.generatedAt === prior.index.generatedAt && index.hash !== prior.index.hash)))) {
-      setJson("withdrawal-sources", sources);
+      saveWithdrawalSources(sources);
       return false;
     }
     const missing = (prior?.hashes ?? []).filter((hash) => !hashes.includes(hash));
-    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings, provenance };
+    // An active advertisement cannot retract an unread authenticated marker.
+    // Keep its authority across replacement, retry and restart. Legacy sources
+    // still require fresh authentication; a successful RB-4 rejection releases
+    // the binding rather than turning arbitrary chain hints into authority.
+    const retained = prior?.provenance !== "legacy" ? (prior?.bindings ?? []) : [];
+    const carried = [...new Map([...retained, ...bindings].map((binding) => [revocationBindingKey(binding), binding])).values()];
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings: carried, provenance };
     if (prior) Object.assign(prior, next); else sources.push(next);
   }
-  setJson("withdrawal-sources", sources);
+  saveWithdrawalSources(sources);
   return true;
 });
 export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
   getJson("withdrawal-carriage-replay-required", false) ||
   getJson<string[]>("withdrawal-carriage-replay-hashes", []).includes(hash) || withdrawalSources().some((source) =>
-    source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*")));
+    source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*") ||
+      (source.provenance !== "legacy" && (source.bindings ?? []).some((binding) => binding.listingContentHash === hash))));
 export const finishWithdrawalCarriageReplay = db.transaction((): void => {
   // Older v4 databases may still carry the global flag. Successful chain
   // replay clears it independently of each source's authenticated checks.

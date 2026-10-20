@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import { installAuthorityVerifier, type VerifyAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
 import { artifactHash } from "../src/catalog/evidenceGraph.js";
 import { deriveIdentityTier, resolveConfiguredRecipe, sellerIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 
-// The identity tier the Directory reports: a claim counts only through a hash-bound, signed,
-// passing VerifyResult from a trusted signer under a live, version-pinned recipe (DACS-2 §7.4-§7.5).
+// The identity tier the Directory reports (DACS-1 §6.3.2.1 IT-1..IT-3): a claim counts only when its
+// verifiedBy passes the §6.3.2 reference checks, a hash-bound, signed, passing VerifyResult (DACS-2 §7.5)
+// from a trusted signer under a live, version-pinned recipe, with an authenticated authority proof (§7.5.2).
 type Obj = Record<string, unknown>;
 const seeds = [81, 82].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
@@ -22,8 +24,8 @@ const policy = (change: Partial<RecipePolicy> = {}): RecipePolicy => ({
   scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 3600, availability: "live", trustedResultSigners: [dids[TRUSTED]], ...change,
 });
 interface Case {
-  result?: Obj; signer?: number; envelope?: Obj; claim?: Obj; ref?: Obj; recipe?: RecipePolicy | null;
-  proof?: Obj; authenticate?: boolean;
+  result?: Obj; signer?: number; envelope?: Obj; claim?: Obj; ref?: Obj; recipe?: RecipePolicy | null; recipes?: RecipePolicy[];
+  proof?: Obj; authenticate?: boolean; adapter?: VerifyAuthorityAttestation; bundle?: Obj;
   now?: number; store?: (store: Map<string, Obj>) => void; scheme?: string;
 }
 
@@ -47,10 +49,10 @@ async function tier(c: Case = {}) {
     verifiedBy: { anchor: { kind: "storage-program", locator: at(1) }, contentHash: artifactHash(signed, "verify-result"), recipeVersion: 2, ...c.ref },
     ...c.claim,
   };
-  const recipe = c.recipe === undefined ? policy({ scheme }) : c.recipe;
-  return deriveIdentityTier({ claims: [claim] }, async (wantScheme, version) =>
-    recipe && recipe.scheme === wantScheme && recipe.recipeVersion === version ? recipe : null,
-  c.now ?? NOW, async (locator) => store.get(locator) ?? null, undefined, c.authenticate === false ? undefined : verifyTestAuthority);
+  const recipes = c.recipes ?? [c.recipe === undefined ? policy({ scheme }) : c.recipe];
+  return deriveIdentityTier({ claims: [claim], ...c.bundle }, async (wantScheme, version) =>
+    recipes.find((recipe) => recipe && recipe.scheme === wantScheme && recipe.recipeVersion === version) ?? null,
+  c.now ?? NOW, async (locator) => store.get(locator) ?? null, undefined, c.adapter ?? (c.authenticate === false ? undefined : verifyTestAuthority));
 }
 
 test("an institutional scheme verified under a live recipe gives the institutional tier, another scheme gives verified", async () => {
@@ -65,8 +67,19 @@ test("an institutional scheme verified under a live recipe gives the institution
   assert.equal(await deriveIdentityTier({ claims: [null, "lei"] }), "self-declared");
 });
 
-test("every VerifyResult rule withholds the tier when it fails", async () => {
+test("without an explicit adapter the tier uses the installed deployment verifier, and none ships", async () => {
+  assert.equal(await tier({ authenticate: false }), "self-declared", "none installed");
+  installAuthorityVerifier(verifyTestAuthority);
+  try {
+    assert.equal(await tier({ authenticate: false }), "institutional");
+    assert.equal(await tier({ adapter: async () => false }), "self-declared", "an explicit adapter governs");
+  } finally { installAuthorityVerifier(undefined); }
+  assert.equal(await tier({ authenticate: false }), "self-declared");
+});
+
+test("each claim, VerifyResult, recipe, freshness and authority-proof rule withholds the tier when it fails", async () => {
   const withheld: Record<string, Case> = {
+    "an unregistered claim scheme (BR-4)": { scheme: "github" },
     "a claim ref without a scheme": { claim: { ref: LEI } },
     "a claim ref starting with a colon": { claim: { ref: `:${LEI}` } },
     "a claim ref that is not a string or object": { claim: { ref: 7 } },
@@ -84,6 +97,11 @@ test("every VerifyResult rule withholds the tier when it fails", async () => {
     "an indeterminate result": { result: { decision: "indeterminate" } },
     "a result under another recipe version": { result: { recipeVersion: 3 } },
     "a result without verifiedAt": { result: { verifiedAt: undefined } },
+    // DACS-2 §7.5: reason and fetchedAt are required VerifyResult members.
+    "a result without reason": { result: { reason: undefined } },
+    "a numeric reason": { result: { reason: 7 } },
+    "a result without fetchedAt": { result: { fetchedAt: undefined } },
+    "a string fetchedAt": { result: { fetchedAt: String(VERIFIED_AT - 10) } },
     "an unsigned result": { store: (store) => { const { signature: _, ...unsigned } = store.get(at(1))!; store.set(at(1), unsigned); } },
     "a forged signature": { envelope: { value: Buffer.from(ed25519Sign(Buffer.from("other"), privateKeyFromSeed(seeds[TRUSTED]))).toString("base64url") } },
     "a signer with no resolvable key": { envelope: { signer: `cci:${"8".repeat(64)}` } },
@@ -106,6 +124,9 @@ test("every VerifyResult rule withholds the tier when it fails", async () => {
     "a past validUntil": { result: { validUntil: NOW - 1 } },
     "a result older than the recipe's maximum age": { now: VERIFIED_AT + 3_600_000 + 1 },
     "an expired claim wrapper": { claim: { expiresAt: NOW - 1 } },
+    // DACS-1 §6.3.2 "presenter narrows only": a later wrapper expiry never extends the authority window.
+    "a later wrapper expiry over a past validUntil": { result: { validUntil: NOW - 1 }, claim: { expiresAt: NOW + 1000 } },
+    "a later wrapper expiry over the recipe's maximum age": { claim: { expiresAt: NOW + 1e7 }, now: VERIFIED_AT + 3_600_001 },
     "no authority attestation": { result: { attestation: undefined } },
     "an attestation that is not a reference": { result: { attestation: { anchor: { kind: "storage-program", locator: at(2) } } } },
     "an unreadable attestation": { store: (store) => { store.delete(at(2)); } },
@@ -119,6 +140,46 @@ test("every VerifyResult rule withholds the tier when it fails", async () => {
   assert.equal(await tier({ now: VERIFIED_AT + 3_600_000 }), "institutional");
   assert.equal(await tier({ claim: { expiresAt: NOW } }), "institutional");
   assert.equal(await tier({ result: { validUntil: VERIFIED_AT } , now: VERIFIED_AT }), "institutional");
+  // Issuance is the result's verifiedAt: a numeric wrapper issuedAt, even a later one, is ignored.
+  assert.equal(await tier({ claim: { issuedAt: VERIFIED_AT - 5 } }), "institutional");
+  assert.equal(await tier({ claim: { issuedAt: NOW + 1e7 } }), "institutional");
+});
+
+test("claim and result identities compare canonically: scheme case, identifier rules and parameters (DACS-1 §6.3.1, CF-1..3)", async () => {
+  const canonical: Record<string, Case> = {
+    "an upper-case claim scheme": { claim: { ref: `LEI:${LEI}` } },
+    "an upper-case result scheme": { result: { scheme: "LEI" } },
+    "upper-case claim and result schemes": { claim: { ref: `LEI:${LEI}` }, result: { scheme: "LEI" } },
+    "a structured claim ref with a mixed-case scheme": { claim: { ref: { scheme: "Lei", identifier: LEI } } },
+    "a lower-case LEI identifier": { claim: { ref: `lei:${LEI.toLowerCase()}` } },
+    "a claim ref with parameters": { claim: { ref: `lei:${LEI}?jurisdiction=US` } },
+  };
+  const results: Record<string, string> = {};
+  for (const [name, c] of Object.entries(canonical)) results[name] = await tier(c);
+  assert.deepEqual(results, Object.fromEntries(Object.keys(canonical).map((name) => [name, "institutional"])));
+  assert.equal(await tier({ scheme: "domain", claim: { ref: "DOMAIN:Example.COM" }, result: { identifier: "example.com" } }), "verified");
+});
+
+test("IT-2: a presenter's identityTier is ignored and recomputed", async () => {
+  assert.equal(await tier({ bundle: { identityTier: "self-declared" } }), "institutional");
+  assert.equal(await tier({ bundle: { identityTier: "institutional" }, recipe: null }), "self-declared");
+});
+
+test("the maximum age comes from the result's exact recipe version, never a later one (DACS-1 §6.3.2)", async () => {
+  const recipes = [policy(), policy({ recipeVersion: 3, defaultMaxAgeSec: 36_000 })];
+  const now = VERIFIED_AT + 3_600_001;
+  assert.equal(await tier({ recipes, now }), "self-declared", "a later version's longer maximum age does not widen a version 2 result");
+  assert.equal(await tier({ recipes, now, result: { recipeVersion: 3 }, ref: { recipeVersion: 3 } }), "institutional");
+});
+
+test("the authority proof's content hash is checked whatever the adapter answers (DACS-2 §7.5.2 step 2)", async () => {
+  const accept = async () => true;
+  const attestationWith = (contentHash: string) => ({ anchor: { kind: "storage-program", locator: at(2) }, contentHash, signer: authoritySigner });
+  assert.equal(await tier({ adapter: accept }), "institutional");
+  assert.equal(await tier({ adapter: accept, store: (store) => store.set(at(2), { ...attested, record: "OTHER" }) }), "self-declared");
+  assert.equal(await tier({ adapter: accept, result: { attestation: attestationWith("0".repeat(64)) } }), "self-declared");
+  assert.equal(await tier({ adapter: accept, result: { attestation: attestationWith(`sha256:${proofHash(attested).toUpperCase()}`) } }), "institutional",
+    "the same hash forms a VerifyResultRef accepts");
 });
 
 test("one verified claim is enough, and an institutional scheme outranks the rest", async () => {
@@ -162,11 +223,12 @@ test("recipe policy comes only from the configured, version-pinned list", async 
 test("further identity rules: any listed trusted signer counts, and an inverted window never does", async () => {
   assert.equal(await tier({ recipe: policy({ trustedResultSigners: [dids[OTHER], dids[TRUSTED]] }) }), "institutional");
   assert.equal(await tier({ recipe: policy({ trustedResultSigners: ["cci:unknown", dids[TRUSTED]] }) }), "institutional");
-  // validUntil before verifiedAt is never valid, even before validUntil passes.
+  // validUntil before verifiedAt is never valid, even before validUntil passes. Before verifiedAt the
+  // stricter future-verifiedAt rule (a SPEC_PIN deviation) also withholds it.
   assert.equal(await tier({ result: { validUntil: VERIFIED_AT - 10 }, now: VERIFIED_AT - 20 }), "self-declared");
 });
 
-test("IT-1..IT-3 at the seller: the highest tier among its listings' bundles", () => {
+test("the seller tier, a Directory extension: the highest IT-1 tier among its listings' bundles", () => {
   assert.equal(sellerIdentityTier([]), "self-declared");
   assert.equal(sellerIdentityTier(["self-declared", "self-declared"]), "self-declared");
   assert.equal(sellerIdentityTier(["self-declared", "verified"]), "verified");

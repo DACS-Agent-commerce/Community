@@ -1,7 +1,9 @@
 /** Human labels for the spec's kebab-case rail / delivery / negotiation ids. */
 export const RAIL_LABELS: Record<string, string> = {
+  "demos-native:DEM": "DEM",
+  "x402:default": "x402",
   "pay-dem": "DEM",
-  "pay-x402": "USDC · x402",
+  "pay-x402": "x402",
   "ap2:stripe-paymentintents": "Stripe PaymentIntents · AP2",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");
@@ -58,7 +60,8 @@ export const publishedPriceLabel = (
 export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
 
-/** DACS identity tiers. Elevation requires a fresh resolved DACS-2 VerifyResult. */
+/** DACS identity tiers. Elevation requires a fresh resolved DACS-2 VerifyResult and an authority proof
+ * authenticated by a deployment verifier; none is installed in this build. */
 export const IDENTITY_TIERS = [
   {
     id: "institutional",

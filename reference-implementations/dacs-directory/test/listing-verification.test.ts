@@ -340,13 +340,18 @@ test("LR-2 caps the canonical form at 16,384 bytes, signature omitted, not the r
   assert.equal(await verifyListing(expanding), null);
 });
 
-test("the indexer publishes a current listing only once validity.notBefore has passed (DACS-1 validation step 3)", async () => {
+test("the indexer publishes a current listing at validity.notBefore, including a single-millisecond window (DACS-1 validation step 3)", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const directory = mkdtempSync(join(tmpdir(), "dacs-directory-validity-"));
   process.env.DACS_DIRECTORY_DATA = directory;
   const { indexRegistration } = await import("../src/catalog/indexer.js");
   const anchors: Record<string, Record<string, unknown>> = {
     [`stor-${"a1".padStart(40, "0")}`]: signedCurrentListing({ listingId: "future", validity: { notBefore: Date.now() + 3_600_000 } }),
     [`stor-${"a2".padStart(40, "0")}`]: signedCurrentListing({ listingId: "current", validity: { notBefore: Date.now() - 1_000 } }),
+    [`stor-${"a3".padStart(40, "0")}`]: signedCurrentListing({ listingId: "first-millisecond", validity: { notBefore: now, notAfter: now } }),
+    [`stor-${"a4".padStart(40, "0")}`]: signedCurrentListing({ listingId: "one-millisecond-too-soon", validity: { notBefore: now + 1 } }),
+    [`stor-${"a5".padStart(40, "0")}`]: signedCurrentListing({ listingId: "one-millisecond-too-late", validity: { notBefore: 1, notAfter: now - 1 } }),
   };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -361,7 +366,7 @@ test("the indexer publishes a current listing only once validity.notBefore has p
       undefined,
       async () => { throw new Error("identity unavailable"); },
     );
-    assert.deepEqual(record.listings.map((listing) => listing.listingId), ["current"]);
+    assert.deepEqual(record.listings.map((listing) => listing.listingId), ["current", "first-millisecond"]);
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
@@ -377,4 +382,33 @@ test("negotiable bounds and metered units retain their independent schema types"
     { ...band, maxPct: -1 }, { ...meter, unit: ["call"] }, { ...meter, unit: 1 }, { ...meter, unit: "" }, { ...meter, unit: "x".repeat(65) }]) {
     assert.equal(await verifyListing(signedCurrentListing({ pricing })), null);
   }
+});
+
+test("shared canonicalization and listing verification reject lone surrogates in signed keys and values", async () => {
+  const guarded = await import("../src/catalog/canonical.js");
+  for (const surrogate of ["\ud800", "\udfff"]) {
+    for (const extra of [{ nested: { value: surrogate } }, { nested: { [surrogate]: "value" } }]) {
+      for (const canonical of [guarded.canonicalize, guarded.contentHash]) {
+        assert.throws(() => canonical(extra), /invalid Unicode/);
+      }
+      // The pinned SDK can sign these bytes; the actual Directory caller must refuse them.
+      const raw = signedCurrentListing(extra);
+      assert.equal(await verifyListing(raw).catch(() => null), null);
+    }
+  }
+  const valid = { nested: { ["\ud83d\ude00"]: "\ud83d\ude00" } };
+  assert.doesNotThrow(() => guarded.canonicalize(valid));
+  assert.equal(guarded.contentHash(valid), contentHash(valid));
+  assert.ok(await verifyListing(signedCurrentListing(valid)));
+});
+
+test("independently signed storage-program listing accepts the explicit public access model", async () => {
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-public-storage.json", import.meta.url), "utf8"));
+  const verified = await verifyListing(fixture.listing);
+  assert.equal(verified?.contentHash, fixture.contentHash);
+  assert.equal(verified?.profile, "dacs-v0.1");
+  assert.equal(await verifyListing({ ...fixture.listing,
+    offering: { ...fixture.listing.offering, deliverable: { kind: "storage-program", accessModel: "unknown" } },
+  }), null);
 });

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation, settlementEligibleDeals } from "../src/catalog/reputation.js";
-import type { DealRecord } from "../src/catalog/types.js";
+import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation, reconcileCatalogReputation, settlementEligibleDeals } from "../src/catalog/reputation.js";
+import { admitSettlement } from "../src/catalog/settlementKey.js";
+import type { DealRecord, SellerRecord } from "../src/catalog/types.js";
 
 // DACS-5 §10.5 derivation: which deals count, on which time basis, and what the reported
 // rates, ratings, volume and bundle references are.
@@ -190,6 +194,64 @@ test("SB-2 rejects one job reusing a settlement under two pipeline indices", () 
   assert.equal(deriveSellerReputation([reused], 0, 100).bundleCount, 0);
 });
 
+
+test("SB-2 records each first claim itself, and one claim cited twice at one phase stays counted", () => {
+  const ledger = new Map<string, { jobId: string; phaseIndex: number }>();
+  const claim = { id: "demos:self-recorded", jobId: "job", phaseIndex: 2 };
+  assert.deepEqual([admitSettlement(ledger, claim), admitSettlement(ledger, claim)], ["count", "already-counted"]);
+  assert.equal(admitSettlement(ledger, { ...claim, phaseIndex: 3 }), "reject");
+  assert.equal(admitSettlement(ledger, { ...claim, jobId: "other-job" }), "reject");
+  const tx = { id: "demos:twice", observedAt: 10, phaseIndex: 2, evidenceHash: "a".repeat(64) };
+  const twice = deal({ settlementTxIds: [tx, { ...tx }] });
+  assert.deepEqual(settlementEligibleDeals([twice]), [twice]);
+  assert.equal(deriveSellerReputation([twice], 0, 100).completed, 1);
+});
+
+/** Two sellers whose verified deals cite one settlement id under different jobs; the earlier observation wins. */
+function crossSellerCatalog() {
+  const sellerRecord = (primaryClaim: string, deals: DealRecord[]): SellerRecord => ({ primaryClaim, displayName: primaryClaim, cci: [], deals,
+    listings: [{ offering: { category: "rules.sb2" } } as never], reputation: { completed: 0, totalAgreements: 0, completionRate: null },
+    registeredAt: 1, lastIndexedAt: 1 });
+  const tx = (observedAt: number) => [{ id: "demos:shared-across-sellers", observedAt, phaseIndex: 2, evidenceHash: "c".repeat(64) }];
+  const OTHER = "did:demos:agent:other-seller";
+  const price = { amount: "2", currency: "DEM" };
+  const winner = deal({ jobId: "winner", settlementTxIds: tx(10), agreementPrice: price, category: "rules.sb2" });
+  const later = deal({ jobId: "later", settlementTxIds: tx(11), agreementPrice: price, category: "rules.sb2", owners: { buyer: "did:demos:agent:buyer", seller: OTHER } });
+  return { sellers: [sellerRecord(SELLER, [winner]), sellerRecord(OTHER, [later])], winner, later };
+}
+
+test("SB-2 runs one ledger across every seller in the catalog and reconsiders a loser once the winner is gone", () => {
+  const { sellers, later } = crossSellerCatalog();
+  // Each seller alone would count its deal; the catalog pass shares the ledger.
+  assert.equal(deriveSellerReputation(sellers[1].deals, 0, 100).completed, 1);
+  reconcileCatalogReputation(sellers, 100);
+  assert.deepEqual(sellers.map((seller) => seller.deals[0].settlementRejected), [undefined, true]);
+  assert.deepEqual(sellers.map((seller) => [seller.reputation.completed, seller.reputation.observedTransactionalVolume]),
+    [[1, [{ currency: "DEM", amount: "2" }]], [0, []]]);
+  assert.equal(sellers[1].listings[0].reputationHint?.bundleCount, 0);
+  assert.equal(sellers[0].listings[0].reputationHint?.bundleCount, 1);
+  sellers[0].deals = [];
+  reconcileCatalogReputation(sellers, 100);
+  assert.equal(later.settlementRejected, undefined);
+  assert.equal(sellers[1].reputation.completed, 1);
+});
+
+test("saving the catalog applies the catalog-wide SB-2 ledger", async (t) => {
+  const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-reputation-rules-"));
+  const previous = process.env.DACS_DIRECTORY_DATA;
+  process.env.DACS_DIRECTORY_DATA = dataDirectory;
+  t.after(() => {
+    if (previous === undefined) delete process.env.DACS_DIRECTORY_DATA; else process.env.DACS_DIRECTORY_DATA = previous;
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  const { loadCatalog, saveCatalog } = await import("../src/catalog/store.js");
+  const { sellers } = crossSellerCatalog();
+  saveCatalog({ catalogVersion: "1", generatedAt: 100, sellers });
+  const saved = loadCatalog().sellers;
+  assert.deepEqual(saved.map((seller) => [seller.deals[0].settlementRejected, seller.reputation.completed]), [[undefined, 1], [true, 0]]);
+  saveCatalog({ catalogVersion: "1", generatedAt: 100, sellers: [{ ...saved[0], deals: [] }, saved[1]] });
+  assert.deepEqual(loadCatalog().sellers.map((seller) => seller.reputation.completed), [0, 1]);
+});
 
 test("equal-time/hash/job settlement claims choose the lower phase index in both insertion orders", () => {
   const claim = { id: "shared", observedAt: 1, evidenceHash: "a".repeat(64) };

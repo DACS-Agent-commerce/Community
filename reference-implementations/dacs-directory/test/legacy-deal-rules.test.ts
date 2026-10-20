@@ -348,6 +348,39 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
   assert.deepEqual(failed.deals[0].settlementTxIds, []);
   assert.equal(failed.reputation.completed, 0);
 
+  // §10.5.1: the pinned listing, never the outcome, decides indeterminacy. On a paid listing a
+  // seller-fault failure that ended before settlement is excluded exactly like the paid completion,
+  // so the seller is published as "no data", not as 0%. On a listing that declares
+  // no rail, delivery or price, the same failure and an unpaid completion both count.
+  const unsettled = { ...bundleScope, settlementEvidence: [] };
+  const sellerFault = signedCopies({ ...unsettled, outcome: "failed-counterparty" }, { ...unsettled, outcome: "failed-perm" });
+  const paidFailure = await run({ ...base, ...sellerFault });
+  assert.equal(paidFailure.deals[0].sellerOutcome, "failed-perm");
+  assert.equal(paidFailure.deals[0].refsVerified, false, "a failure on a paid listing is indeterminate like its completions");
+  assert.equal(paidFailure.reputation.bundleCount, 0);
+  assert.equal(paidFailure.reputation.completionRate, null);
+  const freeScope: Obj = { ...listingScope, supportedPaymentRails: [], supportedDelivery: [] };
+  const freeListing = { ...freeScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-listing:v1:${contentHash(freeScope)}`, SELLER) } };
+  const onFree = (scope: Obj) => ({ ...scope, listingRef: { ...(scope.listingRef as Obj), contentHash: contentHash(freeScope) } });
+  const free = { ...base, [at(1)]: freeListing };
+  const freeFailure = await run({ ...free, ...signedCopies(onFree({ ...unsettled, outcome: "failed-counterparty" }), onFree({ ...unsettled, outcome: "failed-perm" })) });
+  assert.equal(freeFailure.deals[0].refsVerified, true, "a free listing's failure is verifiable");
+  assert.equal(freeFailure.reputation.bundleCount, 1);
+  assert.equal(freeFailure.reputation.completionRate, 0);
+  const freeCompletion = await run({ ...free, ...signedCopies(onFree(unsettled)) });
+  assert.equal(freeCompletion.deals[0].refsVerified, true, "a free listing's unpaid completion is verifiable");
+  assert.equal(freeCompletion.reputation.completed, 1);
+  assert.equal(freeCompletion.reputation.completionRate, 1);
+  for (const [name, change] of Object.entries({ "a price": { pricing: { kind: "fixed" } }, "accepted rails": { acceptedRails: [{ railId: "demos-native:DEM" }] },
+    "a settle phase": { pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "pay-dem" }] }, "a malformed pipeline": { pipeline: [null] } })) {
+    const paidScope = { ...freeScope, ...change };
+    const paidListing = { ...paidScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-listing:v1:${contentHash(paidScope)}`, SELLER) } };
+    const onPaid = (scope: Obj) => ({ ...scope, listingRef: { ...(scope.listingRef as Obj), contentHash: contentHash(paidScope) } });
+    const excluded = await run({ ...base, [at(1)]: paidListing, ...signedCopies(onPaid({ ...unsettled, outcome: "failed-counterparty" }), onPaid({ ...unsettled, outcome: "failed-perm" })) });
+    assert.equal(excluded.deals[0].refsVerified, false, name);
+  }
+  assert.equal(policy.legacyListingSettlementIndeterminate(verification(), []), true, "an unresolved pin is indeterminate");
+
   const store = await import("../src/catalog/store.js");
   const priorState = store.loadScanState();
   const vetScope = { jobId: JOB, subject: dids[BUYER], recipeId: "legacy-vet", recipeVersion: "1", decision: "pass", verifiedAt: "2026-10-16T00:00:00Z",

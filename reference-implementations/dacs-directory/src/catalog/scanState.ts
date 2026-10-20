@@ -38,7 +38,7 @@ export const discoveredDealKey = (buyer: string, jobId: string): string => `${ca
 export const SCAN_STATE_SCHEMA_VERSION = 10;
 
 /** JSON/SQLite restore prototypes: rebuild every attacker-keyed dictionary on ingress. */
-export type NormalizedScanState = ScanState & Required<Pick<ScanState, "programs" | "revocations" | "verifiedRevocations" | "bundleBindings" | "bundleBindingOverflow">>;
+export type NormalizedScanState = ScanState & Required<Pick<ScanState, "programs" | "revocations" | "verifiedRevocations" | "bundleBindings" | "bundleBindingOverflow" | "publisherListingDiscoveries">>;
 
 export function normalizeScanState(state: ScanState): NormalizedScanState {
   const deals = dictionary<ScanState["deals"][string]>(state.deals, (v) => {
@@ -51,6 +51,11 @@ export function normalizeScanState(state: ScanState): NormalizedScanState {
   return {
     ...state,
     listings: dictionary(state.listings, string),
+    publisherListingDiscoveries: dictionary(state.publisherListingDiscoveries, (v) => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+      const discovery = v as { publisherClaim?: unknown; listingAnchors?: unknown };
+      return typeof discovery.publisherClaim === "string" && strings(discovery.listingAnchors);
+    }),
     // Entries are rekeyed from their own buyer and jobId, which also migrates jobId-keyed state in place.
     deals: dictionary(Object.fromEntries(Object.values(deals)
       .map((deal) => [discoveredDealKey(deal.owners.buyer, deal.jobId), deal])), () => true),

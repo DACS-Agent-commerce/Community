@@ -1,15 +1,16 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
+import { boundLogicalAddress, deliverableLogicalAddress, parsePaymentLogicalAddress } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
-import { verifyIdentityPresentation, verifyListing } from "./listingVerification.js";
+import { verifyIdentityPresentation, verifyStoredListing } from "./listingVerification.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import { settlementTxId } from "./settlementKey.js";
-import { matchesVetRequirement } from "./vetClaimRules.js";
+import { matchesVetRequirement, type VerifyPrimaryClaimControl } from "./vetClaimRules.js";
 import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
-import { nativeRailAdmission } from "./railPolicy.js";
+import { nativeRailAdmission, nativeRailConfigured } from "./railPolicy.js";
 import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
@@ -22,7 +23,7 @@ export type ArtifactKind = "agreement" | "evidence" | "amendment" | "verify-resu
 export interface CurrentRef { anchor: { kind: string; locator: string }; contentHash: string; [key: string]: unknown }
 export interface ResolvedEvidence {
   kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string;
-  /** SB-1 pipeline index independently recovered from the payment-evidence anchor. */
+  /** SB-1 pipeline index independently recovered from the payment-evidence anchor's published binding. */
   phaseIndex?: number;
 }
 export interface EvidenceGraph {
@@ -67,6 +68,9 @@ export interface EvidenceGraphDeps {
    * Historical reads are idempotent; they never issue or consume a challenge.
    * Return null for unavailable evidence or a replay attempt. */
   resolveSessionChallenge?: (jobId: string, party: Record<string, unknown>) => Promise<HistoricalSessionChallenge | null>;
+  /** Trusted control verifier for the presented primary claim (DACS-2 §7.12). Without one,
+   * session vet admission stays fail-closed: a verified primary claim alone is not control proof. */
+  verifyPrimaryClaimControl?: VerifyPrimaryClaimControl;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
@@ -120,7 +124,8 @@ export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
       case "pay-dem": return ref.kind === "demos" && hash(ref.txHash) &&
         (raw.outcome !== "success" || Number.isSafeInteger(ref.blockNumber) && Number(ref.blockNumber) > 0);
       case "pay-evm-erc20": return ref.kind === "evm" && chain(ref.chainId) && hash(ref.txHash);
-      case "pay-solana-spl": return ref.kind === "solana" && settlementTxId({ ...ref, instructionIndex: 0 }) !== null;
+      // SB-1: the canonical key needs the instructionIndex; a reference without it is an error, never index 0.
+      case "pay-solana-spl": return ref.kind === "solana" && settlementTxId(ref) !== null;
       case "pay-x402": return ref.kind === "x402" && text(ref.httpResource) &&
         typeof ref.paymentReceiptHash === "string" && /^[0-9a-f]{64}$/.test(ref.paymentReceiptHash) &&
         (ref.protocolVersion === "1" || ref.protocolVersion === "2") &&
@@ -161,6 +166,7 @@ const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
 type AgreementProfile = "legacy" | "payee-bound";
+const AGREEMENT_PATTERNS = new Set(["fixed-price", "rfq", "sealed-envelope"]);
 
 /** Select the agreement type before interpreting fields; never strip-and-retry. */
 function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
@@ -197,6 +203,26 @@ export function agreementMatchesListing(agreement: Record<string, unknown>, list
   const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
 
+  // DACS-3 §8.5.2 check 7: a valid pattern must also name this listing's
+  // negotiation phase, including an explicitly enabled RFQ fixed-price fallback.
+  const negotiations = pipeline.filter((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
+  if (negotiations.length !== 1) return false;
+  const negotiation = negotiations[0];
+  const pricing = rec(listing.pricing);
+  const fixedPriceFallback = negotiation.kind === "negotiate-rfq" &&
+    rec(negotiation.parameters)?.fixedPriceFallback === true && agreement.derivedFromPattern === "fixed-price" &&
+    pricing?.kind === "negotiable";
+  if (agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)] && !fixedPriceFallback) return false;
+
+  // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
+  // exactly its center. Canonical decimal strings avoid floating-point loss.
+  if (pricing?.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price") {
+    const center = rec(pricing.bandCenter);
+    const price = rec(terms.price);
+    if (!priceTermOk(center) || !priceTermOk(price) ||
+        price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
+  }
+
   if (profile === "legacy") return terms.payoutBindings === undefined;
   if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
 
@@ -225,6 +251,14 @@ const compareDecimals = (left: Decimal, right: Decimal): number => {
   const b = right.units * 10n ** BigInt(scale - right.scale);
   return a < b ? -1 : a > b ? 1 : 0;
 };
+/** DACS-4 §9.7: paymentAmount is the actual settled amount, so it must equal the agreed CD-1 amount in the
+ * agreed currency. PriceTerm.unit is an optional qualifier (§9.3) and binds only when both terms state it. */
+const settlesAgreedPrice = (paid: unknown, agreed: unknown): boolean => {
+  const settled = rec(paid); const price = rec(agreed);
+  return Boolean(settled && price && priceTermOk(settled) && priceTermOk(price) && settled.currency === price.currency &&
+    compareDecimals(decimal(settled.amount), decimal(price.amount)) === 0 &&
+    (settled.unit === undefined || price.unit === undefined || settled.unit === price.unit));
+};
 /** bandCenter × (100 ± pct) / 100, rounded half-up to the centre's fractional digits (§8.5.2 check 2). */
 function bandBound(center: unknown, pct: unknown, direction: 1n | -1n): Decimal | null {
   if (typeof pct !== "number" || !/^\d+(?:\.\d+)?$/.test(String(pct))) return null;
@@ -234,7 +268,7 @@ function bandBound(center: unknown, pct: unknown, direction: 1n | -1n): Decimal 
   const numerator = centre.units * (denominator + direction * percent.units);
   return numerator < 0n ? null : { units: (2n * numerator + denominator) / (2n * denominator), scale: centre.scale };
 }
-const AGREEMENT_PATTERNS: Record<string, string> = {
+const NEGOTIATION_PATTERNS: Record<string, string> = {
   "negotiate-fixed-price": "fixed-price",
   "negotiate-rfq": "rfq",
   "negotiate-sealed-envelope": "sealed-envelope",
@@ -327,7 +361,7 @@ export function agreementListingConformance(
   const negotiation = pipeline.find((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
   const fallback = negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true &&
     agreement.derivedFromPattern === "fixed-price";
-  if (!negotiation || (!fallback && agreement.derivedFromPattern !== AGREEMENT_PATTERNS[String(negotiation.kind)])) return "pattern";
+  if (!negotiation || (!fallback && agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)])) return "pattern";
   // 8. Role direction: the publisher is the agreement seller, or the buyer of a procurement (SE-8).
   const publisherRole = negotiation.kind === "negotiate-sealed-envelope-procurement" ? "buyer" : "seller";
   if (!arr(agreement.parties).some((party) => party.role === publisherRole && sameSigningIdentity(party.primaryClaim, publisher))) {
@@ -422,6 +456,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const profile = agreementProfile(raw);
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
       arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
@@ -511,6 +546,64 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
+/**
+ * DACS-5 §10.5.1: exclusion must neither help nor harm. What this deployment cannot verify is
+ * therefore decided from the pinned listing, the session's signed profile and the configured
+ * adapters, never from how far the session got. Every session on such a listing is indeterminate,
+ * pre-commit failures and aborts included; a check that ran only once a session committed, paid
+ * or delivered would drop unverifiable completions while still counting failures.
+ * Returns null when every phase the listing's pipeline can reach is verifiable here.
+ */
+export function deploymentVerifiability(
+  listing: Record<string, unknown>,
+  bundle: Record<string, unknown>,
+  deps: Pick<EvidenceGraphDeps, "readSettlementNode" | "readAnchorRecord" | "resolveSessionChallenge" | "verifyPrimaryClaimControl">,
+): string | null {
+  const pipeline = arr(listing.pipeline);
+  const kinds = pipeline.map((phase) => String(phase.kind));
+  const unsupportedPayment = kinds.find((kind) => PAYMENT_PHASES.has(kind) && kind !== "pay-dem");
+  if (unsupportedPayment) return `payment rail ${unsupportedPayment} has no authoritative adapter`;
+  const unsupportedDelivery = kinds.find((kind) => DELIVERY_PHASES.has(kind) && kind !== "deliver-storage-program");
+  if (unsupportedDelivery) return `delivery ${unsupportedDelivery} has no authoritative attestation or entitlement adapter`;
+  if (kinds.includes("pay-dem")) {
+    if (pipeline.some((phase) => phase.kind === "pay-dem" && rec(phase.parameters)?.rail !== "demos-native:DEM")) {
+      return "a pay-dem phase names a rail other than demos-native:DEM";
+    }
+    if (!deps.readSettlementNode) return "the native payment node reader is unavailable";
+    if (!nativeRailConfigured(bundle.railRegistryVersion)) return "no authenticated live native DEM rail definition is installed for the session's rail registry version";
+  }
+  if (kinds.includes("deliver-storage-program")) {
+    const deliverable = rec(rec(listing.offering)?.deliverable);
+    if (deliverable?.kind !== "storage-program") return "storage delivery has no storage-program deliverable";
+    if ((deliverable.accessModel ?? "public") === "encrypt-to-buyer") return "storage delivery is encrypted to the buyer";
+    if (!deps.readAnchorRecord) return "the storage payload reader is unavailable";
+  }
+  // Payment and storage anchors resolve only through this Directory's AnchorBinding extension, which
+  // the Standard and the pinned SDK do not emit. Tooling without it never carries the signed
+  // member, whatever the outcome, so its sessions are neutral rather than counted only when they fail.
+  if (kinds.some((kind) => kind === "pay-dem" || kind === "deliver-storage-program") && !Array.isArray(bundle.anchorBindings)) {
+    return "the session does not carry the AnchorBinding profile its payment and storage anchors need";
+  }
+  if (kinds.includes("vet-credentials")) {
+    if (!deps.resolveSessionChallenge) return "authenticated historical session challenges are unavailable";
+    const requirement = rec(listing.buyerRequirement);
+    const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
+      (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
+    if (hasRequirements && !deps.verifyPrimaryClaimControl) return "primary-claim control verification is unavailable";
+  }
+  // DACS-3 §8.5.2 checks 5 and 6 need the CommitmentRecord's anchored committedAt, which no bundle carries.
+  if (rec(listing.terms)?.deadlineSecAfterCommit !== undefined || rec(listing.validity)?.notAfter !== undefined) {
+    return "commitment-time bounds need the commitment's committedAt";
+  }
+  // Every agreement on such a listing is fixed-price, which has no settlement semantics here. An RFQ
+  // step's fixed-price fallback is chosen per agreement during negotiation and is judged there.
+  const negotiation = pipeline.find((phase) => String(phase.kind).startsWith("negotiate-"));
+  if (rec(listing.pricing)?.kind === "negotiable" && negotiation?.kind === "negotiate-fixed-price") {
+    return "fixed-price agreements on negotiable listings have no settlement semantics";
+  }
+  return null;
+}
+
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   const raw = await deps.read(bundleLocator);
   // A failed graph carries no content hash: a rejected bundle is never hashed again.
@@ -531,7 +624,7 @@ async function verifyCurrentEvidenceGraph(
   const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
   const phaseIndexes = phases.map((phase) => phase.index);
-  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && !Array.isArray(raw.amendments)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
+  if (!raw || !withinArtifactLimit(raw) || raw.signature !== undefined || !bundleProfile(raw) || typeof raw.jobId !== "string" || !OUTCOMES.has(String(raw.outcome)) || !["buyer", "seller", "orchestrator"].includes(String(raw.anchoredByRole)) || !rec(raw.listingRef) || arr(raw.parties).length < 2 || !Array.isArray(raw.phaseSummary) || phases.length !== raw.phaseSummary.length || phases.some((phase) => !Number.isSafeInteger(phase.index) || Number(phase.index) < 0 || typeof phase.kind !== "string" || !PHASE_OUTCOMES.has(String(phase.outcome)) || (phase.errorClass !== undefined && !ERROR_CLASSES.has(String(phase.errorClass)))) || new Set(phaseIndexes).size !== phaseIndexes.length || !Array.isArray(raw.vetRecords) || !Array.isArray(raw.settlementEvidence) || (raw.ratingRefs !== undefined && !Array.isArray(raw.ratingRefs)) || (raw.amendments !== undefined && !Array.isArray(raw.amendments)) || (raw.anchorBindings !== undefined && !Array.isArray(raw.anchorBindings)) || !Number.isSafeInteger(raw.recipeRegistryVersion) || Number(raw.recipeRegistryVersion) < 1 || !Number.isSafeInteger(raw.railRegistryVersion) || Number(raw.railRegistryVersion) < 1 || typeof raw.finalisedAt !== "number") return fail("invalid current DACS-5 bundle shape");
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
@@ -796,7 +889,7 @@ async function verifyCurrentEvidenceGraph(
   const tupleOk = listed && listed.raw.listingId === listingRef.listingId &&
     Number.isSafeInteger(pinnedVersion) && listed.raw.listingVersion === pinnedVersion;
   const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
-    ? await verifyListing(listed.raw, resolveKey) : null;
+    ? await verifyStoredListing(listed.raw, listed.locator, resolveKey) : null;
   if (!listed || verifiedListing?.profile !== "dacs-v0.1") return failSigned("listing reference failed");
   // A summary entry is an invocation of the signed pipeline at this exact index. A completed
   // session executed every mandatory phase. ST-5 permits rate to be declined.
@@ -814,21 +907,24 @@ async function verifyCurrentEvidenceGraph(
       topLevelEvidence.some((evidence) => evidence.raw.outcome !== "success"))) {
     return failSigned("completed session contains a failed mandatory phase");
   }
-  // SB-1 / PC-2: native Demos locators are opaque. Recover the tuple from fresh SR-2 program
-  // metadata, checking the reread's hash so metadata can never be borrowed from another record.
+  // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
+  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). The logical dacs4 address comes only from a carried binding
+  // its record's own signer published for this native address and content hash; the name is never read.
+  const anchorBindings = Array.isArray(raw.anchorBindings) ? raw.anchorBindings as unknown[] : [];
+  if (anchorBindings.length > MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
+  const boundAddress = (evidence: ResolvedEvidence, nativeAddress: string, hash: string) => boundLogicalAddress(anchorBindings,
+    { jobId: String(raw.jobId), nativeAddress, contentHash: hash, signer: rec(evidence.raw.signature)?.signer }, resolveKey);
   const recoveredPayments = new Set<number>();
   for (const evidence of topLevelEvidence) {
     if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
-    const anchor = await deps.readAnchorRecord?.(evidence.locator);
-    const match = anchor?.programName?.match(/^dacs4:payment:([^:]+):([^:]+):(0|[1-9]\d*)(?::resolved)?$/);
-    if (!anchor || !match || artifactHash(anchor.data, "evidence") !== evidence.contentHash) {
-      return failSigned("payment evidence anchor binding failed");
-    }
-    const index = Number(match[3]);
+    const logical = await boundAddress(evidence, evidence.locator, evidence.contentHash);
+    const tuple = logical === null ? null : parsePaymentLogicalAddress(logical);
+    if (!tuple) return failSigned("payment evidence anchor binding failed");
+    const index = tuple.phaseIndex;
     const phase = phases.find((entry) => entry.index === index);
     const rail = rec(pipeline[index]?.parameters)?.rail;
-    if (!Number.isSafeInteger(index) || recoveredPayments.has(index) || match[1] !== raw.jobId || typeof rail !== "string" ||
-        match[2] !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
+    if (recoveredPayments.has(index) || tuple.jobId !== raw.jobId || typeof rail !== "string" ||
+        tuple.encodedRail !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
         (paired.has(evidence) && paired.get(evidence) !== index) || !phase || !outcomesAgree(phase, evidence)) {
       return failSigned("payment evidence anchor binding failed");
     }
@@ -899,7 +995,7 @@ async function verifyCurrentEvidenceGraph(
       // policies therefore remain indeterminate rather than granting verified standing.
       const eligible = results.filter((result) => recipePolicies.get(result)?.availability === "live");
       return matchesVetRequirement(identities.get(counterpartyRole)!, requirement,
-        eligible, record.raw.generatedAt, raw.finalisedAt, recipeSnapshot?.recipes);
+        eligible, record.raw.generatedAt, raw.finalisedAt, recipeSnapshot?.recipes, deps.verifyPrimaryClaimControl);
     };
     if (!(await Promise.all(composites.map(async (record) => sameSigningIdentity(record.raw.evaluatedParty, counterparty.primaryClaim) &&
         record.raw.overallDecision === "pass" && await provesRequirement(record)))).some(Boolean)) {
@@ -923,11 +1019,19 @@ async function verifyCurrentEvidenceGraph(
     }
     if (nonconforming) return failSigned(`agreement fails listing conformance check: ${nonconforming}`);
   }
+  // Discovery compatibility does not establish settlement semantics. This
+  // pairing needs agreement/deliverable, payment/finality and delivery adapters
+  // before either signed copy can contribute a verified outcome or volume.
+  // Include the RFQ fixed-price fallback and both agreement/bundle profiles.
+  if (rec(listed.raw.pricing)?.kind === "negotiable" && agreement?.derivedFromPattern === "fixed-price") {
+    return { ...failSigned("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
+      artifacts, agreement, listing: listed.raw };
+  }
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
     if (!PAYMENT_PHASES.has(String(evidence.raw.phase)) || evidence.raw.outcome !== "success") continue;
-    if (!agreement || canonicalize(evidence.raw.paymentAmount) !== canonicalize(rec(agreement.terms)?.price)) {
+    if (!agreement || !settlesAgreedPrice(evidence.raw.paymentAmount, rec(agreement.terms)?.price)) {
       return failSigned("payment amount does not match the agreement price");
     }
     const rail = rec(rec(agreement.terms)?.rail);
@@ -960,12 +1064,16 @@ async function verifyCurrentEvidenceGraph(
     // Anonymous catalog verification cannot open a buyer's sealed payload or verify its cleartext hash/key binding.
     if (accessModel === "encrypt-to-buyer") return failSigned("storage delivery is indeterminate: encrypted cleartext is unavailable");
     const anchor = rec(evidence.raw.deliverableAnchor)!;
+    const deliverableHash = normalizedHash(evidence.raw.deliverableContentHash);
+    // The payload anchor is resolved through the delivery signer's binding before it is read.
+    if (await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
+      return failSigned("storage delivery payload binding failed");
+    }
     const delivered = await deps.readAnchorRecord?.(String(anchor.locator));
     if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
     if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
     // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
-    if (delivered.programName !== `dacs4:deliverable:${raw.jobId}` || !withinArtifactLimit(delivered.data) ||
-        sha256Hex(canonicalize(delivered.data)) !== normalizedHash(evidence.raw.deliverableContentHash)) {
+    if (!withinArtifactLimit(delivered.data) || sha256Hex(canonicalize(delivered.data)) !== deliverableHash) {
       return failSigned("storage delivery payload binding failed");
     }
     const acl = rec(delivered.acl);
@@ -982,6 +1090,10 @@ async function verifyCurrentEvidenceGraph(
       }
     }
   }
+  // Last, so every specific evidence failure above keeps its own reason; any session still standing
+  // here, whatever its outcome, is excluded when its listing is not verifiable by this deployment.
+  const unverifiable = deploymentVerifiability(listed.raw, raw, deps);
+  if (unverifiable) return failSigned(`session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }

@@ -1,23 +1,32 @@
+import "./helpers/isolated-directory.js";
 import { authorityProof, authoritySigner, proofHash, verifyTestAuthority, fixtureRecipeSnapshot } from "./helpers/authority.js";
 import { nativeNodeFixture } from "./helpers/native-node.js";
+import { deliverableAnchorBinding, OPAQUE_PROGRAM_NAME, paymentAnchorBinding } from "./helpers/anchor-binding.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { NextRequest } from "next/server";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
+import { agreementListingConformance, artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement, type EvidenceGraphDeps } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
+import { installAuthorityVerifier } from "../src/catalog/authorityAttestation.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
-import { indexRegistration, listingBindingRejection } from "../src/catalog/indexer.js";
+import { indexRegistration, listingBindingRejection, MAX_PUBLISHER_LISTING_READS } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { loadScanState, saveScanState } from "../src/catalog/store.js";
+import { registrationMessage } from "../src/catalog/registrationSig.js";
+import { parseRegistration } from "../src/catalog/registration.js";
 import type { BundleBinding, DealRecord, RegisteredDeal } from "../src/catalog/types.js";
 
 type Obj = Record<string, unknown>;
 const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
+/** Recipe-trusted VerifyResult signer for primary-claim proofs, distinct from both parties. */
+const verifierSeed = Uint8Array.from(Buffer.alloc(32, 13));
+const verifierDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(verifierSeed))).toString("hex")}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 /** A distinct 32-byte Demos transaction hash per job, so each fixture cites its own settlement (SB-1). */
 const txHashOf = (jobId: string) => contentHash({ settlement: jobId });
@@ -25,7 +34,7 @@ const maps = new Map<string, Obj>();
 const readNativeFixture = nativeNodeFixture(() => maps.values());
 const paymentAnchorRecord = async (at: string) => {
   const data = maps.get(at);
-  return data ? { data, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:${maps.get(locator(1))?.pipeline && (maps.get(locator(1))!.pipeline as Obj[])[0].kind === "vet-credentials" ? 3 : 2}`, acl: { mode: "public" } } : null;
+  return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" } } : null;
 };
 const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
@@ -88,10 +97,26 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
     ],
     phaseSummary: (listingScope.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" })), vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence"), ref(at(60), delivery, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
+    anchorBindings: [
+      await paymentAnchorBinding(seeds[sellerIndex], jobId, "demos-native:DEM", withVet ? 3 : 2, at(3), artifactHash(evidence, "evidence")),
+      await deliverableAnchorBinding(seeds[sellerIndex], jobId, at(61), contentHash(payload)),
+    ],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
+  let primaryProof: Obj | undefined;
   if (withVet) {
+    // DACS-2 §7.12: the counterparty's presented primary carries its own verified claim.
+    const attestation = authorityProof({ authority: "holder-key", status: "active" });
+    maps.set(at(63), attestation);
+    const primaryScope: Obj = { resultVersion: "1", scheme: "did", identifier: dids[buyerIndex].slice(4), recipeVersion: 1,
+      method: "verifiable-credential", decision: "pass", reason: "holder key match", fetchedAt: 10, verifiedAt: 20, validUntil: 100,
+      attestation: { ...ref(at(63), attestation, "attestation"), contentHash: proofHash(attestation), signer: authoritySigner } };
+    const primaryResult = { ...primaryScope, signature: { signer: verifierDid, algorithm: "ed25519",
+      value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-verifyresult:v1:${artifactHash(primaryScope, "verify-result")}`), privateKeyFromSeed(verifierSeed))).toString("base64url") } };
+    maps.set(at(62), primaryResult);
+    primaryProof = ref(at(62), primaryResult, "verify-result", { recipeVersion: 1 });
     bundleScope.parties = await Promise.all([buyerIndex, sellerIndex].map(async (party, index) => {
-      const scope = { bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, sessionNonce: `challenge-${dids[party]}`, claims: [{ ref: dids[party] }] };
+      const scope = { bundleVersion: "1", presentedBy: dids[party], presentedAt: 1, sessionNonce: `challenge-${dids[party]}`,
+        claims: [{ ref: dids[party], ...(party === buyerIndex ? { verifiedBy: primaryProof } : {}) }] };
       const signature = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[party]))).toString("hex");
       return { role: index === 0 ? "buyer" : "seller", primaryClaim: dids[party], bundleHash: contentHash(scope),
         identityBundle: { ...scope, presentation: { kind: "per-claim", signatures: [{ ref: dids[party], signature }] } } };
@@ -101,8 +126,21 @@ async function vector(jobId = "job-1", offset = 0, sellerIndex = 1, settlementHa
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
   return {
-    listing, buyerBundle, sellerBundle, agreement, evidence, rating,
+    listing, buyerBundle, sellerBundle, agreement, evidence, rating, primaryProof,
     locators: { listing: at(1), agreement: at(2), evidence: at(3), rating: at(4), buyer: at(5), seller: at(6) },
+  };
+}
+
+/** Session-vet deps: a roster recipe for the buyer's presented `did` primary, the test authority
+ * and a fixture control adapter for that exact primary and result. Production installs no adapter. */
+function vetDeps(primaryProof: Obj | undefined): Partial<EvidenceGraphDeps> {
+  const recipes: RecipePolicy[] = [{ scheme: "did", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live", defaultMaxAgeSec: 1, trustedResultSigners: [verifierDid] }];
+  return {
+    verifyAttestation: verifyTestAuthority,
+    resolveRecipeSnapshot: async (registryVersion) => registryVersion === 1 ? { registryVersion, recipes } : null,
+    verifyPrimaryClaimControl: async ({ identity, primary, result }) =>
+      identity.presentedBy === dids[0] && `${primary.scheme}:${primary.identifier}` === dids[0] &&
+      result.locator === (primaryProof?.anchor as Obj | undefined)?.locator,
   };
 }
 
@@ -156,6 +194,24 @@ async function installAgreement(
   fixture.agreement = agreement;
   fixture.buyerBundle = await installBundle(fixture.buyerBundle, "buyer");
   fixture.sellerBundle = await installBundle(fixture.sellerBundle, "seller");
+}
+
+/** The bundle phaseSummary for a rewritten listing pipeline: one ok entry per phase. */
+const phaseSummaryOf = (listing: Obj) => (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
+
+/** Re-sign the seller's payment evidence for `amount` DEM, with its settlement reference and
+ * payment AnchorBinding in both bundles; installAgreement then re-signs the bundles. */
+async function repay(fixture: Awaited<ReturnType<typeof vector>>, amount: string) {
+  const scope = signedScope(fixture.evidence, "evidence");
+  scope.paymentAmount = { amount, currency: "DEM" };
+  fixture.evidence = { ...scope, signature: await sign(scope, "evidence", 1) };
+  maps.set(fixture.locators.evidence, fixture.evidence);
+  const binding = await paymentAnchorBinding(seeds[1], String(scope.jobId), "demos-native:DEM", 2, fixture.locators.evidence, artifactHash(fixture.evidence, "evidence"));
+  for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) {
+    bundle.settlementEvidence = (bundle.settlementEvidence as Obj[]).map((entry) =>
+      (entry.anchor as Obj).locator === fixture.locators.evidence ? ref(fixture.locators.evidence, fixture.evidence, "evidence") : entry);
+    bundle.anchorBindings = (bundle.anchorBindings as Obj[]).map((entry) => entry.nativeAddress === fixture.locators.evidence ? binding : entry);
+  }
 }
 
 async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
@@ -699,7 +755,7 @@ test("the evidence graph rejects an agreement that does not conform to its listi
 });
 
 test("current evidence graph accepts a verified vet record as its phase attestation", async () => {
-  const { listing, buyerBundle: bundle } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
+  const { listing, buyerBundle: bundle, primaryProof } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
   const compositeScope: Obj = {
     recordVersion: "1",
     jobId: "job-1",
@@ -719,25 +775,29 @@ test("current evidence graph accepts a verified vet record as its phase attestat
   maps.set(locator(6), composite);
 
   const scope = signedScope(bundle, "bundle");
-  const buyerScope = { ...compositeScope, evaluatedParty: dids[0], bundleHash: (bundle.parties as Obj[])[0].bundleHash, requirementHash: contentHash(listing.buyerRequirement as Obj) };
+  const buyerScope = { ...compositeScope, evaluatedParty: dids[0], bundleHash: (bundle.parties as Obj[])[0].bundleHash, requirementHash: contentHash(listing.buyerRequirement as Obj), freshness: [primaryProof] };
   const buyerComposite = { ...buyerScope, signature: await sign(buyerScope, "composite", 1) };
   maps.set(locator(19), buyerComposite);
   scope.vetRecords = [ref(locator(6), composite, "composite"), ref(locator(19), buyerComposite, "composite")];
   scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 ? { attestationRef: (scope.vetRecords as unknown[])[0] } : {}) }));
   maps.set(locator(5), await resignBundle(scope));
 
-  const graph = await buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const graphWith = (deps = vetDeps(primaryProof)) => buildCurrentEvidenceGraph(locator(5), { ...deps, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+  const graph = await graphWith();
   assert.equal(graph.ok, true, graph.reason);
+  // Without a trusted control adapter for the presented primary, session vet admission fails closed.
+  assert.equal((await graphWith({ ...vetDeps(primaryProof), verifyPrimaryClaimControl: undefined })).reason,
+    "committed vet lacks passing verification evidence for the listing's requirements");
 });
 
 test("a vet record binds the listing's requirement and must pass for a vet phase or agreement to rest on it (DACS-2 §7.7, VPC-4)", async () => {
-  const { listing, buyerBundle: bundle } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
+  const { listing, buyerBundle: bundle, primaryProof } = await vector("job-1", 0, 1, txHashOf("job-1"), 100, true);
   const requirementHash = contentHash((listing as Obj).buyerRequirement as Obj);
   const record = (party: number, extra: Obj = {}): Obj => ({
     recordVersion: "1", jobId: "job-1", evaluatedParty: dids[party], bundleHash: (bundle.parties as Obj[])[party].bundleHash,
     requirementHash: party === 0 ? requirementHash : "c".repeat(64),
-    freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...extra,
+    freshness: party === 0 ? [primaryProof] : [], supplementary: [], dealSpecific: [], overallDecision: "pass", generatedAt: 30, ...extra,
   });
   const graphWith = async (records: Obj[], vetPhase: number | null) => {
     const refs: Obj[] = [];
@@ -750,7 +810,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
     scope.vetRecords = refs;
     scope.phaseSummary = (listing.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok", ...(index === 0 && vetPhase !== null ? { attestationRef: refs[vetPhase] } : {}) }));
     maps.set(locator(5), await resignBundle(scope));
-    return buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+    return buildCurrentEvidenceGraph(locator(5), { ...vetDeps(primaryProof), resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
       resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   };
   // The buyer is vetted against the listing's buyerRequirement; the publisher against requirements the listing omits.
@@ -776,7 +836,7 @@ test("a vet record binds the listing's requirement and must pass for a vet phase
   aborted.settlementEvidence = [];
   aborted.ratingRefs = [];
   maps.set(locator(5), await resignBundle(aborted));
-  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+  const abortedGraph = await buildCurrentEvidenceGraph(locator(5), { ...vetDeps(primaryProof), resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(abortedGraph.ok, true, abortedGraph.reason);
 });
@@ -862,10 +922,13 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   await graphWith(compositeScope);
 
   maps.set(locator(7), { ...attestation, status: "tampered" });
-  const tampered = await buildCurrentEvidenceGraph(locator(5), { resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
-    resolveListing: async () => ({ locator: locator(1), raw: listing }) });
-  assert.equal(tampered.ok, false);
-  assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  // DACS-2 §7.5.2 step 2: the proof's content hash is checked before, and whatever, the adapter answers.
+  for (const verifyAttestation of [undefined, async () => true]) {
+    const tampered = await buildCurrentEvidenceGraph(locator(5), { verifyAttestation, resolveRecipeSnapshot: fixtureRecipeSnapshot, resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), readSettlementNode: readNativeFixture, readAnchorRecord: paymentAnchorRecord, read: async (at) => maps.get(at) ?? null,
+      resolveListing: async () => ({ locator: locator(1), raw: listing }) });
+    assert.equal(tampered.ok, false, verifyAttestation ? "an accepting adapter" : "no adapter");
+    assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  }
 });
 
 test("current evidence graph caps attacker-controlled transitive work", async () => {
@@ -1023,7 +1086,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1086,7 +1149,7 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data } : { success: false }),
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data } : { success: false }),
       { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
   };
   let omitted = 0;
@@ -1107,6 +1170,48 @@ test("bindings signed by other parties leave a deal's binding resolution intact"
   }
 });
 
+test("registration-time holder binding overflow leaves the buyer side indeterminate", async () => {
+  const fixture = await vector("registration-binding-overflow-job", 140);
+  const deal = registeredDeal("registration-binding-overflow-job", fixture.locators.buyer, fixture.locators.seller);
+  const { signature: _signature, ...buyerScope } = await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0);
+  // Distinct signed records share one native address, keeping BB-6's separate
+  // fetch budget from masking the registration-time binding cap.
+  const buyers = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
+    const scope = { ...buyerScope, anchorTx: `tx-registration-binding-${index}` };
+    const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-binding:v1:${contentHash(scope)}`),
+      privateKeyFromSeed(seeds[0]))).toString("base64url");
+    return { ...scope, signature: { algorithm: "ed25519" as const, signer: dids[0], value } };
+  }));
+  assert.equal(new Set(buyers.map((binding) => contentHash(binding))).size, 33);
+  const seller = await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1);
+  const saved = loadScanState();
+  const originalFetch = globalThis.fetch;
+  saveScanState({ ...saved, bundleBindings: {}, bundleBindingOverflow: [] });
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+    }
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", acl: { mode: "public" }, data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  const index = (count: number) => indexRegistration({ primaryClaim: dids[1], displayName: "seller",
+    listingAnchors: [fixture.locators.listing], deals: [deal], bundleBindings: [...buyers.slice(0, count), seller] },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  try {
+    assert.equal((await index(32)).deals[0].refsVerified, true, "the full in-budget set resolves normally");
+    assert.deepEqual(loadScanState().bundleBindingOverflow, [], "no persisted overflow supplies the registration-time marker");
+    const record = await index(33);
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, false, "truncating the holder's bindings must leave its side indeterminate");
+    assert.equal(record.reputation.bundleCount, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    saveScanState(saved);
+  }
+});
+
 test("indexer excludes a valid current seller copy when the buyer anchor is unreadable", async () => {
   const fixture = await vector("seller-fallback-job", 80);
   maps.delete(fixture.locators.buyer);
@@ -1119,7 +1224,7 @@ test("indexer excludes a valid current seller copy when the buyer anchor is unre
     const locatorValue = String(input).split("/").pop() ?? "";
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1173,7 +1278,7 @@ test("indexer never retries a malformed current seller copy as legacy", async ()
     reads.set(locatorValue, (reads.get(locatorValue) ?? 0) + 1);
     const data = maps.get(locatorValue);
     return new Response(JSON.stringify(data
-      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data }
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data }
       : { success: false }), {
       status: data ? 200 : 404,
       headers: { "content-type": "application/json" },
@@ -1292,11 +1397,13 @@ test("current pre-commit policy cancellations are reputation-neutral", () => {
 
 test("identity tier requires a fresh passing version-pinned VerifyResult and its evidence", async () => {
   maps.clear(); const attested = authorityProof({ authority: "ok" }); maps.set(locator(8), attested);
-  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "consensus-backed-proxy", decision: "pass", reason: "found",
+  // A did:demos:agent proof signer models a verifiable-credential issuer; consensus-backed-proxy would need a
+  // substrate-validator-set signer and roster (DACS-2 §7.5).
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
     attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: proofHash(attested), signer: authoritySigner }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
   const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(9), result);
   const identity = { claims: [{ ref: "lei:123", verifiedBy: ref(locator(9), result, "verify-result", { recipeVersion: 2 }) }] };
-  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
   const tier = await deriveIdentityTier(identity, async () => policy, 100, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority);
   assert.equal(tier, "institutional");
   const mixedScheme = structuredClone(result);
@@ -1308,6 +1415,109 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null, undefined, verifyTestAuthority), "self-declared");
+});
+
+/** A seller with a plain listing and a listing whose signed IdentityBundle carries a verified lei claim,
+ * served through a stubbed storage node. Call `restore()` when done. */
+async function verifiedLeiSeller() {
+  const fixture = await vector();
+  const issued = Date.now() - 1_000;
+  const proof = authorityProof({ authority: "gleif", record: "123" }); maps.set(locator(80), proof);
+  const resultScope: Obj = { resultVersion: "1", scheme: "lei", identifier: "123", recipeVersion: 2, method: "verifiable-credential", decision: "pass", reason: "found",
+    attestation: { anchor: { kind: "storage-program", locator: locator(80) }, contentHash: proofHash(proof), signer: authoritySigner },
+    fetchedAt: issued - 10, verifiedAt: issued, validUntil: issued + 3_600_000 };
+  const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) }; maps.set(locator(81), result);
+  const policy: RecipePolicy = { scheme: "lei", recipeVersion: 2, methods: ["verifiable-credential"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] };
+  const resolveRecipe = async (scheme: string, version: number) => scheme === "lei" && version === 2 ? policy : null;
+  // A second listing whose signed seller IdentityBundle also carries the verified lei claim.
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "svc-lei";
+  const identity: Obj = { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1,
+    claims: [{ ref: dids[1] }, { ref: "lei:123", verifiedBy: ref(locator(81), result, "verify-result", { recipeVersion: 2 }) }] };
+  const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[1]))).toString("hex");
+  scope.seller = { displayName: "seller", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[1], signature: presentation }] } } };
+  maps.set(locator(82), { ...scope, signature: await sign(scope, "listing", 1) });
+  const [plain, lei] = [fixture.locators.listing, locator(82)];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
+    const data = maps.get(path.split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  const store = await import("../src/catalog/store.js");
+  const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
+  // A fresh scan over just this seller.
+  store.saveDomains([]);
+  store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+  store.saveRegistrations([{ primaryClaim: dids[1], displayName: "seller", listingAnchors: [lei, plain], deals: [] }]);
+  return {
+    plain, lei, policy, resolveRecipe,
+    savedTier: () => store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.identityTier,
+    restore() {
+      globalThis.fetch = originalFetch; installAuthorityVerifier(undefined);
+      store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+      store.saveCatalog(priorCatalog);
+    },
+  };
+}
+
+test("indexing and reindexing raise a seller's tier only through the deployment's authority adapter", async () => {
+  const { plain, lei, resolveRecipe, savedTier, restore } = await verifiedLeiSeller();
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  try {
+    const tierOf = async (listingAnchors: string[], verifyAttestation?: typeof verifyTestAuthority) => (await indexRegistration(
+      { primaryClaim: dids[1], displayName: "seller", listingAnchors, deals: [] }, undefined, async () => [], resolveRecipe, undefined, () => [], verifyAttestation)).identityTier;
+    // The seller tier is the highest across every listing's bundle, whichever listing carries the claim.
+    assert.equal(await tierOf([lei, plain], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain, lei], verifyTestAuthority), "institutional");
+    assert.equal(await tierOf([plain], verifyTestAuthority), "self-declared");
+    assert.equal(await tierOf([lei, plain]), "self-declared", "no adapter installed: the shipped default fails closed");
+    assert.equal(await tierOf([lei, plain], async () => false), "self-declared");
+    installAuthorityVerifier(verifyTestAuthority);
+    assert.equal(await tierOf([lei, plain]), "institutional", "indexRegistration defaults to the installed verifier");
+    assert.equal(await tierOf([lei, plain], async () => false), "self-declared", "an explicit adapter still governs");
+    for (const [verifyAttestation, want] of [[verifyTestAuthority, "institutional"], [undefined, "self-declared"]] as const) {
+      installAuthorityVerifier(verifyAttestation);
+      await reindexAll({ log: () => {}, resolveIdentities: async () => [], resolveRecipe });
+      assert.equal(savedTier(), want);
+    }
+  } finally { restore(); }
+});
+
+test("the reindex and index-now routes derive a seller's tier with the one installed verifier", async () => {
+  // Shipped entry points take no options: recipe policy comes from the environment, the verifier from the install.
+  const { policy, savedTier, restore } = await verifiedLeiSeller();
+  const { POST: reindex } = await import("../app/api/dacs/reindex/route.js");
+  const { POST: indexNow } = await import("../app/api/dacs/index-now/route.js");
+  const post = async (route: typeof reindex, path: string, body?: Obj) => {
+    const response = await route(new NextRequest(`http://directory.test/api/dacs/${path}`, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }));
+    assert.equal(response.status, 200, `${path}: ${await response.clone().text()}`);
+  };
+  const priorPolicies = process.env.DACS_RECIPE_POLICIES; const priorLog = console.log;
+  process.env.DACS_RECIPE_POLICIES = JSON.stringify([policy]); console.log = () => {};
+  try {
+    installAuthorityVerifier(verifyTestAuthority);
+    await post(reindex, "reindex");
+    assert.equal(savedTier(), "institutional", "batch reindex uses the installed verifier");
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "institutional", "immediate indexing keeps the batch tier");
+    installAuthorityVerifier(undefined);
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "self-declared", "without an installed verifier the immediate path fails closed");
+    installAuthorityVerifier(verifyTestAuthority);
+    await post(indexNow, "index-now", { claim: dids[1] });
+    assert.equal(savedTier(), "institutional");
+    installAuthorityVerifier(undefined);
+    await post(reindex, "reindex");
+    assert.equal(savedTier(), "self-declared", "the shipped default: no verifier installed");
+  } finally {
+    console.log = priorLog;
+    if (priorPolicies === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = priorPolicies;
+    restore();
+  }
 });
 
 test("a mixed pair indexes the fault copy's advisory fields and hash even when it is the buyer copy", async () => {
@@ -1324,7 +1534,7 @@ test("a mixed pair indexes the fault copy's advisory fields and hash even when i
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1367,6 +1577,8 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
       scope.listingRef = agreement.listingRef;
       scope.phaseSummary = (scope.phaseSummary as Obj[]).map((p) => p.kind === "pay-dem" ? { ...p, kind: "pay-evm-erc20" } : p);
       scope.settlementEvidence = [ref(fixture.locators.evidence, fixture.evidence, "evidence")];
+      scope.anchorBindings = [await paymentAnchorBinding(seeds[seller], String(scope.jobId), "evm-test", 2,
+        fixture.locators.evidence, artifactHash(fixture.evidence, "evidence"))];
       fixture[field] = { ...scope, anchoredByRole: role };
     }
     await installAgreement(fixture, agreement);
@@ -1387,6 +1599,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
   const registrations = [await registration(later, "seller-a-later", 1), await registration(earlier, "seller-b-earlier", 0)];
   const originalFetch = globalThis.fetch;
   const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
   globalThis.fetch = async (input, init) => {
     if (init?.method === "POST") {
       const call = JSON.parse(String(init.body)).params?.[0];
@@ -1396,7 +1609,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
     if (!path.startsWith("/storage-program/")) return Response.json({ result: 200, response: [] });
     const data = maps.get(path.split("/").pop() ?? "");
     const seller = data === later.listing ? 1 : data === earlier.listing ? 0 : 1;
-    return data ? Response.json({ success: true, owner: `0x${dids[seller].slice(-64)}`, programName: `dacs4:payment:${data.jobId}:evm-test:2`, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[seller].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1446,6 +1659,7 @@ test("reindex and refresh never admit unsupported EVM settlements across sellers
   } finally {
     globalThis.fetch = originalFetch;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1456,6 +1670,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
   const fixture = await vector("passive-binding-job", 1600);
   const originalMaps = new Map(maps);
   const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains(); const priorState = store.loadScanState();
+  const priorCatalog = store.loadCatalog();
   const originalFetch = globalThis.fetch;
   const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH;
   process.env.DACS_SCAN_FINALITY_DEPTH = "0";
@@ -1490,7 +1705,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
         const native = path.split("/").pop() ?? "";
         const data = maps.get(native);
         const owner = native === fixture.locators.listing ? dids[1] : data?.anchoredByRole === "buyer" ? dids[0] : dids[1];
-        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+        return data ? Response.json({ success: true, owner: `0x${owner.slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
           : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
       };
       await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
@@ -1508,6 +1723,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
     globalThis.fetch = originalFetch;
     if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
     store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1517,6 +1733,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
   const { discoveredDealKey } = await import("../src/catalog/scanState.js");
   const originalFetch = globalThis.fetch;
   const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const priorCatalog = store.loadCatalog();
   const previousDepth = process.env.DACS_SCAN_FINALITY_DEPTH; process.env.DACS_SCAN_FINALITY_DEPTH = "0";
   const deal = { jobId: "cached-legacy", rail: "demos-native:DEM", buyerBundleRef: locator(3001), sellerBundleRef: locator(3002),
     owners: { buyer: dids[0], seller: dids[1] }, sellerFromAgreement: dids[1] };
@@ -1553,6 +1770,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
     globalThis.fetch = originalFetch;
     if (previousDepth === undefined) delete process.env.DACS_SCAN_FINALITY_DEPTH; else process.env.DACS_SCAN_FINALITY_DEPTH = previousDepth;
     store.saveScanState(priorState); store.saveRegistrations(priorRegs); store.saveDomains(priorDomains);
+    store.saveCatalog(priorCatalog);
   }
 });
 
@@ -1575,7 +1793,7 @@ test("indexer persists authoritative orchestrator neutrality from a verified FAB
       return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1596,7 +1814,7 @@ test("DV-1 rejects malformed Unicode substitution against a valid replacement-ch
   for (const report of ["\ud800", "\ud801"]) {
     const graph = await buildCurrentEvidenceGraph(locator(5), { ...deps,
       readAnchorRecord: async (at) => at === locator(61)
-        ? { data: { report }, programName: "dacs4:deliverable:\ufffd", acl: { mode: "public" } }
+        ? { data: { report }, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" } }
         : paymentAnchorRecord(at) });
     assert.equal(graph.ok, false);
     assert.equal(graph.refsVerified, false);
@@ -1616,7 +1834,7 @@ test("PB-2 withholds completion and volume when a confirmed bound payout bypasse
       if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
     }
     const data = maps.get(String(input).split("/").pop() ?? "");
-    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: data.report ? `dacs4:deliverable:${data.report}` : `dacs4:payment:${data.jobId}:demos-native%3ADEM:2`, acl: { mode: "public" }, data })
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -1630,4 +1848,747 @@ test("PB-2 withholds completion and volume when a confirmed bound payout bypasse
     assert.equal(record.reputation.completed, 0);
     assert.deepEqual(record.reputation.observedTransactionalVolume, []);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+// DACS-3 SE-8 / DACS-1: a procurement listing is published by the session's buyer, so the supplier
+// scored as agreement seller never holds it. Each fixture listing below is anchored by its signer.
+test("a buyer-published procurement listing credits its supplier's verified completion and volume", async () => {
+  /** Re-publish the fixture's listing as `publisher`, editing its scope, and re-pin both bundles and the agreement. */
+  const republish = async (fixture: Awaited<ReturnType<typeof vector>>, publisher: number, change: (scope: Obj) => void, pattern = "fixed-price") => {
+    const scope = signedScope(fixture.listing, "listing");
+    const identity: Obj = { bundleVersion: "1", presentedBy: dids[publisher], presentedAt: 1, claims: [{ ref: dids[publisher] }] };
+    const presentation = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`), privateKeyFromSeed(seeds[publisher]))).toString("hex");
+    scope.seller = { displayName: "publisher", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[publisher], signature: presentation }] } } };
+    change(scope);
+    fixture.listing = { ...scope, signature: await sign(scope, "listing", publisher) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    assert.notEqual(await verifyListing(fixture.listing), null);
+    const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    for (const field of ["buyerBundle", "sellerBundle"] as const) {
+      const bundle = signedScope(fixture[field], "bundle");
+      bundle.listingRef = listingRef;
+      bundle.phaseSummary = (bundle.phaseSummary as Obj[]).map((phase, index) => ({ ...phase, kind: (scope.pipeline as Obj[])[index].kind }));
+      fixture[field] = { ...bundle, anchoredByRole: fixture[field].anchoredByRole };
+    }
+    await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef, derivedFromPattern: pattern });
+  };
+  const asProcurement = (scope: Obj) => {
+    scope.pricing = { kind: "auction", selectionRule: "lowest-price", reservePrice: { amount: "2", currency: "DEM" } };
+    (scope.pipeline as Obj[])[0] = { kind: "negotiate-sealed-envelope-procurement",
+      parameters: { commitDeadline: 1, revealWindow: 60, selectionRule: "lowest-price", auctionMode: "procurement" } };
+  };
+  const index = async (fixture: Awaited<ReturnType<typeof vector>>, jobId: string, scored: number, options: {
+    ownListings?: boolean; publisherAnchors?: string[]; listingOwner?: number; listingPublisher?: number;
+  } = {}) => {
+    const publisher = options.listingPublisher ?? 0;
+    const bundleBindings = [await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1)];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === "POST") {
+        const call = JSON.parse(String(init.body)).params?.[0];
+        return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+      }
+      const at = String(input).split("/").pop() ?? "";
+      const data = maps.get(at);
+      // The supplier anchors the session artifacts; the listing's publisher anchors the listing.
+      const owner = at === fixture.locators.listing ? options.listingOwner ?? publisher : 1;
+      return data ? Response.json({ success: true, owner: `0x${dids[owner].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+        : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    };
+    try {
+      return await indexRegistration({ primaryClaim: dids[scored], displayName: "scored", listingAnchors: options.ownListings ? [fixture.locators.listing] : [],
+        deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)], bundleBindings }, undefined, async () => [], undefined, undefined,
+        (claim) => claim === dids[publisher] ? options.publisherAnchors ?? [fixture.locators.listing] : []);
+    } finally { globalThis.fetch = originalFetch; }
+  };
+  const credited = (record: Awaited<ReturnType<typeof index>>, name: string) => {
+    assert.equal(record.deals[0].refsVerified, true, name);
+    assert.equal(record.deals[0].reputationEligible, true, name);
+    assert.equal(record.deals[0].sellerOutcome, "completed", name);
+    assert.equal(record.reputation.completed, 1, name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }], name);
+  };
+  const uncounted = (record: Awaited<ReturnType<typeof index>>, name: string) => {
+    assert.equal(record.deals[0].refsVerified, false, name);
+    assert.equal(record.deals[0].reputationEligible, false, name);
+    assert.equal(record.reputation.completed, 0, name);
+    assert.deepEqual(record.reputation.observedTransactionalVolume, [], name);
+  };
+
+  // Demand-mode control: the supplier publishes its own listing and holds it.
+  const demand = await vector("demand-control", 1200);
+  credited(await index(demand, "demand-control", 1, { ownListings: true, listingPublisher: 1, publisherAnchors: [] }), "demand control");
+
+  const procurement = await vector("procurement-job", 1100);
+  await republish(procurement, 0, asProcurement, "sealed-envelope");
+  // The supplier, scored as agreement seller, is credited from the buyer's own owner-bound listing,
+  // which does not become one of the supplier's offers.
+  const supplier = await index(procurement, "procurement-job", 1);
+  credited(supplier, "supplier");
+  assert.equal(supplier.primaryClaim, dids[1]);
+  assert.deepEqual(supplier.listings, []);
+  assert.equal(supplier.deals[0].category, "services.test");
+  // The publishing buyer holds the listing but is never scored as the session's seller.
+  const publisher = await index(procurement, "procurement-job", 0, { ownListings: true });
+  uncounted(publisher, "publisher scored as seller");
+  assert.equal(publisher.listings.length, 1);
+  // Without the publisher's own owner-bound anchor, the listing stays unresolved and the session uncounted.
+  uncounted(await index(procurement, "procurement-job", 1, { publisherAnchors: [] }), "no publisher anchors");
+  uncounted(await index(procurement, "procurement-job", 1, { listingOwner: 1 }), "listing anchored by another wallet");
+  const others = Array.from({ length: MAX_PUBLISHER_LISTING_READS }, (_, n) => locator(1300 + n));
+  uncounted(await index(procurement, "procurement-job", 1, { publisherAnchors: [...others, procurement.locators.listing] }), "over the read bound");
+  credited(await index(procurement, "procurement-job", 1, { publisherAnchors: [...others.slice(1), procurement.locators.listing] }), "at the read bound");
+
+  // A buyer-published listing that is not a procurement cannot cast its buyer as publisher (check 8).
+  const misdirected = await vector("misdirected-demand", 1400);
+  await republish(misdirected, 0, () => {});
+  uncounted(await index(misdirected, "misdirected-demand", 1), "buyer-published demand listing");
+  // A procurement published by the agreement's seller casts its publisher as seller (check 8, SE-8).
+  const sellerPublished = await vector("seller-published-procurement", 1500);
+  await republish(sellerPublished, 1, asProcurement, "sealed-envelope");
+  assert.equal((await graphAt(sellerPublished.locators.buyer, sellerPublished.listing, sellerPublished.locators.listing)).reason,
+    "agreement fails listing conformance check: role-direction");
+  uncounted(await index(sellerPublished, "seller-published-procurement", 1, { ownListings: true, listingPublisher: 1, publisherAnchors: [] }),
+    "seller-published procurement");
+
+  // Batch indexing and immediate refresh share every known publisher's anchors.
+  const procurementAgain = await vector("procurement-job", 1100);
+  await republish(procurementAgain, 0, asProcurement, "sealed-envelope");
+  const store = await import("../src/catalog/store.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const priorState = store.loadScanState(); const priorRegs = store.loadRegistrations(); const priorDomains = store.loadDomains();
+  const priorCatalog = store.loadCatalog();
+  const emptyCatalog = { catalogVersion: "1" as const, generatedAt: 0, sellers: [] };
+  const bundleBindings = [await bindingFor("procurement-job", "buyer", procurementAgain.locators.buyer, procurementAgain.buyerBundle, 0),
+    await bindingFor("procurement-job", "seller", procurementAgain.locators.seller, procurementAgain.sellerBundle, 1)];
+  const supplierRegistration = { primaryClaim: dids[1], displayName: "supplier", listingAnchors: [],
+    deals: [registeredDeal("procurement-job", procurementAgain.locators.buyer, procurementAgain.locators.seller)], bundleBindings };
+  let listingOwner = 0;
+  const requestedAnchors: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+      return Response.json({ result: 200, response: [] });
+    }
+    const at = new URL(String(input)).pathname.split("/").pop() ?? "";
+    requestedAnchors.push(at);
+    const data = maps.get(at);
+    return data ? Response.json({ success: true, owner: `0x${dids[at === procurementAgain.locators.listing ? listingOwner : 1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    store.saveDomains([]);
+    store.saveRegistrations([supplierRegistration]);
+    store.saveCatalog(emptyCatalog);
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: { [procurementAgain.locators.listing]: `0x${dids[0].slice(-64)}` },
+      deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "scan-state publisher anchors");
+    // A third party can register unsigned candidates for an unregistered buyer.
+    // Those candidates cannot consume its suppliers' publisher read budget.
+    const squatter = { primaryClaim: dids[0], displayName: "squatter", listingAnchors: others };
+    assert.equal(parseRegistration(squatter).ok, true);
+    store.saveRegistrations([squatter, supplierRegistration]);
+    requestedAnchors.length = 0;
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter before batch");
+    assert.equal(requestedAnchors.some((anchor) => others.includes(anchor)), false, "trusted tuple resolves without reading unsigned candidates");
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "unsigned squatter after batch");
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned squatter after immediate refresh");
+    store.saveScanState({ ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] });
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "no discovered publisher anchors");
+    const buyerRegistration = { primaryClaim: dids[0], displayName: "buyer", listingAnchors: [procurementAgain.locators.listing] };
+    // Unsigned registration is a supported discovery path when the passive scan
+    // has missed the buyer. The listing itself still has to bind to its owner.
+    assert.equal(parseRegistration(buyerRegistration).ok, true);
+    store.saveRegistrations([buyerRegistration, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned registered-only publisher before batch");
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    const unsignedSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(unsignedSupplier, "unsigned registered-only publisher after batch");
+    credited(await indexRegistration(supplierRegistration, unsignedSupplier, async () => []), "unsigned registered-only publisher after immediate refresh");
+    assert.deepEqual(Object.keys(store.loadScanState().listings), [], "no passive discovery supplies the registered-only listing");
+
+    listingOwner = 1;
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with a different chain owner");
+    listingOwner = 0;
+    maps.set(procurementAgain.locators.listing, { ...procurementAgain.listing, listingId: "changed" });
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with tampered bytes");
+    const unrelated = { ...signedScope(procurementAgain.listing, "listing"), listingId: "unrelated" };
+    maps.set(procurementAgain.locators.listing, { ...unrelated, signature: await sign(unrelated, "listing", 0) });
+    assert.notEqual(await verifyListing(maps.get(procurementAgain.locators.listing)!), null);
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidate with a different signed tuple");
+    maps.set(procurementAgain.locators.listing, procurementAgain.listing);
+
+    store.saveScanState({ ...store.loadScanState(), listings: { [others[0]]: `0x${dids[0].slice(-64)}` } });
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "trusted candidates miss the pinned tuple before unsigned fallback");
+    store.saveScanState({ ...store.loadScanState(), listings: {} });
+    store.saveRegistrations([{ ...buyerRegistration, listingAnchors: [...others, procurementAgain.locators.listing] }, supplierRegistration]);
+    requestedAnchors.length = 0;
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidates over the fallback read bound");
+    assert.equal(requestedAnchors.some((anchor) => others.includes(anchor) || anchor === procurementAgain.locators.listing), false,
+      "over-budget unsigned candidates cause no listing reads");
+    store.saveRegistrations([{ ...buyerRegistration, listingAnchors: [...others.slice(1), procurementAgain.locators.listing] }, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned candidates at the fallback read bound");
+
+    // Keep the signed-registration control and combined trusted-source budget.
+    const signedAt = Date.now();
+    const message = registrationMessage(buyerRegistration, signedAt);
+    const signature = Buffer.from(await ed25519Sign(Buffer.from(message), privateKeyFromSeed(seeds[0]))).toString("base64url");
+    store.saveRegistrations([{ ...buyerRegistration, ownerSignature: { message, signature, signedAt } }, supplierRegistration]);
+    credited(await indexRegistration(supplierRegistration, undefined, async () => []), "registered-only publisher before batch");
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    const sellers = store.loadCatalog().sellers;
+    const reindexedSupplier = sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(reindexedSupplier, "reindexed supplier");
+    assert.equal(sellers.find((seller) => seller.primaryClaim === dids[0])!.listings.length, 1);
+    credited(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []),
+      "registered-only publisher after immediate refresh");
+
+    // The registered anchor still works without a cached buyer listing. All discovery
+    // sources share the same read bound, and duplicates do not spend it twice.
+    store.saveCatalog(emptyCatalog);
+    const discovered = Object.fromEntries(others.map((anchor) => [anchor, `0x${dids[0].slice(-64)}`]));
+    const emptyState = { ...priorState, lastSeenTxId: 0, lastChainTip: 0, listings: {}, publisherListingDiscoveries: {}, deals: {}, bundleBindings: {}, bundleBindingOverflow: [] };
+    store.saveScanState({ ...emptyState, listings: discovered });
+    uncounted(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []), "combined sources over the read bound");
+    delete discovered[others[0]];
+    discovered[procurementAgain.locators.listing] = `0x${dids[0].slice(-64)}`;
+    store.saveScanState({ ...emptyState, listings: discovered });
+    credited(await indexRegistration(supplierRegistration, reindexedSupplier, async () => []), "combined sources deduplicate at the read bound");
+
+    // Only an authenticated well-known index introduces new catalog anchors.
+    store.saveScanState(emptyState);
+    store.saveRegistrations([supplierRegistration]);
+    store.saveCatalog(emptyCatalog);
+    store.saveDomains(["buyer.example"]);
+    const { crawlDomain, wellKnownWithdrawalMessage } = await import("../src/catalog/wellknown.js");
+    const indexRaw = JSON.stringify({ indexVersion: "1", generatedAt: 123, seller: dids[0], listings: [{ listingId: "svc", version: 1,
+      contentHash: artifactHash(procurementAgain.listing, "listing"), anchor: { kind: "storage-program", locator: procurementAgain.locators.listing } }] });
+    const indexHash = sha256Hex(indexRaw);
+    const crawl = (publisherSignature?: string) => crawlDomain("buyer.example", { validateUrl: async () => ({} as never), fetchJson: async (url) => {
+      const raw = new URL(url).pathname === "/.well-known/agent.json"
+        ? JSON.stringify({ dacs: { dacsVersion: "1", listings: { indexUrl: "https://buyer.example/.well-known/dacs/listings.json", indexHash: `sha256-${indexHash}`, publisherSignature } } })
+        : indexRaw;
+      return { raw, body: JSON.parse(raw) };
+    } });
+    const unsigned = await crawl();
+    assert.ok(!("error" in unsigned));
+    assert.equal(unsigned.withdrawalAuthenticated, false);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [unsigned], errors: [] }) });
+    uncounted(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "unsigned discovery");
+    uncounted(await indexRegistration(supplierRegistration, undefined, async () => []), "unsigned discovery after immediate refresh");
+    const publisherSignature = Buffer.from(await ed25519Sign(Buffer.from(wellKnownWithdrawalMessage("buyer.example", indexHash)), privateKeyFromSeed(seeds[0]))).toString("base64url");
+    const authenticated = await crawl(publisherSignature);
+    assert.ok(!("error" in authenticated));
+    assert.equal(authenticated.withdrawalAuthenticated, true);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    const wellKnownSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(wellKnownSupplier, "well-known-only publisher after batch");
+    assert.equal(Object.keys(store.loadScanState().listings).length, 0);
+    assert.equal(store.loadRegistrations().some((reg) => reg.primaryClaim === dids[0]), false);
+    credited(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "well-known-only publisher after immediate refresh");
+
+    // Reviewer outage probe: historical discovery survives catalog replacement
+    // even though the failed crawl cannot publish the buyer's current offers.
+    const outage = { log: () => {}, resolveIdentities: async () => [],
+      crawlWellKnown: async () => ({ agents: [], errors: [{ domain: "buyer.example", error: "temporary outage" }] }) };
+    await reindexAll(outage);
+    let batchSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(batchSupplier, "crawl outage after batch");
+    assert.equal(store.loadCatalog().sellers.some((seller) => seller.primaryClaim === dids[0]), false);
+    credited(await indexRegistration(supplierRegistration, batchSupplier, async () => []), "crawl outage after immediate refresh");
+    await reindexAll(outage);
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "repeated crawl outage");
+
+    // Reviewer pending-withdrawal probe: authenticated discovery must survive
+    // even on its first crawl, when no public buyer listing is ever saved.
+    store.saveScanState(emptyState);
+    store.saveCatalog(emptyCatalog);
+    const listingHash = artifactHash(procurementAgain.listing, "listing");
+    const pendingMarker = locator(16000);
+    maps.set(pendingMarker, { unreadable: true });
+    const normalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => String(input).endsWith(pendingMarker)
+      ? Response.json({ success: false, errorCode: "UNAVAILABLE" }, { status: 503 }) : normalFetch(input, init);
+    store.admitRevocationCandidates(listingHash, [{ locator: pendingMarker }]);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    assert.equal(store.hasPendingRevocationCandidates(listingHash), true);
+    assert.equal(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[0])!.listings.length, 0);
+    batchSupplier = store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!;
+    credited(batchSupplier, "pending withdrawal after batch");
+    credited(await indexRegistration(supplierRegistration, batchSupplier, async () => []), "pending withdrawal after immediate refresh");
+    globalThis.fetch = normalFetch;
+
+    // A prior catalog is presentation, not discovery. Its removed rows cannot
+    // exhaust the current pass's budget, even on the first replacement pass.
+    const staleCatalog = store.loadCatalog();
+    const buyerRow = staleCatalog.sellers.find((seller) => seller.primaryClaim === dids[0])!;
+    buyerRow.listings = others.map((anchor) => ({ ...publisher.listings[0], anchor: { kind: "storage-program", locator: anchor } }));
+    store.saveCatalog(staleCatalog);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "stale prior catalog anchors");
+
+    // Successful domain indexes replace old hints rather than accumulating
+    // withdrawn anchors; removing a domain retires its hints too.
+    store.saveScanState({ ...store.loadScanState(), publisherListingDiscoveries: {
+      "https://buyer.example": { publisherClaim: dids[0], listingAnchors: others },
+    } });
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [authenticated], errors: [] }) });
+    assert.deepEqual(store.loadScanState().publisherListingDiscoveries?.["https://buyer.example"], {
+      publisherClaim: dids[0], listingAnchors: [procurementAgain.locators.listing],
+    }, "successful crawl replaces the retained domain's hints");
+    credited(store.loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])!, "fresh authenticated index replaces old hints");
+
+    // A cached discovery never substitutes for current owner/signature/hash checks.
+    listingOwner = 1;
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with a different chain owner");
+    listingOwner = 0;
+    maps.set(procurementAgain.locators.listing, { ...procurementAgain.listing, listingId: "changed" });
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing with tampered bytes");
+    maps.delete(procurementAgain.locators.listing);
+    uncounted(await indexRegistration(supplierRegistration, wellKnownSupplier, async () => []), "cached listing missing on chain");
+    store.saveDomains([]);
+    await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+    assert.deepEqual(Object.keys(store.loadScanState().publisherListingDiscoveries), [], "removed domains retire discovery hints");
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveRegistrations(priorRegs); store.saveDomains(priorDomains); store.saveScanState(priorState);
+    store.saveCatalog(priorCatalog);
+  }
+});
+
+test("fixed-price negotiation of a negotiable band requires the exact decimal center and currency", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const [amount, currency, accepted] of [
+      ["100.000000000000000001", "USDC", true],
+      ["90", "USDC", false],
+      ["100.000000000000000002", "USDC", false],
+      ["100.000000000000000001", "EUR", false],
+    ] as const) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "100.000000000000000001", currency: "USDC" }, minPct: 20, maxPct: 20 };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      fixture.buyerBundle.listingRef = listingRef;
+      fixture.sellerBundle.listingRef = listingRef;
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
+      await installAgreement(fixture, agreementScope);
+      const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+      assert.equal(graph.ok, false, `${profile}: ${amount} ${currency}: ${graph.reason}`);
+      assert.equal(graph.refsVerified, false);
+      if (accepted) assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/);
+      else assert.equal(graph.reason, `agreement fails listing conformance check: ${currency === "USDC" ? "price" : "currency"}`);
+    }
+  }
+});
+
+test("fixed-price agreements require a declared matching pattern for both pricing kinds and agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pricingKind of ["negotiable", "fixed"] as const) {
+      for (const pattern of [undefined, null, 7, {}, "", "fixed_price", "rfq", "sealed-envelope", "fixed-price"]) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        if (pricingKind === "negotiable") {
+          const listingScope = signedScope(fixture.listing, "listing");
+          listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 };
+          fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+          maps.set(fixture.locators.listing, fixture.listing);
+        }
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        fixture.buyerBundle.listingRef = listingRef;
+        fixture.sellerBundle.listingRef = listingRef;
+        const agreementScope = signedScope(fixture.agreement, "agreement");
+        agreementScope.listingRef = listingRef;
+        if (pattern === undefined) delete agreementScope.derivedFromPattern;
+        else agreementScope.derivedFromPattern = pattern;
+        // Re-sign the agreement and both bundle references: rejection must be semantic.
+        await installAgreement(fixture, agreementScope);
+        for (const role of ["buyer", "seller"] as const) {
+          const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+          const accepted = pattern === "fixed-price" && pricingKind === "fixed";
+          const label = `${profile}/${pricingKind}/${role}/${JSON.stringify(pattern)}: ${graph.reason}`;
+          assert.equal(graph.signaturesVerified, true, label);
+          assert.equal(graph.ok, accepted, label);
+          assert.equal(graph.refsVerified, accepted, label);
+        }
+      }
+    }
+  }
+});
+
+test("agreement discovery requires a recognized pattern in both agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of [undefined, null, 7, {}, "", "fixed_price", "fixed-price", "rfq", "sealed-envelope"]) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const scope = signedScope(fixture.agreement, "agreement");
+      if (pattern === undefined) delete scope.derivedFromPattern;
+      else scope.derivedFromPattern = pattern;
+      await installAgreement(fixture, scope);
+      assert.equal(await verifiedDiscoveryAgreement(fixture.agreement),
+        typeof pattern === "string" && ["fixed-price", "rfq", "sealed-envelope"].includes(pattern),
+        `${profile}/${JSON.stringify(pattern)}`);
+    }
+  }
+});
+
+test("agreement patterns must match RFQ and sealed-envelope pipelines in both agreement profiles", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of ["rfq", "sealed-envelope"] as const) {
+      for (const declared of [pattern, "fixed-price"]) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        const listingScope = signedScope(fixture.listing, "listing");
+        (listingScope.pipeline as Obj[])[0] = pattern === "rfq"
+          ? { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300 } }
+          : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price", fixedPriceFallback: true } };
+        listingScope.pricing = pattern === "rfq"
+          ? { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 }
+          : { kind: "auction", selectionRule: "lowest-price" };
+        fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+        maps.set(fixture.locators.listing, fixture.listing);
+        assert.ok(await verifyListing(fixture.listing));
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) Object.assign(bundle, { listingRef, phaseSummary: phaseSummaryOf(fixture.listing) });
+        const agreementScope = signedScope(fixture.agreement, "agreement");
+        agreementScope.listingRef = listingRef;
+        agreementScope.derivedFromPattern = declared;
+        await installAgreement(fixture, agreementScope);
+        for (const role of ["buyer", "seller"] as const) {
+          const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+          const label = `${profile}/${role}/${pattern}/${declared}: ${graph.reason}`;
+          assert.equal(graph.ok, declared === pattern, label);
+          assert.equal(graph.refsVerified, declared === pattern, label);
+        }
+      }
+    }
+  }
+});
+
+test("RFQ fixed-price fallback remains discoverable but requires semantic settlement adapters", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+    const listingScope = signedScope(fixture.listing, "listing");
+    (listingScope.pipeline as Obj[])[0] = {
+      kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true },
+    };
+    listingScope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 };
+    fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    assert.ok(await verifyListing(fixture.listing));
+    const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) Object.assign(bundle, { listingRef, phaseSummary: phaseSummaryOf(fixture.listing) });
+    const agreementScope = signedScope(fixture.agreement, "agreement");
+    agreementScope.listingRef = listingRef;
+    agreementScope.derivedFromPattern = "fixed-price";
+    await installAgreement(fixture, agreementScope);
+    for (const role of ["buyer", "seller"] as const) {
+      const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+      const label = `${profile}/${role}: ${graph.reason}`;
+      assert.equal(graph.signaturesVerified, true, label);
+      assert.equal(graph.ok, false, label);
+      assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
+      assert.equal(graph.refsVerified, false, label);
+    }
+  }
+});
+
+test("RFQ fallback requires signed opt-in and the exact decimal center without restricting normal RFQ agreements", async () => {
+  // DEM has 9 decimals; at this magnitude a binary float cannot tell the center from its neighbour.
+  const center = "1000000000.000000001";
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const [fallback, pattern, amount, currency, rejection] of [
+      [true, "fixed-price", center, "DEM", null],
+      [false, "fixed-price", center, "DEM", "pattern"],
+      [undefined, "fixed-price", center, "DEM", "pattern"],
+      [true, "fixed-price", "900000000", "DEM", "price"],
+      [true, "fixed-price", "1000000000.000000002", "DEM", "price"],
+      [true, "fixed-price", center, "EUR", "currency"],
+      [true, "sealed-envelope", center, "DEM", "pattern"],
+      [true, "rfq", "900000000", "DEM", null],
+      [false, "rfq", "900000000", "DEM", null],
+      [undefined, "rfq", "900000000", "DEM", null],
+    ] as const) {
+      const accepted = rejection === null;
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      const parameters: Obj = { maxTurns: 6, timeoutSec: 300 };
+      if (fallback !== undefined) parameters.fixedPriceFallback = fallback;
+      (listingScope.pipeline as Obj[])[0] = { kind: "negotiate-rfq", parameters };
+      listingScope.pricing = { kind: "negotiable", bandCenter: { amount: center, currency: "DEM" }, minPct: 20, maxPct: 20 };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      assert.ok(await verifyListing(fixture.listing));
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) Object.assign(bundle, { listingRef, phaseSummary: phaseSummaryOf(fixture.listing) });
+      if (currency === "DEM") await repay(fixture, amount);
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.derivedFromPattern = pattern;
+      agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
+      // Every case has valid signatures and updated references, including rejections.
+      await installAgreement(fixture, agreementScope);
+      for (const role of ["buyer", "seller"] as const) {
+        const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${role}/${fallback}/${pattern}/${amount} ${currency}: ${graph.reason}`;
+        assert.equal(graph.signaturesVerified, true, label);
+        assert.equal(graph.ok, accepted && pattern === "rfq", label);
+        assert.equal(graph.refsVerified, accepted && pattern === "rfq", label);
+        if (accepted && pattern === "fixed-price") assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
+        if (!accepted) assert.equal(graph.reason, `agreement fails listing conformance check: ${rejection}`, label);
+      }
+    }
+  }
+});
+
+test("RFQ fixed-price fallback cannot select a center from metered pricing", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const pattern of ["fixed-price", "rfq"] as const) {
+      const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+      const listingScope = signedScope(fixture.listing, "listing");
+      (listingScope.pipeline as Obj[])[0] = {
+        kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true },
+      };
+      listingScope.pricing = { kind: "metered", unitPrice: { amount: "1.25", currency: "DEM" }, unit: "call" };
+      fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+      maps.set(fixture.locators.listing, fixture.listing);
+      assert.ok(await verifyListing(fixture.listing));
+      const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+      for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) Object.assign(bundle, { listingRef, phaseSummary: phaseSummaryOf(fixture.listing) });
+      const agreementScope = signedScope(fixture.agreement, "agreement");
+      agreementScope.listingRef = listingRef;
+      agreementScope.derivedFromPattern = pattern;
+      // Both patterns carry the metered usage (1 call at 1.25 DEM); only the pattern differs.
+      agreementScope.terms = { ...(agreementScope.terms as Obj), meteredQuantity: { quantity: "1", unit: "call" } };
+      await installAgreement(fixture, agreementScope);
+      for (const role of ["buyer", "seller"] as const) {
+        const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${role}/${pattern}: ${graph.reason}`;
+        assert.equal(graph.signaturesVerified, true, label);
+        assert.equal(graph.ok, pattern === "rfq", label);
+        assert.equal(graph.refsVerified, pattern === "rfq", label);
+      }
+    }
+  }
+});
+
+test("authenticated indeterminate withdrawal hides discovery but retains a committed completed deal", async t => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const { activeOffer } = await import("../src/catalog/discovery.js");
+  const { findValidListingRevocation } = await import("../src/catalog/listingVerification.js");
+  const { recordWellKnownWithdrawalCheck, retainListingRevocation } = await import("../src/catalog/store.js");
+  const fixture = await vector("withdrawal-history-job", 800);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.acceptedRails = [{ railId: "demos-native:DEM" }];
+  scope.pipeline = (scope.pipeline as Obj[]).map(phase => phase.kind === "pay-dem"
+    ? { ...phase, parameters: { rail: "demos-native:DEM" } } : phase);
+  fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) bundle.listingRef = listingRef;
+  const agreementScope = signedScope(fixture.agreement, "agreement");
+  agreementScope.listingRef = listingRef;
+  agreementScope.terms = { ...(agreementScope.terms as Obj), rail: { railId: "demos-native:DEM" } };
+  await installAgreement(fixture, agreementScope);
+  const deal = registeredDeal("withdrawal-history-job", locator(990), locator(991));
+  const reg = {
+    primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal],
+    bundleBindings: [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ],
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+    }
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, acl: { mode: "public" }, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    const resolve = async () => { throw new Error("identity unavailable"); };
+    const before = await indexRegistration(reg, undefined, resolve);
+    assert.equal(before.listings.some(activeOffer), true, "canonical rail makes the control discoverable");
+    assert.equal(before.deals[0].refsVerified, true);
+    assert.equal(before.deals[0].buyerBundleRef, fixture.locators.buyer);
+    assert.equal(before.deals[0].sellerBundleRef, fixture.locators.seller);
+    assert.equal(before.reputation.completed, 1);
+    assert.equal(before.reputation.bundleCount, 1);
+    recordWellKnownWithdrawalCheck("https://history.example", dids[1], [listingRef.contentHash],
+      [listingRef.contentHash], { generatedAt: 1, hash: "c".repeat(64) }, [], "publisher-signature");
+    const held = await indexRegistration(reg, before, resolve);
+    assert.deepEqual(held.listings, [], "authenticated incomplete withdrawal suppresses new discovery");
+    assert.equal(held.deals[0].refsVerified, true, "historical listing remains available to the evidence graph");
+    assert.deepEqual(held.reputation, before.reputation, "committed completion and reputation are unchanged");
+
+    const verified = await verifyListing(fixture.listing); assert.ok(verified);
+    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 1 };
+    const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: dids[1],
+      value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(markerScope)}`),
+        privateKeyFromSeed(seeds[1]))).toString("base64url") } };
+    const binding = await findValidListingRevocation([locator(807)], verified, 1, async () => marker);
+    assert.ok(binding); retainListingRevocation(binding, marker);
+    const revoked = await indexRegistration(reg, held, resolve);
+    assert.equal(revoked.listings.some(activeOffer), false);
+    assert.equal(revoked.listings[0].status, "revoked");
+    assert.deepEqual(revoked.listings[0].revocation, binding);
+    assert.equal(revoked.deals[0].refsVerified, true);
+    assert.deepEqual(revoked.reputation, before.reputation, "verified revocation preserves committed history too");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("new negotiable fixed-price pairings stay discoverable but cannot establish completion or volume", async () => {
+  for (const profile of ["legacy", "payee-bound"] as const) {
+    for (const negotiation of ["negotiate-fixed-price", "negotiate-rfq"] as const) {
+      for (const faultBundle of [false, true]) for (const fault of ["missing-deliverable", "mismatched-deliverable", "usdc-pay-dem", "nonexistent-transaction", "missing-delivery", "missing-invocations"] as const) {
+        const fixture = profile === "legacy" ? await vector() : await payeeBoundVector();
+        const scope = signedScope(fixture.listing, "listing");
+        const currency = fault === "usdc-pay-dem" ? "USDC" : "DEM";
+        scope.pricing = { kind: "negotiable", bandCenter: { amount: "1.25", currency }, minPct: 20, maxPct: 20 };
+        (scope.pipeline as Obj[])[0] = negotiation === "negotiate-rfq"
+          ? { kind: negotiation, parameters: { maxTurns: 6, timeoutSec: 300, fixedPriceFallback: true } }
+          : { kind: negotiation };
+        fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+        maps.set(fixture.locators.listing, fixture.listing);
+        assert.ok(await verifyListing(fixture.listing), "listing remains readable for discovery");
+        const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+        const agreement = signedScope(fixture.agreement, "agreement");
+        agreement.listingRef = listingRef;
+        agreement.terms = { ...(agreement.terms as Obj), price: { amount: "1.25", currency },
+          ...(fault === "missing-deliverable" ? {} : { deliverable: {
+            kind: "attested-payload", specHash: fault === "mismatched-deliverable" ? "f".repeat(64)
+              : contentHash((scope.offering as Obj).deliverable as Obj),
+          } }) };
+        for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) {
+          bundle.listingRef = listingRef;
+          if (fault !== "missing-invocations") bundle.phaseSummary = (scope.pipeline as Obj[]).map((phase, index) => ({ index, kind: phase.kind, outcome: "ok" }));
+        }
+        if (fault === "nonexistent-transaction") {
+          const evidence = signedScope(fixture.evidence, "evidence");
+          evidence.paymentTxRefs = [{ txId: "0".repeat(64), blockHash: "0".repeat(64), blockNumber: 1 }];
+          const signed = { ...evidence, signature: await sign(evidence, "evidence", 1) };
+          maps.set(fixture.locators.evidence, signed);
+          for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) bundle.settlementEvidence = [ref(fixture.locators.evidence, signed, "evidence")];
+        }
+        await installAgreement(fixture, agreement);
+        if (faultBundle) for (const role of ["buyer", "seller"] as const) {
+          const bundle = signedScope(role === "buyer" ? fixture.buyerBundle : fixture.sellerBundle, "bundle");
+          delete bundle.bundleVersion;
+          bundle.faultBundleVersion = "1";
+          bundle.faultedParty = "none";
+          const signed = { ...bundle, signatures: [await sign(bundle, "bundle", 0, true), await sign(bundle, "bundle", 1, true)], anchoredByRole: role };
+          maps.set(fixture.locators[role], signed);
+          if (role === "buyer") fixture.buyerBundle = signed;
+          else fixture.sellerBundle = signed;
+        }
+        const buyer = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+        const seller = await graphAt(fixture.locators.seller, fixture.listing, fixture.locators.listing);
+        const label = `${profile}/${negotiation}/${faultBundle ? "fault" : "legacy"}/${fault}`;
+        assert.equal(buyer.signaturesVerified, true, label);
+        assert.equal(seller.signaturesVerified, true, label);
+        assert.equal(buyer.refsVerified, false, label);
+        assert.equal(seller.refsVerified, false, label);
+        const deal = registeredDeal(String(fixture.buyerBundle.jobId), fixture.locators.buyer, fixture.locators.seller);
+        assert.equal(reconcileCurrentCopies(deal, dids[1], buyer, seller).refsVerified, false, label);
+        const bindings = [await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+          await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1)];
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input) => {
+          const data = maps.get(String(input).split("/").pop() ?? "");
+          return Response.json(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, data } : { success: false }, { status: data ? 200 : 404 });
+        };
+        try {
+          const indexed = await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+            deals: [deal], bundleBindings: bindings }, undefined, async () => { throw new Error("identity unavailable"); });
+          assert.equal(indexed.listings.length, 1, label);
+          assert.equal(indexed.deals[0].refsVerified, false, label);
+          assert.equal(indexed.deals[0].reputationEligible, false, label);
+          assert.equal(indexed.reputation.completed, 0, label);
+          assert.equal(indexed.reputation.bundleCount, 0, label);
+          assert.deepEqual(indexed.reputation.observedTransactionalVolume, [], label);
+        } finally { globalThis.fetch = originalFetch; }
+      }
+    }
+  }
+});
+
+test("pre-upgrade hex listing remains readable at its pinned anchor in a completed session", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const fixture = await vector("historical-hex-session", 900);
+  const envelope = fixture.listing.signature as Obj;
+  const hex = { ...fixture.listing, signature: { ...envelope,
+    value: Buffer.from(String(envelope.value), "base64url").toString("hex") } };
+  const hash = artifactHash(hex, "listing");
+  assert.equal(hash, artifactHash(fixture.listing, "listing"), "no signed bytes or pinned hash change");
+  assert.equal(await verifyListing(hex), null, "new admission retains strict SIG-6 encoding");
+  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [fixture.locators.listing]: {
+    encoding: "lowercase-hex", sellerPrimaryClaim: dids[1], listingId: "svc", listingVersion: 1, contentHash: hash,
+  } });
+  const originalFetch = globalThis.fetch;
+  maps.set(fixture.locators.listing, hex);
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+    }
+    const at = String(input).split("/").pop()!;
+    const data = maps.get(at);
+    return data ? Response.json({ success: true, data, owner: `0x${dids[1].slice(-64)}`, acl: { mode: "public" } })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    const graph = await graphAt(fixture.locators.buyer, hex, fixture.locators.listing);
+    assert.equal(graph.ok, true, graph.reason);
+    assert.equal(graph.refsVerified, true);
+    const deal = registeredDeal("historical-hex-session", locator(9901), locator(9902));
+    const registration = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+      deals: [deal], bundleBindings: [
+        await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+        await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+      ] };
+    const resolve = async () => { throw new Error("offline"); };
+    const indexed = await indexRegistration(registration, undefined, resolve);
+    assert.equal(indexed.deals[0].refsVerified, true, "the full indexer retains the completed session's pinned history");
+    assert.equal(indexed.reputation.completed, 1);
+    const repeated = await indexRegistration(registration, indexed, resolve);
+    assert.deepEqual(repeated.reputation, indexed.reputation, "recrawl re-verifies the same immutable history");
+    assert.equal(indexed.listings.length, 1, "history is retained by the catalog reader");
+    assert.equal(indexed.listings[0].contentHash, hash);
+    const { saveCatalog } = await import("../src/catalog/store.js");
+    saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [indexed] });
+    const { NextRequest } = await import("next/server");
+    const { GET: detail } = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
+    const response = await detail(new NextRequest("https://directory.example/api/dacs/listings/svc/1"),
+      { params: Promise.resolve({ listingId: "svc", version: "1" }) });
+    assert.equal(response.status, 200, "historical detail reads use the same import contract");
+    assert.deepEqual(await response.json(), hex, "detail retains the stored envelope");
+    const { GET: derive } = await import("../app/api/dacs/derive/route.js");
+    const derived = await derive(new NextRequest(`https://directory.example/api/dacs/derive?claim=${dids[1]}&serviceId=svc`));
+    assert.equal((await derived.json()).valid, true, "derivation rechecks history against fresh owner-bound bytes");
+    assert.deepEqual(graph.listing, hex, "original stored envelope remains available as evidence");
+    const tampered = { ...hex, listingId: "changed-after-signing" };
+    assert.equal((await graphAt(fixture.locators.buyer, tampered, fixture.locators.listing)).ok, false);
+    delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    assert.equal((await graphAt(fixture.locators.buyer, hex, fixture.locators.listing)).ok, false,
+      "an artifact cannot select its own legacy import");
+    const unpinned = await indexRegistration(registration, indexed, resolve);
+    assert.equal(unpinned.deals[0].refsVerified, false, "cached success cannot replace the now-missing import provenance");
+    assert.equal(unpinned.reputation.completed, 0);
+
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
 });

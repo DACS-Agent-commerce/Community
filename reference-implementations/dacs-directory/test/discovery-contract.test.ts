@@ -16,7 +16,7 @@ import { catalogJson } from "../src/catalog/http.js";
 import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
 import { parsePagination } from "../src/catalog/pagination.js";
-import { primaryClaimMatches } from "../src/catalog/discovery.js";
+import { activeOffer, activeCatalogListings, activeCatalogSellers, discoveryListing, primaryClaimMatches } from "../src/catalog/discovery.js";
 import { publicDemosRpcUrl } from "../src/catalog/substrateDiscovery.js";
 
 test("public navigation never sends visitors to the private SDK repository", () => {
@@ -51,6 +51,13 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseDataPointer, "/data");
   assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseOwnerPointer, "/owner");
   assert.ok(manifest.filters.includes("identityTier"));
+});
+
+test("public tier text says an authority verifier is needed and this build installs none", async () => {
+  assert.match(directoryManifest("https://directory.example", "https://node.example/demos").maturity.identityTier,
+    /authority proof .*installs no authority verifier, so every tier is self-declared/);
+  const { GET } = await import("../app/llms.txt/route.js");
+  assert.match(await (await GET()).text(), /authority proof a deployment verifier authenticates; .*this build installs no verifier/);
 });
 
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {
@@ -176,4 +183,25 @@ test("primaryClaim filtering accepts exact claims and canonical prefixes", () =>
   assert.equal(primaryClaimMatches(claim, "did:demos:agent"), true);
   assert.equal(primaryClaimMatches(claim, "did:demos:other"), false);
   assert.equal(primaryClaimMatches(claim, `${claim}:extra`), false);
+});
+
+
+test("mixed current rails remain discoverable while alias-only offers are archival", () => {
+  const listing = (rails: string[], status: "active" | "revoked" = "active") => ({
+    artifactProfile: "dacs-v0.1", offering: { rails }, status,
+  } as import("../src/catalog/types.js").ListingSummary);
+  for (const [rails, expected] of [
+    [["pay-dem"], false], [["pay-x402"], false], [["pay-dem", "pay-x402"], false],
+    [["demos-native:DEM"], true], [["x402:default"], true],
+    [["pay-dem", "demos-native:DEM"], true], [["x402:default", "pay-x402"], true],
+    [[], true],
+  ] as Array<[string[], boolean]>) {
+    const offer = listing(rails);
+    assert.equal(activeOffer(offer), expected, rails.join(","));
+    assert.equal(discoveryListing(offer), expected);
+    const seller = { listings: [offer] } as import("../src/catalog/types.js").SellerRecord;
+    assert.equal(activeCatalogListings({ sellers: [seller] } as import("../src/catalog/types.js").Catalog).length, Number(expected));
+    assert.equal(activeCatalogSellers([seller]).length, Number(expected));
+    assert.equal(activeOffer(listing(rails, "revoked")), false);
+  }
 });

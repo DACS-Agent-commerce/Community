@@ -5,7 +5,7 @@ import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catal
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import { PUBLISHABLE_RAIL_OPTIONS, publishableRail } from "../src/catalog/listingOptions.js";
 import { verifyNativePayment, demOs, type SettlementNodeRead } from "../src/catalog/nativePayment.js";
-import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
+import { paymentTxRefsOk, type EvidenceGraph } from "../src/catalog/evidenceGraph.js";
 import { activeCatalogListings, activeCatalogSellers } from "../src/catalog/discovery.js";
 import type { Catalog, SellerRecord } from "../src/catalog/types.js";
 import type { DealRecord } from "../src/catalog/types.js";
@@ -18,6 +18,10 @@ test("SB-1 malformed indices never mint settlement identities", () => {
   }
   assert.equal(settlementTxId({ kind: "evm", chainId: "8453", txHash, logIndex: 0 }), null);
   for (const instructionIndex of [undefined, -1]) assert.equal(settlementTxId({ kind: "solana", cluster: "devnet", signature: "1".repeat(64), instructionIndex }), null);
+  // The §9.14 shape guard agrees with SB-1: it never supplies a missing instructionIndex.
+  const solana = { kind: "solana", cluster: "mainnet", signature: "1".repeat(64) };
+  assert.equal(paymentTxRefsOk({ phase: "pay-solana-spl", outcome: "success", paymentTxRefs: [solana] }), false);
+  assert.equal(paymentTxRefsOk({ phase: "pay-solana-spl", outcome: "success", paymentTxRefs: [{ ...solana, instructionIndex: 0 }] }), true);
   const legacy = { rail: "demos", kind: "payment", txHash };
   assert.equal(legacySettlementTxId("pay-evm-erc20", legacy), null);
   assert.equal(legacySettlementTxId("pay-dem", legacy), `demos:${txHash}`);
