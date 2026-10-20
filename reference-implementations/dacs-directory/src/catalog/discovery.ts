@@ -1,9 +1,9 @@
 import type { Catalog, ListingSummary, SellerRecord } from "./types.js";
 
-/** Historical signed phase-name aliases are retained for evidence, but cannot be executed
- * under the current registry. Publishers must issue a new signed version with canonical IDs. */
+/** Historical rail aliases are retained for evidence. A current offer needs
+ * at least one rail other than those aliases, or a pipeline without payment. */
 export const activeOffer = (listing: ListingSummary): boolean => listing.status === "active" &&
-  !(listing.artifactProfile === "dacs-v0.1" && listing.offering.rails?.some((rail) => rail === "pay-dem" || rail === "pay-x402"));
+  !(listing.artifactProfile === "dacs-v0.1" && listing.offering.rails?.length && listing.offering.rails.every((rail) => rail === "pay-dem" || rail === "pay-x402"));
 
 /** Public discovery advertises active, executable offers only. */
 export const activeCatalogListings = (catalog: Catalog): ListingSummary[] =>

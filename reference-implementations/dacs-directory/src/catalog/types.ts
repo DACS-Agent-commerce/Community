@@ -291,6 +291,8 @@ export interface ScanState {
   bundleBindingOverflow?: string[];
   /** listing anchor address → owner address */
   listings: Record<string, string>;
+  /** Domain → authenticated publisher listing hints, independent of active catalog rows. */
+  publisherListingDiscoveries?: Record<string, { publisherClaim: string; listingAnchors: string[] }>;
   /** buyer owner + jobId (discoveredDealKey) → discovered deal */
   deals: Record<string, RegisteredDeal>;
 }

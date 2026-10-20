@@ -339,10 +339,11 @@ test("the browser deal verdict is strict only with matching parties, signatures,
   assert.equal(verdict({ registered: null, expectedSeller: undefined }).verdict, "limited");
 });
 
-test("verified reputation deals collapse to one authoritative copy per jobId, whoever the buyers are (§10.5.1, BB-6)", () => {
+test("verified reputation deals collapse to one authoritative copy per (buyer, jobId) session (§10.5.1, BB-6)", () => {
   const ref = (character: string) => `stor-${character.repeat(40)}`;
+  const buyerKey = "a".repeat(64), otherKey = "b".repeat(64);
   const base: DealRecord = {
-    jobId: "j", rail: "pay-dem", buyerBundleRef: ref("a"), owners: { buyer: "buyer", seller: "seller" },
+    jobId: "j", rail: "pay-dem", buyerBundleRef: ref("a"), owners: { buyer: `did:demos:agent:${buyerKey}`, seller: "seller" },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed",
     bundleContentHash: "1".repeat(64), fullSignatureStanding: true, finalisedAt: 10, verifiedAt: 1,
   };
@@ -350,18 +351,41 @@ test("verified reputation deals collapse to one authoritative copy per jobId, wh
     .map((deal) => `${deal.jobId} ${deal.buyerBundleRef.slice(-1)} ${deal.reputationEligible ? "eligible" : "excluded"}`);
   // One record per bundle ref, and canonically equal copies of a jobId collapse to the first.
   assert.deepEqual(listed([base, { ...base }, { ...base, jobId: "other" }, { ...base, buyerBundleRef: ref("b") }]), ["j a eligible"]);
-  // Divergent fully signed copies void the jobId even when their buyers differ.
-  const otherBuyer = { ...base, buyerBundleRef: ref("b"), owners: { buyer: "other-buyer", seller: "seller" }, bundleContentHash: "2".repeat(64) };
-  assert.deepEqual(listed([base, otherBuyer]), ["j a excluded", "j b excluded"]);
-  // A lone fully signed copy takes precedence over a lesser-signed divergent one.
-  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, otherBuyer]), ["j a excluded", "j b eligible"]);
-  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, { ...otherBuyer, fullSignatureStanding: false }]), ["j a excluded", "j b excluded"]);
+  // Divergent fully signed copies of one session void it; the buyer's 0x alias is the same party.
+  const sameBuyer = { ...base, buyerBundleRef: ref("b"), owners: { buyer: `0x${buyerKey}`, seller: "seller" }, bundleContentHash: "2".repeat(64) };
+  assert.deepEqual(listed([base, sameBuyer]), ["j a excluded", "j b excluded"]);
+  // A lone fully signed copy of the session takes precedence over a lesser-signed divergent one.
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, sameBuyer]), ["j a excluded", "j b eligible"]);
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, { ...sameBuyer, fullSignatureStanding: false }]), ["j a excluded", "j b excluded"]);
+  // A jobId is unique only per producer: another buyer's session on the same jobId is a separate
+  // record, whatever its standing, and can neither void nor supersede this one.
+  const otherBuyer = { ...base, buyerBundleRef: ref("c"), owners: { buyer: `did:demos:agent:${otherKey}`, seller: "seller" }, bundleContentHash: "3".repeat(64) };
+  assert.deepEqual(listed([base, otherBuyer]), ["j a eligible", "j c eligible"]);
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, otherBuyer]), ["j a eligible", "j c eligible"]);
   // Other jobIds and unverified records are untouched.
-  assert.deepEqual(listed([base, { ...base, jobId: "k", buyerBundleRef: ref("c") }, { ...base, jobId: "u", buyerBundleRef: ref("d"), refsVerified: false }]),
-    ["j a eligible", "k c eligible", "u d eligible"]);
-  const reputation = deriveSellerReputation(dedupeVerifiedDeals([base, otherBuyer]), 0, 20);
+  assert.deepEqual(listed([base, { ...base, jobId: "k", buyerBundleRef: ref("d") }, { ...base, jobId: "u", buyerBundleRef: ref("e"), refsVerified: false }]),
+    ["j a eligible", "k d eligible", "u e eligible"]);
+  const reputation = deriveSellerReputation(dedupeVerifiedDeals([base, sameBuyer]), 0, 20);
   assert.equal(reputation.completed, 0);
   assert.deepEqual(reputation.bundleRefs, []);
+});
+
+test("a sock-puppet buyer's session on the same jobId cannot erase a seller's genuine failure", () => {
+  const genuine: DealRecord = {
+    jobId: "J", rail: "pay-dem", buyerBundleRef: `stor-${"1".repeat(40)}`, owners: { buyer: `did:demos:agent:${"1".repeat(64)}`, seller: "S" },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "failed-perm",
+    bundleContentHash: "1".repeat(64), fullSignatureStanding: true, finalisedAt: 10, verifiedAt: 1,
+  };
+  const alone = deriveSellerReputation(dedupeVerifiedDeals([genuine]), 0, 20);
+  assert.deepEqual([alone.bundleCount, alone.completionRate], [1, 0]);
+  // S registers a second fully signed session on J with a buyer it controls.
+  const puppet: DealRecord = { ...genuine, buyerBundleRef: `stor-${"2".repeat(40)}`, owners: { buyer: `did:demos:agent:${"2".repeat(64)}`, seller: "S" },
+    sellerOutcome: "failed-counterparty", bundleContentHash: "2".repeat(64) };
+  const deals = dedupeVerifiedDeals([genuine, puppet]);
+  assert.equal(deals.find((deal) => deal.buyerBundleRef === genuine.buyerBundleRef)?.reputationEligible, true);
+  const withPuppet = deriveSellerReputation(deals, 0, 20);
+  // Merge-base result: the genuine failure still counts; the puppet session is its own record.
+  assert.deepEqual([withPuppet.bundleCount, withPuppet.completionRate, withPuppet.counterpartyFaultRate], [2, 0, 0.5]);
 });
 
 test("legacy full signature standing needs a valid signature from every bundle party", () => {

@@ -6,11 +6,21 @@ const rec = (v: unknown): Obj | null => v && typeof v === "object" && !Array.isA
  * PA-1 bootstrap trust is explicit: no snapshot is installed by default. An operator must
  * authenticate the registry index and rail definitions before provisioning this configuration.
  */
-export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, phase: unknown, price: unknown): string | null {
+function railDefinitions(registryVersion: unknown): Array<Obj | null> {
   let snapshots: unknown;
   try { snapshots = JSON.parse(process.env.DACS_RAIL_SNAPSHOTS ?? "[]"); } catch { snapshots = []; }
   const snapshot = Array.isArray(snapshots) ? snapshots.map(rec).find((item) => item?.registryVersion === registryVersion) : null;
-  const definitions = Array.isArray(snapshot?.rails) ? snapshot.rails.map(rec) : [];
+  return Array.isArray(snapshot?.rails) ? snapshot.rails.map(rec) : [];
+}
+
+/** A deployment capability, the same for every session pinning `registryVersion` whatever its
+ * outcome: the operator installed a live native DEM definition for that registry version. */
+export function nativeRailConfigured(registryVersion: unknown): boolean {
+  return railDefinitions(registryVersion).some((item) => item?.railId === "demos-native:DEM" && item.availability === "live");
+}
+
+export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, phase: unknown, price: unknown): string | null {
+  const definitions = railDefinitions(registryVersion);
   const matching = definitions.filter((item) => item?.railId === rail?.railId && Number.isSafeInteger(item?.railVersion) && Number(item?.railVersion) >= 1);
   const version = rail?.railVersion ?? Math.max(0, ...matching.map((item) => Number(item!.railVersion)));
   const selected = matching.filter((item) => item?.railVersion === version);

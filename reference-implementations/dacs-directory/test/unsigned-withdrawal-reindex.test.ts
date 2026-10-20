@@ -39,7 +39,8 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
   const marker = { ...markerScope, signature: sign(markerScope, 'dacs-revocation:v1:') };
   const binding = await findValidListingRevocation([at(2)], verified, 1, async () => marker); assert.ok(binding);
   const indexRaw = JSON.stringify({ indexVersion: '1', generatedAt: 123, seller: claim, listings: [{ listingId: 'svc', version: 1,
-    contentHash: verified.contentHash, anchor: { kind: 'storage-program', locator: at(1) }, status: 'revoked', revocation: binding }] });
+    contentHash: verified.contentHash, anchor: { kind: 'storage-program', locator: at(1) },
+    summary: { title: 'Service', category: 'services.other', tags: [] }, status: 'revoked', revocation: binding }] });
   const docs: Record<string, string> = { '/.well-known/agent.json': JSON.stringify({ dacs: { dacsVersion: '1',
     listings: { indexUrl: 'https://seller.example/.well-known/dacs/listings.json', indexHash: `sha256-${sha256Hex(indexRaw)}` } } }),
     '/.well-known/dacs/listings.json': indexRaw };
@@ -72,6 +73,11 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
     assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
     process.env.DACS_WITHDRAWAL_SOURCE_PINS = JSON.stringify({ 'https://seller.example': claim });
+    await run();
+    assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true,
+      'pinning the seller domain does not authorize an attacker domain for the same seller');
+    assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), false);
+    assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), false);
     crawled = complete;
     store.saveDomains(['seller.example']);
     await run();

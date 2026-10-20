@@ -10,7 +10,7 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, legacySignatureBytes } from "./signatureValue.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -132,7 +132,9 @@ function validPhaseParameters(step: Record<string, unknown>, pricing: Record<str
       optional(parameters.channelSubnet, isString);
   }
   if (step.kind === "rate") return optional(parameters.required, (required) => typeof required === "boolean");
-  return String(step.kind).startsWith("pay-");
+  // The remaining recognized kinds have no required parameter members. Preserve
+  // object-valued additions in the signed scope; the caller checks the phase kind.
+  return true;
 }
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
@@ -325,6 +327,46 @@ export async function verifyListing(
   };
 }
 
+/**
+ * Read immutable history without weakening SIG-6 admission. Only an operator's
+ * out-of-band pre-upgrade inventory can select the old Directory hex importer;
+ * artifact fields, timestamps and a failed signature never grant that authority.
+ * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
+ * Every read still verifies the complete current schema and both signatures.
+ */
+export async function verifyStoredListing(
+  raw: Record<string, unknown>,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<VerifiedListing | null> {
+  const signature = record(raw.signature);
+  if (!("dacsVersion" in raw) || canonicalSignatureBytes(signature?.value)) {
+    return verifyListing(raw, resolveKey);
+  }
+  if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
+  const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  if (!configured || Buffer.byteLength(configured, "utf8") > 65_536) return null;
+  try {
+    const pins = record(JSON.parse(configured));
+    if (!pins || Object.keys(pins).length > 256 || !Object.hasOwn(pins, nativeAddress)) return null;
+    const pin = record(pins[nativeAddress]);
+    if (!pin || pin.encoding !== "lowercase-hex" || typeof pin.contentHash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(pin.contentHash) || typeof pin.sellerPrimaryClaim !== "string" ||
+        pin.listingId !== raw.listingId || pin.listingVersion !== raw.listingVersion) return null;
+    const value = typeof signature?.value === "string"
+      ? importLegacySignatureValue(signature.value, "lowercase-hex") : null;
+    if (!value) return null;
+    // Only the unsigned envelope changes in memory. Keep the native bytes,
+    // signed scope and pinned hash intact; never re-sign or write a replacement.
+    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    return verified && verified.contentHash === pin.contentHash &&
+      verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
+      ? verified : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A bogus candidate must never shadow another valid owner-signed marker. */
 export async function hasValidListingRevocation(
   candidateRefs: string[],
@@ -355,7 +397,7 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
-/** Per-listing, per-pass bound on candidate reads and RB-4 verifications. */
+/** Per-listing, per-pass candidate bound; each may check cached and current bytes. */
 export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
 
 /** Candidates examined by one call: unreadable ones are retried later, rejected ones were read and failed RB-4. */
@@ -368,7 +410,9 @@ export interface RevocationCandidateProgress {
  * Fully verify discovered candidates, in the given order and at most `limit`
  * of them, and return the RB-2 binding this catalog can publish. A bogus
  * candidate never shadows a later valid marker; unexamined candidates are
- * left for a later call.
+ * left for a later call. When the first reader supplies cached observations,
+ * a failed check must use the current reader before recording a rejection.
+ * This bounds work to `limit` current reads and at most `2 * limit` checks.
  */
 export async function findValidListingRevocation(
   candidateRefs: string[],
@@ -378,14 +422,20 @@ export async function findValidListingRevocation(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
   progress: RevocationCandidateProgress = { unread: [], rejected: [] },
   limit = REVOCATION_VERIFICATIONS_PER_PASS,
+  readCurrentCandidate?: (ref: string) => Promise<Record<string, unknown> | null>,
 ): Promise<RevocationBinding | null> {
   for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
-    const candidate = await readCandidate(ref);
+    let candidate = await readCandidate(ref);
+    let valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    if (!valid && readCurrentCandidate) {
+      candidate = await readCurrentCandidate(ref);
+      valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    }
     if (!candidate) {
       progress.unread.push(ref);
       continue;
     }
-    if (!(await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey))) {
+    if (!valid) {
       progress.rejected.push(ref);
       continue;
     }

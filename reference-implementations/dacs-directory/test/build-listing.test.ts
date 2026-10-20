@@ -195,6 +195,36 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     assert.equal(recovered.anchorAddress, built.anchorAddress);
     assert.equal(recovered.contentHash, built.contentHash);
     assert.deepEqual(recovered.listing, signedListing);
+
+    const previousImports = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    signedListing.signature.value = Buffer.from(listingSignature, "base64url").toString("hex");
+    try {
+      delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      assert.equal((await POST(request(finalInput))).status, 409, "unproven hex cannot enter recovery");
+      process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [built.anchorAddress]: {
+        encoding: "lowercase-hex", sellerPrimaryClaim: claim, listingId: built.listing.listingId,
+        listingVersion: built.listing.listingVersion, contentHash: built.contentHash,
+      } });
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const historical = await POST(request(finalInput));
+        assert.equal(historical.status, 200);
+        const value = await historical.json();
+        assert.equal(value.exists, true);
+        assert.equal(value.tx, null, "repeat recovery never constructs another transaction");
+        assert.equal(value.anchorAddress, built.anchorAddress);
+        assert.equal(value.contentHash, built.contentHash);
+        assert.deepEqual(value.listing, signedListing, "original hex bytes survive recovery");
+      }
+      const { POST: confirm } = await import("../app/api/dacs/confirm-listing/route.js");
+      const confirmed = await confirm(request({ anchorAddress: built.anchorAddress, programName: built.programName,
+        contentHash: built.contentHash, sellerClaim: claim, listingId: built.listing.listingId,
+        listingVersion: built.listing.listingVersion }));
+      assert.equal(confirmed.status, 200, "recovered history can finish pointer registration");
+      assert.equal((await confirmed.json()).confirmed, true);
+    } finally {
+      if (previousImports === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previousImports;
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -299,4 +329,17 @@ test("publisher rejects fractional percentages cleanly under its integer profile
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /integer/);
   }
+});
+
+test("publication rejects lone high/low surrogate keys and values and accepts a valid pair", async () => {
+  for (const surrogate of ["\ud800", "\udfff"]) {
+    for (const extra of [{ description: surrogate }, { [surrogate]: "extension" }]) {
+      const response = await POST(request({ ...base, ...extra }));
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /invalid Unicode/);
+    }
+  }
+  const response = await POST(request({ ...base, name: "Service \ud83d\ude00", ["\ud83d\ude00"]: "valid" }));
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).identityMessage);
 });

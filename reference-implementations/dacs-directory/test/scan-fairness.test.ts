@@ -53,7 +53,7 @@ const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: sell
 /** Marker-shaped, but its signature does not verify. */
 const unsigned = (n: number) => ({ ...markerScope, revokedAt: 1_000 + n, signature: { algorithm: "ed25519", signer: seller, value: "00".repeat(64) } });
 async function agreementFor(jobId: string, buyerIndex: number, sellerIndex: number) {
-  const scope = { agreementVersion: "1", jobId, listingRef: { listingId: "svc", version: 1, contentHash: listingHash },
+  const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: listingHash },
     parties: [{ role: "buyer", primaryClaim: dids[buyerIndex] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   const sign = async (index: number) => ({ party: dids[index], algorithm: "ed25519",
@@ -117,6 +117,7 @@ function resetIndex(registrations: Registration[], generatedAt: number) {
   store.saveRegistrations(registrations);
   store.saveCatalog({ catalogVersion: "1", generatedAt, sellers: [] });
   store.saveScanState(emptyState());
+  sql("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'");
   sql("DELETE FROM artifacts");
   sql("DELETE FROM dead_letters");
   if (candidateTable()) sql("DELETE FROM revocation_candidates");
@@ -195,9 +196,9 @@ test("every revocation candidate is eventually verified with bounded work per pa
   }
   assert.equal(listingStatus(), "revoked");
   assert.ok(passes <= Math.ceil(candidates.length / 16), `revoked after ${passes} passes`);
-  // Unreadable candidates are kept for a later pass rather than dropped.
+  // Invalid retained bytes cannot conclusively reject a now-unreadable locator.
   const queued = pending(listingHash);
-  for (const at of unreadable) assert.ok(queued.includes(at), `${at} stays queued`);
+  for (const at of unreadable) assert.ok(queued.includes(at), `${at} stays pending until a current read succeeds`);
   // Rejected candidates are not verified again.
   reads = new Map();
   await reindex();
@@ -224,7 +225,7 @@ test("per-pass revocation work does not grow with the number of queued candidate
     work.push({ calls: sqlWork.calls, rows: sqlWork.rows, verified: readsOf(queued) });
   }
   assert.deepEqual(work[1], work[0], "the same statements and rows with ten times the queue");
-  assert.equal(work[0].verified, 16);
+  assert.equal(work[0].verified, 16, "each cached rejection gets one bounded current read");
   // Nothing unexamined left the queue: two passes examined 32 of the 400.
   assert.equal(pending(listingHash).length, 400 - 32);
 });
@@ -305,12 +306,25 @@ test("a verified revocation stays revoked while its marker cannot be read or no 
   // Later content at the marker's locator does not withdraw the revocation either.
   unavailable.clear();
   storage[locator(5)] = { data: JSON.stringify(unsigned(1)), owner: ownerOf(otherBuyer) };
+  transactions = [memo(100, locator(5))];
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
   assert.deepEqual(publishedListing()?.revocation, binding);
+  // A fresh process has neither the old catalog record nor the old observation
+  // as authority: the retained authenticated certificate must suffice.
+  const { spawnSync } = await import("node:child_process");
+  const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    const { indexRegistration } = await import('./src/catalog/indexer.ts');
+    globalThis.fetch = async input => Response.json({ success: true, owner: ${JSON.stringify(ownerOf(seller))},
+      data: String(input).endsWith(${JSON.stringify(locator(1))}) ? ${JSON.stringify(listing)} : ${JSON.stringify(unsigned(1))} });
+    const record = await indexRegistration(${JSON.stringify(sellerRegistration)}, undefined, async () => { throw new Error('offline'); });
+    console.log(JSON.stringify(record.listings[0]?.revocation));
+  `], { encoding: "utf8" });
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.deepEqual(JSON.parse(restarted.stdout), binding);
 });
 
-test("an unread or unexamined revocation candidate withholds the listing rather than publishing it active (RB-5)", async () => {
+test("retained signed discovery revokes while unauthenticated unread or unexamined hints cannot suppress", async () => {
   // Unread: the third-party marker answers the scanner, then the node fails its verification read.
   resetIndex([sellerRegistration, later], 31);
   chain({
@@ -319,7 +333,7 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   }, [locator(1), locator(6)]);
   scanOnly.add(locator(6));
   await reindex();
-  assert.equal(publishedListing(), undefined, "an incomplete check publishes no active record");
+  assert.equal(publishedListing()?.status, "revoked", "retained publisher-signed bytes survive the third-party read outage");
   scanOnly.clear();
   transactions = [];
   const realNow = Date.now; Date.now = () => realNow() + 60_000;
@@ -335,7 +349,7 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
     ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
   }, [locator(1), ...bogus, locator(7)]);
   await reindex();
-  assert.equal(publishedListing(), undefined, "16 of 21 candidates examined");
+  assert.equal(publishedListing()?.status, "active", "unexamined chain hints have no suppression authority");
   transactions = [];
   await reindex();
   assert.equal(publishedListing()?.status, "revoked");
@@ -348,8 +362,8 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
   }, [locator(1), locator(8)]);
   vanishing.add(locator(8));
   await reindex();
-  assert.equal(publishedListing(), undefined);
-  assert.deepEqual(pending(listingHash), [locator(8)]);
+  assert.equal(publishedListing()?.status, "active");
+  assert.deepEqual(pending(listingHash), [locator(8)], "missing current bytes cannot make a cached rejection conclusive");
 
   // Every candidate examined and rejected: absent, and an active record carries no binding.
   resetIndex([sellerRegistration, later], 33);
@@ -358,7 +372,7 @@ test("an unread or unexamined revocation candidate withholds the listing rather 
     ...Object.fromEntries(bogus.map((at, n) => [at, { data: JSON.stringify(unsigned(n)), owner: ownerOf(outsider) }])),
   }, [locator(1), ...bogus]);
   await reindex();
-  assert.equal(publishedListing(), undefined);
+  assert.equal(publishedListing()?.status, "active");
   transactions = [];
   await reindex();
   assert.equal(publishedListing()?.status, "active");
@@ -444,6 +458,13 @@ test("a discovered current-profile deal is attributed through the agreementRef i
   deal = await scannedDeal();
   assert.equal(deal?.owners.seller, "");
 
+  // A reference to a locator that holds nothing attributes nothing, and the scan still completes.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(984))), owner: ownerOf(buyer) },
+  }, [locator(980)]);
+  deal = await scannedDeal();
+  assert.deepEqual([deal?.buyerBundleRef, deal?.owners.seller, deal?.agreementLocator], [locator(980), "", undefined]);
+
   // Two programs sharing the conventional name do not void a deal its signed reference attributes.
   resetIndex([later], 36);
   chain({
@@ -516,12 +537,13 @@ test("two buyers' attributed deals with the same jobId both reach the seller's r
   const deals = store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals ?? [];
   assert.deepEqual(deals.map((deal) => `${deal.owners.buyer} ${deal.buyerBundleRef}`).sort(),
     [`${buyer} ${locator(70)}`, `${otherBuyer} ${locator(72)}`].sort());
-  // Both are listed, but §10.5.1 reconciles per jobId: equal-standing divergent copies count for neither.
+  // Both are listed and both stay separate sessions: a jobId is unique only per producer, so §10.5.1
+  // reconciles per (buyer, jobId) and neither buyer's session voids the other's (BB-6).
   const verifiedDeal = (who: string, at: number) => ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at),
     owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, reputationEligible: true,
     bundleContentHash: at.toString(16).padStart(64, "0"), fullSignatureStanding: true, verifiedAt: 1 });
   assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(outsider, 70)])
-    .map((deal) => [deal.buyerBundleRef, deal.reputationEligible]), [[locator(70), false], [locator(72), false]]);
+    .map((deal) => [deal.buyerBundleRef, deal.reputationEligible]), [[locator(70), true], [locator(72), true]]);
 });
 
 test("v9 scan state is completed by a full deal-history replay before it is marked migrated", async () => {

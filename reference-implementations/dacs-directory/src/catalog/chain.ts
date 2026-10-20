@@ -12,7 +12,6 @@
  */
 import { boundedJson, storageResponseJson } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
-import { gcrAuthHeaders } from "./gcr.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 export const LIVE_STORAGE_SALT = "";
@@ -70,11 +69,10 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
   // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
   // proxy's or a wrong route's, leaves the read incomplete (RB-6).
-  if (res.status === 404 || res.status === 403) {
+  if (res.status === 404) {
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
-      const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
-      return res.status === 404 && answer && answer.success === false && answer.errorCode === expected ? { status: "absent" } : { status: "unavailable" };
+      return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" } : { status: "unavailable" };
     } catch {
       return { status: "unavailable" };
     }
@@ -182,10 +180,10 @@ export async function resolveOwnedAnchorByName(
   });
   // The pinned node revision (README "Pinned upstreams") has no searchStoragePrograms nodeCall: it
   // answers an unknown message with result 200 and this literal, and serves the same exact-name
-  // search as a read-authenticated gcr_routine. A deployment with the nodeCall answers it directly.
+  // search as a public gcr_routine. A deployment with the nodeCall answers it directly.
   if (search.status === "ok" && isUnknownNodeCall(search.body)) {
     aclFilteredSearch = true;
-    search = await rpcCall(await gcrAuthHeaders(), {
+    search = await rpcCall({ "content-type": "application/json" }, {
       method: "gcr_routine",
       params: [{ method: "searchStoragePrograms", params: [programName, options] }],
     });

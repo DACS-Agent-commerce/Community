@@ -143,7 +143,7 @@ function sql(query: string) {
 }
 const scanCounts = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")[0];
 async function agreementFor(jobId: string) {
-  const scope = { agreementVersion: "1", jobId, listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
+  const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   return { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
