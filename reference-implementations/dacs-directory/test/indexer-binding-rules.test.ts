@@ -161,7 +161,7 @@ test("a deal resolved through its holders' bindings carries the authoritative co
   assert.equal(deal.finalisedAt, 120);
   assert.deepEqual(deal.agreementPrice, { amount: "2", currency: "DEM" });
   // SB-1: the key is the canonical demos:{lower-case hash without 0x}, and the phase index is the bundle entry's.
-  assert.deepEqual(deal.settlementTxIds, [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2, evidenceHash: artifactHash(evidence, "evidence") }]);
+  assert.deepEqual(deal.settlementTxIds, [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2, evidenceHash: artifactHash(evidence, "evidence"), nodeVerified: true }]);
   assert.deepEqual(deal.ratings, [{ rater: dids[BUYER], target: dids[SELLER], targetRole: "seller", value: 4, ratedAt: 110, contentHash: artifactHash(rating, "rating") }]);
   assert.equal(deal.cancellationNeutral, false);
 });
@@ -272,6 +272,9 @@ test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain b
   const withoutNote: Obj = { ...extended }; delete withoutNote.note;
   assert.equal(await verifyAnchorBinding(withoutNote), null);
   assert.equal(await verifyAnchorBinding({ ...signedScope({}), note: "added later" }), null);
+  // The content hash omits `signatures` too, so that member could be added unsigned (review sweep 10, P3-7).
+  assert.equal(contentHash({ ...scope, signatures: ["unsigned"] }), contentHash(scope));
+  assert.equal(await verifyAnchorBinding({ ...signedScope({}), signatures: ["unsigned"] }), null);
   // SIG-6: only the strict unpadded base64url value of the same signature bytes is accepted.
   const strict = signedScope({});
   const bytes = Buffer.from(String((strict.signature as Obj).value), "base64url");
@@ -726,9 +729,17 @@ test("required vet execution binds presented claims, verification and phase poin
         c.pointer === "failed-result" ? refTo(at(82), store.get(at(82))!, "verify-result") :
         c.pointer === "foreign" ? { ...resultRef, anchor: { kind: "storage-program", locator: at(84) } } :
         c.pointer === "evidence" ? refTo(at(3), evidence, "evidence") : undefined;
+      // DACS-5 §10.3.1: a failed session ends in a failed phase of its class, the delivery here.
+      const failedEnd = Boolean(c.bundleOutcome?.startsWith("failed-"));
+      const ends = (index: number) => failedEnd && index === pipeline.length - 1;
       const phaseSummary = pipeline.flatMap((phase, index) => c.omittedVet && index === 0 ? [] :
-        [{ index, kind: phase.kind, outcome: "ok", ...(index === 0 && pointer ? { attestationRef: pointer } : {}) }]);
-      const scope = bundleScope({ recipeRegistryVersion: c.registryVersion ?? 1, listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30) });
+        [{ index, kind: phase.kind, outcome: ends(index) ? "fail" : "ok", ...(ends(index) ? { errorClass: "permanent" } : {}),
+          ...(index === 0 && pointer ? { attestationRef: pointer } : {}) }]);
+      const failedDeliveryScope = { ...deliveryScope, outcome: "failure" };
+      const failedDelivery = { ...failedDeliveryScope, signature: signedWith(failedDeliveryScope, "evidence", SELLER) };
+      if (failedEnd) store.set(at(66), failedDelivery);
+      const scope = bundleScope({ recipeRegistryVersion: c.registryVersion ?? 1, listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement"), parties, outcome: c.bundleOutcome ?? "completed", vetRecords: refs, phaseSummary, finalisedAt: Math.max(120, c.generatedAt ?? 30),
+        ...(failedEnd ? { settlementEvidence: [refTo(at(3), evidence, "evidence"), refTo(at(66), failedDelivery, "evidence")] } : {}) });
       store.set(at(20), copy("buyer", scope)).set(at(21), copy("seller", scope));
       const buildGraph = () => buildCurrentEvidenceGraph(at(20), {
         verifyAttestation: verifyTestAuthority,
@@ -1450,7 +1461,7 @@ test("agreement presence and pre-commit terminal facts cannot contradict one ano
         s.phaseSummary = [phase]; s.settlementEvidence = []; s.ratingRefs = [];
       });
       const graph = await currentGraph(listed); assert.equal(graph.ok, false);
-      assert.match(graph.reason!, /failed commitment|has no agreement|no failed terminal phase/);
+      assert.match(graph.reason!, /failed commitment|has no agreement|no failed terminal phase|terminal phase classification contradicts/);
       await assertUncounted();
     }
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }

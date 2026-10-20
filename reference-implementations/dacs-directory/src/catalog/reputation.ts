@@ -50,7 +50,11 @@ export function isNeutralCancellation(
 
 /** Admit the consumer's complete evidence set before seller, category or window filtering. */
 export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
-  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && !deal.settlementRejected && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
+  // Only a settlement this deployment confirmed on the node may claim, or reject, an id: an asserted
+  // one would let any producer evict another seller's verified completion. A deal citing a settlement
+  // without that stamp (as an earlier release persisted it) is not admitted until it is verified again.
+  const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && !deal.settlementRejected &&
+    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? "") && (deal.settlementTxIds ?? []).every((tx) => tx.nodeVerified === true));
   // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) of one session only; a jobId is
   // unique only per producer, so another buyer's session on the same jobId is a second binding.
   // Claims are admitted in the winning order, earliest evidence observation first, then the lower

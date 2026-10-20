@@ -215,8 +215,10 @@ export interface DealRecord extends RegisteredDeal {
   agreementPrice?: { amount: string; currency: string };
   /** Signature/hash/session-bound DACS-5 ratings. */
   ratings?: VerifiedRating[];
-  /** Settlement ids used for the SB-2 cross-job uniqueness gate, with the content hash of the evidence citing each. */
-  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number; evidenceHash?: string }>;
+  /** Settlement ids used for the SB-2 cross-job uniqueness gate, with the content hash of the evidence citing each.
+   * nodeVerified marks a transfer this deployment confirmed on the node; only such a claim enters the
+   * catalog-wide ledger, and a deal citing any other (as an earlier release persisted) is not admitted. */
+  settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number; evidenceHash?: string; nodeVerified?: boolean }>;
 }
 
 export interface SellerRecord {

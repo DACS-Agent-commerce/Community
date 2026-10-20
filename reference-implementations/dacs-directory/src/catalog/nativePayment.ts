@@ -57,6 +57,12 @@ export async function verifyNativePayment(ref: Obj, agreement: Obj, phaseIndex: 
         args[0] !== payee || payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount) return "fail";
     const block = rec(await read("getBlockByNumber", { blockNumber: ref.blockNumber }));
     if (!block) return "indeterminate";
+    // The pinned source (ac8f45f) has no block attrs. A newer deployment (node2) lists the transactions whose
+    // GCR edits the block applied; where it states that list, a transfer it does not name, or a list it
+    // cannot read, does not establish settlement.
+    const attrs = block.attrs === undefined ? {} : rec(block.attrs);
+    const applied = attrs?.gcrAppliedTxs;
+    if (!attrs || (applied !== undefined && (!Array.isArray(applied) || !applied.some((h) => hash(h) === txHash)))) return "indeterminate";
     const transactions = rec(block.content)?.ordered_transactions;
     return block.number === ref.blockNumber && Array.isArray(transactions) && transactions.some((h) => hash(h) === txHash) ? "pass" : "fail";
   } catch { return "indeterminate"; }

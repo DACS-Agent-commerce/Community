@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { settlementTxId, legacySettlementTxId } from "../src/catalog/settlementKey.js";
+import { settlementTxId } from "../src/catalog/settlementKey.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import { PUBLISHABLE_RAIL_OPTIONS, publishableRail } from "../src/catalog/listingOptions.js";
@@ -22,9 +22,6 @@ test("SB-1 malformed indices never mint settlement identities", () => {
   const solana = { kind: "solana", cluster: "mainnet", signature: "1".repeat(64) };
   assert.equal(paymentTxRefsOk({ phase: "pay-solana-spl", outcome: "success", paymentTxRefs: [solana] }), false);
   assert.equal(paymentTxRefsOk({ phase: "pay-solana-spl", outcome: "success", paymentTxRefs: [{ ...solana, instructionIndex: 0 }] }), true);
-  const legacy = { rail: "demos", kind: "payment", txHash };
-  assert.equal(legacySettlementTxId("pay-evm-erc20", legacy), null);
-  assert.equal(legacySettlementTxId("pay-dem", legacy), `demos:${txHash}`);
 });
 
 test("publisher rail IDs and phase kinds follow the pinned DACS-4 registry", () => {

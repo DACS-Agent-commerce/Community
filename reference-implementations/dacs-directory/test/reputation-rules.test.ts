@@ -46,7 +46,7 @@ test("the window uses SR-2 anchor time only when every scored deal has one, with
 });
 
 test("SB-2: a reused settlement id counts once, for the earliest observation, and its other deals drop out", () => {
-  const tx = (id: string, observedAt: number, evidenceHash = "a".repeat(64)) => ({ id, observedAt, phaseIndex: 2, evidenceHash });
+  const tx = (id: string, observedAt: number, evidenceHash = "a".repeat(64)) => ({ id, observedAt, phaseIndex: 2, evidenceHash, nodeVerified: true });
   const later = deal({ jobId: "a-later", settlementTxIds: [tx("t", 20)] });
   const earlier = deal({ jobId: "z-earlier", settlementTxIds: [tx("t", 10)] });
   const kept = (deals: DealRecord[]) => (deriveSellerReputation(deals, 0, 100).bundleRefs ?? []).map((ref) => ref.id).sort();
@@ -164,7 +164,7 @@ test("DACS-1 §6.3.6 ReputationHint: the listing's category scopes the metrics, 
     categoryScope: "legal", completionRate: null, averageSellerRating: null, bundleCount: 0, windowStart: 0, windowEnd: 100, computedAt: 7,
   });
   // The hint applies SB-2 and the window exactly as the seller derivation does.
-  const tx = [{ id: "shared", observedAt: 1, phaseIndex: 2, evidenceHash: "a".repeat(64) }];
+  const tx = [{ id: "shared", observedAt: 1, phaseIndex: 2, evidenceHash: "a".repeat(64), nodeVerified: true }];
   const reused = [deal({ category: "data.finance", settlementTxIds: tx }), deal({ category: "data.finance", settlementTxIds: [{ ...tx[0], observedAt: 2 }] })];
   assert.equal(categoryReputationHint("data.finance", reused, 0, 100, 7).bundleCount, 1);
   assert.equal(categoryReputationHint("data.finance", [deal({ category: "data.finance", finalisedAt: 500 })], 0, 100, 7).bundleCount, 0);
@@ -172,7 +172,7 @@ test("DACS-1 §6.3.6 ReputationHint: the listing's category scopes the metrics, 
 
 test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and rating recency before hash", () => {
   assert.equal(deriveSellerReputation([], 0, 100).windowingBasis, "finalisedAt");
-  const tx = (observedAt: number, evidenceHash: string) => [{ id: "shared", observedAt, phaseIndex: 2, evidenceHash }];
+  const tx = (observedAt: number, evidenceHash: string) => [{ id: "shared", observedAt, phaseIndex: 2, evidenceHash, nodeVerified: true }];
   const kept = (deals: DealRecord[]) => (deriveSellerReputation(deals, 0, 100).bundleRefs ?? []).map((ref) => ref.id);
   const a = deal({ jobId: "a", settlementTxIds: tx(10, "5".repeat(64)) });
   const z = deal({ jobId: "z", settlementTxIds: tx(10, "5".repeat(64)) });
@@ -192,8 +192,8 @@ test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and 
 
 test("SB-2 rejects one job reusing a settlement under two pipeline indices", () => {
   const reused = deal({ settlementTxIds: [
-    { id: "demos:shared", observedAt: 10, phaseIndex: 2, evidenceHash: "a" },
-    { id: "demos:shared", observedAt: 11, phaseIndex: 3, evidenceHash: "b" },
+    { id: "demos:shared", observedAt: 10, phaseIndex: 2, evidenceHash: "a", nodeVerified: true },
+    { id: "demos:shared", observedAt: 11, phaseIndex: 3, evidenceHash: "b", nodeVerified: true },
   ] });
   assert.equal(deriveSellerReputation([reused], 0, 100).completed, 0);
   assert.equal(deriveSellerReputation([reused], 0, 100).bundleCount, 0);
@@ -206,7 +206,7 @@ test("SB-2 records each first claim itself, and one claim cited twice at one pha
   assert.deepEqual([admitSettlement(ledger, claim), admitSettlement(ledger, claim)], ["count", "already-counted"]);
   assert.equal(admitSettlement(ledger, { ...claim, phaseIndex: 3 }), "reject");
   assert.equal(admitSettlement(ledger, { ...claim, jobId: "other-job" }), "reject");
-  const tx = { id: "demos:twice", observedAt: 10, phaseIndex: 2, evidenceHash: "a".repeat(64) };
+  const tx = { id: "demos:twice", observedAt: 10, phaseIndex: 2, evidenceHash: "a".repeat(64), nodeVerified: true };
   const twice = deal({ settlementTxIds: [tx, { ...tx }] });
   assert.deepEqual(settlementEligibleDeals([twice]), [twice]);
   assert.equal(deriveSellerReputation([twice], 0, 100).completed, 1);
@@ -215,7 +215,7 @@ test("SB-2 records each first claim itself, and one claim cited twice at one pha
 test("SB-2: two sessions on one jobId citing one settlement count it once, for the earlier observation", () => {
   // A jobId is unique only per producer, so another buyer's session may share it; one payment
   // still settles one session (review F-4).
-  const tx = (observedAt: number) => [{ id: "demos:one-payment", observedAt, phaseIndex: 2, evidenceHash: "d".repeat(64) }];
+  const tx = (observedAt: number) => [{ id: "demos:one-payment", observedAt, phaseIndex: 2, evidenceHash: "d".repeat(64), nodeVerified: true }];
   const first = deal({ jobId: "shared-job", settlementTxIds: tx(10), agreementPrice: { amount: "2", currency: "DEM" } });
   const second = deal({ jobId: "shared-job", settlementTxIds: tx(11), agreementPrice: { amount: "2", currency: "DEM" },
     owners: { buyer: "did:demos:agent:other-buyer", seller: SELLER } });
@@ -236,7 +236,7 @@ function crossSellerCatalog() {
   const sellerRecord = (primaryClaim: string, deals: DealRecord[]): SellerRecord => ({ primaryClaim, displayName: primaryClaim, cci: [], deals,
     listings: [{ offering: { category: "rules.sb2" } } as never], reputation: { completed: 0, totalAgreements: 0, completionRate: null },
     registeredAt: 1, lastIndexedAt: 1 });
-  const tx = (observedAt: number) => [{ id: "demos:shared-across-sellers", observedAt, phaseIndex: 2, evidenceHash: "c".repeat(64) }];
+  const tx = (observedAt: number) => [{ id: "demos:shared-across-sellers", observedAt, phaseIndex: 2, evidenceHash: "c".repeat(64), nodeVerified: true }];
   const OTHER = "did:demos:agent:other-seller";
   const price = { amount: "2", currency: "DEM" };
   const winner = deal({ jobId: "winner", settlementTxIds: tx(10), agreementPrice: price, category: "rules.sb2" });
@@ -277,8 +277,36 @@ test("saving the catalog applies the catalog-wide SB-2 ledger", async (t) => {
   assert.deepEqual(loadCatalog().sellers.map((seller) => seller.reputation.completed), [0, 1]);
 });
 
+// Review sweep 10: only a settlement this deployment confirmed on the node takes part in SB-2. A claim
+// without that stamp (an unverified citation, or one an earlier release persisted before payments were
+// verified) can neither hold nor reject an id, and its deal is not admitted until it is verified again.
+test("SB-2 admits only node-verified claims, so an asserted or persisted citation evicts no one", async (t) => {
+  const { sellers, winner, later } = crossSellerCatalog();
+  later.settlementTxIds = [{ ...later.settlementTxIds![0], observedAt: 1, nodeVerified: undefined }];
+  assert.deepEqual(settlementEligibleDeals([later, winner]), [winner]);
+  const mixed = deal({ settlementTxIds: [{ id: "demos:own", observedAt: 5, phaseIndex: 2, nodeVerified: true }, { id: "demos:cited", observedAt: 5, phaseIndex: 3 }] });
+  assert.deepEqual(settlementEligibleDeals([mixed]), [], "one unverified citation is enough to withhold the deal");
+  reconcileCatalogReputation(sellers, 100);
+  assert.deepEqual(sellers.map((seller) => [seller.deals[0].settlementRejected, seller.reputation.completed]), [[undefined, 1], [true, 0]]);
+
+  // index-now recomputes the ledger over persisted sellers it did not verify again.
+  const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-reputation-provenance-"));
+  const previous = process.env.DACS_DIRECTORY_DATA;
+  process.env.DACS_DIRECTORY_DATA = dataDirectory;
+  t.after(() => {
+    if (previous === undefined) delete process.env.DACS_DIRECTORY_DATA; else process.env.DACS_DIRECTORY_DATA = previous;
+    rmSync(dataDirectory, { recursive: true, force: true });
+  });
+  const { loadCatalog, saveCatalog } = await import("../src/catalog/store.js");
+  saveCatalog({ catalogVersion: "1", generatedAt: 100, sellers: [sellers[1]] });
+  const persisted = loadCatalog();
+  persisted.sellers.push({ ...sellers[0], deals: [{ ...winner, settlementRejected: undefined }] });
+  saveCatalog(persisted);
+  assert.deepEqual(loadCatalog().sellers.map((seller) => [seller.primaryClaim, seller.reputation.completed]), [[sellers[1].primaryClaim, 0], [SELLER, 1]]);
+});
+
 test("equal-time/hash/job settlement claims choose the lower phase index in both insertion orders", () => {
-  const claim = { id: "shared", observedAt: 1, evidenceHash: "a".repeat(64) };
+  const claim = { id: "shared", observedAt: 1, evidenceHash: "a".repeat(64), nodeVerified: true };
   const low = deal({ jobId: "same", settlementTxIds: [{ ...claim, phaseIndex: 0 }] });
   const high = deal({ jobId: "same", settlementTxIds: [{ ...claim, phaseIndex: 1 }] });
   assert.deepEqual(settlementEligibleDeals([low, high]), [low]);

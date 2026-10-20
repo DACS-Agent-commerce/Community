@@ -22,7 +22,7 @@ import {
   type ArtifactKind,
   type EvidenceGraphDeps,
 } from "../src/catalog/evidenceGraph.js";
-import { deliverableLogicalAddress, paymentLogicalAddress } from "../src/catalog/anchorBinding.js";
+import { cf4Segment, deliverableLogicalAddress, paymentLogicalAddress } from "../src/catalog/anchorBinding.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "../src/catalog/artifactLimits.js";
 
 // Each DACS rule the current-profile evidence graph enforces, one case per rule. Every mutated
@@ -319,12 +319,19 @@ test("DACS-5 §10.4.1: the bundle's own shape, parties and signatures", async ()
 });
 
 test("DACS-5 FaultAttributionBundle: faultedParty agrees with the outcome and the anchoring role", async () => {
+  const failed = (outcome: string) => outcome.startsWith("failed-");
   const fault = (outcome: string, faultedParty: unknown, anchoredByRole = "buyer"): Case => ({
     anchoredByRole,
+    // §10.3.1: a failure ends in a failed phase of its class, the payment here.
+    scopes: (scopes) => { if (failed(outcome)) { scopes.evidence.outcome = "failure"; delete scopes.evidence.settlementFinality; } },
     bundle: (bundle) => {
       delete bundle.bundleVersion;
       Object.assign(bundle, { faultBundleVersion: "1", outcome, faultedParty });
       if (outcome.startsWith("aborted")) { delete bundle.agreementRef; bundle.settlementEvidence = []; bundle.phaseSummary = []; }
+      if (failed(outcome)) {
+        bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" },
+          { index: 2, kind: "pay-dem", outcome: "fail", errorClass: outcome === "failed-substrate" ? "substrate" : "permanent" }];
+      }
     },
   });
   const ok = "ok"; const bad = "invalid fault attribution";
@@ -1131,6 +1138,9 @@ test("payment bindings are unique per invocation and CF-4 encode the rail", asyn
     scopes: (scopes) => { (scopes.agreement.terms as Obj).rail = { railId: "dem:native" }; } };
   assert.match((await evaluate(encoded)).reason!, /authenticated pinned rail definition is unavailable/);
   assert.equal((await evaluate({ ...encoded, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem:native:2` } })).reason, "payment evidence anchor binding failed");
+  // CORE CF-4 encodes exactly `: ? & = %` in uppercase hex; other characters stay as written.
+  assert.equal(cf4Segment("demos-native:DEM"), "demos-native%3ADEM");
+  assert.equal(paymentLogicalAddress(JOB, "x402:base/usdc?v=1&k=%", 2), `dacs4:payment:${JOB}:x402%3Abase/usdc%3Fv%3D1%26k%3D%25:2`);
 });
 
 test("payment and agreement currency bounds, and failed payment refs, are independently enforced", async () => {
@@ -1492,6 +1502,69 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     assert.equal(graph.refsVerified, c.expected ?? false);
     if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
   });
+});
+
+// DACS-4 §9.5.9 and SB-1: a pay-dem settlement is a single native transfer, keyed demos:{txHash}, so
+// the record's paymentAmount, the transfer the node confirms and the SB-2 key are one payment.
+test("a successful pay-dem record cites exactly one native transfer", async () => {
+  const first = { kind: "demos", blockNumber: 1, txHash: "ab".repeat(32) };
+  const second = { kind: "demos", blockNumber: 1, txHash: "cd".repeat(32) };
+  // Both transfers are confirmed full-price sends on the fixture node, so only the count can refuse them.
+  for (const refs of [[first, second], [first, { ...first }], [first, { ...first, txHash: `0x${"AB".repeat(32)}` }]]) {
+    const graph = await evaluate({ scopes: (scopes) => { scopes.evidence.paymentTxRefs = refs; } });
+    assert.equal(graph.ok, false, JSON.stringify(refs));
+    assert.equal(graph.reason, "evidence reference failed", JSON.stringify(refs));
+  }
+  assert.equal(paymentTxRefsOk({ phase: "pay-dem", outcome: "success", paymentTxRefs: [first] }), true);
+  assert.equal(paymentTxRefsOk({ phase: "pay-dem", outcome: "success", paymentTxRefs: [first, second] }), false);
+  // A failed payment may cite every transaction it attempted.
+  assert.equal(paymentTxRefsOk({ phase: "pay-dem", outcome: "failure", paymentTxRefs: [first, second] }), true);
+  const single = await evaluate();
+  assert.equal(single.ok, true, single.reason);
+});
+
+// DACS-5 §10.3.1: a failure outcome is the terminal state of a failed phase, classified by that phase's
+// errorClass: substrate is failed-substrate, and permanent, transient, counterparty and
+// settlement-atomicity are a party fault. §10.4.3 keeps phaseSummary identical in both copies of a session
+// while the outcome flips with the anchoring role, so one copy of every converged pair reads failed-perm
+// beside a counterparty class (or failed-counterparty beside permanent): the party is not checkable from
+// one copy, the class is. An abort may follow any phase result (ST-3; ST-7 lets an abort win a substrate pause).
+test("§10.3.1: a failure outcome needs a failed terminal phase of its own class", async () => {
+  const TERMINAL = "terminal phase classification contradicts the bundle outcome";
+  const ended = (outcome: string, pay: Obj | null): Case => ({ scopes: (scopes) => {
+    scopes.bundle.outcome = outcome;
+    scopes.bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" },
+      ...(pay ? [{ index: 2, kind: "pay-dem", ...pay }] : [])];
+    if (pay?.outcome !== "ok") { scopes.evidence.outcome = "failure"; delete scopes.evidence.settlementFinality; }
+  }, bundle: (bundle) => { if (!pay) bundle.settlementEvidence = []; } });
+  const rejected: Record<string, Case> = {
+    "failed-perm after every phase succeeded": ended("failed-perm", { outcome: "ok" }),
+    "failed-counterparty after every phase succeeded": ended("failed-counterparty", { outcome: "ok" }),
+    "failed-substrate after every phase succeeded": ended("failed-substrate", { outcome: "ok" }),
+    "failed-perm with no phase after commitment": ended("failed-perm", null),
+    "failed-perm beside an unclassified failure": ended("failed-perm", { outcome: "fail" }),
+    "failed-counterparty beside an unclassified failure": ended("failed-counterparty", { outcome: "fail" }),
+    "failed-substrate beside an unclassified failure": ended("failed-substrate", { outcome: "fail" }),
+    "failed-perm beside a substrate failure": ended("failed-perm", { outcome: "fail", errorClass: "substrate" }),
+    "failed-counterparty beside a substrate failure": ended("failed-counterparty", { outcome: "fail", errorClass: "substrate" }),
+    "completed beside a substrate failure": ended("completed", { outcome: "fail", errorClass: "substrate" }),
+    ...Object.fromEntries(["permanent", "transient", "counterparty", "settlement-atomicity"].map((errorClass) =>
+      [`failed-substrate beside a ${errorClass} failure`, ended("failed-substrate", { outcome: "fail", errorClass })])),
+    "a pre-commit failed-perm beside an unclassified negotiation failure": { scopes: (scopes) => {
+      scopes.bundle.outcome = "failed-perm"; scopes.bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "fail" }];
+    }, bundle: (bundle) => { delete bundle.agreementRef; bundle.settlementEvidence = []; delete bundle.ratingRefs; } },
+  };
+  assert.deepEqual(await verdicts(rejected), Object.fromEntries(Object.keys(rejected).map((name) => [name, TERMINAL])));
+  const accepted: Record<string, Case> = {
+    "failed-substrate beside a substrate failure": ended("failed-substrate", { outcome: "fail", errorClass: "substrate" }),
+    ...Object.fromEntries(["failed-perm", "failed-counterparty"].flatMap((outcome) =>
+      ["permanent", "transient", "counterparty", "settlement-atomicity"].map((errorClass) =>
+        [`${outcome} beside a ${errorClass} failure`, ended(outcome, { outcome: "fail", errorClass })]))),
+    "aborted-by-self beside a counterparty failure": ended("aborted-by-self", { outcome: "fail", errorClass: "counterparty" }),
+    "aborted-by-other beside a permanent failure": ended("aborted-by-other", { outcome: "fail", errorClass: "permanent" }),
+    "aborted-by-other after every phase succeeded": ended("aborted-by-other", { outcome: "ok" }),
+  };
+  assert.deepEqual(await verdicts(accepted), Object.fromEntries(Object.keys(accepted).map((name) => [name, "ok"])));
 });
 
 test("each signed payment must match the agreed amount and currency", async () => {

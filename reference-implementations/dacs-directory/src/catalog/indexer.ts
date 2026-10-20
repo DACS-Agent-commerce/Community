@@ -61,8 +61,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { agreementPrice, buildCurrentEvidenceGraph, paymentTxRefsOk, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
-import { legacySettlementTxId, settlementTxId } from "./settlementKey.js";
+import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
 import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
@@ -106,37 +105,17 @@ type SettlementTxIds = NonNullable<DealRecord["settlementTxIds"]>;
 /**
  * DACS-4 SB-1 claims of a current bundle's successful payment evidence, keyed on
  * (settlement-tx-id, jobId, phaseIndex). The phase index is recovered from the verified
- * payment-evidence anchor. Null means a claim could not be keyed (`error`).
+ * payment-evidence anchor, and the id is the one transfer the graph confirmed on the node, so
+ * every claim is stamped nodeVerified for the catalog-wide SB-2 ledger. Null means a successful
+ * payment has no verified, keyed transfer (`error`).
  */
 function currentSettlementClaims(settlement: ResolvedEvidence[]): SettlementTxIds | null {
   const claims: SettlementTxIds = [];
   for (const evidence of settlement) {
     if (evidence.raw.outcome !== "success" || typeof evidence.raw.phase !== "string" || !evidence.raw.phase.startsWith("pay-")) continue;
-    if (!paymentTxRefsOk(evidence.raw)) return null;
-    const refs = Array.isArray(evidence.raw.paymentTxRefs) ? evidence.raw.paymentTxRefs : [];
-    if (evidence.phaseIndex === undefined || refs.length === 0) return null;
-    for (const ref of refs) {
-      const id = settlementTxId(ref);
-      if (!id) return null;
-      claims.push({ id, observedAt: Number(evidence.raw.observedAt), phaseIndex: evidence.phaseIndex, evidenceHash: evidence.contentHash });
-    }
-  }
-  return claims;
-}
-
-/** The pinned SDK's legacy evidence carries its own phaseIndex and pre-SB-1 TxRefs. */
-function legacySettlementClaims(artifacts: ResolvedArtifact[]): SettlementTxIds | null {
-  const claims: SettlementTxIds = [];
-  for (const artifact of artifacts) {
-    const raw = artifact.raw;
-    if (artifact.kind !== "dacs-4-evidence" || raw.outcome !== "success") continue;
-    const refs = Array.isArray(raw.paymentTxRefs) ? raw.paymentTxRefs : [];
-    if (!Number.isSafeInteger(raw.phaseIndex) || Number(raw.phaseIndex) < 0 || refs.length === 0) return null;
-    for (const ref of refs) {
-      const id = legacySettlementTxId(raw.phase, ref);
-      if (!id) return null;
-      claims.push({ id, observedAt: Number(raw.observedAt), phaseIndex: Number(raw.phaseIndex), evidenceHash: contentHash(raw) });
-    }
+    if (evidence.phaseIndex === undefined || evidence.verifiedSettlementId === undefined) return null;
+    claims.push({ id: evidence.verifiedSettlementId, observedAt: Number(evidence.raw.observedAt), phaseIndex: evidence.phaseIndex,
+      evidenceHash: evidence.contentHash, nodeVerified: true });
   }
   return claims;
 }
@@ -594,7 +573,10 @@ export async function indexRegistration(
     );
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary, bundle?.agreementRef);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
-    const settlement = legacySettlementClaims(authoritative.resolvedArtifacts);
+    // The legacy profile has no payment adapter, so its TxRefs are never verified and it asserts no
+    // settlement claim: an unverified citation must never reach the catalog-wide SB-2 ledger, where it
+    // could reject another session's verified claim. A session on a listing that declares payment is
+    // indeterminate (above); one on a free listing counts on its signatures alone, as at the merge base.
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -606,12 +588,11 @@ export async function indexRegistration(
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
       fullSignatureStanding: legacyFullSignatureStanding(authoritative.verification),
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? "") && settlement !== null,
+      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       orchestratorFaultNeutral: false,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
-      settlementTxIds: settlement ?? [],
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });

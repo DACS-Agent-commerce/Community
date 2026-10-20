@@ -47,9 +47,13 @@ const record = (value: unknown): Record<string, unknown> | null =>
     ? value as Record<string, unknown>
     : null;
 
+/** CORE CF-4: percent-encode exactly the reserved delimiters `: ? & = %` of a variable segment, in uppercase hex. */
+export const cf4Segment = (segment: string): string =>
+  segment.replace(/[:?&=%]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+
 /** PC-2 logical address. `railId` is a CF-4 variable segment; jobId (a ULID) is not encoded. */
 export function paymentLogicalAddress(jobId: string, railId: string, phaseIndex: number, resolved = false): string {
-  return `dacs4:payment:${jobId}:${encodeURIComponent(railId)}:${phaseIndex}${resolved ? ":resolved" : ""}`;
+  return `dacs4:payment:${jobId}:${cf4Segment(railId)}:${phaseIndex}${resolved ? ":resolved" : ""}`;
 }
 
 export function parsePaymentLogicalAddress(address: string): { jobId: string; encodedRail: string; phaseIndex: number } | null {
@@ -72,8 +76,9 @@ export async function verifyAnchorBinding(
 ): Promise<AnchorBinding | null> {
   const raw = record(value);
   const signature = record(raw?.signature);
+  // contentHash omits `signatures` as well as `signature`, so such a member would ride along unsigned.
   if (
-    !raw || boundedJson(raw, 16_384) === null ||
+    !raw || boundedJson(raw, 16_384) === null || raw.signatures !== undefined ||
     raw.anchorBindingVersion !== "1" || typeof raw.jobId !== "string" ||
     raw.jobId.length < 1 || raw.jobId.length > 160 ||
     typeof raw.logicalAddress !== "string" || !raw.logicalAddress.startsWith("dacs4:") || raw.logicalAddress.length > 512 ||

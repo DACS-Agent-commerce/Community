@@ -959,7 +959,9 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
 
   const outcomeFixture = await vector("disputed-job", 10);
   const outcomeScope = signedScope(outcomeFixture.sellerBundle, "bundle");
-  outcomeScope.outcome = "failed-counterparty";
+  // Outcome alone contradicts: both copies keep every phase ok. A failure outcome would need a failed
+  // terminal phase (DACS-5 §10.3.1), which is the phase limb tested below.
+  outcomeScope.outcome = "aborted-by-other";
   maps.set(outcomeFixture.locators.seller, {
     ...outcomeScope,
     signatures: [await sign(outcomeScope, "bundle", 0, true), await sign(outcomeScope, "bundle", 1, true)],
@@ -1098,7 +1100,7 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.equal(record.deals[0].refsVerified, true);
     assert.equal(record.deals[0].fullSignatureStanding, true, "both parties signed the authoritative copy");
     assert.deepEqual(record.deals[0].settlementTxIds, [{ id: `demos:${txHashOf(deal.jobId)}`, observedAt: 100, phaseIndex: 2,
-      evidenceHash: artifactHash(fixture.evidence, "evidence") }], "SB-2 carries the citing evidence hash");
+      evidenceHash: artifactHash(fixture.evidence, "evidence"), nodeVerified: true }], "SB-2 carries the citing evidence hash and its node verification");
     assert.equal(record.deals[0].buyerBundleRef, fixture.locators.buyer);
     assert.notEqual(record.deals[0].buyerBundleRef, submittedBuyerPointer);
     assert.equal(record.deals[0].sellerBundleRef, fixture.locators.seller);
@@ -1338,8 +1340,8 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const base: DealRecord = { jobId: "a", rail: "demos-native:DEM", buyerBundleRef: locator(5), sellerBundleRef: locator(6), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: "a".repeat(64), agreementPrice: { amount: "1.25", currency: "DEM" },
-    settlementTxIds: [{ id: "tx", observedAt: 10, phaseIndex: 2 }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
-  const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2 }] };
+    settlementTxIds: [{ id: "tx", observedAt: 10, phaseIndex: 2, nodeVerified: true }], ratings: [{ rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 10, contentHash: "b".repeat(64) }] };
+  const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2, nodeVerified: true }] };
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
   assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
@@ -1350,7 +1352,7 @@ test("SB-2: a settlement id cited at the same time by two jobs counts for the lo
     jobId, rail: "demos-native:DEM", buyerBundleRef: locator(jobId === "a" ? 160 : 161), owners: { buyer: dids[0], seller: dids[1] },
     signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed", finalisedAt: 1, anchorTimestamp: 100,
     verifiedAt: 1, bundleContentHash: jobId.repeat(64), agreementPrice: { amount, currency: "DEM" },
-    settlementTxIds: [{ id: "demos:tx", observedAt: 10, phaseIndex: 2, evidenceHash }],
+    settlementTxIds: [{ id: "demos:tx", observedAt: 10, phaseIndex: 2, evidenceHash, nodeVerified: true }],
   });
   const volume = (deals: DealRecord[]) => deriveSellerReputation(deals, 0, 200).observedTransactionalVolume;
   // Job "z" sorts after "a", but its evidence hash is lower, so it keeps the settlement.
@@ -1666,11 +1668,19 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
 
 test("indexer persists authoritative orchestrator neutrality from a verified FAB pair", async () => {
   const fixture = await vector("orchestrator-neutral", 900);
+  // §10.3.1: the failure ends in a failed phase, here the delivery.
+  const deliveryAt = locator(960);
+  const failedDeliveryScope: Obj = { ...signedScope(maps.get(deliveryAt)!, "evidence"), outcome: "failure" };
+  const failedDelivery: Obj = { ...failedDeliveryScope, signature: await sign(failedDeliveryScope, "evidence", 1) };
+  maps.set(deliveryAt, failedDelivery);
   const copies: Obj[] = [];
   for (const [raw, role, at] of [[fixture.buyerBundle, "buyer", fixture.locators.buyer], [fixture.sellerBundle, "seller", fixture.locators.seller]] as const) {
     const scope = signedScope(raw, "bundle");
     delete scope.bundleVersion;
     Object.assign(scope, { faultBundleVersion: "1", faultedParty: "orchestrator", outcome: "failed-counterparty" });
+    scope.phaseSummary = (scope.phaseSummary as Obj[]).map((phase) => phase.kind === "deliver-storage-program"
+      ? { ...phase, outcome: "fail", errorClass: "counterparty" } : phase);
+    scope.settlementEvidence = [(scope.settlementEvidence as Obj[])[0], ref(deliveryAt, failedDelivery, "evidence")];
     // A party may also orchestrate; full standing still requires every distinct signer.
     scope.parties = [...scope.parties as Obj[], { role: "orchestrator", primaryClaim: dids[0], bundleHash: "a".repeat(64) }];
     const copy = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };

@@ -314,8 +314,16 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
    computing any seller or category totals; it keys each claim on the session as well, so two
-   sessions sharing a jobId cannot both count one payment. Legacy SDK artifacts remain on an
-   explicitly-labelled compatibility path.
+   sessions sharing a jobId cannot both count one payment. Only a claim whose transfer this
+   Directory confirmed on the node (`nodeVerified`) can hold or reject an id there; a deal citing
+   any other settlement, such as one an earlier release persisted, is not admitted until it is
+   verified again. A failure outcome must end in a failed phase whose `errorClass` has its class
+   (DACS-5 §10.3.1): `substrate` is `failed-substrate`, and the other four classes are
+   `failed-perm` or `failed-counterparty`. Those two spellings flip with the anchoring role across
+   the two copies of one phaseSummary (§10.4.3), so only the class is checked; an abort carries
+   none. Legacy SDK artifacts remain on an explicitly-labelled compatibility path. It has no
+   payment adapter, so a legacy session asserts no settlement claim: on a listing that declares
+   payment it is indeterminate, and on one that declares none it counts on its signatures alone.
 
 ## Architecture note: the web app is chain-fetch-only
 
@@ -328,6 +336,13 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
+- **In the shipped default no paid or storage-delivered session counts.** Without an
+  operator's `DACS_RAIL_SNAPSHOTS` and a producer that carries `anchorBindings`, every session
+  on a `pay-dem` or storage-delivery listing is indeterminate, and so is every legacy session on
+  a listing that declares payment, which earlier releases counted. No producer carries the
+  binding yet: the pinned Standard defines a logical→native binding only for listings,
+  revocations and bundles, and the pinned SDK anchors a one-party bundle that the current graph
+  refuses at its shape check. Such sellers are published with no rate, not a 0% one.
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
   yet (CORS), so chain reads go through the server. Cryptography is client-side, but
   chain inclusion still depends on the server/RPC path until Demos exposes a
@@ -423,9 +438,9 @@ cached evidence eligibility is refreshed.
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
   with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
   every vendored file's hash, SIG-6 encoding and Demos agent claim resolution, and runs
-  the other vendored sets through adapters onto the Directory's own decisions. Two sets
-  run in part: `payee-destination-binding` (14 of 28) and `metered-pricing` (19 of 22);
-  `SPEC_PIN` names the skipped cases and why.
+  the other vendored sets through adapters onto the Directory's own decisions. Three sets
+  run in part: `payee-destination-binding` (14 of 28), `metered-pricing` (19 of 22) and
+  `sb2-settlement-uniqueness` (19 of 20); `SPEC_PIN` names the skipped cases and why.
   `test/listing-vectors.test.ts` and `test/revocation-vectors.test.ts` check the two
   listing/withdrawal fixture hashes and exercise the Directory's decisions. The
   revocation adapter explicitly excludes remote-catalog freshness, which this producer
@@ -476,7 +491,11 @@ names as rail IDs remain readable as evidence, but are excluded from public disc
 a new signed listing version to make those offers executable.
 
 Native DEM success requires public transaction and block reads confirming inclusion, the payer
-and payee, and the exact agreed amount (1 DEM = 10^9 OS). The node credits and debits the
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). A successful `pay-dem` record cites
+exactly one native transfer (DACS-4 §9.5.9), so its `paymentAmount`, the transfer the node
+confirms and its SB-1 key describe one payment. Where a block lists the transactions whose GCR
+edits it applied (`attrs.gcrAppliedTxs`, served by node2 but absent from the pinned node source),
+a transfer the list does not name, or a list that cannot be read, is indeterminate. The node credits and debits the
 exact address string it stores (ac8f45f `handleNativeOperations`), so the transaction's
 sender, recipient and send argument must be the canonical `0x<64 lowercase hex>` payer and
 payee. Another spelling of the same key is a different account. The stored RPC amount is OS,

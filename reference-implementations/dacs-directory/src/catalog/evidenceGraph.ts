@@ -1,5 +1,5 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
-import { boundLogicalAddress, deliverableLogicalAddress, parsePaymentLogicalAddress } from "./anchorBinding.js";
+import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
@@ -25,6 +25,9 @@ export interface ResolvedEvidence {
   kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string;
   /** SB-1 pipeline index independently recovered from the payment-evidence anchor's published binding. */
   phaseIndex?: number;
+  /** SB-1 settlement-tx-id of the one transfer the node confirmed for this successful payment; set only
+   * by the graph after verification, so it is the only settlement a claim may cite. */
+  verifiedSettlementId?: string;
 }
 export interface EvidenceGraph {
   profile: "dacs-v0.1";
@@ -92,6 +95,7 @@ const sameSigningIdentity = (left: unknown, right: unknown): boolean =>
   typeof left === "string" && typeof right === "string" &&
   canonicalSigningIdentity(left) === canonicalSigningIdentity(right);
 const OUTCOMES = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+const FAILURE_OUTCOMES = new Set(["failed-perm", "failed-counterparty", "failed-substrate"]);
 const PHASE_OUTCOMES = new Set(["ok", "fail"]);
 const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
 const MAX_GRAPH_ARTIFACTS = 64;
@@ -113,6 +117,9 @@ const settlesPhase = (kind: unknown): boolean => PAYMENT_PHASES.has(String(kind)
 export function paymentTxRefsOk(raw: Record<string, unknown>): boolean {
   if (!PAYMENT_PHASES.has(String(raw.phase)) || !Array.isArray(raw.paymentTxRefs)) return false;
   if (raw.outcome === "success" && raw.paymentTxRefs.length === 0) return false;
+  // DACS-4 §9.5.9 / SB-1: a pay-dem settlement is one native transfer, so its paymentAmount, the
+  // transfer the node confirms and its demos:{txHash} key describe one payment.
+  if (raw.phase === "pay-dem" && raw.outcome === "success" && raw.paymentTxRefs.length !== 1) return false;
   // DACS-4 §9.14 / ST-8: a refund is the failed path. Success needs all
   // three stages, rather than merely one individually well-shaped reference.
   if (raw.phase === "pay-cross-chain-htlc" && raw.outcome === "success") {
@@ -719,13 +726,16 @@ async function verifyCurrentEvidenceGraph(
   const failSigned = (reason: string): EvidenceGraph => ({ ...fail(reason), signaturesVerified, signedParties });
 
   const abort = raw.outcome === "aborted-by-self" || raw.outcome === "aborted-by-other";
-  // ST-7 / §10.3.1: an unrecovered substrate failure is neutral in both copies,
-  // regardless of which party anchors. A recovered earlier failure is not terminal.
+  // DACS-5 §10.3.1 / ST-2 / ST-7: a failure outcome is the terminal state of a failed phase, classified by
+  // its errorClass; substrate is failed-substrate in both copies, regardless of which party anchors. The
+  // other classes are a party fault whose role-relative spelling flips between the two copies of one
+  // phaseSummary (§10.4.3), so only the class is checkable here. A recovered earlier failure is not terminal.
   const terminalPhase = phases.filter((phase) => phase.kind !== "rate")
     .sort((a, b) => Number(b.index) - Number(a.index))[0];
-  if (!abort && terminalPhase?.outcome === "fail" && terminalPhase.errorClass !== undefined &&
-      ((terminalPhase.errorClass === "substrate") !== (raw.outcome === "failed-substrate"))) {
-    return failSigned("terminal substrate classification contradicts the bundle outcome");
+  const terminalClass = terminalPhase?.outcome === "fail" ? terminalPhase.errorClass : undefined;
+  if (!abort && ((terminalClass === "substrate") !== (raw.outcome === "failed-substrate") ||
+      (FAILURE_OUTCOMES.has(String(raw.outcome)) && terminalClass === undefined))) {
+    return failSigned("terminal phase classification contradicts the bundle outcome");
   }
 
   const artifacts: ResolvedEvidence[] = [];
@@ -996,7 +1006,7 @@ async function verifyCurrentEvidenceGraph(
     const phase = phases.find((entry) => entry.index === index);
     const rail = rec(pipeline[index]?.parameters)?.rail;
     if (recoveredPayments.has(index) || tuple.jobId !== raw.jobId || typeof rail !== "string" ||
-        tuple.encodedRail !== encodeURIComponent(rail) || phase?.kind !== evidence.raw.phase ||
+        tuple.encodedRail !== cf4Segment(rail) || phase?.kind !== evidence.raw.phase ||
         (paired.has(evidence) && paired.get(evidence) !== index) || !phase || !outcomesAgree(phase, evidence)) {
       return failSigned("payment evidence anchor binding failed");
     }
@@ -1120,10 +1130,11 @@ async function verifyCurrentEvidenceGraph(
     if (evidence.raw.phase !== "pay-dem") {
       return failSigned("payment verification is indeterminate: authoritative rail adapter is unavailable");
     }
-    for (const ref of arr(evidence.raw.paymentTxRefs)) {
-      const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
-      if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
-    }
+    // The shape admits exactly one transfer for a pay-dem success (DACS-4 §9.5.9).
+    const ref = arr(evidence.raw.paymentTxRefs)[0];
+    const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
+    if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
+    evidence.verifiedSettlementId = settlementTxId(ref) ?? undefined;
   }
   // DV-1..3: a signed success assertion alone does not establish storage delivery.
   // Use the hash-bound listing specification, never self-described payload access metadata.

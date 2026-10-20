@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { demOs, verifyNativePayment } from "../src/catalog/nativePayment.js";
 
-// Read-only node2 captures from 2026-10-17, retained byte-for-byte.
-const captured = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/native-payment/${name}.json`, import.meta.url), "utf8")).response;
+// Read-only node2 (https://node2.demos.sh) replies, retained byte-for-byte: transaction/block and the
+// -556299 pair were captured on 2026-10-17 and are gone since node2's chain reset; the -873 pair and
+// not-found were captured on 2026-10-20 (checkedThroughBlock 2594). No node revision is attested.
+const raw = (name: string) => readFileSync(new URL(`./fixtures/native-payment/${name}.json`, import.meta.url), "utf8");
+const captured = (name: string) => JSON.parse(raw(name)).response;
 const tx = captured("transaction");
 const block = captured("block");
 const ref = { txHash: tx.hash, blockNumber: tx.blockNumber };
@@ -137,4 +140,48 @@ test("multi-digit and fractional DEM prices convert exactly to OS", async () => 
 
 test("a node read that throws leaves the payment indeterminate", async () => {
   assert.equal(await verifyNativePayment(ref, agreement, 2, async () => { throw new Error("node unreachable"); }), "indeterminate");
+});
+
+// Review sweep 10 (code P2-1): node2 runs code newer than the pinned source. Its blocks list the
+// transactions whose GCR edits they applied; where a block states that list, a transfer it does not
+// name, or a list that cannot be read, establishes no settlement.
+test("where the block lists its applied transactions, the transfer must be one of them", async () => {
+  const applied = (attrs: unknown) => check(tx, { ...block, attrs });
+  assert.deepEqual(block.attrs.gcrAppliedTxs, [tx.hash]);
+  assert.equal(await applied(block.attrs), "pass");
+  assert.equal(await applied({ ...block.attrs, gcrAppliedTxs: [`0x${tx.hash.toUpperCase()}`] }), "pass");
+  for (const gcrAppliedTxs of [[], ["cd".repeat(32)], tx.hash, null]) {
+    assert.equal(await applied({ ...block.attrs, gcrAppliedTxs }), "indeterminate", JSON.stringify(gcrAppliedTxs));
+  }
+  for (const attrs of [null, "attrs", [tx.hash]]) assert.equal(await applied(attrs), "indeterminate", JSON.stringify(attrs));
+  // The pinned source's blocks carry no such list: inclusion in ordered_transactions decides.
+  assert.equal(await applied(undefined), "pass");
+  assert.equal(await applied({ gcrAppliedTxCount: 1 }), "pass");
+});
+
+test("node2 replies through the production reader: a confirmed transfer passes, a missing one is indeterminate", async () => {
+  const { readSettlementNode } = await import("../src/catalog/chain.js");
+  const sent = captured("transaction-873");
+  const missing = "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143";
+  const requests: unknown[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    requests.push(call);
+    const name = call.message === "getBlockByNumber" ? "block-873" : call.data.hash === sent.hash ? "transaction-873" : "not-found";
+    return new Response(raw(name), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    const agreed = { parties: [
+      { role: "buyer", primaryClaim: `did:demos:agent:${sent.content.from.slice(2)}` },
+      { role: "seller", primaryClaim: `did:demos:agent:${sent.content.to.slice(2)}` },
+    ], terms: { price: { amount: "2400", currency: "DEM" } } };
+    assert.equal(await verifyNativePayment({ txHash: sent.hash, blockNumber: sent.blockNumber }, agreed, 2, readSettlementNode), "pass");
+    assert.deepEqual(requests[0], { type: "nodeCall", message: "getTxByHash", data: { hash: sent.hash }, sender: "", signature: "", extra: "" });
+    assert.deepEqual(JSON.parse(raw("not-found")).extra, { reason: "not_found", checkedThroughBlock: 2594 });
+    assert.equal(await readSettlementNode("getTxByHash", { hash: missing }), null);
+    assert.equal(await verifyNativePayment({ txHash: missing, blockNumber: 548169 }, agreed, 2, readSettlementNode), "indeterminate");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

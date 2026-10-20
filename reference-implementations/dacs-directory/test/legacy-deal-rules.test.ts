@@ -6,6 +6,7 @@ import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import type { DealRecord, SellerRecord } from "../src/catalog/types.js";
 
 // The labelled legacy-sdk-v0.1 deal path: the strict policy the browser verdict and the indexer
 // layer on the pinned SDK's verifyBundleCore, and one end-to-end deal through the indexer.
@@ -244,9 +245,8 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
     jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] },
     signatureVerified: true, refsVerified: false, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
     bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: false, cancellationNeutral: false, orchestratorFaultNeutral: false,
+    // No settlement claim: the legacy profile cannot verify its pay-dem TxRef, so it never enters the SB-2 ledger.
     finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", verifiedAt: 0,
-    // SB-1 on the legacy profile: a pay-dem TxRef keys as demos:{hash}, under the evidence's own phaseIndex.
-    settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 0, evidenceHash: contentHash(evidenceScope) }],
   });
   assert.equal(record.reputation.completed, 0);
   assert.equal((await run(base, { orchestratorFaultNeutral: true })).deals[0].orchestratorFaultNeutral, false, "registration cannot grant FAB neutrality to a legacy copy");
@@ -330,8 +330,8 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
     assert.equal(fallback.deals[0].bundleContentHash, contentHash(buyer));
     assert.equal(fallback.deals[0].reputationEligible, false);
   }
-  // Non-evidence artifacts may carry advisory outcome fields; only the evidence
-  // contributes settlement claims, and failed evidence contributes none.
+  // Non-evidence artifacts may carry advisory outcome fields; neither they nor the
+  // unverifiable legacy evidence, successful or failed, contribute settlement claims.
   const annotatedAgreement = { ...agreementScope, outcome: "success" };
   const signedAgreement = { ...annotatedAgreement, signatures: [BUYER, SELLER].map((signer) => ({
     algorithm: "ed25519", signer: dids[signer], value: sign(`dacs-agreement:v1:${contentHash(annotatedAgreement)}`, signer),
@@ -339,13 +339,13 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
   const annotatedBundle = { ...bundleScope, agreementRef: { kind: "dacs-3-agreement", id: "agreement-legacy", contentHash: contentHash(annotatedAgreement) } };
   const annotated = await run({ ...base, [resolveProgramAddress(dids[BUYER], `dacs3:agreement:${JOB}`)!]: signedAgreement, ...signedCopies(annotatedBundle) });
   assert.equal(annotated.deals[0].reputationEligible, false);
-  assert.equal(annotated.deals[0].settlementTxIds?.length, 1);
+  assert.equal(annotated.deals[0].settlementTxIds, undefined);
   const failedEvidence = { ...evidenceScope, outcome: "failure" };
   const failedBundle = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(failedEvidence) }] };
   const failed = await run({ ...base, [evidenceAt]: { ...failedEvidence, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(failedEvidence)}`, SELLER) } },
     ...signedCopies({ ...failedBundle, outcome: "failed-counterparty" }, { ...failedBundle, outcome: "failed-perm" }) });
   assert.equal(failed.deals[0].refsVerified, false);
-  assert.deepEqual(failed.deals[0].settlementTxIds, []);
+  assert.equal(failed.deals[0].settlementTxIds, undefined);
   assert.equal(failed.reputation.completed, 0);
 
   // §10.5.1: the pinned listing, never the outcome, decides indeterminacy. On a paid listing a
@@ -408,7 +408,7 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
     const referenced = { ...bundleScope, settlementEvidence: [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(scope) }] };
     const result = await run({ ...base, [evidenceAt]: paid, ...signedCopies(referenced) });
     assert.equal(result.deals[0].reputationEligible, false, JSON.stringify(change));
-    assert.deepEqual(result.deals[0].settlementTxIds, [], JSON.stringify(change));
+    assert.equal(result.deals[0].settlementTxIds, undefined, JSON.stringify(change));
     assert.equal(result.reputation.completed, 0);
   }
 });
@@ -486,4 +486,63 @@ test("the in-browser verifier: unproven legacy settlement is limited and altered
 
   assert.match(verificationErrorMessage(new TypeError("fetch failed")), /could not be reached/);
   assert.equal(verificationErrorMessage(new Error("unsupported artifact")), "unsupported artifact");
+});
+
+// Review sweep 10 (code P1-1): the legacy profile has no payment adapter, so a pay-dem TxRef in its
+// evidence is never verified. It must not enter the catalog-wide SB-2 ledger, where a backdated
+// citation of another seller's public settlement would reject that seller's node-verified completion
+// while the victim's failures still count.
+test("an unverified legacy pay-dem citation never evicts another seller's verified settlement", async () => {
+  const { reconcileCatalogReputation } = await import("../src/catalog/reputation.js");
+  const VICTIM_TX = "7b17119e22f67de784793194e80631a5e532eca2001985a969528e044b6e6efb";
+  const freeScope: Obj = { ...listingScope, supportedPaymentRails: [], supportedDelivery: [] };
+  const freeListing = { ...freeScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-listing:v1:${contentHash(freeScope)}`, SELLER) } };
+  const citedScope: Obj = { ...evidenceScope, paymentTxRefs: [{ rail: "demos", txHash: VICTIM_TX, kind: "payment" }],
+    settlementFinality: { model: "bft-final", finalityBlocks: 1, finalityObservedAt: 1 }, observedAt: 1 };
+  const cited = { ...citedScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: sign(`dacs-evidence:v1:${contentHash(citedScope)}`, SELLER) } };
+  const bundleScope: Obj = { ...verification().bundle } as Obj;
+  delete bundleScope.anchoredByRole;
+  bundleScope.listingRef = { listingId: "legacy-svc", version: 1, contentHash: contentHash(freeScope) };
+  bundleScope.settlementEvidence = [{ kind: "dacs-4-evidence", id: "evidence-legacy", contentHash: contentHash(citedScope) }];
+  const signatures = [BUYER, SELLER].map((signer) => ({ party: dids[signer], algorithm: "ed25519", value: sign(`dacs-bundle:v1:${contentHash(bundleScope)}`, signer, "base64url") }));
+  const stored: Record<string, Obj> = {
+    [at(1)]: freeListing, [at(2)]: { ...bundleScope, signatures, anchoredByRole: "buyer" }, [at(3)]: { ...bundleScope, signatures, anchoredByRole: "seller" },
+    [resolveProgramAddress(dids[BUYER], `dacs3:agreement:${JOB}`)!]: agreement,
+    [resolveProgramAddress(dids[BUYER], `dacs4:evidence:${JOB}`)!]: cited,
+  };
+  const owner = `0x${dids[SELLER].slice(-64)}`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = stored[String(input).split("/").pop() ?? ""];
+    return data ? Response.json({ success: true, owner, programName: "opaque", data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  let attacker;
+  try {
+    attacker = await indexRegistration({ primaryClaim: dids[SELLER], displayName: "Sybil", listingAnchors: [at(1)],
+      deals: [{ jobId: JOB, rail: "pay-dem", buyerBundleRef: at(2), sellerBundleRef: at(3), owners: { buyer: dids[BUYER], seller: dids[SELLER] } }] },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  // A free listing's session still counts on its signatures, as at the merge base, but asserts no settlement.
+  assert.equal(attacker.deals[0].refsVerified, true);
+  assert.equal(attacker.deals[0].reputationEligible, true);
+  assert.equal(attacker.deals[0].settlementTxIds, undefined);
+
+  // The victim: one completion whose transfer the node confirmed, and one failure.
+  const VICTIM = `did:demos:agent:${"a".repeat(64)}`;
+  const victimDeal = (jobId: string, sellerOutcome: string, settlementTxIds: DealRecord["settlementTxIds"]): DealRecord => ({
+    jobId, rail: "demos-native:DEM", buyerBundleRef: at(jobId.length + 10), owners: { buyer: `did:demos:agent:${"1".repeat(64)}`, seller: VICTIM },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome, outcome: sellerOutcome, finalisedAt: 1500, verifiedAt: 2000, settlementTxIds });
+  const victim = { primaryClaim: VICTIM, displayName: "Victim", cci: [], listings: [], registeredAt: 1, lastIndexedAt: 1,
+    reputation: { completed: 0, totalAgreements: 0, completionRate: null },
+    deals: [victimDeal("victim-paid", "completed", [{ id: `demos:${VICTIM_TX}`, observedAt: 1000, phaseIndex: 3, evidenceHash: "f".repeat(64), nodeVerified: true }]),
+      victimDeal("victim-failed", "failed-perm", [])] } as SellerRecord;
+  reconcileCatalogReputation([victim], 3000);
+  const alone = [victim.reputation.completed, victim.reputation.bundleCount, victim.reputation.completionRate];
+  reconcileCatalogReputation([attacker, victim], 3000);
+  assert.deepEqual(alone, [1, 2, 0.5]);
+  assert.deepEqual([victim.reputation.completed, victim.reputation.bundleCount, victim.reputation.completionRate], alone);
+  assert.equal(victim.deals[0].settlementRejected, undefined);
+  assert.equal(attacker.reputation.completed, 1);
 });

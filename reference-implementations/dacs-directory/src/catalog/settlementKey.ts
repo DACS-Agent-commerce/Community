@@ -53,17 +53,6 @@ export function settlementTxId(ref: unknown): string | null {
   return null;
 }
 
-/**
- * The pinned SDK's pre-SB-1 TxRef `{ rail, txHash, kind }` on a `pay-dem` phase is a native Demos
- * transfer, keyed like the current `demos` variant. No other legacy rail carries the event index
- * SB-1 needs, so its references are `error`.
- */
-export function legacySettlementTxId(phase: unknown, ref: unknown): string | null {
-  const value = record(ref);
-  return phase === "pay-dem" && value?.rail === "demos" && value.kind === "payment"
-    ? settlementTxId({ kind: "demos", txHash: value.txHash }) : null;
-}
-
 export interface SettlementClaim {
   id: string;
   jobId: string;
