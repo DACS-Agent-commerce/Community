@@ -286,8 +286,12 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    verify is decided from the pinned listing, the session's signed profile and the installed
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
-   the denominator, so an unverifiable listing yields no rate instead of a 0% one. Copies are
-   reconciled per `(buyer, jobId)` session; another buyer's session on the same jobId is a
+   the denominator, so an unverifiable listing yields no rate instead of a 0% one. That
+   covers every choice the listing leaves to a session: each DEM rail it accepts needs an
+   installed live definition, its listed price must be in DEM, and neither a declared payload
+   above the 128 KB storage cap (an extended pointer) nor a buyer-only payload is readable here. The
+   agreed rail and price are checked for every session that has an agreement. Copies are
+   reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
    own owner-bound listing anchors (at most 32 reads per publisher in each discovery
@@ -304,7 +308,8 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
    `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
    leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
-   computing any seller or category totals. Legacy SDK artifacts remain on an
+   computing any seller or category totals; it keys each claim on the session as well, so two
+   sessions sharing a jobId cannot both count one payment. Legacy SDK artifacts remain on an
    explicitly-labelled compatibility path.
 
 ## Architecture note: the web app is chain-fetch-only
@@ -355,11 +360,18 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
   fields. The payload must match that hash, and the delivery signer's AnchorBinding must bind
-  its anchor to the job's `dacs4:deliverable` address; `buyer-only` requires a
-  restricted ACL naming the agreement-bound buyer. The pinned node denies anonymous reads of
-  restricted programs, so buyer-only delivery is indeterminate for this anonymous catalog. The
-  readable restricted-ACL tests describe a hypothetical node metadata contract. Unreadable payloads, encrypted payloads
-  and external pointers remain indeterminate and contribute no completion or volume.
+  its anchor to the job's `dacs4:deliverable` address. The buyer must be able to read the
+  payload under the node's read rule: a blacklisted buyer, an owner-mode program or a
+  restricted program that does not allow the buyer is no delivery. `buyer-only` requires a
+  restricted ACL naming only the agreement-bound buyer, read through an authenticated
+  restricted reader. The pinned node denies anonymous reads of restricted programs and the
+  catalog installs no such reader, so every session on a buyer-only listing is indeterminate,
+  whatever its outcome; the buyer-only acceptance tests inject a fixture reader. Encrypted
+  payloads and declared payloads above the 128 KB storage cap exclude every session on the
+  listing in the same way. A seller's own per-session choices stay per session: an unreadable
+  payload, an external pointer whose size the listing did not declare, or a public listing
+  delivered through a restricted ACL leaves only that session indeterminate. None contributes
+  a completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or

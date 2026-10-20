@@ -2,7 +2,7 @@ import { contentHash, stripSignature } from "./canonical.js";
 import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
 
-import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
+import { bundleSignerPolicy, dealSessionKey, demosSigningIdentity } from "./bundleSignerPolicy.js";
 import { verifyListing, verifyStoredListing } from "./listingVerification.js";
 import {
   resolvePrimaryClaimKey,
@@ -170,10 +170,8 @@ export function dedupeVerifiedDeals(deals: DealRecord[]): DealRecord[] {
     forms.add(form);
     return true;
   });
-  const session = (deal: DealRecord) =>
-    `${demosSigningIdentity(deal.owners.buyer)}\n${demosSigningIdentity(deal.owners.seller)}\n${deal.jobId}`;
   const byJob = new Map<string, DealRecord[]>();
-  for (const deal of unique) if (deal.refsVerified) byJob.set(session(deal), [...(byJob.get(session(deal)) ?? []), deal]);
+  for (const deal of unique) if (deal.refsVerified) byJob.set(dealSessionKey(deal), [...(byJob.get(dealSessionKey(deal)) ?? []), deal]);
   const authoritative = new Set<DealRecord>();
   for (const copies of byJob.values()) {
     const full = copies.filter((deal) => deal.fullSignatureStanding);

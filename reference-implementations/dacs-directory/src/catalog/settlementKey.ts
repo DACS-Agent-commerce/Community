@@ -68,6 +68,9 @@ export interface SettlementClaim {
   id: string;
   jobId: string;
   phaseIndex: number;
+  /** The consumer's session identity when a jobId is unique only per producer; another session's
+   * binding of the same (jobId, phaseIndex) is a second binding. */
+  session?: string;
 }
 
 export type Sb2Effect = "count" | "already-counted" | "reject";
@@ -75,13 +78,13 @@ export type Sb2Effect = "count" | "already-counted" | "reject";
 /**
  * SB-2 for one claim against the consumer's ledger of consumed ids. The caller presents claims in
  * the winning order (earlier observedAt, then lower evidence hash), so the first binding of an id
- * stands and any binding under another (jobId, phaseIndex) is rejected.
+ * stands and any binding under another (jobId, phaseIndex), or another session, is rejected.
  */
-export function admitSettlement(ledger: Map<string, { jobId: string; phaseIndex: number }>, claim: SettlementClaim): Sb2Effect {
+export function admitSettlement(ledger: Map<string, Omit<SettlementClaim, "id">>, claim: SettlementClaim): Sb2Effect {
   const prior = ledger.get(claim.id);
   if (!prior) {
-    ledger.set(claim.id, { jobId: claim.jobId, phaseIndex: claim.phaseIndex });
+    ledger.set(claim.id, { jobId: claim.jobId, phaseIndex: claim.phaseIndex, session: claim.session });
     return "count";
   }
-  return prior.jobId === claim.jobId && prior.phaseIndex === claim.phaseIndex ? "already-counted" : "reject";
+  return prior.jobId === claim.jobId && prior.phaseIndex === claim.phaseIndex && prior.session === claim.session ? "already-counted" : "reject";
 }

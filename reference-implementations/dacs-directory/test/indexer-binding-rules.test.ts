@@ -266,6 +266,18 @@ test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain b
   for (const change of [{ anchorBindingVersion: "2" }, { jobId: "j".repeat(161) }, { padding: "p".repeat(16 * 1024) }]) {
     assert.equal(await verifyAnchorBinding(signedScope(change)), null, Object.keys(change)[0]);
   }
+  // SIG-5: an unknown member stays in the signed scope, so dropping or adding one after signing breaks it.
+  const extended = signedScope({ note: "carried" });
+  assert.notEqual(await verifyAnchorBinding(extended), null);
+  const withoutNote: Obj = { ...extended }; delete withoutNote.note;
+  assert.equal(await verifyAnchorBinding(withoutNote), null);
+  assert.equal(await verifyAnchorBinding({ ...signedScope({}), note: "added later" }), null);
+  // SIG-6: only the strict unpadded base64url value of the same signature bytes is accepted.
+  const strict = signedScope({});
+  const bytes = Buffer.from(String((strict.signature as Obj).value), "base64url");
+  for (const encoded of [`${bytes.toString("base64url")}==`, bytes.toString("base64"), bytes.toString("hex")]) {
+    assert.equal(await verifyAnchorBinding({ ...strict, signature: { ...strict.signature as Obj, value: encoded } }), null, encoded);
+  }
 });
 
 test("a completed deal with no pay phase or evidence never contributes reputation (review probe P4)", async () => {
@@ -945,7 +957,10 @@ test("storage payload and ACL verification gates catalog completion and volume",
     { name: "changed signatures at fixed payload hash", payload: { ...signedPayload, signatures: ["tampered"] }, evidence: { deliverableContentHash: signedPayloadHash } },
     { name: "artifact hash cannot hide changed signature", payload: { ...signedPayload, signature: "tampered" } },
     { name: "artifact hash cannot hide changed signatures", payload: { ...signedPayload, signatures: ["tampered"] } },
-    { name: "verified buyer-only payload", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64)}`] } }, expected: true },
+    // The catalog installs no authenticated restricted reader, so even a correct buyer-only ACL is unverifiable.
+    { name: "buyer-only payload without an authenticated restricted reader", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64)}`] } } },
+    { name: "public payload the buyer is blacklisted from", metadata: { acl: { mode: "public", blacklisted: [`0x${dids[BUYER].slice(-64)}`] } } },
+    { name: "owner-mode payload", metadata: { acl: { mode: "owner" } } },
     { name: "missing hash", evidence: { deliverableContentHash: undefined } },
     { name: "wrong hash", evidence: { deliverableContentHash: "0".repeat(64) } },
     { name: "absent anchor", evidence: { deliverableAnchor: undefined } },
@@ -1192,7 +1207,7 @@ test("signed pre-commit failures count in completion denominators without volume
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
-test("§10.5.1: what the deployment cannot verify excludes every outcome on the listing, never only completions", async () => {
+test("§10.5.1: what the deployment cannot verify excludes every outcome on the listing, never only completions", async (t) => {
   // These checks used to run only once a session paid, delivered or committed, so a
   // seller's verified paid completions dropped out while its signed pre-commit failures still
   // counted, publishing it at 0%. Each limitation now excludes the completion and the failure alike.
@@ -1229,6 +1244,18 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     ["storage delivery encrypted to the buyer", (s) => { ((s.offering as Obj).deliverable as Obj).accessModel = "encrypt-to-buyer"; }, [1, "commit-agreement"]],
     ["an entitlement delivery", (s) => { (s.offering as Obj).deliverable = { kind: "entitlement", durationSec: 60, renewable: false }; (s.pipeline as Obj[])[3] = { kind: "deliver-entitlement" }; },
       [0, "negotiate-fixed-price"]],
+    // The pinned node denies anonymous restricted reads (ac8f45f checkReadPermission) and production
+    // installs no authenticated restricted reader, so a buyer-only payload is unreadable here.
+    ["buyer-only delivery without an authenticated restricted reader", (s) => { ((s.offering as Obj).deliverable as Obj).accessModel = "buyer-only"; },
+      [1, "commit-agreement"]],
+    // An agreement may select any rail the listing accepts, and a pre-commit failure never says which.
+    ["an accepted DEM rail version with no installed definition", (s) => { s.acceptedRails = [{ railId: "demos-native:DEM", railVersion: 2 }]; },
+      [0, "negotiate-fixed-price"]],
+    ["a listed price the DEM rail cannot settle", (s) => { s.pricing = { kind: "fixed", price: { amount: "2", currency: "USD" } }; }, [0, "negotiate-fixed-price"]],
+    // DACS-4 §9.6.1: above the 128 KB cap the payload MUST be an extended pointer, whose external
+    // cleartext this deployment cannot read; the honest completion delivers that pointer.
+    ["a declared payload above the inline storage cap", (s) => { ((s.offering as Obj).deliverable as Obj).expectedSizeBytes = 500_000; }, [1, "commit-agreement"],
+      () => { store.set(at(61), { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }); }],
   ];
   try {
     // Control: on a verifiable listing the paid completion and the pre-commit failure both count.
@@ -1237,22 +1264,62 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     const control = installListedCase(() => {}, failBeforeCommit(0, "negotiate-fixed-price")); asSellerFault();
     assert.equal((await currentGraph(control)).ok, true);
     assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0 });
-    for (const [name, change, [index, kind], deploy] of cases) {
-      store.clear(); for (const [key, raw] of original) store.set(key, raw);
-      installListedCase(change); deploy?.();
-      assert.deepEqual(await published(), excluded, `${name}: completion`);
-      process.env.DACS_RAIL_SNAPSHOTS = policy;
-      const failure = installListedCase(change, failBeforeCommit(index, kind)); asSellerFault(); deploy?.();
-      const graph = await currentGraph(failure);
-      assert.equal(graph.ok, false, name);
-      assert.match(graph.reason!, /^session verification is indeterminate for every outcome on this listing: /, name);
-      assert.deepEqual(await published(), excluded, `${name}: failure`);
-      process.env.DACS_RAIL_SNAPSHOTS = policy;
-    }
+    for (const [name, change, [index, kind], deploy] of cases) await t.test(name, async () => {
+      try {
+        store.clear(); for (const [key, raw] of original) store.set(key, raw);
+        installListedCase(change); deploy?.();
+        assert.deepEqual(await published(), excluded, `${name}: completion`);
+        process.env.DACS_RAIL_SNAPSHOTS = policy;
+        const failure = installListedCase(change, failBeforeCommit(index, kind)); asSellerFault(); deploy?.();
+        const graph = await currentGraph(failure);
+        assert.equal(graph.ok, false, name);
+        assert.match(graph.reason!, /^session verification is indeterminate for every outcome on this listing: /, name);
+        assert.deepEqual(await published(), excluded, `${name}: failure`);
+      } finally { process.env.DACS_RAIL_SNAPSHOTS = policy; }
+    });
   } finally {
     process.env.DACS_RAIL_SNAPSHOTS = policy;
     store.clear(); for (const [key, raw] of original) store.set(key, raw);
   }
+});
+
+test("a committed session is held to its agreed rail and price whatever its outcome", async (t) => {
+  // The agreed rail and price are fixed at commitment. Before they were checked only beside a
+  // successful payment, so an agreement no payment could settle dropped the completion while an
+  // abort after commitment on the same agreement still counted.
+  const original = new Map(store);
+  const abortAfterCommit = (s: Obj) => {
+    s.settlementEvidence = []; s.ratingRefs = [];
+    s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }];
+  };
+  const asSellerAbort = () => {
+    for (const [locator, role, outcome] of [[at(5), "buyer", "aborted-by-other"], [at(6), "seller", "aborted-by-self"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
+    }
+  };
+  const published = async () => {
+    const seller = await indexSeller(holders());
+    return { verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate };
+  };
+  try {
+    // Control: an abort after commitment on the DEM agreement counts against the seller.
+    const control = installListedCase(() => {}, abortAfterCommit); asSellerAbort();
+    assert.equal((await currentGraph(control)).ok, true, (await currentGraph(control)).reason);
+    assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0 });
+    // The listing accepts x402 beside DEM, but its only payment phase pays DEM: an agreement on x402
+    // can never settle, so the completion and the abort on it are both excluded.
+    const x402Agreement = (s: Obj) => { s.acceptedRails = [{ railId: "x402:default" }, { railId: "demos-native:DEM" }]; };
+    for (const [name, changeBundle, outcome] of [["completion", () => {}, undefined], ["abort after commitment", abortAfterCommit, asSellerAbort]] as const) {
+      await t.test(name, async () => {
+        store.clear(); for (const [key, raw] of original) store.set(key, raw);
+        const listed = installListedCase(x402Agreement, changeBundle); outcome?.();
+        const graph = await currentGraph(listed);
+        assert.equal(graph.ok, false);
+        assert.equal(graph.reason, "payment phase rail does not match the agreement rail");
+        assert.deepEqual(await published(), { verified: false, bundleCount: 0, completionRate: null });
+      });
+    }
+  } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
 test("a refuted seller cancellation marker cannot hide the buyer copy's established marker", async () => {

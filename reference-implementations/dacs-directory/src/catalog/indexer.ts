@@ -417,6 +417,8 @@ export async function indexRegistration(
       return listingArtifacts.get(key) ?? (await listingsPublishedBy(deal.owners.buyer))?.get(key)
         ?? (await listingsPublishedBy(deal.owners.buyer, true))?.get(key) ?? null;
     };
+    // No authenticated restricted reader is installed: the node denies this catalog's anonymous
+    // restricted reads, so buyer-only delivery is indeterminate for every outcome.
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing, readSettlementNode });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef

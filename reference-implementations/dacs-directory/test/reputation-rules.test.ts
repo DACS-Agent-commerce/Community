@@ -178,7 +178,12 @@ test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and 
   const z = deal({ jobId: "z", settlementTxIds: tx(10, "5".repeat(64)) });
   assert.deepEqual(kept([a, z]), ["a"]);
   assert.deepEqual(kept([z, a]), ["a"]);
-  const rating = (value: number, ratedAt: number, contentHash: string) => ({ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt, contentHash });
+  // DACS-4 SB-2: at an equal observedAt the lower evidence hash wins, before the jobId is consulted.
+  const higherHash = deal({ jobId: "a-job", settlementTxIds: tx(10, "9".repeat(64)) });
+  const lowerHash = deal({ jobId: "z-job", settlementTxIds: tx(10, "1".repeat(64)) });
+  assert.deepEqual(kept([higherHash, lowerHash]), ["z-job"]);
+  assert.deepEqual(kept([lowerHash, higherHash]), ["z-job"]);
+  const rating =(value: number, ratedAt: number, contentHash: string) => ({ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt, contentHash });
   const average = (ratings: NonNullable<DealRecord["ratings"]>) => deriveSellerReputation([deal({ ratings })], 0, 100).averageSellerRating;
   assert.equal(average([rating(2, 5, "9".repeat(64)), rating(4, 6, "1".repeat(64))]), 4, "the newer rating wins over a higher hash");
   assert.equal(average([rating(4, 6, "1".repeat(64)), rating(2, 5, "9".repeat(64))]), 4);
@@ -205,6 +210,25 @@ test("SB-2 records each first claim itself, and one claim cited twice at one pha
   const twice = deal({ settlementTxIds: [tx, { ...tx }] });
   assert.deepEqual(settlementEligibleDeals([twice]), [twice]);
   assert.equal(deriveSellerReputation([twice], 0, 100).completed, 1);
+});
+
+test("SB-2: two sessions on one jobId citing one settlement count it once, for the earlier observation", () => {
+  // A jobId is unique only per producer, so another buyer's session may share it; one payment
+  // still settles one session (review F-4).
+  const tx = (observedAt: number) => [{ id: "demos:one-payment", observedAt, phaseIndex: 2, evidenceHash: "d".repeat(64) }];
+  const first = deal({ jobId: "shared-job", settlementTxIds: tx(10), agreementPrice: { amount: "2", currency: "DEM" } });
+  const second = deal({ jobId: "shared-job", settlementTxIds: tx(11), agreementPrice: { amount: "2", currency: "DEM" },
+    owners: { buyer: "did:demos:agent:other-buyer", seller: SELLER } });
+  for (const deals of [[first, second], [second, first]]) {
+    assert.deepEqual(settlementEligibleDeals(deals), [first]);
+    const reputation = deriveSellerReputation(deals, 0, 100);
+    assert.equal(reputation.completed, 1);
+    assert.deepEqual(reputation.observedTransactionalVolume, [{ currency: "DEM", amount: "2" }]);
+  }
+  // Equal observation, evidence hash, jobId and phase: the session decides, whatever the input order.
+  const tied = deal({ jobId: "shared-job", settlementTxIds: tx(10), owners: { buyer: "did:demos:agent:other-buyer", seller: SELLER } });
+  assert.deepEqual(settlementEligibleDeals([first, tied]), settlementEligibleDeals([tied, first]));
+  assert.equal(settlementEligibleDeals([first, tied]).length, 1);
 });
 
 /** Two sellers whose verified deals cite one settlement id under different jobs; the earlier observation wins. */

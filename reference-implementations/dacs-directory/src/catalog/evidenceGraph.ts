@@ -10,7 +10,7 @@ import { matchesVetRequirement, type VerifyPrimaryClaimControl } from "./vetClai
 import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
-import { nativeRailAdmission, nativeRailConfigured } from "./railPolicy.js";
+import { nativeRailAdmission, nativeRailDefinitionAdmission } from "./railPolicy.js";
 import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
@@ -72,6 +72,11 @@ export interface EvidenceGraphDeps {
    * session vet admission stays fail-closed: a verified primary claim alone is not control proof. */
   verifyPrimaryClaimControl?: VerifyPrimaryClaimControl;
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
+  /** Authenticated reader for restricted StorageProgram records, the only way to open a buyer-only
+   * payload (DACS-4 §9.6.1). The pinned node denies anonymous restricted reads (ac8f45f
+   * checkReadPermission), so the catalog installs none and buyer-only delivery is indeterminate
+   * for every outcome. */
+  readRestrictedAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
@@ -275,6 +280,13 @@ const NEGOTIATION_PATTERNS: Record<string, string> = {
   "negotiate-sealed-envelope-procurement": "sealed-envelope",
 };
 
+/** The PriceTerm a listing names for its pricing kind, which fixes an agreement's currency (DACS-3
+ * §8.5.2 check 1); none for an auction without a reserve. */
+function listedPrice(pricing: Record<string, unknown> | null): Record<string, unknown> | null {
+  return pricing?.kind === "fixed" ? rec(pricing.price) : pricing?.kind === "negotiable" ? rec(pricing.bandCenter)
+    : pricing?.kind === "metered" ? rec(pricing.unitPrice) : pricing?.kind === "auction" ? rec(pricing.reservePrice) : null;
+}
+
 /** Returned when every evaluated check passed but check 5 or 6 needs a committedAt that was not supplied. */
 export const COMMITTED_AT_INDETERMINATE = "committed-at-indeterminate";
 
@@ -296,8 +308,7 @@ export function agreementListingConformance(
   const price = rec(terms?.price);
   const pipeline = arr(listing.pipeline);
   if (!terms || !pricing || !price || !priceTermOk(price)) return "terms";
-  const listed = pricing.kind === "fixed" ? rec(pricing.price) : pricing.kind === "negotiable" ? rec(pricing.bandCenter)
-    : pricing.kind === "metered" ? rec(pricing.unitPrice) : pricing.kind === "auction" ? rec(pricing.reservePrice) : null;
+  const listed = listedPrice(pricing);
   // 1. Currency, before any amount comparison.
   if (listed && price.currency !== listed.currency) return "currency";
   // 2. Price, by the recognised pricing kind (MTR-5 rejects any other).
@@ -546,19 +557,33 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
+const addressList = (value: unknown): string[] | null => value === undefined ? [] :
+  Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value.map((entry: string) => entry.toLowerCase()) : null;
+/** The node's read rule for the buyer (ac8f45f checkReadPermission): a blacklisted buyer cannot read,
+ * a restricted program admits it only when allowed, and owner mode only the owner. Groups are not
+ * trusted to grant it access, and a malformed address list fails closed. */
+function buyerMayRead(acl: Record<string, unknown>, buyerAddress: string): boolean {
+  const allowed = addressList(acl.allowed), blacklisted = addressList(acl.blacklisted);
+  if (!allowed || !blacklisted || blacklisted.includes(buyerAddress)) return false;
+  return acl.mode === "public" || (acl.mode === "restricted" && allowed.includes(buyerAddress));
+}
+
 /**
  * DACS-5 §10.5.1: exclusion must neither help nor harm. What this deployment cannot verify is
  * therefore decided from the pinned listing, the session's signed profile and the configured
  * adapters, never from how far the session got. Every session on such a listing is indeterminate,
  * pre-commit failures and aborts included; a check that ran only once a session committed, paid
- * or delivered would drop unverifiable completions while still counting failures.
+ * or delivered would drop unverifiable completions while still counting failures. The payment and
+ * delivery checks below therefore use the same helpers as the success path, for every choice the
+ * listing leaves open to an agreement (each accepted rail) or to its delivery (the declared size).
  * Returns null when every phase the listing's pipeline can reach is verifiable here.
  */
-export function deploymentVerifiability(
+export async function deploymentVerifiability(
   listing: Record<string, unknown>,
   bundle: Record<string, unknown>,
-  deps: Pick<EvidenceGraphDeps, "readSettlementNode" | "readAnchorRecord" | "resolveSessionChallenge" | "verifyPrimaryClaimControl">,
-): string | null {
+  deps: Pick<EvidenceGraphDeps, "readSettlementNode" | "readAnchorRecord" | "readRestrictedAnchorRecord" | "resolveSessionChallenge" |
+    "verifyPrimaryClaimControl" | "resolveRecipeSnapshot">,
+): Promise<string | null> {
   const pipeline = arr(listing.pipeline);
   const kinds = pipeline.map((phase) => String(phase.kind));
   const unsupportedPayment = kinds.find((kind) => PAYMENT_PHASES.has(kind) && kind !== "pay-dem");
@@ -570,13 +595,26 @@ export function deploymentVerifiability(
       return "a pay-dem phase names a rail other than demos-native:DEM";
     }
     if (!deps.readSettlementNode) return "the native payment node reader is unavailable";
-    if (!nativeRailConfigured(bundle.railRegistryVersion)) return "no authenticated live native DEM rail definition is installed for the session's rail registry version";
+    // An agreement may select any rail the listing accepts (DACS-3 §8.5.2 check 3), and a pre-commit
+    // failure never says which, so every accepted DEM rail needs its pinned definition here.
+    for (const rail of arr(listing.acceptedRails).filter((accepted) => accepted.railId === "demos-native:DEM")) {
+      const unavailable = nativeRailDefinitionAdmission(bundle.railRegistryVersion, rail);
+      if (unavailable) return `accepted rail ${canonicalize(rail)}: ${unavailable}`;
+    }
+    // Check 1 fixes the agreed currency to a listed price; DEM settles only DEM (PC-5).
+    const listed = listedPrice(rec(listing.pricing));
+    if (listed && listed.currency !== "DEM") return "the listed price is not in the DEM rail's asset";
   }
   if (kinds.includes("deliver-storage-program")) {
     const deliverable = rec(rec(listing.offering)?.deliverable);
     if (deliverable?.kind !== "storage-program") return "storage delivery has no storage-program deliverable";
-    if ((deliverable.accessModel ?? "public") === "encrypt-to-buyer") return "storage delivery is encrypted to the buyer";
-    if (!deps.readAnchorRecord) return "the storage payload reader is unavailable";
+    const accessModel = deliverable.accessModel ?? "public";
+    if (accessModel === "encrypt-to-buyer") return "storage delivery is encrypted to the buyer";
+    // DACS-4 §9.6.1: a payload above the 128 KB storage cap MUST be an extended pointer, and this
+    // deployment cannot read external cleartext.
+    if (Number(deliverable.expectedSizeBytes) > MAX_DACS_ARTIFACT_BYTES) return "the declared payload exceeds the inline storage cap";
+    if (accessModel === "buyer-only" && !deps.readRestrictedAnchorRecord) return "buyer-only payloads need an authenticated restricted reader";
+    if (accessModel !== "buyer-only" && !deps.readAnchorRecord) return "the storage payload reader is unavailable";
   }
   // Payment and storage anchors resolve only through this Directory's AnchorBinding extension, which
   // the Standard and the pinned SDK do not emit. Tooling without it never carries the signed
@@ -590,6 +628,9 @@ export function deploymentVerifiability(
     const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
       (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
     if (hasRequirements && !deps.verifyPrimaryClaimControl) return "primary-claim control verification is unavailable";
+    // Vet records, passing or failing, are judged under the session's recipe registry snapshot.
+    const snapshot = await (deps.resolveRecipeSnapshot ?? resolveConfiguredRecipeSnapshot)(Number(bundle.recipeRegistryVersion));
+    if (!snapshot || snapshot.registryVersion !== bundle.recipeRegistryVersion) return "the session's recipe registry snapshot is unavailable";
   }
   // DACS-3 §8.5.2 checks 5 and 6 need the CommitmentRecord's anchored committedAt, which no bundle carries.
   if (rec(listing.terms)?.deadlineSecAfterCommit !== undefined || rec(listing.validity)?.notAfter !== undefined) {
@@ -1027,6 +1068,16 @@ async function verifyCurrentEvidenceGraph(
     return { ...failSigned("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
       artifacts, agreement, listing: listed.raw };
   }
+  // The agreed rail and price are fixed at commitment, so every committed session is held to them,
+  // whatever its outcome: each payment phase uses the agreed rail, admitted under the session's rail
+  // registry (PA-1, PC-5). Checking them only once a payment succeeded would drop completions on an
+  // agreement that failed sessions still count on.
+  const agreedRail = rec(rec(agreement?.terms)?.rail);
+  if (agreement) for (const phase of pipeline.filter((entry) => PAYMENT_PHASES.has(String(entry.kind)))) {
+    if (rec(phase.parameters)?.rail !== agreedRail?.railId) return failSigned("payment phase rail does not match the agreement rail");
+    const railCheck = nativeRailAdmission(raw.railRegistryVersion, agreedRail, phase.kind, rec(agreement.terms)?.price);
+    if (railCheck) return failSigned(railCheck);
+  }
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
@@ -1034,12 +1085,6 @@ async function verifyCurrentEvidenceGraph(
     if (!agreement || !settlesAgreedPrice(evidence.raw.paymentAmount, rec(agreement.terms)?.price)) {
       return failSigned("payment amount does not match the agreement price");
     }
-    const rail = rec(rec(agreement.terms)?.rail);
-    if (rec(pipeline[evidence.phaseIndex!]?.parameters)?.rail !== rail?.railId) {
-      return failSigned("payment phase rail does not match the agreement rail");
-    }
-    const railCheck = nativeRailAdmission(raw.railRegistryVersion, rail, evidence.raw.phase, rec(agreement.terms)?.price);
-    if (railCheck) return failSigned(railCheck);
     if (evidence.raw.phase === "pay-ap2" || evidence.raw.phase === "pay-x402") {
       return failSigned("payment verification is indeterminate: authenticated provider receipt is unavailable");
     }
@@ -1069,7 +1114,9 @@ async function verifyCurrentEvidenceGraph(
     if (await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
       return failSigned("storage delivery payload binding failed");
     }
-    const delivered = await deps.readAnchorRecord?.(String(anchor.locator));
+    // A buyer-only payload is node-enforced private: only an authenticated restricted reader opens it.
+    const reader = accessModel === "buyer-only" ? deps.readRestrictedAnchorRecord : deps.readAnchorRecord;
+    const delivered = await reader?.(String(anchor.locator));
     if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
     if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
     // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
@@ -1080,19 +1127,22 @@ async function verifyCurrentEvidenceGraph(
     if (!acl || !["public", "restricted", "owner"].includes(String(acl.mode))) {
       return failSigned("storage delivery is indeterminate: access metadata is unavailable");
     }
-    if (accessModel === "buyer-only") {
-      const buyer = arr(agreement.parties).find((party) => party.role === "buyer");
-      const claim = typeof buyer?.primaryClaim === "string" ? canonicalDemosAgentClaim(buyer.primaryClaim) : null;
-      const buyerAddress = claim ? `0x${claim.slice(-64)}` : null;
-      if (acl.mode !== "restricted" || !buyerAddress || !Array.isArray(acl.allowed) || acl.allowed.length !== 1 ||
-          typeof acl.allowed[0] !== "string" || acl.allowed[0].toLowerCase() !== buyerAddress) {
-        return failSigned("storage delivery is indeterminate: buyer-only access binding failed");
-      }
+    const buyer = arr(agreement.parties).find((party) => party.role === "buyer");
+    const claim = typeof buyer?.primaryClaim === "string" ? canonicalDemosAgentClaim(buyer.primaryClaim) : null;
+    const buyerAddress = claim ? `0x${claim.slice(-64)}` : null;
+    // A payload the agreement-bound buyer cannot read was not delivered to it, whatever the declared mode.
+    if (!buyerAddress || !buyerMayRead(acl, buyerAddress)) {
+      return failSigned("storage delivery is indeterminate: the buyer cannot read the delivered payload");
+    }
+    // DV-3: the buyer is the only reader the ACL grants; a group could grant others.
+    if (accessModel === "buyer-only" && (acl.mode !== "restricted" || !Array.isArray(acl.allowed) || acl.allowed.length !== 1 ||
+        !(acl.groups === undefined || (rec(acl.groups) && Object.keys(acl.groups as object).length === 0)))) {
+      return failSigned("storage delivery is indeterminate: buyer-only access binding failed");
     }
   }
   // Last, so every specific evidence failure above keeps its own reason; any session still standing
   // here, whatever its outcome, is excluded when its listing is not verifiable by this deployment.
-  const unverifiable = deploymentVerifiability(listed.raw, raw, deps);
+  const unverifiable = await deploymentVerifiability(listed.raw, raw, deps);
   if (unverifiable) return failSigned(`session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };

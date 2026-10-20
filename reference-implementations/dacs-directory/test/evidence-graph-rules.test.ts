@@ -13,6 +13,7 @@ import {
   artifactHash,
   buildCurrentEvidenceGraph,
   COMMITTED_AT_INDETERMINATE,
+  deploymentVerifiability,
   isCurrentRef,
   normalizedHash,
   paymentFinalityOk,
@@ -101,6 +102,7 @@ interface Case {
   /** StorageProgram names the default reader reports, by locator; otherwise OPAQUE_PROGRAM_NAME. */
   programNames?: Record<string, string>;
   readAnchorRecord?: EvidenceGraphDeps["readAnchorRecord"];
+  readRestrictedAnchorRecord?: EvidenceGraphDeps["readRestrictedAnchorRecord"];
   noAnchorMetadata?: boolean;
   scopes?: (scopes: Scopes) => void;
   /** Signs and stores the artifacts; the defaults are the parties who produce each one. */
@@ -154,6 +156,7 @@ async function evaluate(c: Case = {}) {
       const data = store.get(locator);
       return data ? { data, acl: { mode: "public" }, programName } : null;
     }),
+    readRestrictedAnchorRecord: c.readRestrictedAnchorRecord,
     resolveListing: async () => ({ locator: at(1), raw: forListing }),
   });
 }
@@ -1363,8 +1366,9 @@ test("payout helper rejects malformed entries with false and preserves its valid
   assert.equal(agreementMatchesListing(agreement, { pipeline: [...listed.pipeline, null] }), false);
 });
 
-// Signed storage deliveries resolve the actual cleartext and node ACL. Readable restricted
-// records below model a hypothetical node contract; ac8f45f denies these anonymous reads.
+// Signed storage deliveries resolve the actual cleartext and node ACL. Buyer-only payloads are read
+// through an authenticated restricted reader, which the catalog does not install (ac8f45f denies
+// anonymous restricted reads); the reader and the readable restricted records here are test fixtures.
 test("storage delivery requires hash-bound payload and agreement-bound access", async (t) => {
   const payload = { report: "delivered cleartext" };
   const signedPayload = { ...payload, signature: "original", signatures: ["original"] };
@@ -1372,7 +1376,8 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
   const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
   type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
-    payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean };
+    payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean; noRestrictedReader?: boolean };
+  const outsiderAddress = `0x${dids[OUTSIDER].slice(-64)}`;
   const cases: Record<string, DeliveryCase> = {
     "public cleartext": { expected: true },
     "buyer role is independent of agreement party order": { sellerFirst: true, accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
@@ -1403,6 +1408,18 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "buyer-only missing allowed list": { accessModel: "buyer-only", acl: { mode: "restricted" }, indeterminate: true },
     "buyer-only extra reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress, `0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
     "buyer-only unreadable": { accessModel: "buyer-only", unreadable: true, indeterminate: true },
+    "buyer-only without an authenticated restricted reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, noRestrictedReader: true, indeterminate: true },
+    "buyer-only with a group granting another reader": { accessModel: "buyer-only", indeterminate: true,
+      acl: { mode: "restricted", allowed: [buyerAddress], groups: { team: { members: [outsiderAddress], permissions: ["read"] } } } },
+    "buyer-only with an empty group map": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress], groups: {} }, expected: true },
+    // The node's read rule for the buyer (ac8f45f checkReadPermission), whatever the declared mode.
+    "a blacklisted buyer cannot read a public payload": { acl: { mode: "public", blacklisted: [buyerAddress] }, indeterminate: true },
+    "a blacklist entry matches the buyer in any case": { acl: { mode: "public", blacklisted: [buyerAddress.toUpperCase()] }, indeterminate: true },
+    "a malformed blacklist fails closed": { acl: { mode: "public", blacklisted: buyerAddress }, indeterminate: true },
+    "a blacklist naming someone else leaves the buyer reading": { acl: { mode: "public", blacklisted: [outsiderAddress] }, expected: true },
+    "a blacklisted buyer cannot read a restricted payload": { acl: { mode: "restricted", allowed: [buyerAddress], blacklisted: [buyerAddress] }, indeterminate: true },
+    "owner mode admits only the owner": { acl: { mode: "owner" }, indeterminate: true },
+    "restricted delivery of a public listing must allow the buyer": { acl: { mode: "restricted", allowed: [outsiderAddress] }, indeterminate: true },
     "sealed payload cannot establish its cleartext hash": { accessModel: "encrypt-to-buyer", payload: { ciphertext: "sealed", recipient: buyerAddress }, indeterminate: true },
     "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true },
   };
@@ -1411,15 +1428,16 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...(listing.pipeline as Obj[]).slice(0, -1), { kind: "deliver-storage-program" }] };
     const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
     let stored: Map<string, Obj>;
+    const reader: EvidenceGraphDeps["readAnchorRecord"] = async (locator) => {
+      const data = stored.get(locator);
+      return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
+    };
     const graph = await evaluate({ defaultDelivery: false, listing: listed, anchorAddresses: c.logicalAddress ? { [at(51)]: c.logicalAddress } : undefined, scopes: (scopes) => {
       (scopes.agreement.terms as Obj).deliverable = { deliverableType: deliverable.kind, hash: contentHash(deliverable) };
       if (c.sellerFirst) (scopes.agreement.parties as Obj[]).reverse();
       scopes.bundle.phaseSummary = [...(scopes.bundle.phaseSummary as Obj[]).filter((phase) => phase.kind !== "deliver-storage-program"), { index: 3, kind: "deliver-storage-program", outcome: "ok" }];
     }, artifacts: (session) => { stored = session.store; if (!c.unreadable) stored.set(at(51), c.payload ?? payload); },
-    readAnchorRecord: async (locator) => {
-      const data = stored.get(locator);
-      return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
-    }, bundle: async (bundle, session) => {
+    readAnchorRecord: reader, readRestrictedAnchorRecord: c.noRestrictedReader ? undefined : reader, bundle: async (bundle, session) => {
       const evidence: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
         deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(51) }, ...c.evidence };
       for (const key of Object.keys(evidence)) if (evidence[key] === undefined) delete evidence[key];
@@ -1497,4 +1515,21 @@ test("PriceTerm amount and optional RatingRecord text retain their schema types 
     const rating = await evaluate({ scopes: (s) => { s.rating.freeText = freeText; } });
     assert.equal(rating.reason, "rating reference failed");
   }
+});
+
+test("§10.5.1: a vet listing needs the session's recipe registry snapshot for every outcome", async () => {
+  // Passing and failing vet records are judged under the snapshot, but a session that fails before
+  // its vet carries none: without the snapshot, completions would drop out while such failures count.
+  const vetListing = { pipeline: [{ kind: "vet-credentials" }, { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-storage-program" }],
+    offering: { deliverable: { kind: "storage-program", accessModel: "public" } }, buyerRequirement: { requirementVersion: "1", required: [{ scheme: "github" }] } };
+  const deps = { readAnchorRecord: async () => null, resolveSessionChallenge: async () => null, verifyPrimaryClaimControl: async () => true };
+  const session = { recipeRegistryVersion: 1, anchorBindings: [] };
+  assert.equal(await deploymentVerifiability(vetListing, session, { ...deps, resolveRecipeSnapshot: fixtureRecipeSnapshot }), null);
+  for (const resolveRecipeSnapshot of [async () => null, async () => ({ registryVersion: 2, recipes: [] })]) {
+    assert.equal(await deploymentVerifiability(vetListing, session, { ...deps, resolveRecipeSnapshot }), "the session's recipe registry snapshot is unavailable");
+  }
+  assert.equal(await deploymentVerifiability(vetListing, { ...session, recipeRegistryVersion: 2 }, { ...deps, resolveRecipeSnapshot: fixtureRecipeSnapshot }),
+    "the session's recipe registry snapshot is unavailable");
+  // Without a configured resolver the operator's DACS_RECIPE_SNAPSHOTS decides, and none is installed here.
+  assert.equal(await deploymentVerifiability(vetListing, session, deps), "the session's recipe registry snapshot is unavailable");
 });

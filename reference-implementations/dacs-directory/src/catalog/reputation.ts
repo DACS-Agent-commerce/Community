@@ -1,4 +1,5 @@
-import { admitSettlement } from "./settlementKey.js";
+import { dealSessionKey } from "./bundleSignerPolicy.js";
+import { admitSettlement, type SettlementClaim } from "./settlementKey.js";
 import type { DealRecord, ReputationHint, SellerRecord } from "./types.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
@@ -50,16 +51,18 @@ export function isNeutralCancellation(
 /** Admit the consumer's complete evidence set before seller, category or window filtering. */
 export function settlementEligibleDeals(records: DealRecord[]): DealRecord[] {
   const deals = records.filter((deal) => deal.refsVerified && deal.reputationEligible && !deal.settlementRejected && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""));
-  // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) only. Claims are admitted in
-  // the winning order, earliest evidence observation first, then the lower evidence hash, then the
-  // jobId so the choice is deterministic; a job holding any rejected claim is not counted.
-  const claims = deals.flatMap((deal) => (deal.settlementTxIds ?? []).map((tx) => ({ deal, tx })))
+  // SB-2: one settlement-tx-id counts under one (jobId, phaseIndex) of one session only; a jobId is
+  // unique only per producer, so another buyer's session on the same jobId is a second binding.
+  // Claims are admitted in the winning order, earliest evidence observation first, then the lower
+  // evidence hash, then the jobId and session so the choice is deterministic; a session holding any
+  // rejected claim is not counted.
+  const claims = deals.flatMap((deal) => (deal.settlementTxIds ?? []).map((tx) => ({ deal, tx, session: dealSessionKey(deal) })))
     .sort((a, b) => a.tx.observedAt - b.tx.observedAt || byteOrder(a.tx.evidenceHash ?? "", b.tx.evidenceHash ?? "") ||
-      byteOrder(a.deal.jobId, b.deal.jobId) || a.tx.phaseIndex - b.tx.phaseIndex);
-  const ledger = new Map<string, { jobId: string; phaseIndex: number }>();
+      byteOrder(a.deal.jobId, b.deal.jobId) || byteOrder(a.session, b.session) || a.tx.phaseIndex - b.tx.phaseIndex);
+  const ledger = new Map<string, Omit<SettlementClaim, "id">>();
   const rejected = new Set<DealRecord>();
-  for (const { deal, tx } of claims) {
-    if (admitSettlement(ledger, { id: tx.id, jobId: deal.jobId, phaseIndex: tx.phaseIndex }) === "reject") rejected.add(deal);
+  for (const { deal, tx, session } of claims) {
+    if (admitSettlement(ledger, { id: tx.id, jobId: deal.jobId, phaseIndex: tx.phaseIndex, session }) === "reject") rejected.add(deal);
   }
   return deals.filter((deal) => !rejected.has(deal));
 }

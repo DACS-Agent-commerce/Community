@@ -13,13 +13,13 @@ function railDefinitions(registryVersion: unknown): Array<Obj | null> {
   return Array.isArray(snapshot?.rails) ? snapshot.rails.map(rec) : [];
 }
 
-/** A deployment capability, the same for every session pinning `registryVersion` whatever its
- * outcome: the operator installed a live native DEM definition for that registry version. */
-export function nativeRailConfigured(registryVersion: unknown): boolean {
-  return railDefinitions(registryVersion).some((item) => item?.railId === "demos-native:DEM" && item.availability === "live");
-}
+const MISMATCH = "payment verification is indeterminate: pinned rail handler, asset or network does not match";
 
-export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, phase: unknown, price: unknown): string | null {
+/** PA-1 for one RailRef: the operator's authenticated, live native DEM definition at its pinned
+ * railVersion, else the latest (§9.4.2 step 4), with the same parameters. A deployment capability,
+ * the same for every session that may select the rail whatever its outcome: listing admission runs
+ * it for every DEM rail the listing accepts, payment admission for the agreed one. */
+export function nativeRailDefinitionAdmission(registryVersion: unknown, rail: Obj | null): string | null {
   const definitions = railDefinitions(registryVersion);
   const matching = definitions.filter((item) => item?.railId === rail?.railId && Number.isSafeInteger(item?.railVersion) && Number(item?.railVersion) >= 1);
   const version = rail?.railVersion ?? Math.max(0, ...matching.map((item) => Number(item!.railVersion)));
@@ -29,11 +29,17 @@ export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, 
   // This consumer implements just the native DEM adapter. Other rails remain indeterminate.
   if (definition.availability !== "live") return "payment verification is indeterminate: pinned rail is not live";
   const asset = rec(definition.asset), network = rec(definition.network);
-  if (rail?.railId !== "demos-native:DEM" || definition.railType !== "demos-native" || phase !== "pay-dem" ||
-      definition.phaseHandler !== phase || asset?.kind !== "native-dem" || asset.symbol !== "DEM" || asset.decimals !== 9 ||
-      network?.kind !== "demos" || rec(price)?.currency !== asset.symbol ||
+  if (rail?.railId !== "demos-native:DEM" || definition.railType !== "demos-native" || definition.phaseHandler !== "pay-dem" ||
+      asset?.kind !== "native-dem" || asset.symbol !== "DEM" || asset.decimals !== 9 || network?.kind !== "demos" ||
       canonicalize(rail?.parameters ?? {}) !== canonicalize(definition.parameters ?? {})) {
-    return "payment verification is indeterminate: pinned rail handler, asset or network does not match";
+    return MISMATCH;
   }
   return null;
+}
+
+/** The agreed rail on one payment phase: its definition, a pay-dem handler, and a price in the
+ * rail's asset (PC-5). */
+export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, phase: unknown, price: unknown): string | null {
+  return nativeRailDefinitionAdmission(registryVersion, rail) ??
+    (phase !== "pay-dem" || rec(price)?.currency !== "DEM" ? MISMATCH : null);
 }

@@ -35,6 +35,11 @@ export function demosSigningIdentity(claim: string): string {
   return key ? key.toLowerCase() : claim;
 }
 
+/** One session in this catalog: a jobId is unique only per producer, so (buyer, seller, jobId). */
+export function dealSessionKey(deal: { owners: { buyer: string; seller: string }; jobId: string }): string {
+  return `${demosSigningIdentity(deal.owners.buyer)}\n${demosSigningIdentity(deal.owners.seller)}\n${deal.jobId}`;
+}
+
 /**
  * Enforce the signer coverage shared by current, legacy, and browser checks.
  * Abort copies may be single-signed by their anchoring role, or fully signed.

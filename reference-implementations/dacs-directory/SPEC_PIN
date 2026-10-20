@@ -110,6 +110,9 @@
 #     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
 #     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
 #     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
+#     The buyer's read right follows node ac8f45f checkReadPermission: a blacklisted buyer, owner
+#     mode, or a restricted ACL not allowing the buyer is no delivery; groups never grant it, and a
+#     buyer-only ACL names the buyer alone with no reader group.
 #   Rail admission uses explicitly provisioned DACS_RAIL_SNAPSHOTS (PA-1 operator trust).
 #     Snapshots pin registryVersion and railVersion, handler, asset, network, parameters and availability.
 #     Operators must authenticate the registry index/definitions before provisioning; no snapshot is
@@ -128,19 +131,29 @@
 #     from the pinned listing, the session's signed profile and the installed adapters, never from the
 #     outcome (evidenceGraph.ts deploymentVerifiability; bundlePolicy.ts legacyListingSettlementIndeterminate).
 #     Every session on such a listing is excluded from numerator and denominator, pre-commit failures
-#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader or a live native DEM
-#     snapshot for the bundle's railRegistryVersion; a non-storage, encrypt-to-buyer or unreadable delivery;
-#     vet-credentials without a challenge resolver (or, with identity requirements, a control adapter);
-#     listing commitment-time bounds; negotiate-fixed-price on a negotiable listing. A legacy session is
-#     excluded whenever its pinned listing declares a payment rail, delivery, price or settle phase.
-#     Only a transient read failure of one pass (node, payload) is still per session; the next pass rechecks it.
+#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader, without a live
+#     native DEM definition (under the bundle's railRegistryVersion) for every DEM rail the listing
+#     accepts, or with a listed price not in DEM; a non-storage or encrypt-to-buyer delivery, a declared
+#     expectedSizeBytes above the 128 KB storage cap (§9.6.1 extended pointer), buyer-only delivery
+#     without an authenticated restricted reader (none is installed), or no payload reader;
+#     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
+#     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price on
+#     a negotiable listing. The agreed rail and price are checked for every session with an agreement.
+#     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
+#     or settle phase. Still per session: a transient read failure of one pass (node, payload), which
+#     the next pass rechecks, and the seller's own delivery choices the listing does not declare (an
+#     external pointer without expectedSizeBytes, or a public listing delivered through a restricted
+#     ACL the anonymous reader cannot open).
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
+#     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,
+#     phaseIndex) of one session, and ties after observedAt and evidence hash break on jobId, then session.
 #   Current publisher rail IDs are demos-native:DEM and x402:default. Historical signed phase-name
 #     aliases remain readable for evidence, but public discovery excludes those current offers;
 #     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
-#   Anonymous restricted-program reads on node ac8f45f are denied: buyer-only is indeterminate
-#     on that deployment. ACL-success tests model a hypothetical readable metadata contract.
+#   Anonymous restricted-program reads on node ac8f45f are denied and no authenticated restricted
+#     reader is installed, so buyer-only is indeterminate for every outcome. Buyer-only ACL-success
+#     tests inject a fixture restricted reader.
 #   Revocation candidates: discovered markers returning NOT_FOUND, PERMISSION_DENIED or a transport
 #     failure stay pending/indeterminate. Persistent 1–60 second exponential backoff bounds retries.
 #     Only successfully read invalid content can reject a candidate; verified revocation is retained.
@@ -192,6 +205,19 @@
 #   settlement-finalization-propagation-v0.3 and receipt-rederivation-v0.3: handler-side
 #     finalization/receipt emission, not this read-only catalog consumer.
 #   commitment-anchor-authority-v0.3: no CommitmentRecord locator is exposed by current bundles.
+#   channel-message-replay-v0.1 (DACS-3 §8.3.3, CH-6), sealed-envelope-deadline-v0.1 and
+#     sealed-envelope-multicommit-v0.1 (§8.4.3 SE-2..4, SE-9): negotiation-channel and bid handling;
+#     this catalog reads no channel messages, bids or CommitmentRecords.
+#   rail-availability-selection-v0.1 (DACS-4 §9.4.4 RAV-R*): steward-signed availability for rail
+#     selection; the catalog takes rail definitions and availability only from operator-authenticated
+#     snapshots (PA-1) and admits only live ones.
+#   feeschedule-reconciliation-v0.1 (DACS-3 §8.5.3, DACS-4 §9.7.2): no FeeSchedule reader; FS-3
+#     makes reconciliation non-gating for settlement and the catalog publishes no fee result.
+#   sb3-eip3009-nonce-v0.1 and x402-receipt-hash-v0.1: EVM and x402 rails have no adapter here,
+#     so every session on such a listing is indeterminate.
+#   vp-replay-v0.1 (DACS §7.3.2): holder-bound credential presentations under raw ed25519 issuer and
+#     subject keys, outside the did:demos:agent IdentityBundle profile. Session-nonce replay is pinned
+#     by the fixture-resolver graph tests (SN-1..4); production installs no historical challenge resolver.
 #   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
 #     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
 #     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
