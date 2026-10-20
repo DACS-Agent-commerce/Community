@@ -1,4 +1,4 @@
-import { authenticateAuthorityAttestation, installedAuthorityVerifier, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
+import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
 import { readAnchor } from "./chain.js";
 import { artifactHash, isCurrentRef, verifyComponentSignature } from "./evidenceGraph.js";
 import {
@@ -63,8 +63,8 @@ export async function deriveIdentityTier(
   now = Date.now(),
   read: typeof readAnchor = readAnchor,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
-  /** Defaults to the installed deployment verifier; every indexing entry point relies on this default. */
-  verifyAttestation: VerifyAuthorityAttestation | undefined = installedAuthorityVerifier(),
+  /** Without one every claim is unverified. Indexing entry points pass the DACS_AUTHORITY_VERIFIER one. */
+  verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<IdentityTier> {
   const claims = Array.isArray(identityBundle?.claims) ? identityBundle.claims.map(obj).filter(Boolean) as Obj[] : [];
   // A claim whose chain artifacts cannot be canonicalized is unverified; the others still count.

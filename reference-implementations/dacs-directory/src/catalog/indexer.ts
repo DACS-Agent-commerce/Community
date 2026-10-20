@@ -186,8 +186,8 @@ export async function indexRegistration(
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
   listingAnchorsFor: ResolvePublisherListingAnchors = publisherListingAnchors(),
-  /** Authority-proof verifier for identity tiers. Omitted, deriveIdentityTier uses the one installed with
-   * installAuthorityVerifier, as every shipped entry point does; none ships, so tiers stay self-declared. */
+  /** Authority-proof verifier for identity tiers; omitted, every tier is self-declared. reindexAll and
+   * index-now pass the one DACS_AUTHORITY_VERIFIER configures (loadAuthorityVerifier); none ships. */
   verifyAttestation?: VerifyAuthorityAttestation,
 ): Promise<SellerRecord> {
   const now = Date.now();

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { installAuthorityVerifier, type VerifyAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
+import type { VerifyAuthorityAttestation } from "../src/catalog/authorityAttestation.js";
+import { AUTHORITY_VERIFIER_ENV } from "../src/catalog/authorityVerifierConfig.js";
 import { artifactHash } from "../src/catalog/evidenceGraph.js";
 import { deriveIdentityTier, resolveConfiguredRecipe, sellerIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 
@@ -67,14 +68,17 @@ test("an institutional scheme verified under a live recipe gives the institution
   assert.equal(await deriveIdentityTier({ claims: [null, "lei"] }), "self-declared");
 });
 
-test("without an explicit adapter the tier uses the installed deployment verifier, and none ships", async () => {
-  assert.equal(await tier({ authenticate: false }), "self-declared", "none installed");
-  installAuthorityVerifier(verifyTestAuthority);
+test("a tier counts an authority proof only through the adapter its caller passes", async () => {
+  // The indexing entry points load DACS_AUTHORITY_VERIFIER and pass it; tier derivation reads no configuration.
+  const prior = process.env[AUTHORITY_VERIFIER_ENV];
+  process.env[AUTHORITY_VERIFIER_ENV] = new URL("./fixtures/authority-verifier/accepts.ts", import.meta.url).href;
   try {
-    assert.equal(await tier({ authenticate: false }), "institutional");
-    assert.equal(await tier({ adapter: async () => false }), "self-declared", "an explicit adapter governs");
-  } finally { installAuthorityVerifier(undefined); }
-  assert.equal(await tier({ authenticate: false }), "self-declared");
+    assert.equal(await tier({ authenticate: false }), "self-declared", "no adapter: fails closed");
+    assert.equal(await tier(), "institutional");
+    assert.equal(await tier({ adapter: async () => false }), "self-declared");
+  } finally {
+    if (prior === undefined) delete process.env[AUTHORITY_VERIFIER_ENV]; else process.env[AUTHORITY_VERIFIER_ENV] = prior;
+  }
 });
 
 test("each claim, VerifyResult, recipe, freshness and authority-proof rule withholds the tier when it fails", async () => {

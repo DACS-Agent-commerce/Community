@@ -5,6 +5,7 @@
  * store. Can take a minute or two: every bundle is re-verified against chain.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { AuthorityVerifierUnavailable } from "@/src/catalog/authorityVerifierConfig";
 import { reindexAll, type ReindexSummary } from "@/src/catalog/reindexCore";
 import { requireAdmin } from "@/src/catalog/security";
 import { withDataLock } from "@/src/catalog/store";
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : "reindex failed" },
-      { status: 500 },
+      { status: e instanceof AuthorityVerifierUnavailable ? 503 : 500 },
     );
   }
 }

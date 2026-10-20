@@ -61,7 +61,7 @@ export const deliveryLabel = (d: string) =>
   d.replace(/^deliver-/, "").replace(/-/g, " ");
 
 /** DACS identity tiers. Elevation requires a fresh resolved DACS-2 VerifyResult and an authority proof
- * authenticated by a deployment verifier; none is installed in this build. */
+ * authenticated by a deployment verifier (DACS_AUTHORITY_VERIFIER); none ships with this build. */
 export const IDENTITY_TIERS = [
   {
     id: "institutional",

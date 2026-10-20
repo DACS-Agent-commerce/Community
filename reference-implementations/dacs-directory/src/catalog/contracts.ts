@@ -252,7 +252,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
   },
   maturity: {
     listings: "current publisher and dual-profile reader",
-    identityTier: "self-declared unless a fresh DACS-2 verifiedBy result and its authority proof are authenticated; this build installs no authority verifier, so every tier is self-declared",
+    identityTier: "self-declared unless a fresh DACS-2 verifiedBy result and its authority proof are authenticated; this build ships no authority verifier, so every tier is self-declared unless the deployment configures one",
     reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
   },
   verification: {

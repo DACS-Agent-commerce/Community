@@ -51,11 +51,13 @@
 #   schemes unverified, BR-4), decided pass, signed by a trusted signer under a live
 #   exact-version recipe, fresh in the min(expiresAt, validUntil ?? verifiedAt + defaultMaxAgeSec)
 #   window, and backed by an authority proof the deployment verifier authenticates
-#   (installAuthorityVerifier; the reindex CLI, reindex and index-now routes all read that one
-#   instance as deriveIdentityTier's default). A presenter identityTier is ignored.
+#   (the DACS_AUTHORITY_VERIFIER module, loaded by the reindex CLI and the reindex and index-now
+#   routes; the catalog records it, and index-now refuses a catalog derived with another).
+#   A presenter identityTier is ignored.
 #   The seller tier is the highest across its listings' bundles (a Directory extension).
-#   test/identity-rules.test.ts, test/current-indexer.test.ts, test/malformed-artifacts.test.ts
-#   and test/standard-vectors.test.ts (identity-tier-self-asserted-ignored).
+#   test/identity-rules.test.ts, test/current-indexer.test.ts, test/malformed-artifacts.test.ts,
+#   test/authority-verifier-processes.test.ts and test/standard-vectors.test.ts
+#   (identity-tier-self-asserted-ignored).
 # - Session Vet admission in the current evidence graph. It resolves historical
 #   IdentityBundle bytes, authenticates the session challenge, selects the session's
 #   DACS_RECIPE_SNAPSHOTS roster and matches the listing requirement through
@@ -177,10 +179,10 @@
 #     without this extension and is indeterminate whatever its outcome, so such sessions are neutral:
 #     the Directory publishes no rate for them rather than counting only their failures.
 #
-# No production method-specific authority-proof verifier is installed. The session graph
-# (EvidenceGraphDeps.verifyAttestation) and identity tiers (installAuthorityVerifier, read by
-# deriveIdentityTier on every indexing entry point) fail closed without one: every shipped seller
-# tier is self-declared, and a session graph that cites an authority proof does not verify.
+# No production method-specific authority-proof verifier ships. The session graph
+# (EvidenceGraphDeps.verifyAttestation) and identity tiers (the DACS_AUTHORITY_VERIFIER module,
+# loaded by every indexing entry point) fail closed without one: every seller tier is
+# self-declared, and a session graph that cites an authority proof does not verify.
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.

@@ -8,7 +8,7 @@ await withDataLock("reindex", () => {
 
   const catalog = loadCatalog();
   saveCatalog({
-    catalogVersion: "1",
+    ...catalog,
     generatedAt: now,
     sellers: upsertCounterpartyEvidenceSeller(catalog.sellers, now),
   });

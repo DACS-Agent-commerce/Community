@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import test from "node:test";
@@ -109,6 +109,9 @@ test("counterparty fixture seed record exposes the runnable service", () => {
 test("counterparty fixture seed command persists the reindex marker", () => {
   const dataDir = mkdtempSync(`${tmpdir()}/dacs-counterparty-fixture-`);
   const appDir = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+  // An existing catalog whose tiers were derived with a deployment verifier (migrated from legacy JSON on open).
+  const identityTierVerifier = "file:///srv/directory/authority-verifier.mjs";
+  writeFileSync(`${dataDir}/catalog.json`, JSON.stringify({ catalogVersion: "1", generatedAt: 1, sellers: [], identityTierVerifier }));
   try {
     execFileSync(process.execPath, ["--import", "tsx", "scripts/seed-counterparty-fixture.ts"], {
       cwd: appDir,
@@ -122,10 +125,11 @@ test("counterparty fixture seed command persists the reindex marker", () => {
       return JSON.parse(row.value_json) as unknown;
     };
     const seeds = readState("fixtures");
-    const catalog = readState("catalog") as { sellers?: Array<{ primaryClaim?: string }> };
+    const catalog = readState("catalog") as { sellers?: Array<{ primaryClaim?: string }>; identityTierVerifier?: string };
     db.close();
     assert.deepEqual(seeds, ["counterparty-evidence"]);
     assert.ok(catalog.sellers?.some((seller) => seller.primaryClaim === COUNTERPARTY_EVIDENCE_AGENT_ID));
+    assert.equal(catalog.identityTierVerifier, identityTierVerifier, "seeding keeps the verifier the tiers were derived with");
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

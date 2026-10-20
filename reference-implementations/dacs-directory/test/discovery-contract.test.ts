@@ -53,11 +53,11 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.ok(manifest.filters.includes("identityTier"));
 });
 
-test("public tier text says an authority verifier is needed and this build installs none", async () => {
+test("public tier text says an authority verifier is needed and this build ships none", async () => {
   assert.match(directoryManifest("https://directory.example", "https://node.example/demos").maturity.identityTier,
-    /authority proof .*installs no authority verifier, so every tier is self-declared/);
+    /authority proof .*ships no authority verifier, so every tier is self-declared unless the deployment configures one/);
   const { GET } = await import("../app/llms.txt/route.js");
-  assert.match(await (await GET()).text(), /authority proof a deployment verifier authenticates; .*this build installs no verifier/);
+  assert.match(await (await GET()).text(), /authority proof a deployment verifier authenticates; .*this build ships no verifier: a deployment configures its own/);
 });
 
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {
