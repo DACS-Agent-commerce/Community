@@ -281,13 +281,16 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    (DEMOS-MAPPING §A.2) that the pinned Standard does not define for payment anchors. When the
    signed pipeline has one `pay-dem` phase, PC-2 leaves the record exactly one address, so the
    index is that phase's; a storage payload is read at the `deliverableAnchor` its evidence
-   signer put in the evidence (DACS-4 §9.6.1). A bundle may instead carry this Directory's own
-   AnchorBinding extension in a signed `anchorBindings` member: the evidence's signer binds the
-   record's native address and content hash to its logical address, checked against the listing
-   rail, and every payment and payload anchor of that bundle must then resolve through it.
-   Neither the pinned Standard nor the pinned SDK emits it. Only a listing that repeats `pay-dem`
-   needs it, and without it every session on such a listing is indeterminate, whatever its
-   outcome. What the Directory cannot
+   signer put in the evidence (DACS-4 §9.6.1). A listing that repeats `pay-dem` gives no such
+   index, so every session on it is indeterminate, whatever its outcome. A bundle may also carry
+   this Directory's own AnchorBinding extension in a signed `anchorBindings` member, in which the
+   evidence's signer binds a record's native address and content hash to its logical address.
+   It is a cross-check, never a source: every entry must authenticate and bind an address of this
+   job, for every outcome, and a binding the anchor's own signer published must name the address
+   the listing gives that anchor. Neither the pinned Standard nor the pinned SDK emits it, and no
+   session needs it. A failure before payment binds nothing, so no member, absent, empty or full,
+   could show how its completion would have been bound; letting the member decide admission would
+   count such failures and drop the completions. What the Directory cannot
    verify is decided from the pinned listing, the session's signed profile and the installed
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
@@ -344,8 +347,8 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **In the shipped default no paid session counts.** Without an operator's
   `DACS_RAIL_SNAPSHOTS`, every session on a `pay-dem` listing is indeterminate, and so is every
   legacy session on a listing that declares payment, which earlier releases counted. A two-party
-  Standard bundle needs no Directory extension unless its listing repeats `pay-dem`; only then
-  does it need `anchorBindings`, which no producer emits yet. The pinned SDK anchors a one-party
+  Standard bundle needs no Directory extension. A listing that repeats `pay-dem` is indeterminate
+  for every outcome, with or without `anchorBindings`. The pinned SDK anchors a one-party
   buyer copy: the current graph refuses it at its shape check, and the legacy path needs both
   copies, as at the merge base. Such sellers are published with no rate, not a 0% one.
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
@@ -384,9 +387,8 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **Storage delivery is verified from readable cleartext and node access metadata.**
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
-  fields. The payload must match that hash. In a bundle that carries `anchorBindings`, the
-  delivery signer's AnchorBinding must also bind its anchor to the job's `dacs4:deliverable`
-  address. The buyer must be able to read the
+  fields. The payload must match that hash. If the delivery signer carried an AnchorBinding for
+  that anchor, it must bind it to the job's `dacs4:deliverable` address. The buyer must be able to read the
   payload under the pinned node's read rule (ac8f45f `checkReadPermission`), applied to the
   buyer's canonical `0x<64 lowercase hex>` address. Like the node, the Directory compares
   address strings exactly, so an entry in another case is another address. A public program

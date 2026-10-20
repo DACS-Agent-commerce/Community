@@ -9,7 +9,8 @@
  * evidence (PC-2) and storage deliverables (§9.6.1) use this BundleBinding-shaped
  * profile object, signed under a SIG-4 extension domain until the Standard
  * registers one. Like a BundleBinding it is self-authenticating, so any carrier
- * may serve it verbatim.
+ * may serve it verbatim. The evidence graph never needs one: the signed pipeline
+ * gives each anchor its address, and a carried binding must agree with it.
  */
 import { boundedJson } from "./artifactLimits.js";
 import { contentHash } from "./canonical.js";
@@ -109,26 +110,40 @@ export async function verifyAnchorBinding(
 }
 
 /**
- * The logical address that carried bindings publish for one native anchor.
- * Only bindings signed by `signer`, the party that signed the anchored record,
- * for this job and content hash count; others are inert. None, or two that
- * disagree, leaves the anchor unbound (null). Raw candidates are pre-filtered
- * on the native address so unrelated entries cost no signature work.
+ * A bundle's carried member, judged whole: every entry must be an authenticated
+ * binding of one of this job's logical addresses, or the member is refused (null).
+ * Judging only the entries an anchor looks up would refuse a completion for what
+ * a failure, which has no anchor, carries unread.
  */
-export async function boundLogicalAddress(
+export async function verifyAnchorBindings(
   carried: readonly unknown[],
-  anchor: { jobId: string; nativeAddress: string; contentHash: string; signer: unknown },
+  jobId: string,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
-): Promise<string | null> {
-  if (typeof anchor.signer !== "string") return null;
-  const signer = canonicalSigningIdentity(anchor.signer);
-  const addresses = new Set<string>();
+): Promise<AnchorBinding[] | null> {
+  const verified: AnchorBinding[] = [];
   for (const candidate of carried) {
-    if (record(candidate)?.nativeAddress !== anchor.nativeAddress) continue;
     const binding = await verifyAnchorBinding(candidate, resolveKey);
-    if (!binding || binding.jobId !== anchor.jobId || binding.contentHash !== anchor.contentHash ||
-        canonicalSigningIdentity(binding.signer) !== signer) continue;
-    addresses.add(binding.logicalAddress);
+    if (!binding || binding.jobId !== jobId || (binding.logicalAddress !== deliverableLogicalAddress(jobId) &&
+        parsePaymentLogicalAddress(binding.logicalAddress)?.jobId !== jobId)) return null;
+    verified.push(binding);
   }
-  return addresses.size === 1 ? [...addresses][0] : null;
+  return verified;
+}
+
+/**
+ * What the anchored record's own signer bound one native anchor to, among
+ * verified bindings; anyone else's are inert. undefined when that signer bound
+ * nothing there; null when it bound another content hash there or two logical
+ * addresses, which contradicts the record it signed.
+ */
+export function boundLogicalAddress(
+  verified: readonly AnchorBinding[],
+  anchor: { nativeAddress: string; contentHash: string; signer: string },
+): string | null | undefined {
+  const signer = canonicalSigningIdentity(anchor.signer);
+  const own = verified.filter((binding) => binding.nativeAddress === anchor.nativeAddress &&
+    canonicalSigningIdentity(binding.signer) === signer);
+  if (own.length === 0) return undefined;
+  const addresses = new Set(own.map((binding) => binding.logicalAddress));
+  return addresses.size === 1 && own.every((binding) => binding.contentHash === anchor.contentHash) ? [...addresses][0] : null;
 }

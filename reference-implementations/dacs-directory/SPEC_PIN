@@ -146,7 +146,7 @@
 #     price) that the committed session's own rail admission refuses: a rail the pay-dem phase does not
 #     pay (x402 accepted beside DEM), no live native DEM definition under the bundle's
 #     railRegistryVersion, or a price not in DEM (including an auction with no reserve, whose currency
-#     is open); a non-storage or encrypt-to-buyer delivery, a declared expectedSizeBytes above the
+#     is open); a repeated pay-dem phase, whatever the bundle's anchorBindings member holds; a non-storage or encrypt-to-buyer delivery, a declared expectedSizeBytes above the
 #     Standard's 128 KB storage limit (§9.6.1 extended pointer), buyer-only delivery
 #     without an authenticated restricted reader (none is installed), or no payload reader;
 #     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
@@ -188,19 +188,22 @@
 #     §9.6.1 storage deliverables, while SB-1 keys a settlement on the phaseIndex of its PC-2 address.
 #     Where the signed pipeline has one pay-dem phase, PC-2 leaves the record one address, so the index
 #     is that phase's; a payload is read at the deliverableAnchor its evidence signer signed (§9.6.1
-#     step 5). A bundle may instead carry a BundleBinding-shaped AnchorBinding
-#     (src/catalog/anchorBinding.ts; SIG-4 domain "dacs-x-anchor-binding:v1:") signed by the anchored
-#     record's own signer in its `anchorBindings` member; every payment and payload anchor of that
-#     bundle must then resolve through it, and a missing, unauthenticated or conflicting binding leaves
-#     the session uncounted. StorageProgram names are never read.
+#     step 5). A repeated pay-dem phase leaves no listed index, so every session on that listing is
+#     indeterminate whatever its outcome. A bundle may also carry a BundleBinding-shaped AnchorBinding
+#     (src/catalog/anchorBinding.ts; SIG-4 domain "dacs-x-anchor-binding:v1:") in its `anchorBindings`
+#     member. It is a cross-check, never a source, and never needed: every entry must authenticate and
+#     bind an address of this job, for every outcome, or the session is uncounted; a binding the
+#     anchored record's own signer published for that anchor must name the listed address and the
+#     record's content hash; anyone else's binding is inert. A failure before payment binds nothing,
+#     so no member (absent, empty or full) shows how its completion would have been bound, and the
+#     member never decides admission by outcome (test/indexer-binding-rules.test.ts, the §10.5.1
+#     anchorBindings matrix). StorageProgram names are never read.
 #     A binding carrying a `signatures` member is refused: the SDK contentHash omits that member too.
 #     The rail segment is CF-4 encoded: exactly `: ? & = %`, uppercase hex.
 #     Well-known, catalog and chain-scan carriage of AnchorBindings is not implemented.
-#     Neither the pinned Standard nor the pinned SDK emits `anchorBindings`. Only a listing that repeats
-#     pay-dem needs it to tell its payments apart; without it every session on such a listing is
-#     indeterminate whatever its outcome, so the Directory publishes no rate rather than counting only
-#     failures (test/indexer-binding-rules.test.ts). The pinned SDK (runSessionCore.ts) anchors a
-#     one-party bundle, which the shape check refuses; the merge base never counted it either.
+#     Neither the pinned Standard nor the pinned SDK emits `anchorBindings`. The pinned SDK
+#     (runSessionCore.ts) anchors a one-party bundle, which the shape check refuses; the merge base
+#     never counted it either.
 #
 # Pending production integration (split 4/5): method-specific authority-proof
 # authentication. The session graph authenticates VerifyResult authority evidence only

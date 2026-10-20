@@ -1,5 +1,5 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
-import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress, paymentLogicalAddress } from "./anchorBinding.js";
+import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress, verifyAnchorBindings } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
@@ -652,12 +652,12 @@ export async function deploymentVerifiability(
     if (accessModel === "buyer-only" && !deps.readRestrictedAnchorRecord) return "buyer-only payloads need an authenticated restricted reader";
     if (accessModel !== "buyer-only" && !deps.readAnchorRecord) return "the storage payload reader is unavailable";
   }
-  // SB-1 keys a settlement on the phaseIndex of its PC-2 anchor address, which on Demos only a published
-  // binding recovers (DEMOS-MAPPING §A.2), and the Standard defines none for payment anchors. Without this
-  // Directory's AnchorBinding extension the signed pipeline fixes that index only when it has one pay-dem
-  // phase; a repeated one leaves every session neutral, whatever its outcome.
-  if (!Array.isArray(bundle.anchorBindings) && kinds.filter((kind) => kind === "pay-dem").length > 1) {
-    return "a repeated pay-dem phase needs the AnchorBinding profile to recover each payment's phase index";
+  // SB-1 keys a settlement on the phaseIndex of its PC-2 anchor address, which the signed pipeline fixes
+  // only for a lone pay-dem phase. Nothing every outcome carries fixes it for a repeated one: a session
+  // that fails before paying binds no anchor, so no anchorBindings member, absent, empty or full, shows
+  // how its completion would have been bound. Every session on such a listing is neutral.
+  if (kinds.filter((kind) => kind === "pay-dem").length > 1) {
+    return "a repeated pay-dem phase leaves no listed phase index for each payment";
   }
   if (kinds.includes("vet-credentials")) {
     if (!deps.resolveSessionChallenge) return "authenticated historical session challenges are unavailable";
@@ -738,6 +738,12 @@ async function verifyCurrentEvidenceGraph(
       (FAILURE_OUTCOMES.has(String(raw.outcome)) && terminalClass === undefined))) {
     return failSigned("terminal phase classification contradicts the bundle outcome");
   }
+  // The anchorBindings member is judged here, whatever the outcome; below, each anchor only looks up its
+  // own signer's entries. A member a completion could not carry is refused on a failure too.
+  const carriedBindings = Array.isArray(raw.anchorBindings) ? raw.anchorBindings as unknown[] : [];
+  if (carriedBindings.length > MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
+  const anchorBindings = await verifyAnchorBindings(carriedBindings, String(raw.jobId), resolveKey);
+  if (!anchorBindings) return failSigned("an anchor binding is unauthenticated or binds no address of this job");
 
   const artifacts: ResolvedEvidence[] = [];
   const topLevelLocators = new Map<string, { kind: ArtifactKind; hash: string }>();
@@ -914,7 +920,7 @@ async function verifyCurrentEvidenceGraph(
   }
   // Pair each record with its phase entry: by the entry's attestationRef, else as the only entry of
   // its kind. The phase outcome and the evidence outcome must agree. The pairing gives SB-1 its
-  // candidate phaseIndex; SB-1 independently verifies it against anchor metadata below.
+  // phaseIndex; below, a payment's must be the listed one, and so must any address its signer bound.
   const outcomesAgree = (phase: Record<string, unknown>, evidence: ResolvedEvidence) =>
     (phase.outcome === "ok") === (evidence.raw.outcome === "success");
   const paired = new Map<ResolvedEvidence, number>();
@@ -989,40 +995,6 @@ async function verifyCurrentEvidenceGraph(
   if (raw.outcome === "completed" && (phases.some((phase) => phase.outcome === "fail" && phase.kind !== "rate") ||
       topLevelEvidence.some((evidence) => evidence.raw.outcome !== "success"))) {
     return failSigned("completed session contains a failed mandatory phase");
-  }
-  // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
-  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). A session carrying the AnchorBinding extension resolves the
-  // logical dacs4 address only through a binding its record's own signer published for this native
-  // address and content hash. Without the extension, PC-2 leaves a payment phase kind the signed
-  // pipeline names once exactly one address; deploymentVerifiability refuses a repeated one. The name
-  // is never read.
-  const carriesBindings = Array.isArray(raw.anchorBindings);
-  const anchorBindings = carriesBindings ? raw.anchorBindings as unknown[] : [];
-  if (anchorBindings.length > MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
-  const boundAddress = (evidence: ResolvedEvidence, nativeAddress: string, hash: string) => boundLogicalAddress(anchorBindings,
-    { jobId: String(raw.jobId), nativeAddress, contentHash: hash, signer: rec(evidence.raw.signature)?.signer }, resolveKey);
-  const paymentAddress = async (evidence: ResolvedEvidence): Promise<string | null> => {
-    if (carriesBindings) return boundAddress(evidence, evidence.locator, evidence.contentHash);
-    const indexes = pipeline.flatMap((phase, index) => phase.kind === evidence.raw.phase ? [index] : []);
-    const rail = rec(pipeline[indexes[0]]?.parameters)?.rail;
-    return indexes.length === 1 && typeof rail === "string" ? paymentLogicalAddress(String(raw.jobId), rail, indexes[0]) : null;
-  };
-  const recoveredPayments = new Set<number>();
-  for (const evidence of topLevelEvidence) {
-    if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
-    const logical = await paymentAddress(evidence);
-    const tuple = logical === null ? null : parsePaymentLogicalAddress(logical);
-    if (!tuple) return failSigned("payment evidence anchor binding failed");
-    const index = tuple.phaseIndex;
-    const phase = phases.find((entry) => entry.index === index);
-    const rail = rec(pipeline[index]?.parameters)?.rail;
-    if (recoveredPayments.has(index) || tuple.jobId !== raw.jobId || typeof rail !== "string" ||
-        tuple.encodedRail !== cf4Segment(rail) || phase?.kind !== evidence.raw.phase ||
-        (paired.has(evidence) && paired.get(evidence) !== index) || !phase || !outcomesAgree(phase, evidence)) {
-      return failSigned("payment evidence anchor binding failed");
-    }
-    recoveredPayments.add(index);
-    evidence.phaseIndex = index;
   }
   // DACS-2 §7.7: requirementHash binds a vet to the listing's BundleRequirement, which gates the
   // publisher's counterparty. The publisher itself is vetted against requirements the listing omits.
@@ -1128,6 +1100,26 @@ async function verifyCurrentEvidenceGraph(
     const refused = paymentPhaseAdmission(phase, raw.railRegistryVersion, rec(rec(agreement.terms)?.rail), rec(agreement.terms)?.price);
     if (refused) return failSigned(refused);
   }
+  // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
+  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4), and it is never read. PC-2 leaves a payment record whose kind
+  // the signed pipeline names once that phase's address. The pairing above already holds the record to
+  // that phase: summary entries match the pipeline, and one entry of a kind takes its one record. A
+  // repeated kind has no listed address, and deploymentVerifiability leaves that listing neutral for
+  // every outcome. A carried AnchorBinding is never needed. One the record's own signer published for
+  // this anchor must name the same address, or the session contradicts itself.
+  const signerBinding = (evidence: ResolvedEvidence, nativeAddress: string, hash: string) =>
+    boundLogicalAddress(anchorBindings, { nativeAddress, contentHash: hash, signer: String(rec(evidence.raw.signature)?.signer) });
+  for (const evidence of topLevelEvidence) {
+    if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
+    const indexes = pipeline.flatMap((phase, index) => phase.kind === evidence.raw.phase ? [index] : []);
+    const rail = rec(pipeline[indexes[0]]?.parameters)?.rail;
+    const bound = signerBinding(evidence, evidence.locator, evidence.contentHash);
+    const tuple = typeof bound === "string" ? parsePaymentLogicalAddress(bound) : null;
+    if (indexes.length !== 1 || (bound !== undefined && (!tuple || tuple.jobId !== raw.jobId || typeof rail !== "string" ||
+        tuple.encodedRail !== cf4Segment(rail) || tuple.phaseIndex !== indexes[0]))) {
+      return failSigned("payment evidence anchor binding failed");
+    }
+  }
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
@@ -1161,9 +1153,10 @@ async function verifyCurrentEvidenceGraph(
     if (accessModel === "encrypt-to-buyer") return failSigned("storage delivery is indeterminate: encrypted cleartext is unavailable");
     const anchor = rec(evidence.raw.deliverableAnchor)!;
     const deliverableHash = normalizedHash(evidence.raw.deliverableContentHash);
-    // The payload anchor is resolved through the delivery signer's binding before it is read. Without the
-    // extension it is the deliverableAnchor that same signer put in this job's evidence (DACS-4 §9.6.1 step 5).
-    if (carriesBindings && await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
+    // The payload is read at the deliverableAnchor its evidence signer put in this job's evidence (DACS-4
+    // §9.6.1 step 5). A binding that signer published for that anchor must name this job's deliverable.
+    const bound = signerBinding(evidence, String(anchor.locator), deliverableHash);
+    if (bound !== undefined && bound !== deliverableLogicalAddress(String(raw.jobId))) {
       return failSigned("storage delivery payload binding failed");
     }
     // A buyer-only payload is node-enforced private: only an authenticated restricted reader opens it.

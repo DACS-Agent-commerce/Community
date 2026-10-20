@@ -668,22 +668,22 @@ test("DACS-5 §10.4.3 and DACS-4 §9.7: settlement evidence covers each executed
     "a failure carrying a finality record": "evidence reference failed", "evidence for a non-settle phase": "evidence reference failed",
     "delivery evidence carrying a finality record": "evidence reference failed",
   });
-  // SB-1: the phase index comes from the bundle's phase entry, by pointer or as the only entry of its kind.
+  // SB-1: the phase index is the one the signed pipeline lists, and the pairing holds the record to it.
   const single = await evaluate();
   assert.deepEqual(single.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [2]);
+  // A repeated pay-dem phase lists none. Phase pointers and the signers' own bindings tell the two
+  // records apart here, but a failure on the same listing carries neither, so neither counts (§10.5.1).
   const twoPays = await evaluate({ listing: repeatedListing, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3`, [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` }, bundle: async (bundle, session) => {
     const second = await publish(session, 42, { ...session.scopes.evidence, observedAt: 102 }, "evidence", SELLER);
     bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, phase({ attestationRef: second }), phase({ index: 3, attestationRef: session.refs.evidence }), { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
     bundle.settlementEvidence = [session.refs.evidence, second];
   } });
-  assert.equal(twoPays.ok, true, twoPays.reason);
-  assert.deepEqual(twoPays.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [3, 2]);
+  assert.equal(twoPays.reason, "payment evidence anchor binding failed");
   const unpointed = await evaluate({ listing: repeatedListing, bundle: async (bundle, session) => {
     bundle.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }, phase(), phase({ index: 3 }), { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
     bundle.settlementEvidence = [session.refs.evidence, await publish(session, 42, { ...session.scopes.evidence, observedAt: 102 }, "evidence", SELLER)];
   } });
-  assert.equal(unpointed.ok, true, unpointed.reason);
-  assert.deepEqual(unpointed.settlement.filter((entry) => entry.raw.phase === "pay-dem").map((entry) => entry.phaseIndex), [2, 3], "SB-1 recovers repeated invocation indices from anchor bindings");
+  assert.equal(unpointed.reason, "payment evidence anchor binding failed");
 });
 
 test("DACS-4 AMEND-1..4: an amendment that fails its rules is flagged, kept for audit, and never an unwind", async () => {
@@ -967,7 +967,8 @@ test("further graph rules: discriminators, profiles, bounds, external verifiers 
     "a phase attestationRef to the agreement": "phase attestation reference is outside the verified graph",
     "a phase attestationRef to a rating": "phase attestation reference is outside the verified graph",
     "agreement roles swapped against the bundle": "agreement party binding failed",
-    "payouts for both pay phases": "ok",
+    // Its payouts pass CA-7 conformance; then the repeated pay-dem phase lists no index for either payment.
+    "payouts for both pay phases": "payment evidence anchor binding failed",
     "a payout for one pay phase twice": COVERAGE,
     "two payouts, the second on the delivery phase": COVERAGE, "two payouts, the second on another rail": COVERAGE,
     "a rail parameter on a delivery phase": "ok",
@@ -1050,12 +1051,16 @@ test("payment finality records require observation time and the rail's own model
   assert.equal(paymentTxRefsOk({ phase: "pay-x402", outcome: "success", paymentTxRefs: [{ ...receipt, chainId: 8453 }] }), false);
 });
 
-test("SB-1 recovers job, encoded rail and index independently from the payment anchor's binding", async () => {
-  for (const address of ["opaque", `dacs4:payment:other:demos-native%3ADEM:2`, `dacs4:payment:${JOB}:other:2`,
-    `dacs4:payment:${JOB}:demos-native%3ADEM:3`, `dacs4:payment:${JOB}:demos-native%3ADEM:02`, `dacs4:payment:${JOB}:demos-native%3ADEM:9007199254740992`]) {
+const UNBOUND = "an anchor binding is unauthenticated or binds no address of this job";
+test("SB-1: a payment anchor's own signer may bind it only to its listed job, encoded rail and index", async () => {
+  // A binding of no address of this job is refused with the whole member; one of another phase or rail
+  // contradicts the record its signer signed.
+  for (const [address, reason] of [["opaque", UNBOUND], [`dacs4:payment:other:demos-native%3ADEM:2`, UNBOUND],
+    [`dacs4:payment:${JOB}:demos-native%3ADEM:02`, UNBOUND], [`dacs4:payment:${JOB}:demos-native%3ADEM:9007199254740992`, UNBOUND],
+    [`dacs4:payment:${JOB}:other:2`, "payment evidence anchor binding failed"], [`dacs4:payment:${JOB}:demos-native%3ADEM:3`, "payment evidence anchor binding failed"]]) {
     const graph = await evaluate({ anchorAddresses: { [at(3)]: address } });
     assert.equal(graph.ok, false, address);
-    assert.equal(graph.reason, "payment evidence anchor binding failed", address);
+    assert.equal(graph.reason, reason, address);
   }
   const resolved = await evaluate({ anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2:resolved` } });
   assert.equal(resolved.ok, true, resolved.reason);
@@ -1063,8 +1068,9 @@ test("SB-1 recovers job, encoded rail and index independently from the payment a
 });
 
 // DEMOS-MAPPING §A.2 / DACS-1 §6.3.4: a StorageProgram name is an opaque write input. Every default
-// fixture anchor already uses OPAQUE_PROGRAM_NAME; only the carried binding names its logical address.
-test("an opaque-named payment or delivery anchor counts only when its signer's binding authenticates it", async () => {
+// fixture anchor already uses OPAQUE_PROGRAM_NAME. The signed pipeline gives the payment its address and
+// the evidence's own deliverableAnchor names the payload; a carried binding is a cross-check, never a source.
+test("an opaque-named payment or delivery anchor counts by its listed address, and its signer's binding must agree", async () => {
   const bound = await evaluate();
   assert.equal(bound.ok, true, bound.reason);
   assert.deepEqual(bound.settlement.map((entry) => entry.phaseIndex), [2, 3]);
@@ -1083,37 +1089,40 @@ test("an opaque-named payment or delivery anchor counts only when its signer's b
       anchorBindings: async (bindings) => (await Promise.all(bindings.map((binding) => select(binding) ? change(binding) : binding)))
         .filter((binding): binding is Obj => binding !== null),
     });
-    const refused: Record<string, Case> = {
-      "missing binding": edit(() => null),
-      "a literal dacs4 program name without a binding": { ...edit(() => null),
-        programNames: { [at(3)]: paymentLogicalAddress(JOB, "demos-native:DEM", 2), [at(61)]: deliverableLogicalAddress(JOB) } },
-      // Each tampered binding would otherwise match; only its signature check refuses it.
-      "member added after signing": edit((binding) => ({ ...binding, anchorTx: "ab".repeat(32) })),
-      "signature copied from another binding": edit(async (binding) => ({ ...binding,
-        signature: (await resign(binding, SELLER, { anchorTx: "ab".repeat(32) })).signature })),
-      "binding for another native address": edit((binding) => resign(binding, SELLER, { nativeAddress: at(99) })),
-      "binding for another content hash": edit((binding) => resign(binding, SELLER, { contentHash: "c".repeat(64) })),
-      "binding for another job": edit((binding) => resign(binding, SELLER, { jobId: "other-job" })),
-      "binding for another job's logical address": edit((binding) => resign(binding, SELLER, {
-        logicalAddress: isPayment(binding) ? paymentLogicalAddress("other-job", "demos-native:DEM", 2) : deliverableLogicalAddress("other-job") })),
-      "binding signed by the counterparty, not the evidence signer": edit((binding) => resign(binding, BUYER, {})),
-      "binding signed by an outsider": edit((binding) => resign(binding, OUTSIDER, {})),
+    const verdicts: Record<string, [Case, string]> = {
+      // Nothing the anchor's signer bound there: the listed address stands, and the name is never read.
+      "missing binding": [edit(() => null), "ok"],
+      "a literal dacs4 program name without a binding": [{ ...edit(() => null),
+        programNames: { [at(3)]: paymentLogicalAddress(JOB, "demos-native:DEM", 2), [at(61)]: deliverableLogicalAddress(JOB) } }, "ok"],
+      "binding for another native address": [edit((binding) => resign(binding, SELLER, { nativeAddress: at(99) })), "ok"],
+      "binding signed by the counterparty, not the evidence signer": [edit((binding) => resign(binding, BUYER, {})), "ok"],
+      "binding signed by an outsider": [edit((binding) => resign(binding, OUTSIDER, {})), "ok"],
+      // The member is judged whole, whatever the outcome: each entry would otherwise match this anchor.
+      "member added after signing": [edit((binding) => ({ ...binding, anchorTx: "ab".repeat(32) })), UNBOUND],
+      "signature copied from another binding": [edit(async (binding) => ({ ...binding,
+        signature: (await resign(binding, SELLER, { anchorTx: "ab".repeat(32) })).signature })), UNBOUND],
+      "binding for another job": [edit((binding) => resign(binding, SELLER, { jobId: "other-job" })), UNBOUND],
+      "binding for another job's logical address": [edit((binding) => resign(binding, SELLER, {
+        logicalAddress: isPayment(binding) ? paymentLogicalAddress("other-job", "demos-native:DEM", 2) : deliverableLogicalAddress("other-job") })), UNBOUND],
+      // The anchor's own signer bound it against the record it signed.
+      "binding for another content hash": [edit((binding) => resign(binding, SELLER, { contentHash: "c".repeat(64) })), target],
+      "binding to the other kind's address": [edit((binding) => resign(binding, SELLER, {
+        logicalAddress: isPayment(binding) ? deliverableLogicalAddress(JOB) : paymentLogicalAddress(JOB, "demos-native:DEM", 2) })), target],
     };
-    for (const [name, c] of Object.entries(refused)) {
+    for (const [name, [c, reason]] of Object.entries(verdicts)) {
       const graph = await evaluate(c);
       assert.equal(graph.signaturesVerified, true, `${target}: ${name}`);
-      assert.equal(graph.ok, false, `${target}: ${name}`);
-      assert.equal(graph.reason, target, `${target}: ${name}`);
+      assert.equal(graph.ok ? "ok" : graph.reason, reason, `${target}: ${name}`);
     }
-    // Two authenticated bindings for one anchor that disagree leave it unbound.
+    // Two authenticated bindings by the signer for one anchor that disagree contradict it.
     const equivocal = await evaluate({ anchorBindings: async (bindings) => [...bindings,
       ...await Promise.all(bindings.filter(select).map((binding) => resign(binding, SELLER, {
-        logicalAddress: isPayment(binding) ? paymentLogicalAddress(JOB, "demos-native:DEM", 3) : deliverableLogicalAddress("other-job") })))] });
+        logicalAddress: paymentLogicalAddress(JOB, "demos-native:DEM", isPayment(binding) ? 3 : 2) })))] });
     assert.equal(equivocal.reason, target);
     // An outsider's or the counterparty's extra binding is inert beside the signer's own.
     const crowded = await evaluate({ anchorBindings: async (bindings) => [...bindings,
       ...await Promise.all(bindings.filter(select).flatMap((binding) => [resign(binding, BUYER, { logicalAddress: paymentLogicalAddress(JOB, "demos-native:DEM", 3) }),
-        resign(binding, OUTSIDER, { logicalAddress: deliverableLogicalAddress("other-job") })]))] });
+        resign(binding, OUTSIDER, { logicalAddress: deliverableLogicalAddress(JOB) })]))] });
     assert.equal(crowded.ok, true, `${target}: ${crowded.reason}`);
   }
   assert.equal((await evaluate({ stored: (bundle) => { bundle.anchorBindings = {}; } })).reason, SHAPE);
@@ -1121,7 +1130,8 @@ test("an opaque-named payment or delivery anchor counts only when its signer's b
   assert.equal(flooded.reason, "evidence graph exceeds size limit");
 });
 
-test("payment bindings are unique per invocation and CF-4 encode the rail", async () => {
+test("a payment binding cannot single out a repeated phase, and it CF-4 encodes the rail", async () => {
+  // Both records are bound to phase 2 here, but bound apart or not, a repeated phase lists no index.
   const repeated = await evaluate({ listing: await listingFor("commit-agreement", "pay-dem"),
     anchorAddresses: { [at(42)]: `dacs4:payment:${JOB}:demos-native%3ADEM:2` },
     bundle: async (bundle, session) => {
@@ -1137,7 +1147,10 @@ test("payment bindings are unique per invocation and CF-4 encode the rail", asyn
   const encoded: Case = { listing: encodedListing, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem%3Anative:2` },
     scopes: (scopes) => { (scopes.agreement.terms as Obj).rail = { railId: "dem:native" }; } };
   assert.match((await evaluate(encoded)).reason!, /authenticated pinned rail definition is unavailable/);
-  assert.equal((await evaluate({ ...encoded, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem:native:2` } })).reason, "payment evidence anchor binding failed");
+  // An unencoded delimiter leaves no PC-2 address of this job; lowercase hex is another rail segment.
+  assert.equal((await evaluate({ ...encoded, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:dem:native:2` } })).reason, UNBOUND);
+  assert.equal((await evaluate({ anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native:DEM:2` } })).reason, UNBOUND);
+  assert.equal((await evaluate({ anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3aDEM:2` } })).reason, "payment evidence anchor binding failed");
   // CORE CF-4 encodes exactly `: ? & = %` in uppercase hex; other characters stay as written.
   assert.equal(cf4Segment("demos-native:DEM"), "demos-native%3ADEM");
   assert.equal(paymentLogicalAddress(JOB, "x402:base/usdc?v=1&k=%", 2), `dacs4:payment:${JOB}:x402%3Abase/usdc%3Fv%3D1%26k%3D%25:2`);

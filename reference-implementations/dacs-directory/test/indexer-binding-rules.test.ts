@@ -246,7 +246,7 @@ test("a session aborted before commitment verifies with each copy signed by its 
 });
 
 test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain bytes", async () => {
-  const { boundLogicalAddress, verifyAnchorBinding } = await import("../src/catalog/anchorBinding.js");
+  const { boundLogicalAddress, verifyAnchorBinding, verifyAnchorBindings } = await import("../src/catalog/anchorBinding.js");
   const scope: Obj = { anchorBindingVersion: "1", jobId: JOB, logicalAddress: deliverableLogicalAddress(JOB), nativeAddress: at(61),
     contentHash: contentHash(payload), signer: dids[SELLER] };
   const signedOver = (message: string) => ({ ...scope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: value(message, SELLER) } });
@@ -256,9 +256,9 @@ test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain b
   assert.notEqual(await verifyAnchorBinding(domainSeparated), null);
   assert.equal(await verifyAnchorBinding(bare), null);
   assert.equal(await verifyAnchorBinding(signedOver(`dacs-bundle-binding:v1:${contentHash(scope)}`)), null);
-  const anchor = { jobId: JOB, nativeAddress: at(61), contentHash: contentHash(payload), signer: dids[SELLER] };
-  assert.equal(await boundLogicalAddress([domainSeparated], anchor), deliverableLogicalAddress(JOB));
-  assert.equal(await boundLogicalAddress([bare], anchor), null);
+  const anchor = { nativeAddress: at(61), contentHash: contentHash(payload), signer: dids[SELLER] };
+  assert.equal(boundLogicalAddress((await verifyAnchorBindings([domainSeparated], JOB))!, anchor), deliverableLogicalAddress(JOB));
+  assert.equal(await verifyAnchorBindings([bare], JOB), null);
   // Structural limits hold for an otherwise correctly signed binding.
   const signedScope = (change: Obj) => { const body = { ...scope, ...change };
     return { ...body, signature: { algorithm: "ed25519", signer: dids[SELLER], value: value(`dacs-x-anchor-binding:v1:${contentHash(body)}`, SELLER) } }; };
@@ -281,6 +281,34 @@ test("SIG-4 AnchorBinding signatures cover the dacs-x-anchor-binding:v1 domain b
   for (const encoded of [`${bytes.toString("base64url")}==`, bytes.toString("base64"), bytes.toString("hex")]) {
     assert.equal(await verifyAnchorBinding({ ...strict, signature: { ...strict.signature as Obj, value: encoded } }), null, encoded);
   }
+});
+
+test("a carried anchorBindings member is judged whole, and an anchor sees only its own signer's bindings", async () => {
+  const { boundLogicalAddress, verifyAnchorBindings } = await import("../src/catalog/anchorBinding.js");
+  const PAID = paymentLogicalAddress(JOB, "demos-native:DEM", 2), HASH = "c".repeat(64);
+  const sellerPaid = anchorBinding(JOB, PAID, at(3), HASH, SELLER);
+  // Every entry must authenticate and bind one of this job's addresses, wherever it points.
+  assert.equal((await verifyAnchorBindings([], JOB))!.length, 0);
+  assert.equal((await verifyAnchorBindings([sellerPaid, anchorBinding(JOB, deliverableLogicalAddress(JOB), at(98), HASH, OUTSIDER)], JOB))!.length, 2);
+  const refused: Record<string, Obj> = {
+    "an entry changed after signing": { ...anchorBinding(JOB, PAID, at(98), HASH, SELLER), anchorTx: "ab".repeat(32) },
+    "a binding for another job": anchorBinding("another-job", paymentLogicalAddress("another-job", "demos-native:DEM", 2), at(98), HASH, SELLER),
+    "another job's payment address": anchorBinding(JOB, paymentLogicalAddress("another-job", "demos-native:DEM", 2), at(98), HASH, SELLER),
+    "another job's deliverable address": anchorBinding(JOB, deliverableLogicalAddress("another-job"), at(98), HASH, SELLER),
+    "an address that is neither": anchorBinding(JOB, `dacs4:listing:${JOB}`, at(98), HASH, SELLER),
+  };
+  for (const [name, entry] of Object.entries(refused)) assert.equal(await verifyAnchorBindings([sellerPaid, entry], JOB), null, name);
+  // undefined: the anchor's signer bound nothing there. null: what it bound contradicts the record it signed.
+  const lookup = async (entries: Obj[]) =>
+    boundLogicalAddress((await verifyAnchorBindings(entries, JOB))!, { nativeAddress: at(3), contentHash: HASH, signer: dids[SELLER] });
+  assert.equal(await lookup([]), undefined);
+  assert.equal(await lookup([sellerPaid]), PAID);
+  assert.equal(await lookup([sellerPaid, sellerPaid]), PAID);
+  assert.equal(await lookup([anchorBinding(JOB, PAID, at(3), HASH, BUYER), anchorBinding(JOB, PAID, at(3), HASH, OUTSIDER)]), undefined, "others' bindings are inert");
+  assert.equal(await lookup([anchorBinding(JOB, PAID, at(98), HASH, SELLER)]), undefined, "a binding of another anchor");
+  assert.equal(await lookup([anchorBinding(JOB, PAID, at(3), "d".repeat(64), SELLER)]), null, "another content hash");
+  assert.equal(await lookup([sellerPaid, anchorBinding(JOB, paymentLogicalAddress(JOB, "demos-native:DEM", 3), at(3), HASH, SELLER)]), null, "two addresses");
+  assert.equal(await lookup([sellerPaid, anchorBinding(JOB, PAID, at(3), "d".repeat(64), SELLER)]), null, "one of two for another hash");
 });
 
 test("a completed deal with no pay phase or evidence never contributes reputation (review probe P4)", async () => {
@@ -1362,10 +1390,10 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
   }
 });
 
-// No Standard or pinned-SDK producer emits this Directory's anchorBindings member. Without it, PC-2 leaves a
-// pay-dem record the one address the signed pipeline's lone pay-dem phase gives it, and the evidence signer's own
-// deliverableAnchor names the payload (DACS-4 §9.6.1 step 5), so the session is verified and counted as a
-// bound one is. SB-1 needs the binding only to tell repeated pay-dem phases apart; that listing is neutral.
+// No Standard or pinned-SDK producer emits this Directory's anchorBindings member, and none is needed: PC-2
+// leaves a pay-dem record the one address the signed pipeline's lone pay-dem phase gives it, and the evidence
+// signer's own deliverableAnchor names the payload (DACS-4 §9.6.1 step 5). A repeated pay-dem phase gives no
+// address, and no member, bound or not, can stand in for one on every outcome, so that listing is neutral.
 test("a Standard session without the AnchorBinding extension is verified and counted; a repeated pay-dem phase is neutral", async (t) => {
   const original = new Map(store);
   const withoutBindingProfile = () => {
@@ -1412,7 +1440,7 @@ test("a Standard session without the AnchorBinding extension is verified and cou
       assert.equal((await currentGraph(store.get(at(1))!)).reason, "storage delivery payload binding failed");
       assert.deepEqual(await published(), excluded);
     });
-    await t.test("a repeated pay-dem phase: counted with the binding, neutral for every outcome without it", async () => {
+    await t.test("a repeated pay-dem phase: neutral for every outcome, with or without the binding", async () => {
       reset();
       const repeated = (s: Obj) => { (s.pipeline as Obj[]).splice(3, 0, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }); };
       // PIPE-5: the second invocation settles the same price in its own transfer.
@@ -1426,19 +1454,93 @@ test("a Standard session without the AnchorBinding extension is verified and cou
           { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
         s.settlementEvidence = [refTo(at(3), evidence, "evidence"), refTo(at(70), second, "evidence"), refTo(at(60), delivery, "evidence")];
       };
+      // Its signers' own bindings tell the two payments apart, yet the completion is refused: the pipeline
+      // lists no index for either, and the failure below could never show such bindings.
       const listed = installListedCase(repeated, bothPaid);
-      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 1,
-        volume: [{ currency: "DEM", amount: "2" }], settlement: [`${SETTLED}@2`, `demos:${"cd".repeat(32)}@3`] });
-      withoutBindingProfile();
-      assert.equal((await currentGraph(listed)).ok, false);
+      assert.equal(store.get(at(5))!.anchorBindings && (store.get(at(5))!.anchorBindings as Obj[]).length, 3);
+      assert.equal((await currentGraph(listed)).reason, "payment evidence anchor binding failed");
       assert.deepEqual(await published(), excluded);
-      const failed = installListedCase(repeated, failBeforeCommit); asSellerFault();
-      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0, volume: [], settlement: [] });
       withoutBindingProfile();
-      assert.equal((await currentGraph(failed)).reason, "session verification is indeterminate for every outcome on this listing: " +
-        "a repeated pay-dem phase needs the AnchorBinding profile to recover each payment's phase index");
+      assert.equal((await currentGraph(listed)).reason, "payment evidence anchor binding failed");
+      assert.deepEqual(await published(), excluded);
+      const neutral = "session verification is indeterminate for every outcome on this listing: " +
+        "a repeated pay-dem phase leaves no listed phase index for each payment";
+      const failed = installListedCase(repeated, failBeforeCommit); asSellerFault();
+      assert.deepEqual(store.get(at(5))!.anchorBindings, []);
+      assert.equal((await currentGraph(failed)).reason, neutral);
+      assert.deepEqual(await published(), excluded);
+      withoutBindingProfile();
+      assert.equal((await currentGraph(failed)).reason, neutral);
       assert.deepEqual(await published(), excluded);
     });
+  } finally { reset(); }
+});
+
+// DACS-5 §10.5.1 for the anchorBindings member. What a bundle has to bind grows with the session: a failure
+// before payment has no anchor, so nothing it carries shows whether its completion would have been bound.
+// An empty member used to count such a failure while the same listing's paid completion, carrying the same
+// member, was refused for want of a binding. The member now never decides admission by outcome: every entry
+// is authenticated for every outcome, the listing alone gives each anchor its address, and a listing whose
+// pipeline gives none (a repeated pay-dem phase) is neutral whatever the member holds.
+test("§10.5.1: an absent, empty, valid, irrelevant or invalid anchorBindings member decides a paid completion and a pre-commit failure alike", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const failBeforeCommit = (s: Obj) => {
+    delete s.agreementRef; s.settlementEvidence = []; s.ratingRefs = [];
+    s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "fail", errorClass: "permanent" }];
+  };
+  // Both copies re-signed carrying `carried` (undefined omits the member); a failure is the seller's fault.
+  const carrying = (carried: Obj[] | undefined, failure: boolean) => {
+    for (const [locator, role, outcome] of [[at(5), "buyer", "failed-counterparty"], [at(6), "seller", "failed-perm"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle");
+      if (failure) scope.outcome = outcome;
+      if (carried === undefined) delete scope.anchorBindings; else scope.anchorBindings = carried;
+      store.set(locator, { ...scope, signatures: [BUYER, SELLER].map((signer) => signedWith(scope, "bundle", signer, "party")), anchoredByRole: role });
+    }
+  };
+  const published = async () => {
+    const seller = await indexSeller(holders());
+    return { verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate };
+  };
+  const excluded = { verified: false, bundleCount: 0, completionRate: null };
+  const repeated = (s: Obj) => { (s.pipeline as Obj[]).splice(3, 0, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }); };
+  const secondScope: Obj = { ...evidenceScope, paymentTxRefs: [{ kind: "demos", blockNumber: 1, txHash: "cd".repeat(32) }], observedAt: 102 };
+  const second = { ...secondScope, signature: signedWith(secondScope, "evidence", SELLER) };
+  const bothPaid = (s: Obj) => {
+    s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" },
+      { index: 2, kind: "pay-dem", outcome: "ok", attestationRef: refTo(at(3), evidence, "evidence") },
+      { index: 3, kind: "pay-dem", outcome: "ok", attestationRef: refTo(at(70), second, "evidence") },
+      { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
+    s.settlementEvidence = [refTo(at(3), evidence, "evidence"), refTo(at(70), second, "evidence"), refTo(at(60), delivery, "evidence")];
+  };
+  const listings: Array<[string, (s: Obj) => void, (s: Obj) => void, boolean]> = [
+    ["a lone pay-dem phase", () => {}, () => {}, true],
+    ["a repeated pay-dem phase", repeated, bothPaid, false],
+  ];
+  try {
+    for (const [shape, listed, paid, verifiable] of listings) {
+      reset(); store.set(at(70), second);
+      installListedCase(listed, paid);
+      // The bindings a conforming publisher carries for this completion, each signed by its anchor's own signer.
+      const own = anchorBindingsFor(signedScope(store.get(at(5))!, "bundle"));
+      assert.equal(own.length, verifiable ? 2 : 3, shape);
+      const members: Record<string, Obj[] | undefined> = {
+        absent: undefined,
+        empty: [],
+        valid: own,
+        // Signed for this job, but none by its anchor's own signer: the counterparty's and an outsider's.
+        irrelevant: own.map((entry, n) => anchorBinding(JOB, String(entry.logicalAddress), String(entry.nativeAddress), String(entry.contentHash), n === 0 ? BUYER : OUTSIDER)),
+        // An entry changed after signing; the anchors themselves would still resolve.
+        invalid: [...own, { ...own[0], anchorTx: "ab".repeat(32) }],
+      };
+      for (const [name, carried] of Object.entries(members)) await t.test(`${shape}, ${name} member`, async () => {
+        const counted = verifiable && name !== "invalid";
+        installListedCase(listed, paid); carrying(carried, false);
+        assert.deepEqual(await published(), counted ? { verified: true, bundleCount: 1, completionRate: 1 } : excluded, `${shape}, ${name}: completion`);
+        installListedCase(listed, failBeforeCommit); carrying(carried, true);
+        assert.deepEqual(await published(), counted ? { verified: true, bundleCount: 1, completionRate: 0 } : excluded, `${shape}, ${name}: failure`);
+      });
+    }
   } finally { reset(); }
 });
 
