@@ -348,20 +348,26 @@ test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top
   assert.equal(await verifyListing(listingWith(contentHash)), null, "contentHash strips the signature member");
 });
 
-test("admission reads the identity presentation as SDK readers do: exact presentedBy entry, SIG-6 value", async () => {
-  // CORE §B.7 SIG-6: a current ComponentSignature is canonical unpadded
-  // base64url, and readers MUST NOT accept the legacy hex spelling. The
-  // Directory must not list a Listing the SDK reader's verifier refuses.
+test("admission reads the identity presentation: exact presentedBy entry, base64url or /register hex", async () => {
+  // DACS-1 §6.3.2 and CORE §B.7 leave the per-claim signature's encoding open.
+  // The pinned SDK reader reads base64url only; main's /register wrote the
+  // wallet's 128 hex digits, so the Directory reads both, over the same bytes.
   const signatureBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey));
-  const cases: Record<string, [(message: string) => { ref: string; signature: string }, boolean]> = {
-    "canonical base64url under the exact presentedBy": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64url") }), true],
-    "raw hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex") }), false],
-    "0x-prefixed hex": [(message) => ({ ref: claim, signature: `0x${signatureBytes(message).toString("hex")}` }), false],
-    "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), false],
+  const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 99)));
+  const otherBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), otherKey));
+  const cases: Record<string, [(message: string) => { ref: string; signature: string }, boolean, boolean]> = {
+    "canonical base64url under the exact presentedBy": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64url") }), true, true],
+    "raw hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex") }), false, true],
+    "uppercase hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex").toUpperCase() }), false, true],
+    "base64url by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("base64url") }), false, false],
+    "raw hex by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("hex") }), false, false],
+    "raw hex over other bytes": [(message) => ({ ref: claim, signature: signatureBytes(`${message}0`).toString("hex") }), false, false],
+    "0x-prefixed hex": [(message) => ({ ref: claim, signature: `0x${signatureBytes(message).toString("hex")}` }), false, false],
+    "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), false, false],
     // Same CF-3 identity, other bytes: SDK readers select the entry by exact `ref`.
-    "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), false],
+    "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), false, false],
   };
-  for (const [label, [entry, accepted]] of Object.entries(cases)) {
+  for (const [label, [entry, sdkAccepted, accepted]] of Object.entries(cases)) {
     const identity: Record<string, unknown> = {
       bundleVersion: "1",
       presentedBy: claim,
@@ -380,7 +386,7 @@ test("admission reads the identity presentation as SDK readers do: exact present
       bundle: identity as never,
       signedBytes: Buffer.from(message, "utf8"),
     });
-    assert.equal(sdkAccepts, accepted, `SDK reader: ${label}`);
+    assert.equal(sdkAccepts, sdkAccepted, `SDK reader: ${label}`);
     const result = await verifyListingResult(listing);
     if (accepted) assert.equal(result.ok, true, label);
     else assert.deepEqual(result, { ok: false, code: "IDENTITY_PRESENTATION_INVALID" }, label);

@@ -77,8 +77,8 @@ test("historical import is explicit, exact and re-verifies the original signed s
   }
 });
 
-// The earlier /register publisher wrote the wallet's hex into the identity
-// presentation as well as the ListingSignature (main f13f233 build-listing).
+// /register before main 5483882 wrote the wallet's hex into the ListingSignature
+// as well as the identity presentation (c07560b build-listing and register page).
 const oldSeed = Uint8Array.from(Buffer.alloc(32, 41));
 const oldKey = privateKeyFromSeed(oldSeed);
 const oldClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(oldSeed))).toString("hex")}`;
@@ -133,23 +133,112 @@ test("a pin retains a Listing the earlier publisher wrote with wallet hex in bot
     assert.equal(await verifyStoredListing(old, `stor-${"7".repeat(40)}`), null, "native pointer is pinned");
 
     // Each variant is re-signed and re-pinned, so only the presentation spelling or key differs.
+    // The presentation is read as every current Listing's is: base64url or the wallet's hex.
+    const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 42)));
     for (const [label, variant] of [
       ["uppercase hex", oldPublisherListing((hex) => hex.toUpperCase())],
+      ["base64url", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64url"))],
+    ] as const) {
+      configure(variant.hash);
+      assert.equal((await verifyStoredListing(variant.raw, at))?.contentHash, variant.hash, `pinned presentation: ${label}`);
+    }
+    for (const [label, variant] of [
       ["0x hex", oldPublisherListing((hex) => `0x${hex}`)],
       ["truncated hex", oldPublisherListing((hex) => hex.slice(2))],
       ["padded base64", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64"))],
-      ["another key", oldPublisherListing(undefined, undefined, privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 42))))],
+      ["another key", oldPublisherListing(undefined, undefined, otherKey)],
+      ["base64url by another key",
+        oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64url"), undefined, otherKey)],
     ] as const) {
       configure(variant.hash);
       assert.equal(await verifyStoredListing(variant.raw, at), null, `pinned presentation: ${label}`);
     }
+  } finally {
+    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
+});
 
-    // The pin never reaches strict admission: a canonical ListingSignature with a
-    // hex presentation is read as SDK readers read it, pinned or not.
-    const strict = oldPublisherListing(undefined, (hex) => Buffer.from(hex, "hex").toString("base64url"));
-    configure(strict.hash);
-    assert.deepEqual(await verifyStoredListingResult(strict.raw, at), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" });
-    assert.deepEqual(await verifyListingResult(strict.raw), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" });
+// A Listing as main f13f233's /register publishes it today
+// (build-listing/route.ts:157-241, register/page.tsx:285-294): a canonical
+// base64url ListingSignature, and the wallet's hex in the identity presentation.
+function mainRegisterListing(
+  presentation: (signature: Buffer) => string = (signature) => signature.toString("hex"),
+  presentationKey = oldKey,
+  presentationMessage = (bundleHash: string) => `dacs-bundle-presentation:v1:${bundleHash}`,
+) {
+  const identityScope = { bundleVersion: "1", presentedBy: oldClaim, presentedAt: 1_760_000_000_000, claims: [{ ref: oldClaim }] };
+  const signature = Buffer.from(ed25519Sign(Buffer.from(presentationMessage(contentHash(identityScope)), "utf8"), presentationKey));
+  const scope = {
+    dacsVersion: "1", listingId: "main-register", listingVersion: 1, requiredCapabilities: ["SR-2"],
+    seller: {
+      identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: oldClaim, signature: presentation(signature) }] } },
+      displayName: "Main seller",
+    },
+    offering: { title: "Main seller", description: "published by main /register", category: "services.other", tags: [],
+      deliverable: { kind: "storage-program", accessModel: "public" } },
+    buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
+      { kind: "pay-x402", parameters: { rail: "x402:default" } }, { kind: "deliver-storage-program" }],
+    pricing: { kind: "fixed", price: { amount: "1", currency: "USDC" } },
+    acceptedRails: [{ railId: "x402:default" }], terms: {}, validity: { notBefore: 1_760_000_000_000 },
+  };
+  const hash = contentHash(scope);
+  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${hash}`, "utf8"), oldKey)).toString("base64url");
+  return { raw: { ...scope, signature: { algorithm: "ed25519", signer: oldClaim, value } } as Record<string, unknown>, hash };
+}
+
+test("a Listing main's /register publishes stays in the catalog; a bad presentation is refused in either spelling", async () => {
+  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  const configure = (hash: string) => {
+    process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [at]: { encoding: "lowercase-hex",
+      sellerPrimaryClaim: oldClaim, listingId: "main-register", listingVersion: 1, contentHash: hash } });
+  };
+  const flip = (signature: Buffer) => Buffer.from(signature.map((byte, index) => index === 0 ? byte ^ 1 : byte));
+  const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 42)));
+  try {
+    delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    const main = mainRegisterListing();
+    const original = JSON.stringify(main.raw);
+    const stored = await verifyStoredListingResult(main.raw, at);
+    assert.equal(stored.ok, true, JSON.stringify(stored));
+    assert.equal(stored.ok && stored.value.contentHash, main.hash);
+    assert.equal(stored.ok && stored.value.sellerClaim, oldClaim);
+    assert.equal(stored.ok && stored.value.profile, "dacs-v0.1");
+    assert.equal((await verifyListingResult(main.raw)).ok, true, "admission reads it without a pin");
+    assert.equal(await verifyReferencedArtifactSignature({ kind: "dacs-1-listing", raw: main.raw, locator: at }), true,
+      "deal evidence reads it through the same verifier");
+    assert.equal(JSON.stringify(main.raw), original, "stored bytes stay intact");
+    configure(main.hash);
+    assert.equal((await verifyStoredListing(main.raw, at))?.contentHash, main.hash, "an operator pin keeps it too");
+
+    // Each variant is re-signed, so only the presentation spelling, key or bytes differ.
+    for (const [label, variant] of [
+      ["base64url (SDK sellers and this release's /register)", mainRegisterListing((signature) => signature.toString("base64url"))],
+      ["uppercase hex (main stored the wallet's case)", mainRegisterListing((signature) => signature.toString("hex").toUpperCase())],
+    ] as const) {
+      delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      assert.equal((await verifyStoredListing(variant.raw, at))?.contentHash, variant.hash, label);
+      assert.equal((await verifyListingResult(variant.raw)).ok, true, label);
+    }
+    for (const [label, variant] of [
+      ["hex by another key", mainRegisterListing(undefined, otherKey)],
+      ["base64url by another key", mainRegisterListing((signature) => signature.toString("base64url"), otherKey)],
+      ["hex with one bit flipped", mainRegisterListing((signature) => flip(signature).toString("hex"))],
+      ["base64url with one bit flipped", mainRegisterListing((signature) => flip(signature).toString("base64url"))],
+      ["hex over other bytes", mainRegisterListing(undefined, undefined, (bundleHash) => `dacs-listing:v1:${bundleHash}`)],
+      ["base64url over other bytes",
+        mainRegisterListing((signature) => signature.toString("base64url"), undefined, (bundleHash) => `dacs-listing:v1:${bundleHash}`)],
+      ["0x hex", mainRegisterListing((signature) => `0x${signature.toString("hex")}`)],
+      ["padded base64", mainRegisterListing((signature) => signature.toString("base64"))],
+      ["hex with a trailing space", mainRegisterListing((signature) => `${signature.toString("hex")} `)],
+    ] as const) {
+      delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      assert.deepEqual(await verifyStoredListingResult(variant.raw, at), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" }, label);
+      configure(variant.hash);
+      assert.deepEqual(await verifyStoredListingResult(variant.raw, at), { ok: false, code: "IDENTITY_PRESENTATION_INVALID" },
+        `a pin cannot rescue it: ${label}`);
+    }
   } finally {
     if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
     else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;

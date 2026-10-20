@@ -247,15 +247,22 @@ be safely recovered and explicit republishing guidance. For example, string-valu
 are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them to a
 registered structured verification-method variant.
 
-Listings that `/register` published before this release carry the wallet's raw-hex
-Listing signature and identity presentation. CORE §B.7 SIG-6 requires canonical
-base64url for a current Listing, so unless an operator pins them (see
-`DACS_HISTORICAL_LISTING_IMPORTS` below) this release excludes them as
-`LISTING_SIGNATURE_INVALID` and they leave the catalog. Their versions stay occupied on
-chain, so republishing under the same listing ID is blocked (see the version limitation
-below). Before deploying, list the live listings whose diagnostics carry
-`LISTING_SIGNATURE_INVALID`, and either pin each authenticated one or ask its seller to
-republish under a new listing ID from a current SDK seller runtime.
+Listings that `/register` published before this release carry the wallet's raw hex
+(128 digits) as the identity presentation signature; this release writes canonical
+base64url there. DACS-1 §6.3.2 and CORE §B.7 do not fix that signature's encoding, so the
+Directory reads exactly these two spellings, verified under the presenting claim's key
+over the same bytes, and those Listings stay in the catalog with no operator action. The
+pinned SDK reader's presentation verifier reads base64url only, so an SDK buyer still
+refuses a hex presentation until the Standard settles the encoding.
+
+Earlier `/register` versions also wrote raw hex into the Listing signature. CORE §B.7
+SIG-6 requires canonical base64url for that envelope, so unless an operator pins them
+(see `DACS_HISTORICAL_LISTING_IMPORTS` below) such Listings are excluded as
+`LISTING_SIGNATURE_INVALID`. Their versions stay occupied on chain, so republishing under
+the same listing ID is blocked (see the version limitation below). Before deploying, list
+the live listings whose diagnostics carry `LISTING_SIGNATURE_INVALID`, and either pin
+each authenticated one or ask its seller to republish under a new listing ID from a
+current SDK seller runtime.
 
 Before replacing malformed live Listings, run the read-only deployment acceptance check
 against the deployed Directory and Demos RPC. The replacement manifest must map all three
@@ -547,12 +554,12 @@ upgrading; each entry declares `encoding: "lowercase-hex"`, `sellerPrimaryClaim`
 characters). This is an explicit local trust input, never a field accepted from
 registration requests, index rows or the listing itself. At most 256 entries and
 65,536 UTF-8 bytes are accepted; malformed or incomplete pins cannot import hex.
-The declared encoding applies to the Listing signature and to the identity
-presentation, which the earlier `/register` publisher also wrote as wallet hex. The
-presentation is signed scope, so the pinned `contentHash` fixes its exact spelling;
-it must still be the `presentedBy` entry and verify under the seller's key. A pin
-never applies to a Listing whose own signature is already canonical, so SDK-reader
-admission of new Listings is unchanged.
+The declared encoding applies to the Listing signature only. The identity presentation,
+which the earlier `/register` publisher also wrote as wallet hex, needs no pin: every
+current Listing's presentation is read as canonical base64url or 128 hex digits (see
+the upgrade note above), must be the `presentedBy` entry and must verify under the
+seller's key. A pin never applies to a Listing whose own signature is already
+canonical; such a Listing is admitted or refused on its own signatures.
 
 Every historical read rechecks the original signatures, current schema and pinned
 tuple/hash. The importer normalizes only the envelope in memory, retaining the

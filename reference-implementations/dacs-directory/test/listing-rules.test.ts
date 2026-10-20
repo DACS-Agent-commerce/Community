@@ -258,10 +258,12 @@ test("DACS-1 §6.3.1: the listing's IdentityBundle presentation is the publisher
     "only another claim's signature": await presented((identity) => ({ kind: "per-claim", signatures: [{ ...perClaim(identity).signatures[0], ref: dids[1] }] })),
     "a signature that is not a string": await presented(() => ({ kind: "per-claim", signatures: [{ ref: dids[0], signature: 7 }] })),
     "a signature by another key": await presented((identity) => perClaim(identity, 1)),
+    "a hex signature by another key": await presented((identity) => perClaim(identity, 1, "hex")),
   }, {
-    "a hex presentation signature": false, "a base64url presentation signature": true, "a signature entry beside another claim's": true,
+    "a hex presentation signature": true, "a base64url presentation signature": true, "a signature entry beside another claim's": true,
     "an SR-1 root presentation": false, "no presentation": false, "signatures not a list": false,
     "only another claim's signature": false, "a signature that is not a string": false, "a signature by another key": false,
+    "a hex signature by another key": false,
   });
 });
 
