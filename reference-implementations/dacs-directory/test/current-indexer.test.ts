@@ -22,7 +22,7 @@ import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { admitRevocationCandidates, loadScanState, saveScanState } from "../src/catalog/store.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
-import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
+import type { BundleBinding, DealRecord, ListingSummary, RegisteredDeal, Registration, SellerRecord } from "../src/catalog/types.js";
 
 import { type Obj, seeds, dids, locator, maps, evidenceAddresses, sign, ref, demosTxHash, vector, bindingFor,
   installAgreement, payeeBoundVector, graphAt, registeredDeal } from "./fixtures/current-evidence.js";
@@ -1018,6 +1018,14 @@ test("success payment claims require nonempty exact TxRefs matching the signed a
   });
 });
 
+/** One seller's deals through the read projection, with a single uncached listing hint. */
+const sb2Seller = (deals: DealRecord[], generatedAt: number): SellerRecord => rebuildCatalogObservations({
+  catalogVersion: "1", generatedAt, sellers: [{
+    primaryClaim: dids[1], displayName: "SB-2", cci: [], registeredAt: 1, lastIndexedAt: 1, deals,
+    listings: [{ listingId: "sb2", version: 1, offering: { category: "services.test" } } as unknown as ListingSummary],
+  } as unknown as SellerRecord],
+}).sellers[0];
+
 test("TP-1 local no-authority adaptation: an earlier or tied producer timestamp never wins", () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/sb2-collision-authority-v0.8.subset.json", import.meta.url), "utf8")) as {
     source: { commit: string; path: string };
@@ -1031,13 +1039,14 @@ test("TP-1 local no-authority adaptation: an earlier or tied producer timestamp 
   assert.equal(fixture.source.commit, "d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20");
   assert.deepEqual(fixture.vectors.map((vector) => vector.name), [
     "no-binding-collision-voids-both", "backdated-attacker-does-not-win", "equal-producer-timestamps-do-not-tie-break",
+    "single-record-no-collision-counts", "idempotent-identical-record-counts-once", "distinct-event-identifiers-both-count",
   ]);
   for (const vector of fixture.vectors) {
     const deals: DealRecord[] = vector.protocolInput.records.map((record, index) => ({
       jobId: record.jobId, rail: "pay-x402", buyerBundleRef: locator(200 + index), sellerBundleRef: locator(210 + index),
       owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true, refsVerified: true, reputationEligible: true,
       sellerOutcome: "completed", finalisedAt: 100, anchorTimestamp: 100 + record.sr2AnchorOrder, verifiedAt: 1,
-      bundleContentHash: record.contentHash, agreementPrice: { amount: "1", currency: "USDC" },
+      bundleContentHash: record.contentHash, agreementPrice: { amount: "1", currency: "USDC" }, category: "services.test",
       settlementTxIds: [{ id: record.settlementTxId, observedAt: record.observedAt, phaseIndex: record.phaseIndex }],
     }));
     for (const order of [deals, [...deals].reverse()]) {
@@ -1046,9 +1055,49 @@ test("TP-1 local no-authority adaptation: an earlier or tied producer timestamp 
         assert.ok(!counted.includes(hash), `${vector.name}: ${hash.slice(0, 4)} must not count`);
       }
       // The Directory verifies no settlement-side authority (SB-3), so every
-      // group stays indeterminate here, including the authority vectors.
-      if (vector.trustedContext.settlementAuthorities.length === 0) assert.deepEqual(counted, vector.want.countedEvidenceHashes, vector.name);
-      assert.deepEqual(counted, [], vector.name);
+      // authority vector's group stays indeterminate here.
+      assert.deepEqual(counted, vector.trustedContext.settlementAuthorities.length === 0
+        ? vector.want.countedEvidenceHashes : [], vector.name);
+      // The listing hint and the read projection share the same rule.
+      const projected = sb2Seller(order.map((deal) => ({ ...deal, settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION })), 10_000);
+      assert.equal(projected.reputation!.bundleCount, counted.length, vector.name);
+      assert.equal(projected.listings[0].reputationHint!.bundleCount, counted.length, vector.name);
+    }
+  }
+});
+
+test("SB-2 counts one session's identical records once and excludes a session presented as two bundles", () => {
+  const deal = (values: Partial<DealRecord> = {}): DealRecord => ({
+    jobId: "01KTY8ZJ00CW7KSECW3FS6PQPK", rail: "pay-dem", buyerBundleRef: locator(220), sellerBundleRef: locator(221),
+    owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+    settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION, sellerOutcome: "completed", finalisedAt: 100, verifiedAt: 1,
+    bundleContentHash: "1".repeat(64), agreementPrice: { amount: "1", currency: "DEM" }, category: "services.test",
+    settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 2 }], ...values,
+  });
+  const cases: Array<[string, DealRecord[], number]> = [
+    ["one record", [deal()], 1],
+    ["the same record twice", [deal(), deal()], 1],
+    // A Demos claim spelled as a bare key is the same signing identity.
+    ["the same record with another claim spelling", [deal(), deal({ owners: { buyer: dids[0].replace("did:demos:agent:", "0x"), seller: dids[1] } })], 1],
+    ["one copy inside and one outside the window", [deal({ finalisedAt: 900 }), deal()], 1],
+    ["the same record twice without any settlement id", [deal({ settlementTxIds: [] }), deal({ settlementTxIds: [] })], 1],
+    ["one session presented as two bundles", [deal(), deal({ bundleContentHash: "2".repeat(64), sellerOutcome: "failed-perm" })], 0],
+    ["two bundles without any settlement id", [deal({ settlementTxIds: [] }), deal({ settlementTxIds: [], bundleContentHash: "2".repeat(64) })], 0],
+    ["two records without a content hash", [deal({ bundleContentHash: undefined as unknown as string }), deal({ bundleContentHash: undefined as unknown as string })], 0],
+    ["one settlement under two phase indices of one session", [deal(), deal({ settlementTxIds: [{ id: `demos:${"ab".repeat(32)}`, observedAt: 100, phaseIndex: 3 }] })], 0],
+    ["one settlement under another job", [deal(), deal({ jobId: "01KTY8ZJ01CW7KSECW3FS6PQPK", bundleContentHash: "3".repeat(64) })], 0],
+    ["one settlement under another buyer's job with the same jobId", [deal(), deal({ owners: { buyer: dids[2], seller: dids[1] }, bundleContentHash: "3".repeat(64) })], 0],
+  ];
+  for (const [name, deals, expected] of cases) {
+    for (const order of [deals, [...deals].reverse()]) {
+      const reputation = deriveSellerReputation(order, 0, 200);
+      assert.equal(reputation.bundleCount, expected, name);
+      assert.equal(reputation.completed, expected, name);
+      assert.equal(reputation.bundleRefs!.length, expected, name);
+      assert.deepEqual(reputation.transactionCountByCurrency, expected ? [{ currency: "DEM", count: expected }] : [], name);
+      const seller = sb2Seller(order, 200);
+      assert.equal(seller.reputation!.bundleCount, expected, name);
+      assert.equal(seller.listings[0].reputationHint!.bundleCount, expected, name);
     }
   }
 });
@@ -1308,7 +1357,7 @@ test("seller labels come only from a verifiable owner signature and verified ide
   assert.equal((await indexFixture(fixture, malformed)).ownerRegistered, false);
 });
 
-test("SB-1 recovers the authenticated PC-2 tuple from SDK-valid evidence anchors", async () => {
+test("SB-1 recovers the PC-2 tuple from the storage metadata of SDK-valid evidence anchors", async () => {
   const fixture = await vector("01KTY8ZJ00CW7KSECW3FS6PQPK", 3000);
   const jobId = String(fixture.evidence.jobId);
   assert.ok(isSettlementEvidence(fixture.evidence), "positive evidence passes the pinned SDK validator");

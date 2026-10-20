@@ -1,4 +1,6 @@
-import { countableDeals, inCategory, settlementCollisions, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
+import {
+  countableDeals, inCategory, settlementCollisions, SETTLEMENT_PROJECTION_VERSION, type SettlementExclusions,
+} from "./settlementUniqueness.js";
 import { deriveSellerReputation } from "./reputation.js";
 import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
 
@@ -33,7 +35,7 @@ function withoutMetricKeys<T extends object>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !UNAVAILABLE_METRIC_KEY.test(key))) as T;
 }
 
-function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number, excludedSettlementIds: ReadonlySet<string>): ReputationHint {
+function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number, excluded: SettlementExclusions): ReputationHint {
   // A missing or malformed cached hint must still have the count/window shape
   // the SDK catalog reader requires. The count is always recomputed from the
   // retained records with the indexer's SB-2 rule, so a hint cached before a
@@ -46,7 +48,7 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
     windowEnd: generatedAt,
     computedAt: generatedAt,
   };
-  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd, excludedSettlementIds).deals
+  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd, excluded).deals
     .filter((deal) => inCategory(deal, hint.categoryScope)).length;
   return {
     categoryScope: hint.categoryScope,
@@ -70,20 +72,20 @@ export function rebuildCatalogObservations(catalog: Catalog): Catalog {
         Boolean(deal.reputationEligible),
     })),
   }));
-  const excludedSettlementIds = settlementCollisions(sellers.flatMap((seller) => seller.deals));
+  const excluded = settlementCollisions(sellers.flatMap((seller) => seller.deals));
   return {
     ...catalog,
     sellers: sellers.map((seller, index) => {
       const windowStart = isSafeUint(seller.reputation?.windowStart) ? seller.reputation.windowStart : 0;
       const windowEnd = isSafeUint(seller.reputation?.windowEnd) && seller.reputation.windowEnd >= windowStart
         ? seller.reputation.windowEnd : Math.max(windowStart, catalog.generatedAt);
-      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd, excludedSettlementIds);
+      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd, excluded);
       return {
         ...catalog.sellers[index],
         reputation,
         listings: (seller.listings ?? []).map((listing) => ({
           ...listing,
-          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt, excludedSettlementIds),
+          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt, excluded),
         })),
       };
     }),

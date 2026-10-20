@@ -197,6 +197,152 @@
       },
       "rule": "DACS-4 \u00a79.5.8 SB-2",
       "note": "Equal timestamps and hash order are irrelevant when authority binds A."
+    },
+    {
+      "name": "single-record-no-collision-counts",
+      "operation": "resolve-sb2-collision-group",
+      "trustedContext": {
+        "verifiedRailContexts": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "railId": "base-usdc-x402",
+            "railProfile": "pay-x402/eip-3009:dacs-sb3-v1"
+          }
+        ],
+        "settlementAuthorities": []
+      },
+      "protocolInput": {
+        "records": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+            "phaseIndex": 1,
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "observedAt": 2000,
+            "sr2AnchorOrder": 2
+          }
+        ],
+        "hints": {}
+      },
+      "expected": "pass",
+      "want": {
+        "countedEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "rejectedEvidenceHashes": [],
+        "indeterminateEvidenceHashes": [],
+        "reason": "no-collision",
+        "selectedBy": "no-collision",
+        "partyFaultCreatedByThisGate": false
+      },
+      "rule": "DACS-4 \u00a79.5.8 SB-2",
+      "note": "SB-2 does not require settlement-side authority until a collision appears."
+    },
+    {
+      "name": "idempotent-identical-record-counts-once",
+      "operation": "resolve-sb2-collision-group",
+      "trustedContext": {
+        "verifiedRailContexts": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "railId": "base-usdc-x402",
+            "railProfile": "pay-x402/eip-3009:dacs-sb3-v1"
+          }
+        ],
+        "settlementAuthorities": []
+      },
+      "protocolInput": {
+        "records": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+            "phaseIndex": 1,
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "observedAt": 2000,
+            "sr2AnchorOrder": 2
+          },
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+            "phaseIndex": 1,
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "observedAt": 2000,
+            "sr2AnchorOrder": 2
+          }
+        ],
+        "hints": {}
+      },
+      "expected": "pass",
+      "want": {
+        "countedEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "rejectedEvidenceHashes": [],
+        "indeterminateEvidenceHashes": [],
+        "reason": "idempotent-same-tuple",
+        "selectedBy": "no-collision",
+        "partyFaultCreatedByThisGate": false
+      },
+      "rule": "DACS-4 \u00a79.5.8 SB-2",
+      "note": "Repeated presentation of the same evidence hash is idempotent."
+    },
+    {
+      "name": "distinct-event-identifiers-both-count",
+      "operation": "resolve-sb2-collision-group",
+      "trustedContext": {
+        "verifiedRailContexts": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "railId": "base-usdc-x402",
+            "railProfile": "pay-x402/eip-3009:dacs-sb3-v1"
+          },
+          {
+            "contentHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:8",
+            "railId": "base-usdc-x402",
+            "railProfile": "pay-x402/eip-3009:dacs-sb3-v1"
+          }
+        ],
+        "settlementAuthorities": []
+      },
+      "protocolInput": {
+        "records": [
+          {
+            "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "jobId": "01KTY8ZJ00CW7KSECW3FS6PQPK",
+            "phaseIndex": 1,
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:7",
+            "observedAt": 2000,
+            "sr2AnchorOrder": 2
+          },
+          {
+            "contentHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "jobId": "01KTY8ZJ02CW7KSECW3FS6PQPK",
+            "phaseIndex": 1,
+            "settlementTxId": "evm:1:abababababababababababababababababababababababababababababababab:8",
+            "observedAt": 500,
+            "sr2AnchorOrder": 1
+          }
+        ],
+        "hints": {}
+      },
+      "expected": "pass",
+      "want": {
+        "countedEvidenceHashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "3333333333333333333333333333333333333333333333333333333333333333"
+        ],
+        "rejectedEvidenceHashes": [],
+        "indeterminateEvidenceHashes": [],
+        "reason": "no-collision",
+        "selectedBy": "no-collision",
+        "partyFaultCreatedByThisGate": false
+      },
+      "rule": "DACS-4 \u00a79.5.8 SB-2",
+      "note": "Different log indices are different canonical settlement identifiers."
     }
   ]
 }

@@ -1,4 +1,5 @@
 import type { DealRecord } from "./types.js";
+import { demosSigningIdentity } from "./bundleSignerPolicy.js";
 import { paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { isChainTxRef, isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 
@@ -99,7 +100,11 @@ const PINNED_RAIL_HANDLERS: Readonly<Record<string, string>> = {
 };
 const JOB_ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
-/** Project only SDK-valid success evidence with a matching authenticated PC-2 tuple. */
+/**
+ * Project only SDK-valid success evidence whose anchor's storage metadata
+ * carries a matching PC-2 tuple. The storage program's name and owner are not
+ * yet checked against that address and the evidence signer (docs/TP-1.md).
+ */
 export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>; logicalAddress?: unknown }>, context: {
   jobId: unknown;
   railId: string | null;
@@ -177,15 +182,38 @@ function settlementGroupKey(id: string): string {
 const isAdmissibleDeal = (deal: DealRecord): boolean =>
   deal.refsVerified && Boolean(deal.reputationEligible) && CURRENT_OUTCOMES.has(deal.sellerOutcome ?? "");
 
-/** Build the complete catalog collision set once, before any seller/window scope. */
-export function settlementCollisions(presentedDeals: DealRecord[]): ReadonlySet<string> {
-  const claimants = new Map<string, Set<string>>();
-  for (const deal of presentedDeals.filter(isAdmissibleDeal)) for (const tx of deal.settlementTxIds ?? []) {
-    const key = settlementGroupKey(tx.id);
-    const claimant = JSON.stringify([deal.owners?.buyer, deal.owners?.seller, deal.jobId, tx.phaseIndex, deal.bundleContentHash]);
-    claimants.set(key, (claimants.get(key) ?? new Set()).add(claimant));
-  }
-  return new Set([...claimants].filter(([, records]) => records.size > 1).map(([key]) => key));
+/**
+ * One commercial session. A jobId is unique only per producer, so the parties'
+ * signing identities are part of the key (as in `dedupeVerifiedDeals`).
+ */
+const sessionKey = (deal: DealRecord): string => JSON.stringify([
+  demosSigningIdentity(String(deal.owners?.buyer)), demosSigningIdentity(String(deal.owners?.seller)), deal.jobId,
+]);
+
+/** What the complete presented set removes from every count. */
+export interface SettlementExclusions {
+  /** SB-2 groups claimed under two or more distinct (session, phaseIndex) tuples. */
+  settlementIds: ReadonlySet<string>;
+  /** Sessions presented as more than one distinct bundle. */
+  sessions: ReadonlySet<string>;
+}
+
+/** Build the complete catalog exclusion set once, before any seller/window scope. */
+export function settlementCollisions(presentedDeals: DealRecord[]): SettlementExclusions {
+  const tuples = new Map<string, Set<string>>();
+  const bundles = new Map<string, Set<string>>();
+  presentedDeals.filter(isAdmissibleDeal).forEach((deal, index) => {
+    const session = sessionKey(deal);
+    // A record without a content hash is never provably identical to another.
+    bundles.set(session, (bundles.get(session) ?? new Set()).add(deal.bundleContentHash ?? `unhashed:${index}`));
+    for (const tx of deal.settlementTxIds ?? []) {
+      const key = settlementGroupKey(tx.id);
+      tuples.set(key, (tuples.get(key) ?? new Set()).add(JSON.stringify([session, tx.phaseIndex])));
+    }
+  });
+  const conflicting = (groups: Map<string, Set<string>>) =>
+    new Set([...groups].filter(([, members]) => members.size > 1).map(([key]) => key));
+  return { settlementIds: conflicting(tuples), sessions: conflicting(bundles) };
 }
 
 /**
@@ -193,33 +221,44 @@ export function settlementCollisions(presentedDeals: DealRecord[]): ReadonlySet<
  * listing hints so the two never disagree.
  *
  * DACS-4 SB-2: the complete presented set of admissible records is grouped by
- * settlement id before the window is applied. One record repeating one
- * (jobId, phaseIndex) claim is idempotent. A group claimed by two or more
- * records or tuples is indeterminate without settlement-side binding
- * authority, which this Directory does not verify, so no member counts. The
- * producer-set observedAt, arrival and jobId order never pick a winner.
+ * settlement id before the window is applied. Repeated presentation of one
+ * session's identical bundle is idempotent and counts once. A group claimed
+ * under two or more distinct (jobId, phaseIndex) tuples is indeterminate
+ * without settlement-side binding authority, which this Directory does not
+ * verify, so no member counts. A session presented as two different bundles
+ * is excluded from every count, as DACS-5 §10.4.3(d) excludes a divergent
+ * jobId. The producer-set observedAt, arrival and jobId order never pick a
+ * winner.
  */
 export function countableDeals(
   deals: DealRecord[], windowStart: number, windowEnd: number,
-  excludedSettlementIds: ReadonlySet<string> = settlementCollisions(deals),
+  excluded: SettlementExclusions = settlementCollisions(deals),
 ): {
   deals: DealRecord[];
   useAnchorTimestamps: boolean;
 } {
   const eligible = deals.filter(isAdmissibleDeal);
-  const unique = eligible.filter((deal) =>
-    !(deal.settlementTxIds ?? []).some((tx) => excludedSettlementIds.has(settlementGroupKey(tx.id))));
+  const admitted = eligible.filter((deal) => !excluded.sessions.has(sessionKey(deal)) &&
+    !(deal.settlementTxIds ?? []).some((tx) => excluded.settlementIds.has(settlementGroupKey(tx.id))));
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records
   // that cannot be evaluated on that honest basis.
   const useAnchorTimestamps = eligible.length > 0 &&
     eligible.every((deal) => typeof deal.anchorTimestamp === "number");
+  const sessions = new Set<string>();
   return {
     useAnchorTimestamps,
-    deals: unique.filter((deal) => {
+    deals: admitted.filter((deal) => {
       const timestamp = useAnchorTimestamps ? deal.anchorTimestamp : deal.finalisedAt;
       return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
+    }).filter((deal) => {
+      // The window is applied first, so which identical copy counts never
+      // depends on presentation order.
+      const session = sessionKey(deal);
+      if (sessions.has(session)) return false;
+      sessions.add(session);
+      return true;
     }),
   };
 }

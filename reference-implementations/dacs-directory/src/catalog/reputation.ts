@@ -1,5 +1,5 @@
 import type { DealRecord, SellerRecord } from "./types.js";
-import { countableDeals } from "./settlementUniqueness.js";
+import { countableDeals, type SettlementExclusions } from "./settlementUniqueness.js";
 import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetricPolicy.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
@@ -45,9 +45,9 @@ export function deriveSellerReputation(
   deals: DealRecord[],
   windowStart = 0,
   windowEnd = Date.now(),
-  excludedSettlementIds?: ReadonlySet<string>,
+  excluded?: SettlementExclusions,
 ): SellerRecord["reputation"] {
-  const { deals: scoped, useAnchorTimestamps } = countableDeals(deals, windowStart, windowEnd, excludedSettlementIds);
+  const { deals: scoped, useAnchorTimestamps } = countableDeals(deals, windowStart, windowEnd, excluded);
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,

@@ -108,9 +108,12 @@ reputation and in listing hints:
   gives `solana:{cluster}:{signature}:{instructionIndex}`. A record citing a
   reference that cannot be projected this way does not count.
 - The complete catalog set of otherwise countable records, across all sellers,
-  is grouped by that id before seller, category or window projection. One record
-  repeating one `(jobId, phaseIndex)` claim
-  counts once. A group claimed by more than one record or tuple follows SB-2
-  rule (2): this Directory verifies no settlement-side binding authority, so
-  the group is indeterminate and none of its records count, whatever their
-  `observedAt` or arrival order.
+  is grouped by that id before seller, category or window projection. A
+  session is its buyer and seller signing identities and `jobId`. Repeated
+  presentation of one session's identical bundle (same content hash) counts
+  once. A group claimed under more than one distinct `(jobId, phaseIndex)`
+  tuple, by one session or several, follows SB-2 rule (2): this Directory
+  verifies no settlement-side binding authority, so the group is indeterminate
+  and none of its records count, whatever their `observedAt` or arrival order.
+- A session presented as two or more different bundles counts nowhere, as
+  DACS-5 §10.4.3(d) excludes a divergent jobId from every metric.
