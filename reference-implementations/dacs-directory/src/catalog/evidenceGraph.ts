@@ -10,7 +10,7 @@ import { matchesVetRequirement, type VerifyPrimaryClaimControl } from "./vetClai
 import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolicy, type ResolveRecipeSnapshot } from "./recipePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
-import { nativeRailAdmission, nativeRailDefinitionAdmission } from "./railPolicy.js";
+import { nativeRailAdmission } from "./railPolicy.js";
 import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
 import {
   canonicalSigningIdentity,
@@ -287,6 +287,16 @@ function listedPrice(pricing: Record<string, unknown> | null): Record<string, un
     : pricing?.kind === "metered" ? rec(pricing.unitPrice) : pricing?.kind === "auction" ? rec(pricing.reservePrice) : null;
 }
 
+/** PA-1 and PC-5 for one payment phase under one agreement choice: the phase pays through the chosen
+ * rail, whose pinned definition the session's rail registry admits, at a price in the rail's asset.
+ * A committed session is checked with its agreed rail and price. Listing admission checks every rail
+ * the listing accepts with the price it lists, which is null when it lists none, so the agreed currency
+ * is open. A choice refused here is therefore refused for every outcome. */
+function paymentPhaseAdmission(phase: Record<string, unknown>, registryVersion: unknown, rail: Record<string, unknown> | null, price: unknown): string | null {
+  if (rec(phase.parameters)?.rail !== rail?.railId) return "payment phase rail does not match the agreement rail";
+  return nativeRailAdmission(registryVersion, rail, phase.kind, price);
+}
+
 /** Returned when every evaluated check passed but check 5 or 6 needs a committedAt that was not supplied. */
 export const COMMITTED_AT_INDETERMINATE = "committed-at-indeterminate";
 
@@ -557,15 +567,32 @@ async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphD
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
+// The ACL members as the node's validator stores them (ac8f45f validateACLStructure): address lists of
+// strings, and groups that each hold a members list and a list of known permissions. Anything else did
+// not come from that node, so it is null and the read fails closed.
+const ACL_PERMISSIONS = new Set(["read", "write", "delete"]);
 const addressList = (value: unknown): string[] | null => value === undefined ? [] :
-  Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value.map((entry: string) => entry.toLowerCase()) : null;
-/** The node's read rule for the buyer (ac8f45f checkReadPermission): a blacklisted buyer cannot read,
- * a restricted program admits it only when allowed, and owner mode only the owner. Groups are not
- * trusted to grant it access, and a malformed address list fails closed. */
-function buyerMayRead(acl: Record<string, unknown>, buyerAddress: string): boolean {
-  const allowed = addressList(acl.allowed), blacklisted = addressList(acl.blacklisted);
-  if (!allowed || !blacklisted || blacklisted.includes(buyerAddress)) return false;
-  return acl.mode === "public" || (acl.mode === "restricted" && allowed.includes(buyerAddress));
+  Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
+const aclGroups = (value: unknown): Array<{ members: unknown[]; permissions: unknown[] }> | null => {
+  if (value === undefined) return [];
+  if (!value || typeof value !== "object") return null;
+  const groups = Object.values(value).map(rec);
+  return groups.every((group) => group && Array.isArray(group.members) && Array.isArray(group.permissions) &&
+    group.permissions.every((permission) => ACL_PERMISSIONS.has(permission))) ? groups as Array<{ members: unknown[]; permissions: unknown[] }> : null;
+};
+/** The pinned node's read decision for the buyer's canonical address (ac8f45f checkReadPermission). The node
+ * compares address strings exactly, lets a restricted program's owner past its blacklist, and lets a group
+ * with read permission grant access. A stricter rule here would drop deliveries the buyer can read, while
+ * failures on the same listing still count. */
+function buyerMayRead(acl: Record<string, unknown>, owner: unknown, buyerAddress: string): boolean {
+  const allowed = addressList(acl.allowed), blacklisted = addressList(acl.blacklisted), groups = aclGroups(acl.groups);
+  if (!allowed || !blacklisted || !groups) return false;
+  if (acl.mode === "public") return !blacklisted.includes(buyerAddress);
+  if (acl.mode === "owner") return owner === buyerAddress;
+  if (acl.mode !== "restricted") return false;
+  if (owner === buyerAddress) return true;
+  if (blacklisted.includes(buyerAddress)) return false;
+  return allowed.includes(buyerAddress) || groups.some((group) => group.members.includes(buyerAddress) && group.permissions.includes("read"));
 }
 
 /**
@@ -575,7 +602,8 @@ function buyerMayRead(acl: Record<string, unknown>, buyerAddress: string): boole
  * pre-commit failures and aborts included; a check that ran only once a session committed, paid
  * or delivered would drop unverifiable completions while still counting failures. The payment and
  * delivery checks below therefore use the same helpers as the success path, for every choice the
- * listing leaves open to an agreement (each accepted rail) or to its delivery (the declared size).
+ * listing leaves open to an agreement (each accepted rail, in the listed price's currency) or to its
+ * delivery (the declared size).
  * Returns null when every phase the listing's pipeline can reach is verifiable here.
  */
 export async function deploymentVerifiability(
@@ -591,27 +619,28 @@ export async function deploymentVerifiability(
   const unsupportedDelivery = kinds.find((kind) => DELIVERY_PHASES.has(kind) && kind !== "deliver-storage-program");
   if (unsupportedDelivery) return `delivery ${unsupportedDelivery} has no authoritative attestation or entitlement adapter`;
   if (kinds.includes("pay-dem")) {
-    if (pipeline.some((phase) => phase.kind === "pay-dem" && rec(phase.parameters)?.rail !== "demos-native:DEM")) {
-      return "a pay-dem phase names a rail other than demos-native:DEM";
-    }
     if (!deps.readSettlementNode) return "the native payment node reader is unavailable";
-    // An agreement may select any rail the listing accepts (DACS-3 §8.5.2 check 3), and a pre-commit
-    // failure never says which, so every accepted DEM rail needs its pinned definition here.
-    for (const rail of arr(listing.acceptedRails).filter((accepted) => accepted.railId === "demos-native:DEM")) {
-      const unavailable = nativeRailDefinitionAdmission(bundle.railRegistryVersion, rail);
-      if (unavailable) return `accepted rail ${canonicalize(rail)}: ${unavailable}`;
+    // An agreement may choose any rail the listing accepts (DACS-3 §8.5.2 check 3), in the currency of
+    // the price the listing names (check 1). A pre-commit failure never says which rail or currency,
+    // so every such choice must pass the same admission a committed session does (paymentPhaseAdmission),
+    // non-DEM rails and an unlisted currency included.
+    const accepted = arr(listing.acceptedRails);
+    if (accepted.length === 0 || accepted.length !== (listing.acceptedRails as unknown[]).length) {
+      return "the listing's accepted rails are not a list of rail references";
     }
-    // Check 1 fixes the agreed currency to a listed price; DEM settles only DEM (PC-5).
     const listed = listedPrice(rec(listing.pricing));
-    if (listed && listed.currency !== "DEM") return "the listed price is not in the DEM rail's asset";
+    for (const rail of accepted) for (const phase of pipeline.filter((entry) => entry.kind === "pay-dem")) {
+      const refused = paymentPhaseAdmission(phase, bundle.railRegistryVersion, rail, listed);
+      if (refused) return `accepted rail ${canonicalize(rail)} at the listed price: ${refused}`;
+    }
   }
   if (kinds.includes("deliver-storage-program")) {
     const deliverable = rec(rec(listing.offering)?.deliverable);
     if (deliverable?.kind !== "storage-program") return "storage delivery has no storage-program deliverable";
     const accessModel = deliverable.accessModel ?? "public";
     if (accessModel === "encrypt-to-buyer") return "storage delivery is encrypted to the buyer";
-    // DACS-4 §9.6.1: a payload above the 128 KB storage cap MUST be an extended pointer, and this
-    // deployment cannot read external cleartext.
+    // DACS-4 §9.6.1: a payload above the Standard's 128 KB storage limit MUST be an extended pointer,
+    // and this deployment cannot read external cleartext.
     if (Number(deliverable.expectedSizeBytes) > MAX_DACS_ARTIFACT_BYTES) return "the declared payload exceeds the inline storage cap";
     if (accessModel === "buyer-only" && !deps.readRestrictedAnchorRecord) return "buyer-only payloads need an authenticated restricted reader";
     if (accessModel !== "buyer-only" && !deps.readAnchorRecord) return "the storage payload reader is unavailable";
@@ -1071,14 +1100,12 @@ async function verifyCurrentEvidenceGraph(
       artifacts, agreement, listing: listed.raw };
   }
   // The agreed rail and price are fixed at commitment, so every committed session is held to them,
-  // whatever its outcome: each payment phase uses the agreed rail, admitted under the session's rail
-  // registry (PA-1, PC-5). Checking them only once a payment succeeded would drop completions on an
-  // agreement that failed sessions still count on.
-  const agreedRail = rec(rec(agreement?.terms)?.rail);
+  // whatever its outcome. Checking them only once a payment succeeded would drop completions on an
+  // agreement that failed sessions still count on. Listing admission runs this same check for every
+  // choice an agreement could make.
   if (agreement) for (const phase of pipeline.filter((entry) => PAYMENT_PHASES.has(String(entry.kind)))) {
-    if (rec(phase.parameters)?.rail !== agreedRail?.railId) return failSigned("payment phase rail does not match the agreement rail");
-    const railCheck = nativeRailAdmission(raw.railRegistryVersion, agreedRail, phase.kind, rec(agreement.terms)?.price);
-    if (railCheck) return failSigned(railCheck);
+    const refused = paymentPhaseAdmission(phase, raw.railRegistryVersion, rec(rec(agreement.terms)?.rail), rec(agreement.terms)?.price);
+    if (refused) return failSigned(refused);
   }
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
@@ -1133,12 +1160,12 @@ async function verifyCurrentEvidenceGraph(
     const claim = typeof buyer?.primaryClaim === "string" ? canonicalDemosAgentClaim(buyer.primaryClaim) : null;
     const buyerAddress = claim ? `0x${claim.slice(-64)}` : null;
     // A payload the agreement-bound buyer cannot read was not delivered to it, whatever the declared mode.
-    if (!buyerAddress || !buyerMayRead(acl, buyerAddress)) {
+    if (!buyerAddress || !buyerMayRead(acl, delivered.owner, buyerAddress)) {
       return failSigned("storage delivery is indeterminate: the buyer cannot read the delivered payload");
     }
-    // DV-3: the buyer is the only reader the ACL grants; a group could grant others.
+    // DV-3: the ACL's one allowed entry is the agreement-bound buyer, and no group grants another reader.
     if (accessModel === "buyer-only" && (acl.mode !== "restricted" || !Array.isArray(acl.allowed) || acl.allowed.length !== 1 ||
-        !(acl.groups === undefined || (rec(acl.groups) && Object.keys(acl.groups as object).length === 0)))) {
+        acl.allowed[0] !== buyerAddress || !(acl.groups === undefined || (rec(acl.groups) && Object.keys(acl.groups as object).length === 0)))) {
       return failSigned("storage delivery is indeterminate: buyer-only access binding failed");
     }
   }

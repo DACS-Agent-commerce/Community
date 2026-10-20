@@ -287,10 +287,15 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
    the denominator, so an unverifiable listing yields no rate instead of a 0% one. That
-   covers every choice the listing leaves to a session: each DEM rail it accepts needs an
-   installed live definition, its listed price must be in DEM, and neither a declared payload
-   above the 128 KB storage cap (an extended pointer) nor a buyer-only payload is readable here. The
-   agreed rail and price are checked for every session that has an agreement. Copies are
+   covers every choice the listing leaves to a session. An agreement may pick any rail the
+   listing accepts, in the currency of the price it lists. On a `pay-dem` listing, each
+   accepted rail at the listed price runs the same admission a committed session's agreed
+   rail and price run: the pay-dem phase pays it, and it has an installed live DEM definition
+   and a DEM price. So a listing that also accepts another rail (such as `x402:default`), or
+   an auction without a reserve (any currency), is excluded. Neither a declared payload above
+   the Standard's 128 KB storage limit (an extended pointer) nor a buyer-only payload is
+   readable here. The agreed rail and price are checked for every session that has an
+   agreement. Copies are
    reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
@@ -361,13 +366,18 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   The hash covers the complete canonical payload, including any `signature` or `signatures`
   fields. The payload must match that hash, and the delivery signer's AnchorBinding must bind
   its anchor to the job's `dacs4:deliverable` address. The buyer must be able to read the
-  payload under the node's read rule: a blacklisted buyer, an owner-mode program or a
-  restricted program that does not allow the buyer is no delivery. `buyer-only` requires a
-  restricted ACL naming only the agreement-bound buyer, read through an authenticated
+  payload under the pinned node's read rule (ac8f45f `checkReadPermission`), applied to the
+  buyer's canonical `0x<64 lowercase hex>` address. Like the node, the Directory compares
+  address strings exactly, so an entry in another case is another address. A public program
+  admits everyone not blacklisted; an owner-mode program admits only its owner. A restricted
+  program admits its owner (even when blacklisted), then anyone not blacklisted who is in
+  `allowed` or in a group with `read` permission. An ACL the node's validator would never
+  store fails closed. `buyer-only` requires a
+  restricted ACL whose only `allowed` entry is the agreement-bound buyer and no reader group, read through an authenticated
   restricted reader. The pinned node denies anonymous reads of restricted programs and the
   catalog installs no such reader, so every session on a buyer-only listing is indeterminate,
   whatever its outcome; the buyer-only acceptance tests inject a fixture reader. Encrypted
-  payloads and declared payloads above the 128 KB storage cap exclude every session on the
+  payloads and declared payloads above the Standard's 128 KB storage limit exclude every session on the
   listing in the same way. A seller's own per-session choices stay per session: an unreadable
   payload, an external pointer whose size the listing did not declare, or a public listing
   delivered through a restricted ACL leaves only that session indeterminate. None contributes
@@ -466,7 +476,10 @@ names as rail IDs remain readable as evidence, but are excluded from public disc
 a new signed listing version to make those offers executable.
 
 Native DEM success requires public transaction and block reads confirming inclusion, the payer
-and payee, and the exact agreed amount (1 DEM = 10^9 OS). The stored RPC amount is OS,
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). The node credits and debits the
+exact address string it stores (ac8f45f `handleNativeOperations`), so the transaction's
+sender, recipient and send argument must be the canonical `0x<64 lowercase hex>` payer and
+payee. Another spelling of the same key is a different account. The stored RPC amount is OS,
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
 string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
 All other current payment rails and paid SDK legacy sessions remain indeterminate until their

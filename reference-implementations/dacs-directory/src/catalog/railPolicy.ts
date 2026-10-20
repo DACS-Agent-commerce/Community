@@ -16,9 +16,10 @@ function railDefinitions(registryVersion: unknown): Array<Obj | null> {
 const MISMATCH = "payment verification is indeterminate: pinned rail handler, asset or network does not match";
 
 /** PA-1 for one RailRef: the operator's authenticated, live native DEM definition at its pinned
- * railVersion, else the latest (§9.4.2 step 4), with the same parameters. A deployment capability,
- * the same for every session that may select the rail whatever its outcome: listing admission runs
- * it for every DEM rail the listing accepts, payment admission for the agreed one. */
+ * railVersion, else the latest (§9.4.2 step 4), with the same parameters. This is a deployment
+ * capability, the same for every session that may choose the rail, whatever its outcome. Through
+ * nativeRailAdmission, listing admission runs it for every rail the listing accepts, and payment
+ * admission runs it for the agreed one. */
 export function nativeRailDefinitionAdmission(registryVersion: unknown, rail: Obj | null): string | null {
   const definitions = railDefinitions(registryVersion);
   const matching = definitions.filter((item) => item?.railId === rail?.railId && Number.isSafeInteger(item?.railVersion) && Number(item?.railVersion) >= 1);

@@ -183,7 +183,7 @@ test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and 
   const lowerHash = deal({ jobId: "z-job", settlementTxIds: tx(10, "1".repeat(64)) });
   assert.deepEqual(kept([higherHash, lowerHash]), ["z-job"]);
   assert.deepEqual(kept([lowerHash, higherHash]), ["z-job"]);
-  const rating =(value: number, ratedAt: number, contentHash: string) => ({ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt, contentHash });
+  const rating = (value: number, ratedAt: number, contentHash: string) => ({ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt, contentHash });
   const average = (ratings: NonNullable<DealRecord["ratings"]>) => deriveSellerReputation([deal({ ratings })], 0, 100).averageSellerRating;
   assert.equal(average([rating(2, 5, "9".repeat(64)), rating(4, 6, "1".repeat(64))]), 4, "the newer rating wins over a higher hash");
   assert.equal(average([rating(4, 6, "1".repeat(64)), rating(2, 5, "9".repeat(64))]), 4);

@@ -20,7 +20,10 @@ export function nativeNodeFixture(artifacts: () => Iterable<Obj>): SettlementNod
     const party = (role: string) => `0x${agreement.parties.find((p: Obj) => p.role === role).primaryClaim.slice(-64)}`;
     const [whole, fraction = ""] = agreement.terms.price.amount.split(".");
     const amount = (BigInt(whole) * 1000000000n + BigInt(fraction.padEnd(9, "0"))).toString();
-    const to = agreement.payeeBoundAgreementVersion === "1" ? agreement.terms.payoutBindings[0].payeeAddress : party("seller");
+    // The node stores the account string the send credits: 0x and lowercase hex of the payee's key,
+    // as in the captured transactions, never a claim reference.
+    const account = (address: string) => { const hex = /([0-9a-fA-F]{64})$/.exec(address)?.[1]; return hex ? `0x${hex.toLowerCase()}` : address; };
+    const to = agreement.payeeBoundAgreementVersion === "1" ? account(agreement.terms.payoutBindings[0].payeeAddress) : party("seller");
     return { hash: data.hash, status: "confirmed", blockNumber: ref.blockNumber,
       content: { type: "native", from: party("buyer"), to, amount: BigInt(amount) <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amount) : amount, data: ["native", { nativeOperation: "send", args: [to, amount] }] } };
   };

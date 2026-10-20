@@ -2138,7 +2138,8 @@ test("agreement patterns must match RFQ and sealed-envelope pipelines in both ag
           : { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price", fixedPriceFallback: true } };
         listingScope.pricing = pattern === "rfq"
           ? { kind: "negotiable", bandCenter: { amount: "1.25", currency: "DEM" }, minPct: 20, maxPct: 20 }
-          : { kind: "auction", selectionRule: "lowest-price" };
+          // The DEM reserve fixes the agreed currency; without one no pay-dem session is admitted (§10.5.1).
+          : { kind: "auction", selectionRule: "lowest-price", reservePrice: { amount: "10", currency: "DEM" } };
         fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
         maps.set(fixture.locators.listing, fixture.listing);
         assert.ok(await verifyListing(fixture.listing));

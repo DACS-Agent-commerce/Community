@@ -23,6 +23,7 @@ import {
   type EvidenceGraphDeps,
 } from "../src/catalog/evidenceGraph.js";
 import { deliverableLogicalAddress, paymentLogicalAddress } from "../src/catalog/anchorBinding.js";
+import { MAX_DACS_ARTIFACT_BYTES } from "../src/catalog/artifactLimits.js";
 
 // Each DACS rule the current-profile evidence graph enforces, one case per rule. Every mutated
 // artifact is signed again, so only the rule under test can reject it.
@@ -1314,8 +1315,9 @@ test("procurement vet requirements bind the seller counterparty rather than the 
   const requirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true, recipeVersion: 1 }] };
   const pipeline = [{ kind: "vet-credentials" }, { kind: "negotiate-sealed-envelope-procurement", parameters: { commitDeadline: 100, revealWindow: 60, selectionRule: "lowest-price", auctionMode: "procurement" } }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-storage-program" }];
   const scope = { ...signedScopeOf(listing), seller: { displayName: "procurement buyer", identity: { ...identity, presentation: { kind: "per-claim", signatures: [{ ref: dids[BUYER], signature: presentation }] } } },
-    buyerRequirement: requirement, pipeline, pricing: { kind: "auction", selectionRule: "lowest-price" } };
-  const procurement = { ...scope, signature: await envelope(scope, "listing", BUYER) };
+    // The DEM reserve fixes the agreed currency; without one no pay-dem session is admitted (§10.5.1).
+    buyerRequirement: requirement, pipeline, pricing: { kind: "auction", selectionRule: "lowest-price", reservePrice: { amount: "10", currency: "DEM" } } };
+  const procurement ={ ...scope, signature: await envelope(scope, "listing", BUYER) };
   for (const resultParty of [SELLER, BUYER]) {
     const graph = await evaluate({ resolveSessionChallenge: async (jobId, party) => ({ jobId, party: String(party.primaryClaim), nonce: `challenge-${party.primaryClaim}`, issuedAt: 0, expiresAt: 120, consumedAt: 1, consumedByBundleHash: String(party.bundleHash), consumedByPresentationHash: sha256Hex(canonicalize(party.identityBundle)) }), listing: procurement, anchorAddresses: { [at(3)]: `dacs4:payment:${JOB}:demos-native%3ADEM:3` },
       // Fixture control verifier for the seller counterparty's exact primary and its result.
@@ -1375,9 +1377,16 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
   // These keys are already in canonical order; hash every byte independently of the SDK artifact helper.
   const signedPayloadHash = createHash("sha256").update(JSON.stringify(signedPayload)).digest("hex");
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
-  type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; unreadable?: boolean;
-    payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean; noRestrictedReader?: boolean };
+  type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; owner?: string; unreadable?: boolean;
+    payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean; noRestrictedReader?: boolean;
+    /** Which reader can open the payload, as the pinned node decides: anonymous reads are denied a restricted program. */
+    openedBy?: "anonymous" | "restricted" };
   const outsiderAddress = `0x${dids[OUTSIDER].slice(-64)}`;
+  const sellerAddress = `0x${dids[SELLER].slice(-64)}`;
+  // The same key in uppercase hex: another string to the node, which never case-folds an ACL entry.
+  const buyerUpper = `0x${buyerAddress.slice(2).toUpperCase()}`;
+  assert.notEqual(buyerUpper, buyerAddress);
+  const readGroup = (members: unknown, permissions: unknown = ["read"]) => ({ buyers: { members, permissions } });
   const cases: Record<string, DeliveryCase> = {
     "public cleartext": { expected: true },
     "buyer role is independent of agreement party order": { sellerFirst: true, accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, expected: true },
@@ -1412,14 +1421,47 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "buyer-only with a group granting another reader": { accessModel: "buyer-only", indeterminate: true,
       acl: { mode: "restricted", allowed: [buyerAddress], groups: { team: { members: [outsiderAddress], permissions: ["read"] } } } },
     "buyer-only with an empty group map": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress], groups: {} }, expected: true },
-    // The node's read rule for the buyer (ac8f45f checkReadPermission), whatever the declared mode.
+    // The node's read rule for the buyer (ac8f45f checkReadPermission), whatever the declared mode:
+    // exact address strings, the owner first in restricted mode, and groups granting read.
     "a blacklisted buyer cannot read a public payload": { acl: { mode: "public", blacklisted: [buyerAddress] }, indeterminate: true },
-    "a blacklist entry matches the buyer in any case": { acl: { mode: "public", blacklisted: [buyerAddress.toUpperCase()] }, indeterminate: true },
+    "an uppercase blacklist spelling does not stop the buyer": { acl: { mode: "public", blacklisted: [buyerUpper] }, expected: true },
+    "an uppercase allowed spelling does not admit the buyer": { acl: { mode: "restricted", allowed: [buyerUpper] }, indeterminate: true },
+    "buyer-only with an uppercase allowed spelling": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerUpper] }, indeterminate: true },
+    // The node's ACL validator never stores these, so a record carrying one fails closed.
     "a malformed blacklist fails closed": { acl: { mode: "public", blacklisted: buyerAddress }, indeterminate: true },
+    "a malformed allowed list fails closed": { acl: { mode: "restricted", allowed: buyerAddress }, indeterminate: true },
+    "a non-string address entry fails closed": { acl: { mode: "public", blacklisted: [7] }, indeterminate: true },
     "a blacklist naming someone else leaves the buyer reading": { acl: { mode: "public", blacklisted: [outsiderAddress] }, expected: true },
     "a blacklisted buyer cannot read a restricted payload": { acl: { mode: "restricted", allowed: [buyerAddress], blacklisted: [buyerAddress] }, indeterminate: true },
+    "the restricted program's owner reads even when blacklisted": { owner: buyerAddress, acl: { mode: "restricted", blacklisted: [buyerAddress] }, expected: true },
     "owner mode admits only the owner": { acl: { mode: "owner" }, indeterminate: true },
+    "owner mode refuses a buyer that does not own the program": { owner: sellerAddress, acl: { mode: "owner" }, indeterminate: true },
+    "owner mode admits the buyer that owns the program": { owner: buyerAddress, acl: { mode: "owner" }, expected: true },
+    "owner mode compares the owner exactly": { owner: buyerUpper, acl: { mode: "owner" }, indeterminate: true },
+    "a group with read permission admits the buyer": { acl: { mode: "restricted", groups: readGroup([buyerAddress]) }, expected: true },
+    "a group without read permission does not admit the buyer": { acl: { mode: "restricted", groups: readGroup([buyerAddress], ["write"]) }, indeterminate: true },
+    "a group member in uppercase is another address": { acl: { mode: "restricted", groups: readGroup([buyerUpper]) }, indeterminate: true },
+    "a group never grants a public payload's blacklisted buyer": { acl: { mode: "public", blacklisted: [buyerAddress], groups: readGroup([buyerAddress]) }, indeterminate: true },
+    "a group without a members list fails closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: readGroup(buyerAddress) }, indeterminate: true },
+    "a group with an unknown permission fails closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: readGroup([outsiderAddress], ["read", "admin"]) }, indeterminate: true },
+    "a group that is not an object fails closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: { buyers: "read" } }, indeterminate: true },
+    "a groups member that is not an object fails closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: "buyers" }, indeterminate: true },
+    "null groups fail closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: null }, indeterminate: true },
+    "a group without a permissions list fails closed": { acl: { mode: "restricted", allowed: [buyerAddress], groups: { buyers: { members: [outsiderAddress] } } }, indeterminate: true },
+    "one malformed group fails closed beside a valid one": { acl: { mode: "restricted", allowed: [buyerAddress],
+      groups: { ...readGroup([outsiderAddress]), broken: { members: outsiderAddress, permissions: ["read"] } } }, indeterminate: true },
+    "write and delete groups are valid and leave the allowed buyer reading": { acl: { mode: "restricted", allowed: [buyerAddress],
+      groups: { editors: { members: [outsiderAddress], permissions: ["write", "delete"] } } }, expected: true },
     "restricted delivery of a public listing must allow the buyer": { acl: { mode: "restricted", allowed: [outsiderAddress] }, indeterminate: true },
+    // DV-3: under buyer-only the allowed entry itself is the buyer; owning the program is not enough.
+    "buyer-only owned by the buyer still needs the buyer in allowed": { accessModel: "buyer-only", owner: buyerAddress, acl: { mode: "restricted", allowed: [outsiderAddress] }, indeterminate: true },
+    "buyer-only with a group granting the buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress], groups: readGroup([buyerAddress]) }, indeterminate: true },
+    // Each access model reads through its own reader: buyer-only only through the authenticated one.
+    "buyer-only reads through the authenticated restricted reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, openedBy: "restricted", expected: true },
+    "buyer-only never reads through the anonymous reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, openedBy: "anonymous", indeterminate: true },
+    "a public payload reads through the anonymous reader": { openedBy: "anonymous", expected: true },
+    "a public payload never reads through the restricted reader": { openedBy: "restricted", indeterminate: true },
+    "a list mixing strings and non-strings fails closed": { acl: { mode: "public", blacklisted: [outsiderAddress, 7] }, indeterminate: true },
     "sealed payload cannot establish its cleartext hash": { accessModel: "encrypt-to-buyer", payload: { ciphertext: "sealed", recipient: buyerAddress }, indeterminate: true },
     "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true },
   };
@@ -1428,16 +1470,17 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     const scope = { ...signedScopeOf(listing), offering: { ...listing.offering as Obj, deliverable }, pipeline: [...(listing.pipeline as Obj[]).slice(0, -1), { kind: "deliver-storage-program" }] };
     const listed = { ...scope, signature: await envelope(scope, "listing", SELLER) };
     let stored: Map<string, Obj>;
-    const reader: EvidenceGraphDeps["readAnchorRecord"] = async (locator) => {
-      const data = stored.get(locator);
-      return data ? { data, programName: OPAQUE_PROGRAM_NAME, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
+    const readerFor = (kind: "anonymous" | "restricted"): EvidenceGraphDeps["readAnchorRecord"] => async (locator) => {
+      const data = c.openedBy && c.openedBy !== kind ? undefined : stored.get(locator);
+      return data ? { data, programName: OPAQUE_PROGRAM_NAME, owner: c.owner, acl: c.acl === undefined ? { mode: "public" } : c.acl } : null;
     };
+    const reader = readerFor("anonymous"), restrictedReader = readerFor("restricted");
     const graph = await evaluate({ defaultDelivery: false, listing: listed, anchorAddresses: c.logicalAddress ? { [at(51)]: c.logicalAddress } : undefined, scopes: (scopes) => {
       (scopes.agreement.terms as Obj).deliverable = { deliverableType: deliverable.kind, hash: contentHash(deliverable) };
       if (c.sellerFirst) (scopes.agreement.parties as Obj[]).reverse();
       scopes.bundle.phaseSummary = [...(scopes.bundle.phaseSummary as Obj[]).filter((phase) => phase.kind !== "deliver-storage-program"), { index: 3, kind: "deliver-storage-program", outcome: "ok" }];
     }, artifacts: (session) => { stored = session.store; if (!c.unreadable) stored.set(at(51), c.payload ?? payload); },
-    readAnchorRecord: reader, readRestrictedAnchorRecord: c.noRestrictedReader ? undefined : reader, bundle: async (bundle, session) => {
+    readAnchorRecord: reader, readRestrictedAnchorRecord: c.noRestrictedReader ? undefined : restrictedReader, bundle: async (bundle, session) => {
       const evidence: Obj = { evidenceVersion: "1", jobId: JOB, phase: "deliver-storage-program", outcome: "success", observedAt: 101,
         deliverableContentHash: contentHash(payload), deliverableAnchor: { kind: "storage-program", locator: at(51) }, ...c.evidence };
       for (const key of Object.keys(evidence)) if (evidence[key] === undefined) delete evidence[key];
@@ -1532,4 +1575,68 @@ test("§10.5.1: a vet listing needs the session's recipe registry snapshot for e
     "the session's recipe registry snapshot is unavailable");
   // Without a configured resolver the operator's DACS_RECIPE_SNAPSHOTS decides, and none is installed here.
   assert.equal(await deploymentVerifiability(vetListing, session, deps), "the session's recipe registry snapshot is unavailable");
+});
+
+test("§10.5.1: a pay-dem listing is admitted only when every rail and currency an agreement could choose settles", async () => {
+  // DACS-3 §8.5.2 checks 1 and 3 leave an agreement any accepted rail, in the listed price's currency.
+  // A pre-commit failure never says which, so each choice runs the committed session's own admission.
+  const dem = { amount: "2", currency: "DEM" }, usd = { amount: "2", currency: "USD" };
+  const rfq = (parameters: unknown) => (s: Obj) => { (s.pipeline as Obj[])[0] = { kind: "negotiate-rfq", ...(parameters === undefined ? {} : { parameters }) }; };
+  const listing = (change: (s: Obj) => void = () => {}) => {
+    const s: Obj = { pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } },
+      { kind: "deliver-storage-program" }], offering: { deliverable: { kind: "storage-program", accessModel: "public" } },
+      pricing: { kind: "fixed", price: dem }, acceptedRails: [{ railId: "demos-native:DEM" }] };
+    change(s); return s;
+  };
+  const deps = { readSettlementNode: async () => null, readAnchorRecord: async () => null };
+  const session = { railRegistryVersion: 1, anchorBindings: [] };
+  const gate = (change?: (s: Obj) => void, using: Parameters<typeof deploymentVerifiability>[2] = deps) => deploymentVerifiability(listing(change), session, using);
+  const admitted: Record<string, (s: Obj) => void> = {
+    "a fixed DEM price": () => {},
+    "a negotiable DEM band under RFQ": (s) => { s.pricing = { kind: "negotiable", bandCenter: dem, minPct: 10, maxPct: 10 }; rfq({ maxTurns: 6, timeoutSec: 60 })(s); },
+    "a negotiable band whose RFQ step has no parameters": (s) => { s.pricing = { kind: "negotiable", bandCenter: dem, minPct: 10, maxPct: 10 }; rfq(undefined)(s); },
+    "a negotiable band with no negotiation step": (s) => { s.pricing = { kind: "negotiable", bandCenter: dem, minPct: 10, maxPct: 10 }; (s.pipeline as Obj[]).shift(); },
+    "a metered DEM unit price": (s) => { s.pricing = { kind: "metered", unitPrice: dem, unit: "call" }; },
+    "an auction with a DEM reserve": (s) => { s.pricing = { kind: "auction", selectionRule: "highest-price", reservePrice: dem }; },
+    "the installed DEM rail version, accepted twice": (s) => { s.acceptedRails = [{ railId: "demos-native:DEM" }, { railId: "demos-native:DEM", railVersion: 1 }]; },
+    "a declared payload exactly at the inline limit": (s) => { ((s.offering as Obj).deliverable as Obj).expectedSizeBytes = MAX_DACS_ARTIFACT_BYTES; },
+  };
+  for (const [name, change] of Object.entries(admitted)) assert.equal(await gate(change), null, name);
+  const mismatch = "payment verification is indeterminate: pinned rail handler, asset or network does not match";
+  const refused: Record<string, [(s: Obj) => void, string]> = {
+    "a fixed USD price": [(s) => { s.pricing = { kind: "fixed", price: usd }; }, mismatch],
+    "a negotiable USD band": [(s) => { s.pricing = { kind: "negotiable", bandCenter: usd, minPct: 10, maxPct: 10 }; rfq({ maxTurns: 6, timeoutSec: 60 })(s); }, mismatch],
+    "a metered USD unit price": [(s) => { s.pricing = { kind: "metered", unitPrice: usd, unit: "call" }; }, mismatch],
+    "an auction with a USD reserve": [(s) => { s.pricing = { kind: "auction", selectionRule: "highest-price", reservePrice: usd }; }, mismatch],
+    "an auction without a reserve": [(s) => { s.pricing = { kind: "auction", selectionRule: "highest-price" }; }, mismatch],
+    "no pricing at all": [(s) => { delete s.pricing; }, mismatch],
+    "x402 accepted after DEM": [(s) => { s.acceptedRails = [{ railId: "demos-native:DEM" }, { railId: "x402:default" }]; }, "payment phase rail does not match the agreement rail"],
+    "x402 accepted before DEM": [(s) => { s.acceptedRails = [{ railId: "x402:default" }, { railId: "demos-native:DEM" }]; }, "payment phase rail does not match the agreement rail"],
+    "a DEM rail version with no installed definition": [(s) => { s.acceptedRails = [{ railId: "demos-native:DEM", railVersion: 2 }]; },
+      "payment verification is indeterminate: authenticated pinned rail definition is unavailable"],
+    "a pay-dem phase on another rail": [(s) => { (s.pipeline as Obj[])[2] = { kind: "pay-dem", parameters: { rail: "x402:default" } }; }, "payment phase rail does not match the agreement rail"],
+    "a pay-dem phase that names no rail": [(s) => { (s.pipeline as Obj[])[2] = { kind: "pay-dem" }; }, "payment phase rail does not match the agreement rail"],
+  };
+  for (const [name, [change, reason]] of Object.entries(refused)) {
+    const rails = listing(change).acceptedRails as Obj[];
+    const failing = rails.find((rail) => rail.railId !== "demos-native:DEM" || rail.railVersion === 2) ?? rails[0];
+    assert.equal(await gate(change), `accepted rail ${canonicalize(failing)} at the listed price: ${reason}`, name);
+  }
+  // A listing a verified signature could never carry still fails closed, never as admitted.
+  for (const acceptedRails of [undefined, [], "demos-native:DEM", [{ railId: "demos-native:DEM" }, "x402:default"]]) {
+    assert.equal(await gate((s) => { s.acceptedRails = acceptedRails; }), "the listing's accepted rails are not a list of rail references", JSON.stringify(acceptedRails));
+  }
+  assert.equal(await gate(undefined, { readAnchorRecord: deps.readAnchorRecord }), "the native payment node reader is unavailable");
+  // Fixed-price negotiation of a negotiable band makes every agreement fixed-price; RFQ with the
+  // fixed-price fallback lets any session settle on one.
+  assert.equal(await gate((s) => { s.pricing = { kind: "negotiable", bandCenter: dem, minPct: 10, maxPct: 10 }; }),
+    "fixed-price agreements on negotiable listings have no settlement semantics");
+  assert.equal(await gate((s) => { s.pricing = { kind: "negotiable", bandCenter: dem, minPct: 10, maxPct: 10 }; rfq({ maxTurns: 6, timeoutSec: 60, fixedPriceFallback: true })(s); }),
+    "fixed-price agreements on negotiable listings have no settlement semantics");
+  // Storage delivery: the declared size and the reader each access model needs.
+  assert.equal(await gate((s) => { ((s.offering as Obj).deliverable as Obj).expectedSizeBytes = MAX_DACS_ARTIFACT_BYTES + 1; }), "the declared payload exceeds the inline storage cap");
+  assert.equal(await gate(undefined, { readSettlementNode: deps.readSettlementNode }), "the storage payload reader is unavailable");
+  const buyerOnly = (s: Obj) => { ((s.offering as Obj).deliverable as Obj).accessModel = "buyer-only"; };
+  assert.equal(await gate(buyerOnly, { readSettlementNode: deps.readSettlementNode, readRestrictedAnchorRecord: async () => null }), null);
+  assert.equal(await gate(buyerOnly), "buyer-only payloads need an authenticated restricted reader");
 });

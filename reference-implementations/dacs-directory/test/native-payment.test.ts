@@ -93,6 +93,22 @@ test("PB-2 reads the payee from this phase's own payout binding, not from the se
   assert.equal(await verifyNativePayment(ref, bound([{ railId: "other-rail", phaseIndex: 2, payeeAddress: tx.content.to }]), 2, read), "fail");
 });
 
+// The pinned node credits and debits the exact address string (ac8f45f handleNativeOperations →
+// GCRBalanceRoutines findOneBy({ pubkey })), and its TO check accepts hex in either case, so a
+// send to another spelling of the payee's key credits a different account.
+test("the node's sender and recipient strings must be the canonical payer and payee exactly", async () => {
+  const upper = (address: string) => `0x${address.slice(2).toUpperCase()}`;
+  assert.notEqual(upper(tx.content.to), tx.content.to);
+  assert.notEqual(upper(tx.content.from), tx.content.from);
+  const spelled = (change: (content: any) => void) => { const changed = structuredClone(tx); change(changed.content); return check(changed); };
+  assert.equal(await spelled(() => {}), "pass");
+  assert.equal(await spelled((content) => { content.to = upper(content.to); content.data[1].args[0] = upper(content.data[1].args[0]); }), "fail", "recipient");
+  assert.equal(await spelled((content) => { content.data[1].args[0] = upper(content.data[1].args[0]); }), "fail", "credited account");
+  assert.equal(await spelled((content) => { content.to = upper(content.to); }), "fail", "transaction recipient");
+  assert.equal(await spelled((content) => { content.from = upper(content.from); }), "fail", "sender");
+  assert.equal(await spelled((content) => { content.data[1].args[0] = content.data[1].args[0].slice(2); }), "fail", "unprefixed recipient");
+});
+
 test("§9.5.9 inclusion needs this transaction's hash in the block, not just the block number", async () => {
   const others = ["cd".repeat(32), `0x${"ef".repeat(32)}`];
   assert.equal(await check(tx, { ...block, content: { ...block.content, ordered_transactions: others } }), "fail");

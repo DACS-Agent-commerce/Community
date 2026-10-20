@@ -48,10 +48,13 @@ export async function verifyNativePayment(ref: Obj, agreement: Obj, phaseIndex: 
     const payload = Array.isArray(data) && data[0] === "native" ? rec(data[1]) : null;
     const args = payload?.args;
     if (Array.isArray(args) && typeof args[1] === "number") return "indeterminate";
+    // The node credits and debits the exact address string it stores (ac8f45f handleNativeOperations,
+    // GCRBalanceRoutines findOneBy({ pubkey })), and its TO check accepts hex in any case. Another spelling
+    // of the payee's key is another account, so only the canonical payer and payee strings match.
     if (hash(tx.hash) !== txHash || tx.blockNumber !== ref.blockNumber || content?.type !== "native" ||
-        address(content.from) !== payer || address(content.to) !== payee ||
+        content.from !== payer || content.to !== payee ||
         payload?.nativeOperation !== "send" || !Array.isArray(args) || args.length !== 2 ||
-        address(args[0]) !== payee || payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount) return "fail";
+        args[0] !== payee || payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount) return "fail";
     const block = rec(await read("getBlockByNumber", { blockNumber: ref.blockNumber }));
     if (!block) return "indeterminate";
     const transactions = rec(block.content)?.ordered_transactions;

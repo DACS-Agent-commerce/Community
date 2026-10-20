@@ -961,6 +961,12 @@ test("storage payload and ACL verification gates catalog completion and volume",
     { name: "buyer-only payload without an authenticated restricted reader", accessModel: "buyer-only", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64)}`] } } },
     { name: "public payload the buyer is blacklisted from", metadata: { acl: { mode: "public", blacklisted: [`0x${dids[BUYER].slice(-64)}`] } } },
     { name: "owner-mode payload", metadata: { acl: { mode: "owner" } } },
+    // The pinned node's read rule for the buyer (ac8f45f checkReadPermission) compares exact strings,
+    // honours the owner and lets a group with read permission grant access.
+    { name: "an uppercase blacklist spelling does not stop the buyer", metadata: { acl: { mode: "public", blacklisted: [`0x${dids[BUYER].slice(-64).toUpperCase()}`] } }, expected: true },
+    { name: "an uppercase allowed spelling does not admit the buyer", metadata: { acl: { mode: "restricted", allowed: [`0x${dids[BUYER].slice(-64).toUpperCase()}`] } } },
+    { name: "a group with read permission admits the buyer", metadata: { acl: { mode: "restricted", groups: { buyers: { members: [`0x${dids[BUYER].slice(-64)}`], permissions: ["read"] } } } }, expected: true },
+    { name: "owner-mode payload the buyer owns", metadata: { owner: `0x${dids[BUYER].slice(-64)}`, acl: { mode: "owner" } }, expected: true },
     { name: "missing hash", evidence: { deliverableContentHash: undefined } },
     { name: "wrong hash", evidence: { deliverableContentHash: "0".repeat(64) } },
     { name: "absent anchor", evidence: { deliverableAnchor: undefined } },
@@ -1020,14 +1026,15 @@ test("native transaction and block reads gate reference verification, completion
 });
 
 /** Re-sign every reference so a regression reaches semantic admission, not stale hashes. */
-function installListedCase(change: (scope: Obj) => void, changeBundle: (scope: Obj) => void = () => {}) {
+function installListedCase(change: (scope: Obj) => void, changeBundle: (scope: Obj) => void = () => {}, changeAgreement: (scope: Obj) => void = () => {}) {
   const listedScope = structuredClone(listingScope); change(listedScope);
   const listed = { ...listedScope, signature: signedWith(listedScope, "listing", SELLER) };
   const pinned = { ...listingRef, contentHash: artifactHash(listed, "listing") };
-  const agreedScope = { ...agreementScope, listingRef: pinned, terms: { ...agreementScope.terms as Obj,
+  const agreedScope: Obj = { ...agreementScope, listingRef: pinned, terms: { ...agreementScope.terms as Obj,
     rail: (listedScope.acceptedRails as Obj[])[0],
     deliverable: { deliverableType: (listedScope.offering as Obj).deliverable && ((listedScope.offering as Obj).deliverable as Obj).kind,
       hash: contentHash((listedScope.offering as Obj).deliverable as Obj) } } };
+  changeAgreement(agreedScope);
   const agreed = { ...agreedScope, signatures: [signedWith(agreedScope, "agreement", BUYER, "party"), signedWith(agreedScope, "agreement", SELLER, "party")] };
   const scope = bundleScope({ listingRef: pinned, agreementRef: refTo(at(2), agreed, "agreement") }); changeBundle(scope);
   store.set(at(1), listed).set(at(2), agreed).set(at(5), copy("buyer", scope)).set(at(6), copy("seller", scope));
@@ -1102,15 +1109,23 @@ test("hybrid and legacy listings cannot bypass current graph and catalog admissi
 test("payment phase, anchor binding, agreement and admitted policy must choose the same rail", async () => {
   const original = new Map(store);
   try {
-    for (const phaseRail of ["demos-native:DEM", "x402:default"]) {
+    // The agreement takes the first accepted rail, DEM. Its own session is refused when the phase pays
+    // another rail; the listing that also accepts x402 is refused for every session, since x402 is a
+    // choice the pay-dem phase can never settle.
+    for (const [accepted, phaseRail, reason] of [
+      [["demos-native:DEM"], "demos-native:DEM", undefined],
+      [["demos-native:DEM", "x402:default"], "x402:default", "payment phase rail does not match the agreement rail"],
+      [["demos-native:DEM", "x402:default"], "demos-native:DEM", "session verification is indeterminate for every outcome on this listing: accepted rail " +
+        `${JSON.stringify({ railId: "x402:default" })} at the listed price: payment phase rail does not match the agreement rail`],
+    ] as const) {
       const listed = installListedCase((scope) => {
-        scope.acceptedRails = [{ railId: "demos-native:DEM" }, { railId: "x402:default" }];
+        scope.acceptedRails = accepted.map((railId) => ({ railId }));
         (scope.pipeline as Obj[])[2].parameters = { rail: phaseRail };
       });
       const graph = await currentGraph(listed);
-      const expected = phaseRail === "demos-native:DEM";
+      const expected = reason === undefined;
       assert.equal(graph.ok, expected, graph.reason);
-      if (!expected) assert.equal(graph.reason, "payment phase rail does not match the agreement rail");
+      assert.equal(graph.reason, reason);
       const seller = await indexSeller(holders());
       assert.equal(seller.deals[0].refsVerified, expected);
       assert.equal(seller.reputation.completed, expected ? 1 : 0);
@@ -1135,11 +1150,25 @@ test("paid completion requires an authenticated matching versioned live rail def
     }
     // PA-1: each pinned field of the native DEM definition is checked on its own.
     const mismatch = "payment verification is indeterminate: pinned rail handler, asset or network does not match";
-    for (const change of [{ railType: "evm" }, { asset: { kind: "erc20", symbol: "DEM", decimals: 9 } }, { asset: { kind: "native-dem", symbol: "DEM", decimals: 18 } }]) {
+    for (const change of [{ railType: "evm" }, { asset: { kind: "erc20", symbol: "DEM", decimals: 9 } }, { asset: { kind: "native-dem", symbol: "DEM", decimals: 18 } },
+      { asset: undefined }, { network: undefined }]) {
       process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails: [{ ...snapshot[0].rails[0], ...change }] }]);
       assert.equal((await currentGraph(listing)).reason, mismatch, JSON.stringify(change));
       await assertUncounted();
     }
+    process.env.DACS_RAIL_SNAPSHOTS = policy;
+    // The live DEM definition settles only through its pay-dem handler, whatever phase names the rail:
+    // a session that committed to it on a pay-x402 phase is refused before its payment.
+    const x402Phase = installListedCase((s) => { (s.pipeline as Obj[])[2] = { kind: "pay-x402", parameters: { rail: "demos-native:DEM" } }; }, (s) => {
+      s.settlementEvidence = []; s.ratingRefs = [];
+      s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" }];
+    });
+    for (const [locator, role, outcome] of [[at(5), "buyer", "aborted-by-other"], [at(6), "seller", "aborted-by-self"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
+    }
+    assert.equal((await currentGraph(x402Phase)).reason, mismatch);
+    await assertUncounted();
+    store.clear(); for (const [key, raw] of original) store.set(key, raw);
     // A definition identical to native DEM except for its railId is not the native DEM rail.
     process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails: [{ ...snapshot[0].rails[0], railId: "demos-native:DEM-alt" }] }]);
     const altRail = installListedCase((s) => { s.acceptedRails = [{ railId: "demos-native:DEM-alt" }]; (s.pipeline as Obj[])[2].parameters = { rail: "demos-native:DEM-alt" }; });
@@ -1251,7 +1280,17 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     // An agreement may select any rail the listing accepts, and a pre-commit failure never says which.
     ["an accepted DEM rail version with no installed definition", (s) => { s.acceptedRails = [{ railId: "demos-native:DEM", railVersion: 2 }]; },
       [0, "negotiate-fixed-price"]],
+    // Each order matters: the agreement here takes the first accepted rail, so one completion would
+    // verify on DEM and the other could never settle, while the pipeline pays only through pay-dem.
+    ["a non-DEM rail accepted after DEM on a pay-dem pipeline", (s) => { s.acceptedRails = [{ railId: "demos-native:DEM" }, { railId: "x402:default" }]; },
+      [0, "negotiate-fixed-price"]],
+    ["a non-DEM rail accepted before DEM on a pay-dem pipeline", (s) => { s.acceptedRails = [{ railId: "x402:default" }, { railId: "demos-native:DEM" }]; },
+      [0, "negotiate-fixed-price"]],
     ["a listed price the DEM rail cannot settle", (s) => { s.pricing = { kind: "fixed", price: { amount: "2", currency: "USD" } }; }, [0, "negotiate-fixed-price"]],
+    // Fixed-price negotiation of a negotiable band makes every agreement a fixed-price one, which has
+    // no settlement semantics on a negotiable listing.
+    ["negotiate-fixed-price on a negotiable listing", (s) => { s.pricing = { kind: "negotiable", bandCenter: { amount: "2", currency: "DEM" }, minPct: 10, maxPct: 10 }; },
+      [0, "negotiate-fixed-price"]],
     // An RFQ step enabling the fixed-price fallback lets any session settle on a fixed-price agreement,
     // which has no settlement semantics on a negotiable listing; the completion here is one.
     ["an RFQ step that enables the fixed-price fallback on a negotiable listing", (s) => {
@@ -1282,6 +1321,37 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
         assert.match(graph.reason!, /^session verification is indeterminate for every outcome on this listing: /, name);
         assert.deepEqual(await published(), excluded, `${name}: failure`);
       } finally { process.env.DACS_RAIL_SNAPSHOTS = policy; }
+    });
+    // DACS-3 §8.5.2 check 1: an auction without a reserve names no price, so the agreed currency is
+    // open and a pre-commit failure never says whether it would have been DEM. A DEM reserve fixes
+    // it, and then the completion and the failure both count.
+    const auction = (reservePrice?: Obj) => (s: Obj) => {
+      s.pricing = { kind: "auction", selectionRule: "highest-price", ...(reservePrice ? { reservePrice } : {}) };
+      (s.pipeline as Obj[])[0] = { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: 1, revealWindow: 60, selectionRule: "highest-price" } };
+    };
+    const sealedBid = (s: Obj) => { (s.phaseSummary as Obj[])[0].kind = "negotiate-sealed-envelope"; };
+    const won = (s: Obj) => { s.derivedFromPattern = "sealed-envelope"; };
+    for (const reserve of [{ amount: "1", currency: "DEM" }, undefined]) await t.test(`an auction ${reserve ? "with a DEM reserve" : "without a reserve"}`, async () => {
+      store.clear(); for (const [key, raw] of original) store.set(key, raw);
+      installListedCase(auction(reserve), sealedBid, won);
+      assert.deepEqual(await published(), reserve ? { verified: true, bundleCount: 1, completionRate: 1 } : excluded, "completion");
+      const failure = installListedCase(auction(reserve), failBeforeCommit(0, "negotiate-sealed-envelope"), won); asSellerFault();
+      if (!reserve) assert.match((await currentGraph(failure)).reason!, /^session verification is indeterminate for every outcome on this listing: /);
+      assert.deepEqual(await published(), reserve ? { verified: true, bundleCount: 1, completionRate: 0 } : excluded, "failure");
+    });
+    // The buyer's read right is the pinned node's (ac8f45f checkReadPermission), which compares address
+    // strings exactly: a blacklist entry that only case-folds to the buyer does not stop it reading,
+    // so the delivery counts beside the listing's failures instead of being dropped alone.
+    await t.test("a delivery the pinned node lets the buyer read counts beside the listing's failures", async () => {
+      store.clear(); for (const [key, raw] of original) store.set(key, raw);
+      const buyerHex = dids[BUYER].slice(-64);
+      assert.notEqual(buyerHex.toUpperCase(), buyerHex);
+      installListedCase(() => {});
+      const seller = await indexSeller(holders(), [], "demos-native:DEM", { [at(61)]: { acl: { mode: "public", blacklisted: [`0x${buyerHex.toUpperCase()}`] } } });
+      assert.deepEqual({ verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate },
+        { verified: true, bundleCount: 1, completionRate: 1 });
+      installListedCase(() => {}, failBeforeCommit(0, "negotiate-fixed-price")); asSellerFault();
+      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0 });
     });
   } finally {
     process.env.DACS_RAIL_SNAPSHOTS = policy;

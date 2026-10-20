@@ -110,9 +110,11 @@
 #     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
 #     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
 #     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
-#     The buyer's read right follows node ac8f45f checkReadPermission: a blacklisted buyer, owner
-#     mode, or a restricted ACL not allowing the buyer is no delivery; groups never grant it, and a
-#     buyer-only ACL names the buyer alone with no reader group.
+#     The buyer's read right is node ac8f45f checkReadPermission for the buyer's canonical 0x address,
+#     with exact string comparison as on the node. Public admits anyone not blacklisted; owner mode
+#     admits only the owner; restricted admits the owner first, then anyone not blacklisted who is in
+#     allowed or in a group with read permission. An ACL that validateACLStructure would not store
+#     fails closed. A buyer-only ACL's only allowed entry is the buyer, with no reader group (DV-3).
 #   Rail admission uses explicitly provisioned DACS_RAIL_SNAPSHOTS (PA-1 operator trust).
 #     Snapshots pin registryVersion and railVersion, handler, asset, network, parameters and availability.
 #     Operators must authenticate the registry index/definitions before provisioning; no snapshot is
@@ -120,6 +122,9 @@
 #     demos-native:DEM definition with native-dem/DEM/9 and network demos can use the native adapter.
 #   Native pay-dem: success additionally requires blockNumber and getTxByHash/getBlockByNumber
 #     reads establishing confirmed inclusion, native-send endpoints and the exact DEM price in OS.
+#     The node credits and debits the exact address string (handleNativeOperations, GCRBalanceRoutines
+#     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from, to and
+#     send argument must therefore be the canonical 0x<64 lowercase hex> payer and payee.
 #     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
 #     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Unavailable reads never count. The node source calls terminal inclusion "confirmed".
 #   Attested-payload and entitlement success remain indeterminate until authoritative attestation
@@ -131,10 +136,13 @@
 #     from the pinned listing, the session's signed profile and the installed adapters, never from the
 #     outcome (evidenceGraph.ts deploymentVerifiability; bundlePolicy.ts legacyListingSettlementIndeterminate).
 #     Every session on such a listing is excluded from numerator and denominator, pre-commit failures
-#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader, without a live
-#     native DEM definition (under the bundle's railRegistryVersion) for every DEM rail the listing
-#     accepts, or with a listed price not in DEM; a non-storage or encrypt-to-buyer delivery, a declared
-#     expectedSizeBytes above the 128 KB storage cap (§9.6.1 extended pointer), buyer-only delivery
+#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader, or with any
+#     choice an agreement could make (DACS-3 §8.5.2 checks 1 and 3: every accepted rail, at the listed
+#     price) that the committed session's own rail admission refuses: a rail the pay-dem phase does not
+#     pay (x402 accepted beside DEM), no live native DEM definition under the bundle's
+#     railRegistryVersion, or a price not in DEM (including an auction with no reserve, whose currency
+#     is open); a non-storage or encrypt-to-buyer delivery, a declared expectedSizeBytes above the
+#     Standard's 128 KB storage limit (§9.6.1 extended pointer), buyer-only delivery
 #     without an authenticated restricted reader (none is installed), or no payload reader;
 #     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
 #     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price,
