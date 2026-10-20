@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PUBLISHABLE_RAIL_OPTIONS } from "../src/catalog/listingOptions.js";
 import { pricingModelLabel, publishedPriceLabel, railLabel } from "../src/components/labels.js";
 
 test("pricing label reflects the structured pricing model, not the negotiation pattern", () => {
@@ -25,6 +26,14 @@ test("pricing label falls back to an honest negotiation basis for legacy listing
 
 test("AP2 provider rail keeps its human-readable provider identity", () => {
   assert.equal(railLabel("ap2:stripe-paymentintents"), "Stripe PaymentIntents · AP2");
+});
+
+test("the generic x402 registry rail names no asset; the signed price carries the currency", () => {
+  // DACS-4 §9.4.2: `x402:default` is a generic HTTP 402 micropayment rail.
+  assert.equal(railLabel("x402:default"), "x402");
+  const option = PUBLISHABLE_RAIL_OPTIONS.find((rail) => rail.railId === "x402:default");
+  assert.equal(option?.label, "x402");
+  assert.equal(publishedPriceLabel({ kind: "fixed", priceHint: "5", currency: "EURC" }), "5 EURC");
 });
 
 test("published metered prices retain their unit and minimum", () => {

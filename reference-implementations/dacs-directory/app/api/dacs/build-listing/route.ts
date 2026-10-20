@@ -121,7 +121,7 @@ export async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  let listingVersion = Math.max(0, ...priorVersions) + 1;
+  const listingVersion = Math.max(0, ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {

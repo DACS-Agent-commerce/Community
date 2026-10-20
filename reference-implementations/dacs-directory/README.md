@@ -122,8 +122,8 @@ continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SD
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
-| `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `83082fbb…7dd4`, the chain node2 serves. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
-| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 currently reports a dirty build, so **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until node2 is rebuilt clean or the operator pins that exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
+| `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `83082fbb…7dd4`, the chain node2 served when this release was pinned. node2 has since been reset: on 2026-10-20 it served chain `d59b54c2…`, so the defaults refuse it until an operator reviews that chain and sets this variable. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
+| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 reports a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-20) on that other chain, so with the defaults **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until the operator pins the chain and an exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | GitHub deploy | Fine-grained, read-only token for cloning the pinned private SDK during the build; not needed after the SDK is published |
@@ -196,6 +196,14 @@ declared-hash failures, including bounded listing ID/version coordinates when th
 be safely recovered and explicit republishing guidance. For example, string-valued deliverable verification methods
 are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them to a
 registered structured verification-method variant.
+
+Listings that `/register` published before this release carry the wallet's raw-hex
+Listing signature. CORE §B.7 SIG-6 requires canonical base64url for a current Listing,
+so this release excludes them as `LISTING_SIGNATURE_INVALID` and they leave the catalog.
+Their versions stay occupied on chain, so republishing under the same listing ID is
+blocked (see the version limitation below). Before deploying, list the live listings
+whose diagnostics carry `LISTING_SIGNATURE_INVALID` and ask each seller to republish
+under a new listing ID from a current SDK seller runtime.
 
 Before replacing malformed live Listings, run the read-only deployment acceptance check
 against the deployed Directory and Demos RPC. The replacement manifest must map all three

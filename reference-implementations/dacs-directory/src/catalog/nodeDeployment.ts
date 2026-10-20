@@ -7,10 +7,14 @@
  * re-pin with DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS.
  */
 
-/** Block one's `previousHash` on the Demos network node2 serves (block zero answers `error`). */
+/**
+ * Block one's `previousHash` on the Demos network node2 served when this
+ * release was pinned (block zero answers `error`). node2 has since been reset
+ * onto another chain; see the README's DEMOS_CHAIN_IDENTITY row.
+ */
 export const PINNED_DEMOS_CHAIN_IDENTITY = "83082fbb733d76475a33a9f52fe3700d667a976c2d46bef33a149f47057f7dd4";
 
-/** demos-node-software 0.9.8, the commit node2 reports. */
+/** demos-node-software 0.9.8, the clean commit this release was checked against. */
 export const PINNED_DEMOS_NODE_BUILDS = ["61b8e75aa8db5e408c49e1c3a89db4d673f45578"];
 
 export function pinnedChainIdentity(configured = process.env.DEMOS_CHAIN_IDENTITY): string {
