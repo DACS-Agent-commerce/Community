@@ -9,8 +9,8 @@ import { SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniquene
 import type { Catalog } from "../src/catalog/types.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import { queryListingCatalog } from "../vendor/dacs-sdk/dist/discovery/catalog.js";
-import { COMPLETION_VERIFICATION_UNAVAILABLE, UNAVAILABLE_TESTNET_METRICS } from "../src/catalog/testnetMetrics.js";
-import { listingSummarySchema } from "../src/catalog/contracts.js";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, LISTING_QUERY_PARAMETERS, UNAVAILABLE_TESTNET_METRICS } from "../src/catalog/testnetMetrics.js";
+import { directoryManifest, listingSummarySchema, openApiDocument } from "../src/catalog/contracts.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-testnet-no-rates-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
@@ -320,6 +320,19 @@ test("the published hint schema matches emitted hints and requires every field t
   for (const key of ["categoryScope", "bundleCount", "windowStart", "windowEnd", "computedAt"]) {
     assert.ok((schema.required as readonly string[]).includes(key), key);
   }
+  // The scope pattern spells out its whitespace instead of `\s`, so non-ECMA
+  // validators agree, and it still means exactly what the ECMA `\s` form meant.
+  const pattern = properties.categoryScope.pattern!;
+  assert.doesNotMatch(pattern, /\\s/);
+  const spelled = new RegExp(pattern, "u");
+  const ecma = /^[^\s\u0000-\u001f\u007f](?:[^\u0000-\u001f\u007f]*[^\s\u0000-\u001f\u007f])?$/u;
+  for (let code = 0; code <= 0xffff; code += 1) {
+    if (code >= 0xd800 && code <= 0xdfff) continue;
+    const character = String.fromCharCode(code);
+    for (const value of [character, `${character}a`, `a${character}`, `a${character}b`]) {
+      assert.equal(spelled.test(value), ecma.test(value), `U+${code.toString(16).padStart(4, "0")} in ${JSON.stringify(value)}`);
+    }
+  }
 });
 
 test("catalog writers read the stored catalog, never the public projection", () => {
@@ -357,6 +370,56 @@ test("rate and score filters and ordering return a clear 400 even with empty, re
     assert.doesNotMatch(error, /minCompletionRate|MINCOMPLETIONRATE|sort=|order=|rank=/, query);
     if (/^(?:sort|order|rank)/i.test(query)) assert.equal(error, "Sorting and ranking are unavailable on testnet under TP-1.");
   }
+});
+
+test("every query name the listings API does not read returns 400, whatever its spelling or value", async () => {
+  const sorting = "Sorting and ranking are unavailable on testnet under TP-1.";
+  for (const [query, reason] of [
+    // Ordering spellings the earlier name list missed.
+    ["sortOrder=desc", sorting], ["sortKey=rating", sorting], ["sortDirection=desc", sorting],
+    ["direction=desc", sorting], ["sort_dir=asc", sorting], ["orderDirection=desc", sorting], ["dir=asc", sorting],
+    // A rate named only in the value of an unknown name.
+    ["filter=completionRate", /^Rate and score filters/], ["by=averageSellerRating", /^Rate and score filters/],
+    // Names the API never reads: case variants, bracket forms and extensions.
+    ["Category=services", /^Unsupported listing query parameter/], ["tag%5B%5D=history", /^Unsupported listing query parameter/],
+    ["utm_source=x", /^Unsupported listing query parameter/], ["seller=x", /^Unsupported listing query parameter/],
+    ["category=services&top=1", /^Unsupported listing query parameter/],
+  ] as const) {
+    const response = await getListings(new NextRequest(`https://directory.example/api/dacs/listings?${query}`));
+    assert.equal(response.status, 400, query);
+    const { error } = await response.json();
+    assert.match(error, /unavailable on testnet under TP-1/, query);
+    if (typeof reason === "string") assert.equal(error, reason, query);
+    else assert.match(error, reason, query);
+    assert.doesNotMatch(error, /sortOrder|sortKey|utm_source|Category=|seller=|top=/, query);
+  }
+});
+
+test("the query allowlist is the manifest's filter list and the OpenAPI listing parameters", () => {
+  assert.deepEqual([...directoryManifest("https://directory.example").filters], [...LISTING_QUERY_PARAMETERS]);
+  const listing = openApiDocument("https://directory.example").paths["/api/dacs/listings"].get;
+  assert.deepEqual(listing.parameters.map((parameter) => parameter.name), [
+    "category", "tag", "rail", "credential", "primaryClaim", "identityTier", "priceMax", "q", "profile", "limit", "cursor",
+  ]);
+  assert.deepEqual(new Set(listing.parameters.map((parameter) => parameter.name)), new Set(LISTING_QUERY_PARAMETERS));
+});
+
+test("every non-rate filter the pinned SDK client sends, and a full-text search for a rate word, still return 200", async () => {
+  saveCatalog(noRateCatalog());
+  const requested: string[] = [];
+  const result = await queryListingCatalog({
+    catalogUrl: "https://directory.example/api/dacs/listings",
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      return getListings(new NextRequest(String(url)));
+    },
+  }, { category: "services", tag: ["history"], credential: "none", primaryClaim: noRateClaim, rail: "pay-dem", priceMax: "3", cursor: "0", limit: 10 });
+  assert.equal(result.status, "ok", JSON.stringify(result));
+  assert.deepEqual([...new URL(requested[0]).searchParams.keys()].sort(),
+    ["category", "credential", "cursor", "limit", "priceMax", "primaryClaim", "rail", "tag"]);
+  const search = await getListings(new NextRequest(
+    "https://directory.example/api/dacs/listings?q=rating&profile=dacs-v0.1&identityTier=self-declared&category=sorting"));
+  assert.equal(search.status, 200, "values of documented filters are never read as rate or ranking requests");
 });
 
 test("llms discovery text states the TP-1 null-metric and refused-filter contract", async () => {

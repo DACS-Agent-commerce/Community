@@ -69,9 +69,10 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   assert.deepEqual(listings.parameters.map((parameter) => parameter.name).sort(), [...manifest.filters].sort());
   assert.deepEqual(listings.responses, {
     "200": { description: "A cursor-paginated listing page" },
-    "400": { description: "Invalid query, or unavailable rate/score filtering or ranking" },
+    "400": { description: "Invalid query, an unlisted query name, or unavailable rate/score filtering or ranking" },
   });
   assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
+  assert.match(listings.description, /every query name not listed here are refused with 400/);
   // The schema URL is unversioned, so a changed schema must not be cached as immutable.
   const { GET: getSchema } = await import("../app/schemas/listing-summary.schema.json/route.js");
   const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.schema.json"));
@@ -91,7 +92,13 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
     assert.equal(deviation.status, "open");
     assert.equal(deviation.effect, "nonconforming");
   }
-  assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-3", "SB-1", "SB-2"]);
+  assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-3", "SB-1", "SB-2", "SB-1"]);
+  // The collision rule names the tuple the code groups by (current-indexer
+  // "SB-2 counts one session's identical records once…" pins the behaviour).
+  assert.match(definition, /more than one distinct `\(session, phaseIndex\)`/);
+  assert.doesNotMatch(definition, /\(jobId, phaseIndex\)/);
+  // Rule 2 lists exactly the manifest's filters.
+  assert.match(definition, /`category`, `tag`, `credential`, `primaryClaim`, `identityTier`,\s+`rail`, `priceMax`, `q`, `profile`, `limit` and `cursor`/);
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
   assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
 });

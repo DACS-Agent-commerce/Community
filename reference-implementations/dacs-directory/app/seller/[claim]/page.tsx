@@ -6,7 +6,7 @@ import CopyText from "@/src/components/CopyText";
 import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
 import { loadCatalog } from "@/src/catalog/store";
-import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetricPolicy";
+import { CHECKED_BUNDLES_LABEL, COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetricPolicy";
 
 export const dynamic = "force-dynamic";
 const EXPLORER = "https://explorer.demos.sh";
@@ -97,7 +97,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
       <div className="stat-row">
         <div className="stat"><div className="l">{COMPLETION_VERIFICATION_UNAVAILABLE}</div><div className="l">{observedOutcomesLabel(seller.reputation.totalAgreements)}</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
-        <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">observed bundles; completion not verified</div></div>
+        <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">{CHECKED_BUNDLES_LABEL}</div></div>
       </div>
 
       <div className="section">

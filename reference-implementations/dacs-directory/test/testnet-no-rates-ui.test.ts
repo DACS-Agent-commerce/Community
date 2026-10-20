@@ -46,7 +46,9 @@ test("rendered discovery keeps observations and inspection links without rate co
   saveCatalog(noRateCatalog());
   const html = renderWithRouter(React.createElement(DiscoverPage));
   assertNoRates(html);
-  assert.match(html, /observed bundles; completion not verified/);
+  // The refsVerified figure is not SB-2 or version gated, so it is never labelled an outcome count.
+  assert.match(html, /signature-checked bundles; not counted as outcomes/);
+  assert.doesNotMatch(html, /observed bundles/);
   assert.match(html, /Explore service/);
   assert.match(html, /\/api\/dacs\/listings\/observed-history\/1/);
   assert.doesNotMatch(html, /badge ok[^>]*>\s*Observed outcomes/);
@@ -58,6 +60,8 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
   assertNoRates(seller);
   assert.match(seller, /aborted-by-self/);
   assert.match(seller, /aborted-by-other/);
+  assert.match(seller, /signature-checked bundles; not counted as outcomes/);
+  assert.doesNotMatch(seller, /observed bundles/);
   assert.equal((seller.match(/verify yourself →/g) ?? []).length, 6);
   const service = renderToStaticMarkup(await ServicePage({ params: Promise.resolve({
     seller: noRateClaim, listingId: "observed-history", version: "1",
@@ -68,13 +72,24 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
 });
 
 test("rendered legacy filter and ranking URLs explicitly refuse the query and offer clearing", () => {
-  for (const query of ["trackRecord=90", "minCompletionRate=0.9", "minRating=5", "sort=completionRate", "minCompletionRate%5B%5D=0.9", "order=asc"]) {
+  for (const query of [
+    "trackRecord=90", "minCompletionRate=0.9", "minRating=5", "sort=completionRate", "minCompletionRate%5B%5D=0.9", "order=asc",
+    // Any name outside the listing filters, whatever its spelling.
+    "sortKey=rating", "sortDirection=desc", "direction=desc", "sortOrder=desc", "filter=completionRate", "utm_source=x",
+  ]) {
     const html = renderDiscovery(query);
     assert.match(html, /role="alert"/);
     assert.match(html, /unavailable on testnet/);
     assert.match(html, /Clear all filters/);
     assert.doesNotMatch(html, /class="card service-card"/);
   }
+  for (const query of ["", "category=services&rail=pay-dem&identityTier=self-declared"]) {
+    const html = renderDiscovery(query);
+    assert.doesNotMatch(html, /role="alert"/, query);
+    assert.match(html, /class="card service-card"/, query);
+  }
+  // A search for a rate word is a text search, not a rate filter.
+  assert.doesNotMatch(renderDiscovery("q=rating"), /role="alert"/);
 });
 
 test("the verify page's outcome badge is a neutral observation, never a success badge", () => {

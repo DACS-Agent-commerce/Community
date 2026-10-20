@@ -1,11 +1,16 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
 import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
+import { LISTING_QUERY_PARAMETERS } from "./testnetMetricPolicy.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
 // Unix milliseconds and counts the pinned SDK catalog reader accepts.
 const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
-const CANONICAL_STRING_PATTERN = "^[^\\s\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^\\s\\u0000-\\u001f\\u007f])?$";
+// ECMAScript `\s` outside the control range, spelled out so that validators
+// whose `\s` differs (Python's omits U+FEFF) read the pattern the same way.
+const PATTERN_SPACE = "\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+const CANONICAL_STRING_PATTERN =
+  `^[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f])?$`;
 
 /** The no-rate testnet restriction this Directory applies. See docs/TP-1.md. */
 export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
@@ -311,7 +316,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "q", "profile", "limit", "cursor"],
+  filters: LISTING_QUERY_PARAMETERS,
 });
 
 export const openApiDocument = (origin: string) => ({
@@ -328,7 +333,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs/listings": {
       get: {
         summary: "Search active services",
-        description: "Completion verification unavailable. Rate and score filters (including minCompletionRate and minRating) and ranking parameters are refused with 400 on testnet.",
+        description: "Completion verification unavailable. Rate and score filters (including minCompletionRate and minRating), sorting and ranking parameters, and every query name not listed here are refused with 400 on testnet.",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
@@ -342,7 +347,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid query, or unavailable rate/score filtering or ranking" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid query, an unlisted query name, or unavailable rate/score filtering or ranking" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
