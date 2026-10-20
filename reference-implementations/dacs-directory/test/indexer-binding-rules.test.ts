@@ -1261,13 +1261,6 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
       const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
     }
   };
-  // A copy from tooling without the Directory AnchorBinding extension: no anchorBindings member at all.
-  const withoutBindingProfile = () => {
-    for (const [locator, role] of [[at(5), "buyer"], [at(6), "seller"]]) {
-      const scope = signedScope(store.get(locator)!, "bundle"); delete scope.anchorBindings;
-      store.set(locator, { ...scope, signatures: [BUYER, SELLER].map((signer) => signedWith(scope, "bundle", signer, "party")), anchoredByRole: role });
-    }
-  };
   const published = async () => {
     const seller = await indexSeller(holders());
     return { verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate };
@@ -1279,7 +1272,6 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     ["vetting without a historical challenge resolver", (s) => { (s.pipeline as Obj[]).unshift({ kind: "vet-credentials" }); }, [0, "vet-credentials"]],
     ["no live rail snapshot for the session's registry version", () => {}, [0, "negotiate-fixed-price"],
       () => { process.env.DACS_RAIL_SNAPSHOTS = "[]"; }],
-    ["a copy without the AnchorBinding profile", () => {}, [0, "negotiate-fixed-price"], withoutBindingProfile],
     ["commitment-time bounds", (s) => { s.validity = { ...(s.validity as Obj), notAfter: 4_102_444_800_000 }; }, [0, "negotiate-fixed-price"]],
     ["storage delivery encrypted to the buyer", (s) => { ((s.offering as Obj).deliverable as Obj).accessModel = "encrypt-to-buyer"; }, [1, "commit-agreement"]],
     ["an entitlement delivery", (s) => { (s.offering as Obj).deliverable = { kind: "entitlement", durationSec: 60, renewable: false }; (s.pipeline as Obj[])[3] = { kind: "deliver-entitlement" }; },
@@ -1368,6 +1360,86 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     process.env.DACS_RAIL_SNAPSHOTS = policy;
     store.clear(); for (const [key, raw] of original) store.set(key, raw);
   }
+});
+
+// No Standard or pinned-SDK producer emits this Directory's anchorBindings member. Without it, PC-2 leaves a
+// pay-dem record the one address the signed pipeline's lone pay-dem phase gives it, and the evidence signer's own
+// deliverableAnchor names the payload (DACS-4 §9.6.1 step 5), so the session is verified and counted as a
+// bound one is. SB-1 needs the binding only to tell repeated pay-dem phases apart; that listing is neutral.
+test("a Standard session without the AnchorBinding extension is verified and counted; a repeated pay-dem phase is neutral", async (t) => {
+  const original = new Map(store);
+  const withoutBindingProfile = () => {
+    for (const [locator, role] of [[at(5), "buyer"], [at(6), "seller"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); delete scope.anchorBindings;
+      store.set(locator, { ...scope, signatures: [BUYER, SELLER].map((signer) => signedWith(scope, "bundle", signer, "party")), anchoredByRole: role });
+    }
+  };
+  const failBeforeCommit = (s: Obj) => {
+    delete s.agreementRef; s.settlementEvidence = []; s.ratingRefs = [];
+    s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "fail", errorClass: "permanent" }];
+  };
+  const asSellerFault = () => {
+    for (const [locator, role, outcome] of [[at(5), "buyer", "failed-counterparty"], [at(6), "seller", "failed-perm"]]) {
+      const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
+    }
+  };
+  const published = async (nodeRead?: Parameters<typeof indexSeller>[4]) => {
+    const seller = await indexSeller(holders(), [], "demos-native:DEM", {}, nodeRead);
+    return { verified: seller.deals[0].refsVerified, bundleCount: seller.reputation.bundleCount, completionRate: seller.reputation.completionRate,
+      volume: seller.reputation.observedTransactionalVolume, settlement: (seller.deals[0].settlementTxIds ?? []).map((claim) => `${claim.id}@${claim.phaseIndex}`) };
+  };
+  const SETTLED = `demos:${"ab".repeat(32)}`;
+  const excluded = { verified: false, bundleCount: 0, completionRate: null, volume: [], settlement: [] };
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  try {
+    await t.test("a lone pay-dem phase: the paid, delivered completion and the failure both count", async () => {
+      reset();
+      installListedCase(() => {}); withoutBindingProfile();
+      assert.equal(store.get(at(5))!.anchorBindings, undefined);
+      assert.equal((await currentGraph(store.get(at(1))!)).ok, true);
+      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 1,
+        volume: [{ currency: "DEM", amount: "2" }], settlement: [`${SETTLED}@2`] });
+      installListedCase(() => {}, failBeforeCommit); asSellerFault(); withoutBindingProfile();
+      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0, volume: [], settlement: [] });
+    });
+    await t.test("verification still applies without the binding", async () => {
+      reset();
+      installListedCase(() => {}); withoutBindingProfile();
+      // The node does not confirm the transfer.
+      assert.deepEqual(await published(async () => null), excluded);
+      // The payload at the evidence's deliverableAnchor does not hash to its deliverableContentHash.
+      store.set(at(61), { report: "another payload" });
+      assert.equal((await currentGraph(store.get(at(1))!)).reason, "storage delivery payload binding failed");
+      assert.deepEqual(await published(), excluded);
+    });
+    await t.test("a repeated pay-dem phase: counted with the binding, neutral for every outcome without it", async () => {
+      reset();
+      const repeated = (s: Obj) => { (s.pipeline as Obj[]).splice(3, 0, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }); };
+      // PIPE-5: the second invocation settles the same price in its own transfer.
+      const secondScope: Obj = { ...evidenceScope, paymentTxRefs: [{ kind: "demos", blockNumber: 1, txHash: "cd".repeat(32) }], observedAt: 102 };
+      const second = { ...secondScope, signature: signedWith(secondScope, "evidence", SELLER) };
+      store.set(at(70), second);
+      const bothPaid = (s: Obj) => {
+        s.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-agreement", outcome: "ok" },
+          { index: 2, kind: "pay-dem", outcome: "ok", attestationRef: refTo(at(3), evidence, "evidence") },
+          { index: 3, kind: "pay-dem", outcome: "ok", attestationRef: refTo(at(70), second, "evidence") },
+          { index: 4, kind: "deliver-storage-program", outcome: "ok" }];
+        s.settlementEvidence = [refTo(at(3), evidence, "evidence"), refTo(at(70), second, "evidence"), refTo(at(60), delivery, "evidence")];
+      };
+      const listed = installListedCase(repeated, bothPaid);
+      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 1,
+        volume: [{ currency: "DEM", amount: "2" }], settlement: [`${SETTLED}@2`, `demos:${"cd".repeat(32)}@3`] });
+      withoutBindingProfile();
+      assert.equal((await currentGraph(listed)).ok, false);
+      assert.deepEqual(await published(), excluded);
+      const failed = installListedCase(repeated, failBeforeCommit); asSellerFault();
+      assert.deepEqual(await published(), { verified: true, bundleCount: 1, completionRate: 0, volume: [], settlement: [] });
+      withoutBindingProfile();
+      assert.equal((await currentGraph(failed)).reason, "session verification is indeterminate for every outcome on this listing: " +
+        "a repeated pay-dem phase needs the AnchorBinding profile to recover each payment's phase index");
+      assert.deepEqual(await published(), excluded);
+    });
+  } finally { reset(); }
 });
 
 test("a committed session is held to its agreed rail and price whatever its outcome", async (t) => {

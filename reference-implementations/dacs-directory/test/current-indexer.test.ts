@@ -1706,6 +1706,79 @@ test("indexer persists authoritative orchestrator neutrality from a verified FAB
   } finally { globalThis.fetch = originalFetch; }
 });
 
+// DACS-5 §10.3.1 maps a terminal errorClass to the outcome of the party whose phase failed. Both copies of a
+// session carry the same phaseSummary, errorClass included, or they diverge (§10.4.3), while §10.4.1 makes the
+// faulted party's copy read failed-perm and the other's failed-counterparty. So every genuine two-party failure
+// pair has one copy reading failed-perm beside a counterparty class (or failed-counterparty beside permanent),
+// and the bundle does not say whose phase it was. Such a copy is judged with its partner: a converged pair
+// counts under its faulted party, and copies that contradict each other are excluded from every metric.
+test("§10.4.3: a failed-perm copy beside a counterparty terminal phase counts in a genuine pair and is excluded when its partner contradicts it", async () => {
+  const jobId = "terminal-pair";
+  const fixture = await vector(jobId, 1000);
+  const deliveryAt = locator(1060);
+  const failedDeliveryScope: Obj = { ...signedScope(maps.get(deliveryAt)!, "evidence"), outcome: "failure" };
+  const failedDelivery: Obj = { ...failedDeliveryScope, signature: await sign(failedDeliveryScope, "evidence", 1) };
+  maps.set(deliveryAt, failedDelivery);
+  type CopySpec = { outcome: string; faultedParty?: string; errorClass?: string };
+  const install = async (role: "buyer" | "seller", spec: CopySpec) => {
+    const scope = signedScope(role === "buyer" ? fixture.buyerBundle : fixture.sellerBundle, "bundle");
+    if (spec.faultedParty) {
+      delete scope.bundleVersion;
+      Object.assign(scope, { faultBundleVersion: "1", faultedParty: spec.faultedParty });
+    }
+    scope.outcome = spec.outcome;
+    scope.phaseSummary = (scope.phaseSummary as Obj[]).map((phase) => phase.kind === "deliver-storage-program"
+      ? { ...phase, outcome: "fail", errorClass: spec.errorClass ?? "counterparty" } : phase);
+    scope.settlementEvidence = [(scope.settlementEvidence as Obj[])[0], ref(deliveryAt, failedDelivery, "evidence")];
+    const copy = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+    maps.set(fixture.locators[role], copy);
+    return copy;
+  };
+  const indexed = async (buyer: CopySpec, seller: CopySpec) => {
+    const copies = [await install("buyer", buyer), await install("seller", seller)];
+    const graphs = [await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing),
+      await graphAt(fixture.locators.seller, fixture.listing, fixture.locators.listing)];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === "POST") {
+        const call = JSON.parse(String(init.body)).params?.[0];
+        return Response.json({ result: 200, response: await readNativeFixture(call.message, call.data) });
+      }
+      const data = maps.get(String(input).split("/").pop() ?? "");
+      return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, acl: { mode: "public" }, data })
+        : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    };
+    try {
+      const record = await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+        deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)],
+        bundleBindings: [await bindingFor(jobId, "buyer", fixture.locators.buyer, copies[0], 0), await bindingFor(jobId, "seller", fixture.locators.seller, copies[1], 1)] }, undefined, async () => []);
+      return {
+        copies: graphs.map((graph) => graph.ok ? "ok" : graph.reason),
+        counted: record.deals[0].refsVerified,
+        sellerOutcome: record.deals[0].refsVerified ? record.deals[0].sellerOutcome : undefined,
+        bundleCount: record.reputation.bundleCount,
+        completionRate: record.reputation.completionRate,
+        counterpartyFaultRate: record.reputation.counterpartyFaultRate,
+      };
+    } finally { globalThis.fetch = originalFetch; }
+  };
+  const sellerFault = { copies: ["ok", "ok"], counted: true, sellerOutcome: "failed-perm", bundleCount: 1, completionRate: 0, counterpartyFaultRate: 0 };
+  const buyerFault = { ...sellerFault, sellerOutcome: "failed-counterparty", counterpartyFaultRate: 1 };
+  const excluded = { copies: ["ok", "ok"], counted: false, sellerOutcome: undefined, bundleCount: 0, completionRate: null, counterpartyFaultRate: null };
+  // Genuine pairs: one counterparty class, both spellings. The failed-perm copy is the seller's in the first
+  // and the buyer's in the second and third; each copy passes on its own and the pair counts.
+  assert.deepEqual(await indexed({ outcome: "failed-counterparty", faultedParty: "seller" }, { outcome: "failed-perm", faultedParty: "seller" }), sellerFault);
+  assert.deepEqual(await indexed({ outcome: "failed-perm", faultedParty: "buyer" }, { outcome: "failed-counterparty", faultedParty: "buyer" }), buyerFault);
+  assert.deepEqual(await indexed({ outcome: "failed-perm" }, { outcome: "failed-counterparty" }), buyerFault, "legacy pair, read through perspective_flip");
+  // The mismatch on its own terms: both copies read failed-perm beside the counterparty class. Each still
+  // passes alone, but they name different faulted parties (FAB) or contradict once flipped (legacy).
+  assert.deepEqual(await indexed({ outcome: "failed-perm", faultedParty: "buyer" }, { outcome: "failed-perm", faultedParty: "seller" }), excluded);
+  assert.deepEqual(await indexed({ outcome: "failed-perm" }, { outcome: "failed-perm" }), excluded, "legacy pair");
+  // Copies that disagree on the terminal errorClass contradict on the phaseSummary limb.
+  assert.deepEqual(await indexed({ outcome: "failed-counterparty", faultedParty: "seller", errorClass: "counterparty" },
+    { outcome: "failed-perm", faultedParty: "seller", errorClass: "permanent" }), excluded);
+});
+
 test("DV-1 rejects malformed Unicode substitution against a valid replacement-character payload hash", async () => {
   const fixture = await vector("\ufffd");
   const deps = { readSettlementNode: readNativeFixture, read: async (at: string) => maps.get(at) ?? null,

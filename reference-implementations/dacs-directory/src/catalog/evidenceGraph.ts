@@ -1,5 +1,5 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
-import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress } from "./anchorBinding.js";
+import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress, paymentLogicalAddress } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
@@ -652,11 +652,12 @@ export async function deploymentVerifiability(
     if (accessModel === "buyer-only" && !deps.readRestrictedAnchorRecord) return "buyer-only payloads need an authenticated restricted reader";
     if (accessModel !== "buyer-only" && !deps.readAnchorRecord) return "the storage payload reader is unavailable";
   }
-  // Payment and storage anchors resolve only through this Directory's AnchorBinding extension, which
-  // the Standard and the pinned SDK do not emit. Tooling without it never carries the signed
-  // member, whatever the outcome, so its sessions are neutral rather than counted only when they fail.
-  if (kinds.some((kind) => kind === "pay-dem" || kind === "deliver-storage-program") && !Array.isArray(bundle.anchorBindings)) {
-    return "the session does not carry the AnchorBinding profile its payment and storage anchors need";
+  // SB-1 keys a settlement on the phaseIndex of its PC-2 anchor address, which on Demos only a published
+  // binding recovers (DEMOS-MAPPING §A.2), and the Standard defines none for payment anchors. Without this
+  // Directory's AnchorBinding extension the signed pipeline fixes that index only when it has one pay-dem
+  // phase; a repeated one leaves every session neutral, whatever its outcome.
+  if (!Array.isArray(bundle.anchorBindings) && kinds.filter((kind) => kind === "pay-dem").length > 1) {
+    return "a repeated pay-dem phase needs the AnchorBinding profile to recover each payment's phase index";
   }
   if (kinds.includes("vet-credentials")) {
     if (!deps.resolveSessionChallenge) return "authenticated historical session challenges are unavailable";
@@ -990,16 +991,26 @@ async function verifyCurrentEvidenceGraph(
     return failSigned("completed session contains a failed mandatory phase");
   }
   // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
-  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). The logical dacs4 address comes only from a carried binding
-  // its record's own signer published for this native address and content hash; the name is never read.
-  const anchorBindings = Array.isArray(raw.anchorBindings) ? raw.anchorBindings as unknown[] : [];
+  // (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). A session carrying the AnchorBinding extension resolves the
+  // logical dacs4 address only through a binding its record's own signer published for this native
+  // address and content hash. Without the extension, PC-2 leaves a payment phase kind the signed
+  // pipeline names once exactly one address; deploymentVerifiability refuses a repeated one. The name
+  // is never read.
+  const carriesBindings = Array.isArray(raw.anchorBindings);
+  const anchorBindings = carriesBindings ? raw.anchorBindings as unknown[] : [];
   if (anchorBindings.length > MAX_GRAPH_ARTIFACTS) return failSigned("evidence graph exceeds size limit");
   const boundAddress = (evidence: ResolvedEvidence, nativeAddress: string, hash: string) => boundLogicalAddress(anchorBindings,
     { jobId: String(raw.jobId), nativeAddress, contentHash: hash, signer: rec(evidence.raw.signature)?.signer }, resolveKey);
+  const paymentAddress = async (evidence: ResolvedEvidence): Promise<string | null> => {
+    if (carriesBindings) return boundAddress(evidence, evidence.locator, evidence.contentHash);
+    const indexes = pipeline.flatMap((phase, index) => phase.kind === evidence.raw.phase ? [index] : []);
+    const rail = rec(pipeline[indexes[0]]?.parameters)?.rail;
+    return indexes.length === 1 && typeof rail === "string" ? paymentLogicalAddress(String(raw.jobId), rail, indexes[0]) : null;
+  };
   const recoveredPayments = new Set<number>();
   for (const evidence of topLevelEvidence) {
     if (!PAYMENT_PHASES.has(String(evidence.raw.phase))) continue;
-    const logical = await boundAddress(evidence, evidence.locator, evidence.contentHash);
+    const logical = await paymentAddress(evidence);
     const tuple = logical === null ? null : parsePaymentLogicalAddress(logical);
     if (!tuple) return failSigned("payment evidence anchor binding failed");
     const index = tuple.phaseIndex;
@@ -1150,8 +1161,9 @@ async function verifyCurrentEvidenceGraph(
     if (accessModel === "encrypt-to-buyer") return failSigned("storage delivery is indeterminate: encrypted cleartext is unavailable");
     const anchor = rec(evidence.raw.deliverableAnchor)!;
     const deliverableHash = normalizedHash(evidence.raw.deliverableContentHash);
-    // The payload anchor is resolved through the delivery signer's binding before it is read.
-    if (await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
+    // The payload anchor is resolved through the delivery signer's binding before it is read. Without the
+    // extension it is the deliverableAnchor that same signer put in this job's evidence (DACS-4 §9.6.1 step 5).
+    if (carriesBindings && await boundAddress(evidence, String(anchor.locator), deliverableHash) !== deliverableLogicalAddress(String(raw.jobId))) {
       return failSigned("storage delivery payload binding failed");
     }
     // A buyer-only payload is node-enforced private: only an authenticated restricted reader opens it.

@@ -276,13 +276,18 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    A successful payment states its amount, rail-specific finality and observation time,
    and transactions. Its amount and currency must equal the agreed price; the optional
    PriceTerm `unit` constrains it only when both terms state one. A Demos StorageProgram
-   name is an opaque write input and is never read. Payment phase indices are recovered
-   independently from a signed logical→native AnchorBinding that the evidence's own signer
-   publishes for the record's native address and content hash, carried in the bundle's
-   `anchorBindings`, and checked against the listing rail. AnchorBinding is this
-   Directory's own extension: neither the pinned Standard nor the pinned SDK emits it, so
-   a bundle without the signed `anchorBindings` member on a listing with a `pay-dem` or
-   storage delivery phase is indeterminate, whatever its outcome. What the Directory cannot
+   name is an opaque write input and is never read. A payment's SB-1 phase index comes from
+   its PC-2 anchor address, which on Demos needs a published logical→native binding
+   (DEMOS-MAPPING §A.2) that the pinned Standard does not define for payment anchors. When the
+   signed pipeline has one `pay-dem` phase, PC-2 leaves the record exactly one address, so the
+   index is that phase's; a storage payload is read at the `deliverableAnchor` its evidence
+   signer put in the evidence (DACS-4 §9.6.1). A bundle may instead carry this Directory's own
+   AnchorBinding extension in a signed `anchorBindings` member: the evidence's signer binds the
+   record's native address and content hash to its logical address, checked against the listing
+   rail, and every payment and payload anchor of that bundle must then resolve through it.
+   Neither the pinned Standard nor the pinned SDK emits it. Only a listing that repeats `pay-dem`
+   needs it, and without it every session on such a listing is indeterminate, whatever its
+   outcome. What the Directory cannot
    verify is decided from the pinned listing, the session's signed profile and the installed
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
@@ -336,13 +341,13 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
-- **In the shipped default no paid or storage-delivered session counts.** Without an
-  operator's `DACS_RAIL_SNAPSHOTS` and a producer that carries `anchorBindings`, every session
-  on a `pay-dem` or storage-delivery listing is indeterminate, and so is every legacy session on
-  a listing that declares payment, which earlier releases counted. No producer carries the
-  binding yet: the pinned Standard defines a logical→native binding only for listings,
-  revocations and bundles, and the pinned SDK anchors a one-party bundle that the current graph
-  refuses at its shape check. Such sellers are published with no rate, not a 0% one.
+- **In the shipped default no paid session counts.** Without an operator's
+  `DACS_RAIL_SNAPSHOTS`, every session on a `pay-dem` listing is indeterminate, and so is every
+  legacy session on a listing that declares payment, which earlier releases counted. A two-party
+  Standard bundle needs no Directory extension unless its listing repeats `pay-dem`; only then
+  does it need `anchorBindings`, which no producer emits yet. The pinned SDK anchors a one-party
+  buyer copy: the current graph refuses it at its shape check, and the legacy path needs both
+  copies, as at the merge base. Such sellers are published with no rate, not a 0% one.
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
   yet (CORS), so chain reads go through the server. Cryptography is client-side, but
   chain inclusion still depends on the server/RPC path until Demos exposes a
@@ -379,8 +384,9 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **Storage delivery is verified from readable cleartext and node access metadata.**
   Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
   The hash covers the complete canonical payload, including any `signature` or `signatures`
-  fields. The payload must match that hash, and the delivery signer's AnchorBinding must bind
-  its anchor to the job's `dacs4:deliverable` address. The buyer must be able to read the
+  fields. The payload must match that hash. In a bundle that carries `anchorBindings`, the
+  delivery signer's AnchorBinding must also bind its anchor to the job's `dacs4:deliverable`
+  address. The buyer must be able to read the
   payload under the pinned node's read rule (ac8f45f `checkReadPermission`), applied to the
   buyer's canonical `0x<64 lowercase hex>` address. Like the node, the Directory compares
   address strings exactly, so an entry in another case is another address. A public program
