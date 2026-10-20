@@ -4,11 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 SDK_REV="3904d704fb540e6e1d7dd502a0be29f20569c92d"
 
-# Railway's GitHub integration can check out this repository, but it does not
-# pass its credentials through to nested private-repository clones. Supply a
-# narrowly scoped, read-only token as DACS_SDK_GITHUB_TOKEN for those builds.
-# The credential is passed through Git's environment-based configuration so it
-# is never written to the checkout or embedded in the remote URL.
+# The SDK repository is public, so the clone needs no credentials. When a
+# narrowly scoped, read-only token is set as DACS_SDK_GITHUB_TOKEN, it only
+# authenticates that clone. The credential is passed through Git's
+# environment-based configuration so it is never written to the checkout or
+# embedded in the remote URL.
 git_with_sdk_auth() {
   if [ -z "${DACS_SDK_GITHUB_TOKEN:-}" ]; then
     command git "$@"
@@ -76,6 +76,7 @@ else
   # tsc never deletes stale output, so build into an empty dist (this also
   # clears the marker and manifest).
   rm -rf vendor/dacs-sdk/dist
+  # The SDK lockfile at SDK_REV is enforced, so its demosdk and crypto dependencies are the pinned ones.
   (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
   require_pinned_dist --manifest "$SDK_MANIFEST"
   printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"

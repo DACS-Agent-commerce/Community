@@ -1,5 +1,14 @@
-/** Demos SR-2 is capped at 128 KiB; leave room for JSON encoding and metadata. */
+/**
+ * A DACS artifact must fit the substrate's 128 KB storage soft cap (DACS-5 §10.4.2, DEMOS-MAPPING
+ * SR-2); a larger session uses the extended-pointer pattern, which this indexer does not follow.
+ */
+export const MAX_DACS_ARTIFACT_BYTES = 128 * 1024;
+/** Ceiling on a stored payload's JSON, with room above the DACS cap for encoding and metadata. */
 export const MAX_ARTIFACT_BYTES = 256 * 1024;
+/**
+ * Independent directory policy for the complete storage response envelope.
+ * The node's 1 MiB payload cap does not bound its response metadata or encoding.
+ */
 export const MAX_STORAGE_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_ARTIFACT_DEPTH = 128;
 export const MAX_STORAGE_OWNER_LENGTH = 512;

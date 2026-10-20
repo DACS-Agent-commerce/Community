@@ -1,0 +1,94 @@
+{
+  "provenance": {
+    "generator": "Node.js crypto Ed25519 with independent JCS; ASCII strings and integer numbers",
+    "seedDerivation": "SHA-256 of DACS Directory nested phase metadata public test fixture"
+  },
+  "contentHash": "7c6fed916e00857add9945c35de5f77d6ff0c1256f1a9cac26e87177cae20983",
+  "listing": {
+    "dacsVersion": "1",
+    "listingVersion": 1,
+    "listingId": "nested-phase-metadata",
+    "requiredCapabilities": [
+      "SR-2"
+    ],
+    "seller": {
+      "displayName": "Metadata fixture",
+      "identity": {
+        "bundleVersion": "1",
+        "presentedBy": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102",
+        "presentedAt": 1,
+        "claims": [
+          {
+            "ref": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102"
+          }
+        ],
+        "presentation": {
+          "kind": "per-claim",
+          "signatures": [
+            {
+              "ref": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102",
+              "signature": "-0Jpu_wnhqtGj4yibej7XzzXJINDRY7b_aKtH30X_pfuyuHZz5b3O8eni92hItOrUkqD5BrecRjOKW06-_bcCw"
+            }
+          ]
+        }
+      }
+    },
+    "offering": {
+      "title": "Nested metadata fixture",
+      "description": "A public deterministic conformance control",
+      "category": "services.other",
+      "tags": [],
+      "deliverable": {
+        "kind": "storage-program",
+        "accessModel": "public"
+      }
+    },
+    "buyerRequirement": {
+      "requirementVersion": "1",
+      "required": []
+    },
+    "pipeline": [
+      {
+        "kind": "vet-credentials"
+      },
+      {
+        "kind": "negotiate-fixed-price"
+      },
+      {
+        "kind": "commit-agreement"
+      },
+      {
+        "kind": "deliver-storage-program"
+      },
+      {
+        "kind": "rate",
+        "parameters": {
+          "required": false,
+          "future": {
+            "label": "inert",
+            "values": [
+              1,
+              2
+            ]
+          }
+        }
+      }
+    ],
+    "pricing": {
+      "kind": "fixed",
+      "price": {
+        "amount": "1",
+        "currency": "DEM"
+      }
+    },
+    "terms": {},
+    "validity": {
+      "notBefore": 1
+    },
+    "signature": {
+      "algorithm": "ed25519",
+      "signer": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102",
+      "value": "37i73pPreINIfrfuOhLkumVZh6higSqIQl1WKtyyWP8bbXibpyZXD05HINV9bmuc0cX3Ikkc2qmQr0-wWfMQBw"
+    }
+  }
+}

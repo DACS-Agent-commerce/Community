@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,4 +97,20 @@ test("SR-2 migration removes every legacy producer-controlled anchor time once",
   assert.equal(catalog.sellers[0]?.reputation.windowingBasis, "finalisedAt");
   assert.equal(catalog.sellers[0]?.reputation.bundleCount, 1);
   assert.equal(catalog.sellers[0]?.listings[0]?.reputationHint, undefined);
+});
+
+
+test("two restarts preserve migrated evidence without restoring producer timestamps or listing hints", () => {
+  const moduleUrl = new URL("../src/catalog/store.js", import.meta.url).href;
+  const code = `const s=await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify({anchor:s.artifactAnchorTime(${JSON.stringify(locator)}),catalog:s.loadCatalog()}));`;
+  for (let restart = 0; restart < 2; restart++) {
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { encoding: "utf8", env: process.env });
+    assert.equal(child.status, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    assert.equal(actual.anchor, undefined);
+    assert.equal(actual.catalog.sellers[0].deals[0].anchorTimestamp, undefined);
+    assert.equal(actual.catalog.sellers[0].reputation.windowingBasis, "finalisedAt");
+    assert.equal(actual.catalog.sellers[0].reputation.bundleCount, 1);
+    assert.equal(actual.catalog.sellers[0].listings[0].reputationHint, undefined);
+  }
 });

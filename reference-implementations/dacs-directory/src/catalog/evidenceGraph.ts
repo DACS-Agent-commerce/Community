@@ -1,6 +1,6 @@
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
-import { verifyListing } from "./listingVerification.js";
+import { verifyStoredListing } from "./listingVerification.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -55,6 +55,7 @@ const PAYEE_BOUND_AGREEMENT_SEPARATOR = "dacs-payee-bound-agreement:v1:";
 const FAULT_BUNDLE_SEPARATOR = "dacs-fault-bundle:v1:";
 
 type AgreementProfile = "legacy" | "payee-bound";
+const AGREEMENT_PATTERNS = new Set(["fixed-price", "rfq", "sealed-envelope"]);
 
 /** Select the agreement type before interpreting fields; never strip-and-retry. */
 function agreementProfile(raw: Record<string, unknown>): AgreementProfile | null {
@@ -90,6 +91,26 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
     kind === "commit-agreement" || kind === "commit-payee-bound-agreement");
   const expectedCommitment = profile === "legacy" ? "commit-agreement" : "commit-payee-bound-agreement";
   if (commitmentKinds.length !== 1 || commitmentKinds[0] !== expectedCommitment) return false;
+
+  // DACS-3 §8.5.2 check 7: a valid pattern must also name this listing's
+  // negotiation phase, including an explicitly enabled RFQ fixed-price fallback.
+  const negotiations = pipeline.filter((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
+  if (negotiations.length !== 1) return false;
+  const negotiation = negotiations[0];
+  const pricing = rec(listing.pricing);
+  const fixedPriceFallback = negotiation.kind === "negotiate-rfq" &&
+    rec(negotiation.parameters)?.fixedPriceFallback === true && agreement.derivedFromPattern === "fixed-price" &&
+    pricing?.kind === "negotiable";
+  if (`negotiate-${agreement.derivedFromPattern}` !== negotiation.kind && !fixedPriceFallback) return false;
+
+  // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
+  // exactly its center. Canonical decimal strings avoid floating-point loss.
+  if (pricing?.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price") {
+    const center = rec(pricing.bandCenter);
+    const price = rec(terms.price);
+    if (!priceTermOk(center) || !priceTermOk(price) ||
+        price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
+  }
 
   if (profile === "legacy") return terms.payoutBindings === undefined;
   if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
@@ -197,6 +218,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const profile = agreementProfile(raw);
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
+      typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
       arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
@@ -409,7 +431,7 @@ async function verifyCurrentEvidenceGraph(
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
   if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
-      !(await verifyListing(listed.raw, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+      !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
@@ -421,6 +443,14 @@ async function verifyCurrentEvidenceGraph(
     if (!agreementMatchesListing(agreement, listed.raw)) {
       return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
+  }
+  // Discovery compatibility does not establish settlement semantics. This
+  // pairing needs agreement/deliverable, payment/finality and delivery adapters
+  // before either signed copy can contribute a verified outcome or volume.
+  // Include the RFQ fixed-price fallback and both agreement/bundle profiles.
+  if (rec(listed.raw.pricing)?.kind === "negotiable" && agreement?.derivedFromPattern === "fixed-price") {
+    return { ...fail("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
+      signaturesVerified, artifacts, agreement, listing: listed.raw };
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: true, artifacts, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw) };

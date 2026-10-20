@@ -7,7 +7,7 @@
  */
 export const PUBLISHABLE_RAIL_OPTIONS = [
   { railId: "demos-native:DEM", railVersion: 1, phaseKind: "pay-dem", label: "DEM on Demos", availability: "live" },
-  { railId: "x402:default", railVersion: 1, phaseKind: "pay-x402", label: "x402", availability: "live" },
+  { railId: "x402:default", railVersion: 1, phaseKind: "pay-x402", label: "x402 micropayments", availability: "live" },
   {
     railId: "ap2:stripe-paymentintents",
     railVersion: 1,

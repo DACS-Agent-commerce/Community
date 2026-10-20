@@ -1,4 +1,4 @@
-import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
 import { demosSignedTransactionProofHash } from "../sdkDemosWriteEvidence.js";
 
 import { readAnchorRecord } from "./chain.js";

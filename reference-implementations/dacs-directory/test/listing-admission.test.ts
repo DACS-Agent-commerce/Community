@@ -203,7 +203,8 @@ test("published summaries never claim transaction readiness the Directory did no
 
 // Conforming Listings that the previous SDK pin (f68fed1) refused: APR-1
 // pay-alternative, CORE CF-5 nesting through 128 levels, and CORE B.1 CF-3
-// advisory ClaimReference parameters. Admission must agree with the SDK.
+// advisory ClaimReference parameters. Admission never accepts what the SDK
+// refuses; the catalog profile still refuses pay-alternative pipelines.
 const ALTERNATIVES = [{ railId: "pay-dem" }, { railId: "pay-x402" }];
 const alternativePipeline = (alternatives: Obj[]): Obj[] => [
   ...ATTESTED_PIPELINE.slice(0, 2),
@@ -223,10 +224,10 @@ const nestedListing = (levels: number): Obj => {
 };
 const advisory = `${seller}?channel=directory`;
 
-test("admission accepts an APR-1 pay-alternative listing and leaves its coherence to the SDK", async () => {
+test("the catalog profile refuses an APR-1 pay-alternative listing that the SDK reader accepts", async () => {
   const listing = payAlternative("pay-alternative");
   assert.equal(isListing(listing), true);
-  assert.equal((await verifyListingResult(listing)).ok, true);
+  assert.deepEqual(await verifyListingResult(listing), { ok: false, code: "NORMATIVE_LISTING_INVALID" });
 
   const incoherent: Record<string, Obj> = {
     "a single alternative": payAlternative("one-alternative", { pipeline: alternativePipeline(ALTERNATIVES.slice(0, 1)) }),
@@ -325,7 +326,7 @@ test("the indexer publishes current-SDK listings under the registered identity a
     );
     assert.deepEqual(
       record.listings.map((listing) => listing.listingId).sort(),
-      ["depth-128", "indexed-advisory", "indexed-pay-alternative"],
+      ["depth-128", "indexed-advisory"],
     );
     // The seller record is keyed by the registered CF-3 identity; each §6.3.6
     // summary carries its listing's exact `presentedBy` bytes (RB-2).

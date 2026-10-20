@@ -37,6 +37,7 @@ if [ "$1" = run ] && [ "$2" = build ]; then
   [ "\${STUB_BUILD_FAIL:-0}" = 1 ] && exit 1
   mkdir -p dist && printf '%s' "$STUB_BUILD_OUTPUT" > dist/index.js
 fi
+exit "\${STUB_NPM_EXIT:-0}"
 `);
   chmodSync(join(bin, "git"), 0o755);
   chmodSync(join(bin, "npm"), 0o755);
@@ -45,7 +46,7 @@ fi
 
 /** Run setup in a scratch app root; never installs or fetches anything. */
 function setup({ source = false, marker, standardRevision = standardRev, dist = { "index.js": builtIndex }, head = sdkRev, status = "",
-  buildFail = false, buildOutput = builtIndex, link, stale }) {
+  buildFail = false, buildOutput = builtIndex, link, stale, appInstall = false, npmExit = 0 }) {
   const root = mkdtempSync(join(tmpdir(), "dacs-setup-sdk-"));
   try {
     mkdirSync(join(root, "scripts"));
@@ -68,8 +69,9 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
     writeFileSync(log, "");
     const result = spawnSync("bash", [join(root, "scripts/setup-sdk.sh")], {
       env: {
-        ...process.env, DACS_SKIP_APP_INSTALL: "1", PATH: `${stubBin(root)}:${process.env.PATH}`, STUB_LOG: log,
+        ...process.env, DACS_SKIP_APP_INSTALL: appInstall ? "0" : "1", PATH: `${stubBin(root)}:${process.env.PATH}`, STUB_LOG: log,
         STUB_HEAD: head, STUB_STATUS: status, STUB_BUILD_FAIL: buildFail ? "1" : "0", STUB_BUILD_OUTPUT: buildOutput,
+        STUB_NPM_EXIT: String(npmExit),
       },
       encoding: "utf8",
     });
@@ -111,6 +113,15 @@ test("setup accepts a packaged SDK build only with the pinned marker, Standard r
   ]) {
     refused(setup(tree), name, reason);
   }
+});
+
+test("packaged SDK setup enforces the app lockfile and propagates installation failure", () => {
+  const installed = setup({ marker: sdkRev, appInstall: true });
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.equal(installed.calls, "npm ci --no-audit --no-fund\n");
+  const failed = setup({ marker: sdkRev, appInstall: true, npmExit: 23 });
+  assert.equal(failed.status, 23);
+  assert.doesNotMatch(failed.stdout, /setup complete/);
 });
 
 test("a source build is accepted only from a clean pinned checkout whose output is the pinned build", () => {

@@ -107,7 +107,7 @@ export default function VerifyDeal({
         if (r === bundleRef) rawBundle = raw;
         // The pinned SDK uses readArtifact only for the root and final listing;
         // agreement/evidence/vet artifacts enter through resolveRef below.
-        if (raw && r !== bundleRef) resolvedArtifacts.push({ kind: "dacs-1-listing", raw });
+        if (raw && r !== bundleRef) resolvedArtifacts.push({ kind: "dacs-1-listing", raw, locator: r });
         return raw;
       },
       resolveRef: async (kind, jobId) => {

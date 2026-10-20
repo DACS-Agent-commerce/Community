@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readAnchorRecord } from "@/src/catalog/chain";
 import { loadCatalog } from "@/src/catalog/store";
-import { ownerClaim, verifyListing } from "@/src/catalog/listingVerification";
+import { ownerClaim, verifyStoredListing } from "@/src/catalog/listingVerification";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
   }
   const address = summary.anchor.locator;
   const anchored = await readAnchorRecord(address);
-  const verified = anchored ? await verifyListing(anchored.data) : null;
+  const verified = anchored ? await verifyStoredListing(anchored.data, address) : null;
   const valid = !!verified && verified.contentHash === summary.contentHash && ownerClaim(anchored?.owner) === claim.toLowerCase();
   return NextResponse.json({
     address,

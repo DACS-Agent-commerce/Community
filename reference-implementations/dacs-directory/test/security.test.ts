@@ -24,8 +24,8 @@ import { programBindingKey } from "../src/catalog/store.js";
 import {
   crawlDomain,
   isPrivateAddress,
+  listingIndexEntryIsComplete,
   normalizeSubmittedDomain,
-  projectActiveListingIndexEntries,
 } from "../src/catalog/wellknown.js";
 
 const claim = `did:demos:agent:${"a".repeat(64)}`;
@@ -221,18 +221,11 @@ test("well-known listing indexes enforce normative revocation coherence", () => 
     markerContentHash: "e".repeat(64),
   };
 
-  assert.deepEqual(projectActiveListingIndexEntries([active], claim), {
-    ok: true,
-    listingAnchors: [active.anchor.locator],
-    contentHashes: { [active.anchor.locator]: contentHash },
-  });
-  assert.deepEqual(projectActiveListingIndexEntries([
-    { ...active, status: "revoked", revocation },
-  ], claim), { ok: true, listingAnchors: [], contentHashes: {} });
-
-  assert.equal(projectActiveListingIndexEntries([
-    { ...active, summary: { ...active.summary, priceHint: "1 DEM" } },
-  ], claim).ok, true);
+  // Only a complete row introduces an offer or completes a withdrawal check;
+  // any other row holds its listing (crawl-level bounds: wellknown-crawl.test.ts).
+  assert.equal(listingIndexEntryIsComplete(active, claim), true);
+  assert.equal(listingIndexEntryIsComplete({ ...active, status: "revoked", revocation }, claim), true);
+  assert.equal(listingIndexEntryIsComplete({ ...active, summary: { ...active.summary, priceHint: "1 DEM" } }, claim), true);
 
   const { summary: _summary, ...summaryless } = active;
   for (const [name, invalid] of [
@@ -263,10 +256,8 @@ test("well-known listing indexes enforce normative revocation coherence", () => 
     ["a short content hash", { ...active, contentHash: "b".repeat(63) }],
     ["another status", { ...active, status: "retired" }],
   ] as const) {
-    assert.equal(projectActiveListingIndexEntries([invalid], claim).ok, false, name);
+    assert.equal(listingIndexEntryIsComplete(invalid, claim), false, name);
   }
-  assert.equal(projectActiveListingIndexEntries({ listings: [active] }, claim).ok, false, "a non-array index");
-  assert.equal(projectActiveListingIndexEntries(Array(201).fill(active), claim).ok, false, "more than 200 entries");
 });
 
 test("rate-limit state ignores spoofed proxy headers by default and stays bounded", () => {

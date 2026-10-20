@@ -17,9 +17,8 @@ export const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" 
     : kind === "bundle" && raw.faultBundleVersion === "1"
       ? "dacs-fault-bundle:v1:"
       : prefixes[kind];
-  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
-  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer])))
-    .toString(kind === "listing" ? "base64url" : "hex");
+  // Current artifacts carry CORE §B.7 SIG-6 base64url signature values.
+  const value = Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString("base64url");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 export const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
@@ -44,7 +43,7 @@ export async function vector(jobId = "job-1", offset = 0) {
   (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
-  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef,
+  const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
@@ -105,7 +104,7 @@ export async function installAgreement(
     const value = Buffer.from(await ed25519Sign(
       Buffer.from(signaturePrefix + artifactHash(agreementScope, "agreement")),
       privateKeyFromSeed(seeds[signer]),
-    )).toString("hex");
+    )).toString("base64url");
     return { party: dids[signer], algorithm: "ed25519", value };
   }));
   const agreement = { ...agreementScope, signatures: agreementSignatures };
@@ -136,6 +135,7 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = {
     payeeBoundAgreementVersion: "1",
+    derivedFromPattern: "fixed-price",
     jobId,
     listingRef,
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],

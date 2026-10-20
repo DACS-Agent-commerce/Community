@@ -6,7 +6,7 @@
  * self-describing primaryClaim. Formats accepted: 0x-hex or base64url
  * signatures (wallet builds vary); message must be fresh (±10 min).
  */
-import { canonicalize, sha256Hex } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, sha256Hex } from "./canonical.js";
 import {
   resolveDemosPrimaryClaimKey,
   verifyPrimaryClaimSignature,

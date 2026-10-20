@@ -16,7 +16,7 @@ import { catalogJson } from "../src/catalog/http.js";
 import { requestBaseUrl } from "../src/catalog/publicUrl.js";
 import { safeJsonLd } from "../src/components/structuredData.js";
 import { parsePagination } from "../src/catalog/pagination.js";
-import { primaryClaimMatches } from "../src/catalog/discovery.js";
+import { activeOffer, activeCatalogListings, activeCatalogSellers, discoveryListing, primaryClaimMatches } from "../src/catalog/discovery.js";
 import { publicDemosRpcUrl } from "../src/catalog/substrateDiscovery.js";
 
 test("public navigation never sends visitors to the private SDK repository", () => {
@@ -193,4 +193,25 @@ test("primaryClaim filtering accepts exact claims and canonical prefixes", () =>
   assert.equal(primaryClaimMatches(claim, "did:demos:agen"), false);
   assert.equal(primaryClaimMatches(claim, "did:demos:other"), false);
   assert.equal(primaryClaimMatches(claim, `${claim}:extra`), false);
+});
+
+
+test("mixed current rails remain discoverable while alias-only offers are archival", () => {
+  const listing = (rails: string[], status: "active" | "revoked" = "active") => ({
+    artifactProfile: "dacs-v0.1", offering: { rails }, status,
+  } as import("../src/catalog/types.js").ListingSummary);
+  for (const [rails, expected] of [
+    [["pay-dem"], false], [["pay-x402"], false], [["pay-dem", "pay-x402"], false],
+    [["demos-native:DEM"], true], [["x402:default"], true],
+    [["pay-dem", "demos-native:DEM"], true], [["x402:default", "pay-x402"], true],
+    [[], true],
+  ] as Array<[string[], boolean]>) {
+    const offer = listing(rails);
+    assert.equal(activeOffer(offer), expected, rails.join(","));
+    assert.equal(discoveryListing(offer), expected);
+    const seller = { listings: [offer] } as import("../src/catalog/types.js").SellerRecord;
+    assert.equal(activeCatalogListings({ sellers: [seller] } as import("../src/catalog/types.js").Catalog).length, Number(expected));
+    assert.equal(activeCatalogSellers([seller]).length, Number(expected));
+    assert.equal(activeOffer(listing(rails, "revoked")), false);
+  }
 });

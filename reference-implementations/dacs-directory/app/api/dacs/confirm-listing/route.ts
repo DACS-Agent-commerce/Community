@@ -11,10 +11,10 @@
  * publication for registration.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { listingAddress } from "@kynesyslabs/dacs/canonical";
+import { listingAddress } from "../../../../src/catalog/canonical.js";
 import { readAnchorRecord } from "@/src/catalog/chain";
 import { observeListingAnchorInclusion } from "@/src/catalog/listingFinality";
-import { verifyListing } from "@/src/catalog/listingVerification";
+import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 
 function canonicalOwner(value: string): string | null {
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const verified = await verifyListing(anchored.data);
+  const verified = await verifyStoredListing(anchored.data, body.anchorAddress);
   if (
     !verified ||
     verified.profile !== "dacs-v0.1" ||
