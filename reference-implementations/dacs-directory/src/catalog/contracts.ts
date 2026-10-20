@@ -266,11 +266,13 @@ export const catalogStatusSchema = {
   },
 } as const;
 
+/** 2: TP-1 refuses the DACS-1 §6.3.6 rate filters and publishes null rates. */
+export const DACS_DIRECTORY_VERSION = "2";
+
 export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()) => ({
   name: "DACS Directory",
   description: "A discovery catalog for signed, chain-anchored DACS agent services.",
-  // 2: TP-1 refuses the DACS-1 §6.3.6 rate filters and publishes null rates.
-  dacsDirectoryVersion: "2",
+  dacsDirectoryVersion: DACS_DIRECTORY_VERSION,
   restrictions: TESTNET_RESTRICTIONS,
   humanUrl: origin,
   agentCard: `${origin}/.well-known/agent.json`,

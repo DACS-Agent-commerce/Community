@@ -73,6 +73,9 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   });
   assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
   assert.match(listings.description, /every query name not listed here are refused with 400/);
+  // The API index reports the same contract version as the manifest.
+  const { GET: getIndex } = await import("../app/api/dacs/route.js");
+  assert.equal((await (await getIndex(new NextRequest("https://directory.example/api/dacs"))).json()).version, "2");
   // The schema URL is unversioned, so a changed schema must not be cached as immutable.
   const { GET: getSchema } = await import("../app/schemas/listing-summary.schema.json/route.js");
   const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.schema.json"));

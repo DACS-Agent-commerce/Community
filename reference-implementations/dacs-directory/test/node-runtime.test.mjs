@@ -55,6 +55,17 @@ function otherVersionFiles(root, dir = root, depth = 0) {
 // engines.node, then lets mise's version files override it, and Railway doesn't
 // pin the Railpack release. So engines names the .nvmrc release, no other version
 // file exists, and the build and server check the release they actually run.
+test("CI keeps the browser report when the browser tests fail", () => {
+  const ci = read("../../../.github/workflows/dacs-directory-ci.yml");
+  const at = ci.indexOf("- name: Upload the browser test report");
+  assert.ok(at > ci.indexOf("run: npm run test:e2e"));
+  const step = ci.slice(at);
+  assert.match(step, /^ +if: failure\(\)$/m);
+  assert.match(step, /^ +uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+$/m);
+  assert.match(step, /^ +reference-implementations\/dacs-directory\/playwright-report\/$/m);
+  assert.match(step, /^ +reference-implementations\/dacs-directory\/test-results\/$/m);
+});
+
 test("CI and Railway build on the exact .nvmrc Node release", () => {
   const release = read("../.nvmrc").trim();
   assert.match(release, /^22\.\d+\.\d+$/);
