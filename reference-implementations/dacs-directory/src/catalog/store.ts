@@ -839,6 +839,13 @@ export function finishScanRun(id: number, values: { toTx: number; chainTip?: num
     .run(Date.now(), values.toTx, values.chainTip ?? null, values.txs, values.artifacts, values.rejected,
       values.error ? "failed" : "complete", values.error ?? null, values.omittedSellers ?? 0, values.omittedBindings ?? 0, values.omittedDeals ?? 0, id);
 }
+/** Publish catalog, its matching scanner snapshot and run completion atomically. */
+export const commitCatalogScan = db.transaction((catalog: Catalog, state: ScanState, runId: number,
+  values: Parameters<typeof finishScanRun>[1]): void => {
+  saveScanState(state);
+  saveCatalog(catalog);
+  finishScanRun(runId, values);
+});
 const PUBLIC_FAILURES: Record<string, string> = {
   STORAGE_UNREADABLE: "The storage program could not be read after repeated attempts. Confirm the locator exists and is publicly readable before retrying.",
   STORAGE_NOT_FOUND: "No storage program was found at this locator. The response is operational evidence only and is not authoritative DACS absence evidence.",

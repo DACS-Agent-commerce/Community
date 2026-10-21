@@ -1,3 +1,4 @@
+import { catalogScanProgress } from "@/src/catalog/freshness";
 /**
  * GET /api/dacs/listings — §6.3.6 catalog search endpoint.
  * Normative filters plus q/profile directory extensions.
@@ -90,6 +91,7 @@ export async function GET(req: NextRequest) {
     .map((listing) => withDirectoryInspectionAffordance(listing));
   const body = {
     listings: page,
+    scanProgress: catalogScanProgress(catalog),
     cursor: cursor + limit < filtered.length ? String(cursor + limit) : undefined,
     total: filtered.length,
   };

@@ -57,6 +57,7 @@ import {
   loadScanState,
   recordListingRejection,
   recordRevocationProgress,
+  hasPendingRevocationCandidates,
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
@@ -249,6 +250,10 @@ export async function indexRegistration(
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
     const revocation: RevocationCheck = revocationBinding ? "revoked"
       : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
+    const complete = Boolean(revocationBinding) || (progress.unread.length === 0 &&
+      !hasPendingRevocationCandidates(verified.contentHash));
+    const previous = prior?.listings.find((item) => item.contentHash === verified.contentHash &&
+      item.listingId === listingId && item.version === version);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -288,6 +293,8 @@ export async function indexRegistration(
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
       status: revocation === "revoked" ? "revoked" : "active",
+      revocationCheck: complete ? "complete" : "incomplete",
+      lastVerifiedAt: complete ? now : previous?.lastVerifiedAt ?? null,
       ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
     });

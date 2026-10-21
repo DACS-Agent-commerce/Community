@@ -2,6 +2,13 @@ import { publicDemosRpcUrl } from "./substrateDiscovery.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
+export const scanProgressSchema = {
+  type: "object", additionalProperties: false,
+  required: ["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"],
+  properties: Object.fromEntries(["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"]
+    .map((key) => [key, { type: ["integer", "null"], minimum: 0 }])),
+} as const;
+
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
@@ -49,6 +56,8 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
+    revocationCheck: { enum: ["complete", "incomplete"] },
+    lastVerifiedAt: { type: ["integer", "null"], minimum: 0 },
     revocation: {
       type: "object",
       required: [
@@ -146,6 +155,7 @@ export const catalogStatusSchema = {
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
+    scanProgress: scanProgressSchema,
     generatedAt: { type: "integer" },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
@@ -290,7 +300,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page with persisted scan progress", content: { "application/json": { schema: { type: "object", properties: { listings: { type: "array", items: listingSummarySchema }, total: { type: "integer" }, cursor: { type: "string" }, scanProgress: scanProgressSchema } } } } }, "400": { description: "Invalid pagination" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {

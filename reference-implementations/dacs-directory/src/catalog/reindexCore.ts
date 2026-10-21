@@ -28,13 +28,13 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
+  commitCatalogScan,
   retainListingRevocation,
   retainedListingRevocation,
   recordWellKnownWithdrawalCheck,
   loadWithdrawalCursor,
   saveWithdrawalCursor,
   finishWithdrawalCarriageReplay,
-  saveCatalog,
   saveScanState,
   beginScanRun,
   finishScanRun,
@@ -99,6 +99,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
   }
   const prior = loadCatalog();
+  let catalogCursorAdvancedAt = prior.scanProgress?.cursorAdvancedAt ?? null;
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
@@ -285,7 +286,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       state.anchorBackfillTargetKey = unresolvedKey;
     }
     const nextCursor = Math.max(state.lastSeenTxId, scan.highestTxId);
-    if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
+    if (nextCursor > state.lastSeenTxId) {
+      state.cursorAdvancedAt = Date.now();
+      catalogCursorAdvancedAt = state.cursorAdvancedAt;
+    }
     // Seed upgraded state once so an already-frozen cursor becomes diagnosable
     // after the configured interval instead of remaining "unknown" forever.
     else state.cursorAdvancedAt ??= Date.now();
@@ -440,9 +444,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
-    finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
-      artifacts: scan.observations.length, rejected: scan.failures.length });
+    const completedAt = Date.now();
+    commitCatalogScan({ catalogVersion: "1", generatedAt: completedAt, sellers: catalogSellers,
+      scanProgress: { cursor: state.lastSeenTxId, tip: scan.chainTip,
+        lag: Math.max(0, scan.chainTip - state.lastSeenTxId),
+        cursorAdvancedAt: catalogCursorAdvancedAt,
+        lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, runId,
+      { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
+        artifacts: scan.observations.length, rejected: scan.failures.length });
 
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
