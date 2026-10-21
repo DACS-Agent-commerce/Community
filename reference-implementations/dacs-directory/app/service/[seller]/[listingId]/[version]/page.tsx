@@ -6,6 +6,7 @@ import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { inspectServicePath } from "@/src/catalog/inspection";
 import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
+import { activeOffer } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
 import { directoryEvidenceState } from "@/src/components/directory-evidence-state";
@@ -49,7 +50,8 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const identity = tierMeta(evidence.identityTier);
   const apiHref = `/api/dacs/listings/${encodeURIComponent(listing.listingId)}/${listing.version}?seller=${encodeURIComponent(seller.primaryClaim)}`;
   const inspectHref = inspectServicePath(listing);
-  const engagementEndpoint = listing.status === "active" ? evidence.endpoint.url : undefined;
+  const executable = activeOffer(listing);
+  const engagementEndpoint = executable ? evidence.endpoint.url : undefined;
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
@@ -64,7 +66,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
     description: listing.offering.description,
     identifier: `${listing.listingId}@${listing.version}`,
     provider: { "@type": "Organization", name: seller.displayName },
-    offers: listing.status === "active" && listing.pricing.priceHint ? {
+    offers: executable && listing.pricing.priceHint ? {
       "@type": "Offer",
       price: listing.pricing.priceHint,
       priceCurrency: listing.pricing.currency,
@@ -75,10 +77,10 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: safeJsonLd(structuredData) }} />
       <p className="meta"><Link href="/discover">← discover services</Link></p>
+      {!executable && <p className="note">Archival listing — this version is retained as evidence and is unavailable for new agreements.</p>}
       <section className="service-hero">
         <div className="eyebrow">{listing.offering.category.replaceAll(".", " / ")}</div>
         <h1 className="h1">{listing.offering.title}</h1>
-        <p role="status">Catalog status: {listing.status}{listing.revocationCheck === "incomplete" ? " — revocation check incomplete; not purchasable" : ""}</p>
         <p className="hero-sub">{listing.offering.description || "This seller has not supplied a service description."}</p>
         <div className="service-provider-row">
           <span>Offered by <Link className="text-link" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>{seller.displayName}</Link></span>

@@ -39,7 +39,7 @@ const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
   bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:",
 };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
   const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
@@ -92,7 +92,7 @@ globalThis.fetch = async (input, init) => {
   if (path.startsWith("/storage-program/")) {
     const at = path.slice("/storage-program/".length);
     const entry = storage[at];
-    if (!entry) return new Response(null, { status: 404 });
+    if (!entry) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     const count = (reads.get(at) ?? 0) + 1;
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));
@@ -143,7 +143,7 @@ function sql(query: string) {
 }
 const scanCounts = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")[0];
 async function agreementFor(jobId: string) {
-  const scope = { agreementVersion: "1", jobId, listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
+  const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   return { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };

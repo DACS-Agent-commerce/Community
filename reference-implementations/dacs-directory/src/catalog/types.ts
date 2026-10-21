@@ -116,13 +116,12 @@ export interface ListingSummary {
   };
   buyerRequirement?: Record<string, unknown>;
   terms?: Record<string, unknown>;
-  status: "active" | "revoked" | "unverified";
-  /** Candidate coverage this pass; not global absence of revocation. */
+  status: "active" | "revoked";
+  /** Coverage of discovered candidates; not withdrawal authority or global absence. */
   revocationCheck?: "complete" | "incomplete";
-  /** Last successful listing plus candidate check, not an observation refresh. */
   lastVerifiedAt?: number | null;
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
-  revocationBinding?: RevocationBinding;
+  revocation?: RevocationBinding;
   catalogObservedAt: number;
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
@@ -266,8 +265,8 @@ export interface ScanProgress {
 }
 
 export interface Catalog {
-  catalogVersion: "1";
   scanProgress?: ScanProgress;
+  catalogVersion: "1";
   generatedAt: number;
   sellers: SellerRecord[];
 }

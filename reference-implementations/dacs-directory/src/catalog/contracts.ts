@@ -55,10 +55,10 @@ export const listingSummarySchema = {
         maxPct: { type: "number" }, selectionRule: { type: "string" }, minTotalHint: { type: "string" },
       },
     },
-    status: { enum: ["active", "revoked", "unverified"] },
+    status: { enum: ["active", "revoked"] },
     revocationCheck: { enum: ["complete", "incomplete"] },
-    lastVerifiedAt: { type: ["integer", "null"], minimum: 0, description: "Last complete listing/candidate verification; null if never verified. Not catalogObservedAt." },
-    revocationBinding: {
+    lastVerifiedAt: { type: ["integer", "null"], minimum: 0 },
+    revocation: {
       type: "object",
       required: [
         "sellerPrimaryClaim", "listingId", "listingVersion", "listingContentHash",
@@ -93,19 +93,9 @@ export const listingSummarySchema = {
   },
   allOf: [{
     if: { properties: { status: { const: "revoked" } }, required: ["status"] },
-    then: { required: ["revocationBinding"] },
-    else: { not: { required: ["revocationBinding"] } },
+    then: { required: ["revocation"] },
+    else: { not: { required: ["revocation"] } },
   }],
-} as const;
-
-export const listingPageSchema = {
-  type: "object", required: ["listings", "total", "scanProgress"],
-  properties: {
-    listings: { type: "array", items: listingSummarySchema },
-    total: { type: "integer", minimum: 0 },
-    cursor: { type: "string", description: "Pagination offset; not the chain scan cursor." },
-    scanProgress: scanProgressSchema,
-  },
 } as const;
 
 export const deadLetterDiagnosticSchema = {
@@ -165,8 +155,8 @@ export const catalogStatusSchema = {
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
-    generatedAt: { type: "integer" },
     scanProgress: scanProgressSchema,
+    generatedAt: { type: "integer" },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },
@@ -294,7 +284,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs": { get: { summary: "API index", responses: { "200": { description: "Linked API capabilities" } } } },
     "/api/dacs/listings": {
       get: {
-        summary: "Search active services; incomplete revocation checks are excluded",
+        summary: "Search active services and verified withdrawal records",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
@@ -310,7 +300,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated active-only page with persisted scan progress", content: { "application/json": { schema: { $ref: "#/components/schemas/ListingPage" } } } }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page with persisted scan progress", content: { "application/json": { schema: { type: "object", properties: { listings: { type: "array", items: listingSummarySchema }, total: { type: "integer" }, cursor: { type: "string" }, scanProgress: scanProgressSchema } } } } }, "400": { description: "Invalid pagination" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -326,9 +316,16 @@ export const openApiDocument = (origin: string) => ({
     },
     "/api/dacs/bundles/{jobId}": {
       get: {
-        summary: "Retrieve BB-4-verified DACS-5 BundleBindings known to this catalog",
-        parameters: [{ name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } }],
-        responses: { "200": { description: "Signed BundleBinding candidates" }, "400": { description: "Invalid jobId" } },
+        summary: "Retrieve every BB-4-verified DACS-5 BundleBinding this catalog holds for the job, whoever signed it",
+        parameters: [
+          { name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+          { name: "cursor", in: "query", description: "Opaque cursor from the previous page", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "A page of signed BundleBindings with `total` and, when more remain, the next `cursor`" },
+          "400": { description: "Invalid jobId or pagination" },
+        },
       },
     },
     "/api/dacs/inspect-service/{listingId}/{version}": {
@@ -365,8 +362,6 @@ export const openApiDocument = (origin: string) => ({
   },
   components: { schemas: {
     ListingSummary: listingSummarySchema,
-    ListingPage: listingPageSchema,
-    ScanProgress: scanProgressSchema,
     DeadLetterDiagnostic: deadLetterDiagnosticSchema,
     ListingRejectionDiagnostic: listingRejectionDiagnosticSchema,
     IndexerScanRun: indexerScanRunSchema,

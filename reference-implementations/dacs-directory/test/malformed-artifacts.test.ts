@@ -36,7 +36,7 @@ const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
   bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:",
 };
-const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "hex") =>
+const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
   const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
@@ -89,7 +89,7 @@ globalThis.fetch = async (input, init) => {
   if (path.startsWith("/storage-program/")) {
     const at = path.slice("/storage-program/".length);
     const entry = storage[at];
-    if (!entry) return new Response(null, { status: 404 });
+    if (!entry) return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     const count = (reads.get(at) ?? 0) + 1;
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));
@@ -150,7 +150,7 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   assert.ok(catalog.generatedAt > 42);
   const [indexed] = catalog.sellers[0].listings;
   assert.equal(indexed.status, "revoked");
-  assert.equal(indexed.revocationBinding?.markerAnchor.locator, validMarker);
+  assert.equal(indexed.revocation?.markerAnchor.locator, validMarker);
   const queue = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     assert.deepEqual(queue.prepare("SELECT locator FROM revocation_candidates WHERE listing_hash = ? AND state = 'pending'")
@@ -264,7 +264,7 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const unhashable = locator(44);
   const name = "dacs3:agreement:job-attribution";
   const buyerBundle = { data: JSON.stringify({ bundleVersion: "1", jobId: "job-attribution", parties: [], anchoredByRole: "buyer" }), owner: ownerOf(buyer) };
-  const scope = { agreementVersion: "1", jobId: "job-attribution", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
+  const scope = { agreementVersion: "1", jobId: "job-attribution", derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
@@ -345,7 +345,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
-    agreementVersion: "1", jobId, listingRef, parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+    agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
@@ -449,7 +449,9 @@ test("identity tier skips claims whose verification artifacts have no canonical 
 
 test("reindex drops malformed carried bindings and still indexes every later seller", async () => {
   const listingAnchor = locator(81);
-  chain({ [listingAnchor]: { data: JSON.stringify(listing) } }, [listingAnchor]);
+  const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
+  chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
   assert.throws(() => contentHash(carried), RangeError);
@@ -469,7 +471,9 @@ test("reindex drops malformed carried bindings and still indexes every later sel
 
 test("a seller whose record cannot be indexed is logged and omitted while later sellers are indexed", async () => {
   const listingAnchor = locator(91);
-  chain({ [listingAnchor]: { data: JSON.stringify(listing) } }, [listingAnchor]);
+  const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
+  chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   // Legacy or hand-edited registration JSON is untrusted carriage too.
   const broken = { primaryClaim: buyer, displayName: "Broken", listingAnchors: null } as unknown as Registration;
   resetIndex([broken, { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 44);

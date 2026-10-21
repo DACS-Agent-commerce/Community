@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -39,46 +38,29 @@ const transactions = [
 ];
 
 let blockReads = 0;
-const server = createServer((req, res) => {
-  if (req.method === "GET" && req.url === `/storage-program/${locator}`) {
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ success: true, owner: `0x${"1".repeat(64)}`, programName: "dacs5:bundle:job-sr2-test", data: bundle }));
-    return;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  if (!init?.body && new URL(String(input)).pathname === `/storage-program/${locator}`) {
+    return Response.json({ success: true, owner: `0x${"1".repeat(64)}`, programName: "dacs5:bundle:job-sr2-test", data: bundle });
   }
-  let body = "";
-  req.setEncoding("utf8");
-  req.on("data", (chunk) => { body += chunk; });
-  req.on("end", () => {
-    const call = JSON.parse(body).params?.[0];
-    res.setHeader("content-type", "application/json");
-    if (call?.message === "getTransactions") {
-      const start = call.data?.start;
-      const limit = call.data?.limit ?? 100;
-      const page = transactions.filter((tx) => start === "latest" || tx.id <= start).slice(0, limit);
-      res.end(JSON.stringify({ result: 200, response: page }));
-      return;
-    }
-    if (call?.message === "getBlockByNumber" && call.data?.blockNumber === 30) {
-      blockReads += 1;
-      res.end(JSON.stringify({ result: 200, response: {
-        id: 31,
-        number: 30,
-        status: "confirmed",
-        hash: "9".repeat(64),
-        content: { timestamp: 1_785_920_618, ordered_transactions: [writeHash] },
-      } }));
-      return;
-    }
-    res.end(JSON.stringify({ result: 200, response: null }));
-  });
-});
-await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-const address = server.address();
-if (!address || typeof address === "string") throw new Error("test server did not bind");
+  const call = JSON.parse(String(init?.body)).params?.[0];
+  if (call?.message === "getTransactions") {
+    const start = call.data?.start;
+    const limit = call.data?.limit ?? 100;
+    const page = transactions.filter((tx) => start === "latest" || tx.id <= start).slice(0, limit);
+    return Response.json({ result: 200, response: page });
+  }
+  if (call?.message === "getBlockByNumber" && call.data?.blockNumber === 30) {
+    blockReads += 1;
+    return Response.json({ result: 200, response: { id: 31, number: 30, status: "confirmed", hash: "9".repeat(64),
+      content: { timestamp: 1_785_920_618, ordered_transactions: [writeHash] } } });
+  }
+  return Response.json({ result: 200, response: null });
+};
 
 // Import isolation is security-significant: the store opens SQLite at import.
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
-process.env.DEMOS_RPC = `http://127.0.0.1:${address.port}`;
+process.env.DEMOS_RPC = "https://rpc.example";
 process.env.DACS_SCAN_FINALITY_DEPTH = "0";
 
 const { contentHash } = await import("@kynesyslabs/dacs/canonical");
@@ -86,7 +68,7 @@ const { scanChain, scanConsensusAnchorBackfill } = await import("../src/catalog/
 const store = await import("../src/catalog/store.js");
 
 test.after(() => {
-  server.close();
+  globalThis.fetch = originalFetch;
   rmSync(dataDirectory, { recursive: true, force: true });
 });
 

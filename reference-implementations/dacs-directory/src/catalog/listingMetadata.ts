@@ -60,7 +60,7 @@ export function listingPresentation(scope: Record<string, unknown>) {
       : typeof scope.description === "string" ? scope.description.slice(0, 2000) : "",
     category,
     tags: boundedStrings(currentOffering?.tags ?? scope.tags, 16, 64),
-    rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, protocolId),
+    rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, /^[A-Za-z0-9:-]{1,128}$/),
     delivery: currentOffering
       ? pipeline.filter((kind) => kind.startsWith("deliver-"))
       : boundedStrings(scope.supportedDelivery, 16, 128, protocolId),

@@ -4,7 +4,7 @@ import { catalogScanProgress } from "@/src/catalog/freshness";
  * Normative filters plus q/profile directory extensions.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { activeCatalogListings, primaryClaimMatches } from "@/src/catalog/discovery";
+import { discoveryListing, primaryClaimMatches } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
 import { catalogJson } from "@/src/catalog/http";
@@ -49,9 +49,8 @@ export async function GET(req: NextRequest) {
   const { limit, cursor } = pagination;
 
   const catalog = loadCatalog();
-  // Discovery only advertises offers that remain active. Revoked listings stay
-  // available on the seller history/detail surfaces with an explicit status.
-  const all = activeCatalogListings(catalog);
+  // Machine discovery retains authenticated withdrawal tombstones.
+  const all = catalog.sellers.flatMap((seller) => seller.listings).filter(discoveryListing);
   const tierByClaim = new Map(catalog.sellers.map((seller) => [seller.primaryClaim, seller.identityTier ?? "self-declared"]));
   const filtered = all.filter((l) => {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;

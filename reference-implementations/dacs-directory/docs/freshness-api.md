@@ -1,30 +1,26 @@
-# Directory scan progress and revocation checks (candidate Community extension)
+# Directory scan progress and candidate coverage
 
-This is an unmerged change based on Community 9ce534b0ddec4b2867f358b62ce9d8ef8c6e90f1. It describes the patched API, not the currently deployed API. No signed manifest/key has been approved; TLS origin trust remains required. It is advisory node-derived evidence, not authenticated finality or a universal purchase authorization.
+Proposed extension against Community f13f2335201bec2b0ab1733dde9b98f3d9abcd52. This document describes the proposed API, not a currently deployed release. Responses remain unsigned advisory node-derived context, not authenticated global finality or purchase authorization.
 
-GET /api/dacs/listings?limit=20 returns listings (array), total (whole filtered active set), optional cursor (pagination string offset), and scanProgress. Pass pagination cursor unchanged to the next request. It is absent on the last page. Do not confuse it with scanProgress.cursor, a number from the chain scan. Reject inconsistent snapshot values between pages and restart pagination after a catalog refresh.
+GET /api/dacs/listings returns listings, total, an optional string pagination cursor and scanProgress. GET /api/dacs/status includes the same persisted scanProgress for the published catalog. The snapshot is committed with its catalog and successful run. A failed refresh can change working diagnostics but does not change the published snapshot. Check identical scanProgress and catalog observation values across pages; restart pagination when they change. The numeric scanProgress.cursor is distinct from the string pagination cursor.
 
-GET /api/dacs/status includes the same persisted scanProgress for the published catalog. Other status fields describe live/current scanner diagnostics and may differ after a failed refresh. They do not rewrite the catalog snapshot.
+All six scanProgress members are integer or null; legacy missing progress returns six nulls. Unknown is never fabricated zero lag. Times use UTC Unix milliseconds:
 
-Example body (synthetic, not a live claim):
+- cursor: finalized transaction cursor reached by this completed pass.
+- tip: node tip observed during the scan, not a global or independently authenticated tip.
+- lag: max(0, tip - cursor), including configured finality depth (default two transactions).
+- cursorAdvancedAt: actual observed cursor increase, carried through published snapshots. An upgraded cursor with no observed increase is unknown. Existing upstream diagnostic seeding remains separate and unchanged.
+- lastSuccessfulFullScanAt: completion of this successful whole indexing pass, including the walk from fromTx to its stop boundary and listing processing. It does not mean every incremental pass was a genesis rebuild. Failed/truncated scans do not advance it.
+- fromTx: walk's lower boundary; zero means the pass walked to genesis.
+
+Example (synthetic):
 
 ```json
 {"listings":[],"total":0,"scanProgress":{"cursor":100,"tip":102,"lag":2,"cursorAdvancedAt":1792000000000,"lastSuccessfulFullScanAt":1792000060000,"fromTx":98}}
 ```
 
-All scanProgress members are integer or null. Missing legacy progress is returned as all null; unknown never means zero lag/freshness. Times are UTC Unix milliseconds:
+Each returned newly indexed listing carries revocationCheck: complete | incomplete and lastVerifiedAt: integer | null. With no verified revocation binding, unread candidates or remaining pending work make coverage incomplete. lastVerifiedAt then retains the prior time for that exact seller/listing/version/hash, or null if no complete check exists. It advances on a complete check; fetching the API does not refresh it. A verified or retained seller-bound revocation is complete under the existing RB-3 rule, even if its marker later becomes unreadable.
 
-- cursor: last processed finalized transaction id in this completed catalog pass.
-- tip: node tip observed by that scan, not a second node/global tip.
-- lag: max(0, tip - cursor); includes the scanner's configured finality depth (default 2). A quiet chain can have an unchanged cursor and a new completed-pass time. A stale node can report a quiet tip; these fields cannot detect that alone.
-- cursorAdvancedAt: last time the persisted scan cursor increased, not refreshed just for this API request.
-- lastSuccessfulFullScanAt: completion timestamp for a successful full indexing pass (complete history walk from fromTx to its stop boundary plus registered-listing processing), not proof of a genesis rebuild on every refresh. Failed or truncated scans never advance it.
-- fromTx: starting lower boundary. Zero means this pass walked to genesis; a normal incremental pass is not a cold rebuild.
+This extension preserves current upstream withdrawal rules. Raw discovery hints do not acquire withdrawal authority and do not by themselves change an active listing's status or hide it. An active row can therefore report incomplete candidate coverage. Existing authenticated unresolved withdrawal sources still cause upstream suppression, and verified/retained revocations still use status=revoked with the existing revocation binding property. The active/revoked vocabulary, authenticated withdrawal carriage, current-marker adjudication and offer visibility are unchanged. The coverage flag is context for a buyer's own refusal policy, not a new admission policy. Complete describes only discovered candidate work, not global absence of undiscovered revocations or stale-node responses.
 
-Each newly indexed listing includes revocationCheck (complete or incomplete) and lastVerifiedAt (integer or null). catalogObservedAt means this pass observed the listing. lastVerifiedAt advances only when the listing verifies and the candidate-marker check completes, or a valid revocation binding verifies. On an incomplete check it retains the last successful value for that same seller/listing/version/hash, or null if none exists. It is never minted merely by serving/fetching the API.
-
-An unreadable/throwing marker, or candidates left beyond the 16-verification batch, produces status=unverified, revocationCheck=incomplete. Discovery collections omit unverified and revoked offers; seller/detail history can show them, with no offer metadata or linked engagement endpoint on the service page. Do not interpret an empty active collection as a clean full-history statement. A verified revoked marker yields status=revoked with its binding; a later unreadable marker cannot yield active. Complete means the currently discovered candidate set was exhausted, not that undiscovered revocations or stale-node responses are impossible. Reject legacy absent check/time fields as unknown when your policy requires these new guarantees.
-
-Consumer policy: require complete check, a recent lastVerifiedAt AND recent lastSuccessfulFullScanAt under your own clock/age limit, plausible cursor/tip/lag for the declared finality depth, expected chain/node/profile and independently verified listing/marker bytes. Validate timestamps are not future values. A fresh catalogObservedAt or a fresh HTTP fetch alone proves none of this. Even an active row is not an instruction to buy; trust/integrity/finality checks and authorization remain the buyer's responsibility. An unapproved signing key, network failure or missing fields must not be silently replaced by a successful purchase decision.
-
-Public requests can use a descriptive User-Agent. No wallet, token, seed, signature request or POST is needed to read these endpoints. This extension does not grant trust to a second origin automatically.
+A buyer requiring this extension should refuse missing/incomplete coverage, unknown or stale verification/pass times, implausible cursor/tip/lag, future timestamps and inconsistent pages under its configured age/finality/node/profile/origin policies. A fresh catalogObservedAt or fetch time establishes none of those policies. Independent listing/marker verification and explicit purchase authorization remain the buyer's responsibility. No signed catalog/key, second-origin trust, capacity evidence or signing operation is added here.
