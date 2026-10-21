@@ -35,9 +35,16 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 
 ```bash
 npm run setup    # one-time: vendors + builds dacs-sdk (not yet on npm), installs the app
+npm run check:node-deployment  # is the Demos node the pinned chain and build? exits 1 and prints the values to review if not
 npm run index    # verify registrations against chain state → SQLite catalog
 npm run dev      # http://localhost:3400
 ```
+
+The default node (node2) no longer serves the pinned chain and build (see `DEMOS_CHAIN_IDENTITY`
+and `DEMOS_NODE_BUILDS` below), so with default settings `npm run check:node-deployment` exits 1
+and `npm run index` refuses without changing the catalog. Review the chain and build the check
+prints and set both variables, or point `DEMOS_RPC` at a node that serves the pinned deployment,
+before indexing. The Railway start script runs the same check once at boot and logs the refusal.
 
 `setup` checks out the reviewed dacs-sdk revision pinned in
 `scripts/setup-sdk.sh`; no globally installed SDK is required. For a fresh, isolated
@@ -254,6 +261,14 @@ Directory reads exactly these two spellings, verified under the presenting claim
 over the same bytes, and those Listings stay in the catalog with no operator action. The
 pinned SDK reader's presentation verifier reads base64url only, so an SDK buyer still
 refuses a hex presentation until the Standard settles the encoding.
+
+That keeps a main-era Listing only when its other content is admissible. Main's `/register`
+form defaulted to an `attested-payload` deliverable with no `verificationMethod`. DACS-4 §9.6.3
+DPA-1 requires a Listing whose pipeline contains `deliver-attested-payload` to carry a present,
+well-formed `verificationMethod` and says the reader MUST reject it otherwise, so such a Listing
+is excluded as `VERIFICATION_METHOD_INVALID` and no operator action restores it. The
+storage-program delivery shape that main's form also offered stays. Versions are immutable, so
+its seller publishes a new Listing ID from a current SDK seller runtime.
 
 Earlier `/register` versions also wrote raw hex into the Listing signature. CORE §B.7
 SIG-6 requires canonical base64url for that envelope, so unless an operator pins them

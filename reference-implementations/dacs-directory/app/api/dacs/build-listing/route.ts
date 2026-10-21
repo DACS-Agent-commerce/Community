@@ -309,6 +309,12 @@ export async function POST(req: NextRequest) {
   // the native address from the logical one.
   const programNameFor = (version: number) =>
     logicalToStorageProgramName(listingAddress(did, serviceId, version));
+  // Earlier /register versions named the program `dacs1-<base64url(logical
+  // address)>`. Those versions are still occupied on chain, so the occupancy
+  // check reads both names; new programs are only ever created under the
+  // current one.
+  const legacyProgramNameFor = (version: number) =>
+    `dacs1-${Buffer.from(listingAddress(did, serviceId, version), "utf8").toString("base64url")}`;
   const recoverable = (verified: Awaited<ReturnType<typeof verifyStoredListing>>) => Boolean(
     verified &&
     verified.profile === "dacs-v0.1" &&
@@ -318,7 +324,16 @@ export async function POST(req: NextRequest) {
   );
   // An occupied but invalid version cannot establish a conforming version
   // sequence. Refuse it below; recovery requires a fresh listing ID.
-  const resolution = await resolveOwnedAnchorByName(programNameFor(listingVersion), owner);
+  let programName = programNameFor(listingVersion);
+  let resolution = await resolveOwnedAnchorByName(programName, owner);
+  if (resolution.status === "absent") {
+    const legacyName = legacyProgramNameFor(listingVersion);
+    const legacy = await resolveOwnedAnchorByName(legacyName, owner);
+    if (legacy.status !== "absent") {
+      resolution = legacy;
+      if (legacy.status === "present") programName = legacyName;
+    }
+  }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
   let signedCandidate: Record<string, unknown> | undefined;
@@ -353,7 +368,6 @@ export async function POST(req: NextRequest) {
   }
 
   const logicalAddress = listingAddress(did, serviceId, listingVersion);
-  const programName = programNameFor(listingVersion);
   if (resolution.status === "indeterminate") {
     return NextResponse.json(
       { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },

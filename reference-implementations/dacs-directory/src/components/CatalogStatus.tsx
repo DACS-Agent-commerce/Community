@@ -78,7 +78,7 @@ export default function CatalogStatus() {
       {rejected && rejected.total > 0 && (
         <details className="listing-rejection-notice">
           <summary>{rejected.total.toLocaleString()} listing candidate{rejected.total === 1 ? "" : "s"} need seller attention</summary>
-          <p>These candidates are excluded from discovery. Republish a corrected version with the current SDK, then let the Directory reindex it.</p>
+          <p>These candidates are excluded from discovery. Versions are immutable, so a corrected Listing needs a new Listing ID, published from a current SDK seller runtime; then let the Directory reindex it.</p>
           <ul>
             {rejected.items.map((item) => (
               <li key={`${item.locator}:${item.code}`}>

@@ -148,6 +148,22 @@ export async function pinnedNodeDeployment(): Promise<
 }
 
 /**
+ * What the configured node reports, in the form DEMOS_NODE_BUILDS and
+ * DEMOS_CHAIN_IDENTITY take, with the pin's verdict. For operators deciding
+ * whether to re-pin (`npm run check:node-deployment`); reviewing the reported
+ * chain and build is still the operator's call. Throws when the node cannot be read.
+ */
+export async function observeNodeDeployment(): Promise<{
+  build: string | null;
+  chainIdentity: string;
+  pin: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
+}> {
+  const networkInfo = await nodeCall("getNetworkInfo", {});
+  const servedChain = await chainIdentity();
+  return { build: reportedNodeBuild(networkInfo), chainIdentity: servedChain, pin: await pinnedNodeDeployment() };
+}
+
+/**
  * What the configured, pinned node reports about one listing write. None of it
  * is authenticated: Demos consensus (validator signatures, eligible pool,
  * quorum) is not verified, and on Demos a valid `included` write is also

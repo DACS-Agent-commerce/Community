@@ -63,8 +63,10 @@ const record = (value: unknown): Record<string, unknown> | null =>
 
 // Directory catalog profile: the rules this catalog keeps on top of the pinned
 // SDK reader's isListing. They only ever refuse, and run after isListing has
-// accepted the artifact, so the Directory never admits a Listing an SDK reader
-// refuses. Procurement remains outside this reader profile until reconciliation
+// accepted the artifact, so these rules never admit a Listing isListing
+// refuses. They are not the whole reader: the identity presentation also
+// accepts main's hex signature spelling, which the SDK's presentation
+// verifier refuses (README, "Listings that /register published"). Procurement remains outside this reader profile until reconciliation
 // can resolve the publisher as buyer and attribute supplier history to the
 // agreement seller.
 const PHASES = new Set([

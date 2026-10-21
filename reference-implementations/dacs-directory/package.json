@@ -14,6 +14,7 @@
     "check:node-runtime": "node scripts/check-node-runtime.mjs",
     "verify:origin-sources": "node scripts/verify-origin-sources.mjs",
     "check:node": "tsx scripts/check-node-contract.ts",
+    "check:node-deployment": "tsx scripts/check-node-deployment.ts",
     "check:listing-upgrade": "tsx scripts/check-live-listing-upgrade.ts",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:e2e": "playwright test e2e/home.spec.ts e2e/register.spec.ts",
