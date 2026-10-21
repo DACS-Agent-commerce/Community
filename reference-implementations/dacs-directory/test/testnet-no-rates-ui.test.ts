@@ -83,7 +83,7 @@ test("rendered legacy filter and ranking URLs explicitly refuse the query and of
     assert.match(html, /Clear all filters/);
     assert.doesNotMatch(html, /class="card service-card"/);
   }
-  for (const query of ["", "category=services&rail=pay-dem&identityTier=self-declared"]) {
+  for (const query of ["", "category=services&rail=demos-native:DEM&identityTier=self-declared"]) {
     const html = renderDiscovery(query);
     assert.doesNotMatch(html, /role="alert"/, query);
     assert.match(html, /class="card service-card"/, query);

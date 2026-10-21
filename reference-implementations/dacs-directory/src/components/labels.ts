@@ -1,9 +1,10 @@
 /** Human labels for the spec's kebab-case rail / delivery / negotiation ids. */
 export const RAIL_LABELS: Record<string, string> = {
   "demos-native:DEM": "DEM",
-  "x402:default": "USDC · x402",
+  // DACS-4 §9.4.2: the generic x402 rail; the signed price names its currency.
+  "x402:default": "x402",
   "pay-dem": "DEM",
-  "pay-x402": "USDC · x402",
+  "pay-x402": "x402",
   "ap2:stripe-paymentintents": "Stripe PaymentIntents · AP2",
 };
 export const railLabel = (r: string) => RAIL_LABELS[r] ?? r.replace(/^pay-/, "");

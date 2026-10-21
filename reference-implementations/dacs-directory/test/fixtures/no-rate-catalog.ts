@@ -42,7 +42,8 @@ export function noRateCatalog(): Catalog {
       anchor: { kind: "storage-program", locator: `stor-${"9".repeat(40)}` },
       seller: { primaryClaim: noRateClaim, displayName: "Observed History Service" },
       artifactProfile: "dacs-v0.1",
-      offering: { title: "Observed history inspection", category: "services.test", tags: ["history"], rails: ["pay-dem"] },
+      // A current offer names the registry rail; an alias-only offer is archival.
+      offering: { title: "Observed history inspection", category: "services.test", tags: ["history"], rails: ["demos-native:DEM"] },
       pricing: { kind: "fixed", priceHint: "2", currency: "DEM" },
       status: "active", catalogObservedAt: 200,
       // Deliberately stale numeric metrics exercise reads before any reindex.

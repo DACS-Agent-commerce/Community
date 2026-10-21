@@ -1,7 +1,6 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "./canonical.js";
 import {
   ARTIFACT_SEPARATORS,
-  isCanonicalBase64Url,
   isListing,
   isVerificationMethod,
   readListingArtifact,
@@ -10,7 +9,13 @@ import {
   type LegacyMvpListing,
   type Listing,
 } from "@kynesyslabs/dacs/artifacts";
-import { identityBundleHash } from "../sdkVerification.js";
+// This module reaches the browser bundle (VerifyDeal → bundlePolicy). The
+// SDK's identity barrel also loads its domain-claim and job-ID modules, whose
+// node:util/node:crypto names the browser shims do not provide, so import the
+// leaf module. test/client-bundle-imports.test.ts pins this for every client
+// entry.
+import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
+import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
   resolvePrimaryClaimKey,
@@ -21,38 +26,15 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import {
+  canonicalSignatureBytes,
+  importLegacySignatureValue,
+  legacySignatureBytes,
+  presentationSignatureBytes,
+} from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
-
-/**
- * Legacy-MVP raw hex or base64url. Used for legacy Listings, identity
- * presentations (whose encoding the SDK leaves to the presentation verifier)
- * and revocation markers, where accepting either encoding can only withdraw a
- * Listing. Never used for a current Listing's own signature.
- */
-function decodeSignature(value: string): Uint8Array | null {
-  const hex = value.replace(/^(0x)+/i, "");
-  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Uint8Array.from(Buffer.from(hex, "hex"));
-  try {
-    const decoded = Buffer.from(value, "base64url");
-    return decoded.length === 64 ? Uint8Array.from(decoded) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * CORE §B.7 SIG-6: a current ComponentSignature value is canonical unpadded
- * base64url, and Ed25519 values decode to exactly 64 bytes. Raw hex is the
- * legacy-MVP representation; 128 hex characters are valid base64url text but
- * decode to 96 bytes, so SDK readers reject them.
- */
-function decodeComponentSignature(value: string): Uint8Array | null {
-  if (!isCanonicalBase64Url(value)) return null;
-  const decoded = Buffer.from(value, "base64url");
-  return decoded.length === 64 ? Uint8Array.from(decoded) : null;
-}
 
 interface VerifiedListingBase {
   scope: Record<string, unknown>;
@@ -79,6 +61,66 @@ export type ListingVerificationResult =
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
+// Directory catalog profile: the rules this catalog keeps on top of the pinned
+// SDK reader's isListing. They only ever refuse, and run after isListing has
+// accepted the artifact, so the Directory never admits a Listing an SDK reader
+// refuses. Procurement remains outside this reader profile until reconciliation
+// can resolve the publisher as buyer and attribute supplier history to the
+// agreement seller.
+const PHASES = new Set([
+  "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope",
+  "commit-agreement", "commit-payee-bound-agreement",
+  "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
+  "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
+]);
+/** DACS-4 PricingSpec auction `selectionRule`: a closed enum plus content-hash-bound rule refs. */
+const SELECTION_RULES = new Set(["lowest-price", "highest-price", "first-acceptable"]);
+const validSelectionRule = (value: unknown): boolean =>
+  typeof value === "string" && (SELECTION_RULES.has(value) || /^rule-ref:[0-9a-f]{64}:\S+$/.test(value));
+
+function validPriceTerm(value: unknown): boolean {
+  const term = record(value);
+  return Boolean(term && typeof term.amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(term.amount) &&
+    Number.isFinite(Number(term.amount)) && Number(term.amount) > 0 && typeof term.currency === "string" && term.currency.length > 0 && term.currency.length <= 64 &&
+    (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
+}
+
+function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
+  const seller = record(listing.seller);
+  const offering = record(listing.offering);
+  const pricing = record(listing.pricing);
+  const terms = record(listing.terms);
+  const pipeline = Array.isArray(listing.pipeline) ? listing.pipeline.map(record) : [];
+  const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
+    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter)
+      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
+        : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
+          typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
+          (pricing.minTotal === undefined || validPriceTerm(pricing.minTotal)) : false;
+  const negotiationIndex = pipeline.findIndex((step) => typeof step?.kind === "string" && step.kind.startsWith("negotiate-"));
+  const conflictOfLawsRule = terms?.conflictOfLawsRule;
+  return pricingOk && pipeline.every((step) => typeof step?.kind === "string" && PHASES.has(step.kind)) &&
+    // VPC-1/2: vet authorization precedes negotiation.
+    pipeline.every((step, index) => step?.kind !== "vet-credentials" || index < negotiationIndex) &&
+    // A sealed-envelope step's selectionRule is authoritative and the auction PricingSpec's must equal it.
+    pipeline.every((step) => step?.kind !== "negotiate-sealed-envelope" ||
+      (validSelectionRule(record(step.parameters)?.selectionRule) && record(step.parameters)?.selectionRule === pricing?.selectionRule)) &&
+    typeof offering?.category === "string" && /^[a-z0-9.-]{1,64}$/.test(offering.category) &&
+    (seller?.publicEndpoint === undefined || safePublicEndpoint(seller.publicEndpoint) !== undefined) &&
+    (typeof conflictOfLawsRule !== "string" || !conflictOfLawsRule.startsWith("rule-ref:") || /^rule-ref:\S+$/.test(conflictOfLawsRule));
+}
+// NOTE (open-world listing shape): the directory does NOT reject a listing that carries
+// unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
+// fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
+// newer-minor artifact correctly; SIG-5 (preserve-unknown) is the mechanism that makes that
+// safe — a verifier MAY ignore the *meaning* of unknown fields but MUST preserve them (it must
+// not strip them from the signed content). This validator only reads the recognised fields
+// below, so unknown fields are neither indexed nor interpreted, and verifyListing() hashes the
+// whole scope (contentHash) so they remain signature-bound — a field injected after signing
+// still fails the hash. A closed top-level
+// allowlist here would reject every listing produced under the first minor that adds a
+// top-level field, breaking forward compatibility.
+
 function verificationMethodFailure(raw: Record<string, unknown>): boolean {
   const offering = record(raw.offering);
   const deliverable = record(offering?.deliverable);
@@ -97,36 +139,32 @@ function invalid(
   return { ok: false, code };
 }
 
-async function verifyEd25519(
-  message: Uint8Array,
-  signer: string,
-  value: unknown,
-  resolveKey: ResolvePrimaryClaimKey,
-): Promise<ResolvedPrimaryClaimKey | null> {
-  const sig = typeof value === "string" ? decodeSignature(value) : null;
-  return sig
-    ? verifyPrimaryClaimSignature(message, sig, signer, "ed25519", resolveKey)
-    : null;
-}
-
-async function verifyIdentityPresentation(
+/**
+ * DACS-1 §6.3.2 per-claim presentation by the presenting claim: the entry
+ * whose `ref` is the exact `presentedBy` bytes, verified under that claim's
+ * key over the same bundle-presentation bytes the SDK reader signs. The
+ * Standard leaves this signature's encoding open; the pinned SDK reader
+ * (sdkReaderVerifiers.ts) reads only Base64URL, but main's `/register` wrote
+ * wallet hex, so both spellings are read (presentationSignatureBytes). The
+ * spelling is signed Listing scope, so the Listing signature fixes it.
+ */
+export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
-  sellerClaim: string,
+  presentedBy: string,
   resolveKey: ResolvePrimaryClaimKey,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
-  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
-  const signature = presentation.signatures.map(record).find((item) =>
-    typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === sellerIdentity);
-  if (!signature) return null;
+  const entry = presentation.signatures.map(record).find((item) => item?.ref === presentedBy);
+  const sig = presentationSignatureBytes(entry?.signature);
+  if (!sig) return null;
   // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
   // member is bundle content, unlike in contentHash.
   const message = Buffer.from(
     `dacs-bundle-presentation:v1:${identityBundleHash(identity as unknown as IdentityBundle)}`,
     "utf8",
   );
-  return verifyEd25519(message, sellerClaim, signature.signature, resolveKey);
+  return verifyPrimaryClaimSignature(message, sig, presentedBy, "ed25519", resolveKey);
 }
 
 /**
@@ -142,7 +180,7 @@ export async function verifyListingResult(
   try {
     return await verifyListingArtifact(raw, resolveKey);
   } catch {
-    return invalid(raw.dacsVersion === "1" ? "NORMATIVE_LISTING_INVALID" : "LEGACY_LISTING_INVALID");
+    return invalid("dacsVersion" in raw ? "NORMATIVE_LISTING_INVALID" : "LEGACY_LISTING_INVALID");
   }
 }
 
@@ -151,7 +189,9 @@ async function verifyListingArtifact(
   resolveKey: ResolvePrimaryClaimKey,
 ): Promise<ListingVerificationResult> {
   if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
-  if (raw.dacsVersion === "1") {
+  // Select the profile before validating it. A failed current artifact must
+  // never acquire the looser legacy contract by adding draft SDK fields.
+  if ("dacsVersion" in raw) {
     // Validate the exact received bytes, as the pinned SDK reader does at step
     // 1. CF-2 scheme-case leniency applies to standalone ClaimReference
     // lookups, never to ClaimReferences inside a signed artifact.
@@ -160,6 +200,7 @@ async function verifyListingArtifact(
         ? "VERIFICATION_METHOD_INVALID"
         : "NORMATIVE_LISTING_INVALID");
     }
+    if (!withinDirectoryProfile(raw)) return invalid("NORMATIVE_LISTING_INVALID");
     const listing = raw as unknown as Listing;
     const signatureVerdict = await verifyComponentSignature(
       raw,
@@ -177,7 +218,7 @@ async function verifyListingArtifact(
           return resolved;
         },
         verify: ({ signedBytes, signature, publicKey }) => {
-          const decoded = decodeComponentSignature(signature.value);
+          const decoded = canonicalSignatureBytes(signature.value);
           return Boolean(
             decoded && verifyResolvedPrimaryClaimSignature(
               signedBytes,
@@ -241,7 +282,8 @@ async function verifyListingArtifact(
     typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return invalid("LISTING_SIGNATURE_INVALID");
-  const sig = decodeSignature(s.value);
+  // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
+  const sig = legacySignatureBytes(s.value);
   if (!sig) return invalid("LISTING_SIGNATURE_INVALID");
   const hash = contentHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
@@ -271,6 +313,68 @@ export async function verifyListing(
 ): Promise<VerifiedListing | null> {
   const result = await verifyListingResult(raw, resolveKey);
   return result.ok ? result.value : null;
+}
+
+/**
+ * Read immutable history without weakening SIG-6 admission. Only an operator's
+ * out-of-band pre-upgrade inventory can select the old Directory hex importer;
+ * artifact fields, timestamps and a failed signature never grant that authority.
+ * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
+ * Every read still verifies the complete current schema, the Listing signature
+ * and the identity presentation. The pin's declared encoding applies to the
+ * Listing signature only; a hex presentation needs no pin.
+ */
+export async function verifyStoredListing(
+  raw: Record<string, unknown>,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<VerifiedListing | null> {
+  const result = await verifyStoredListingResult(raw, nativeAddress, resolveKey);
+  return result.ok ? result.value : null;
+}
+
+/** verifyStoredListing with the admission code of the stored artifact when nothing imports it. */
+export async function verifyStoredListingResult(
+  raw: Record<string, unknown>,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<ListingVerificationResult> {
+  const signature = record(raw.signature);
+  if (!("dacsVersion" in raw) || canonicalSignatureBytes(signature?.value)) {
+    return verifyListingResult(raw, resolveKey);
+  }
+  const imported = await importPinnedListing(raw, signature, nativeAddress, resolveKey);
+  return imported ? { ok: true, value: imported } : verifyListingResult(raw, resolveKey);
+}
+
+async function importPinnedListing(
+  raw: Record<string, unknown>,
+  signature: Record<string, unknown> | null,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<VerifiedListing | null> {
+  if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
+  const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  if (!configured || Buffer.byteLength(configured, "utf8") > 65_536) return null;
+  try {
+    const pins = record(JSON.parse(configured));
+    if (!pins || Object.keys(pins).length > 256 || !Object.hasOwn(pins, nativeAddress)) return null;
+    const pin = record(pins[nativeAddress]);
+    if (!pin || pin.encoding !== "lowercase-hex" || typeof pin.contentHash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(pin.contentHash) || typeof pin.sellerPrimaryClaim !== "string" ||
+        pin.listingId !== raw.listingId || pin.listingVersion !== raw.listingVersion) return null;
+    const value = typeof signature?.value === "string"
+      ? importLegacySignatureValue(signature.value, "lowercase-hex") : null;
+    if (!value) return null;
+    // Only the unsigned envelope changes in memory. Keep the native bytes,
+    // signed scope and pinned hash intact; never re-sign or write a replacement.
+    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    return verified && verified.contentHash === pin.contentHash &&
+      verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
+      ? verified : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A bogus candidate must never shadow another valid owner-signed marker. */
@@ -303,7 +407,17 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
-/** Per-listing, per-pass bound on candidate reads and RB-4 verifications. */
+/**
+ * RB-2: SDK readers require the exact `presentedBy` bytes, including any
+ * CF-3 advisory parameters, and the CF-4 address derived from them.
+ */
+export function revocationSellerClaim(listing: VerifiedListing): string {
+  return listing.profile === "dacs-v0.1"
+    ? listing.listing.seller.identity.presentedBy
+    : listing.sellerClaim;
+}
+
+/** Per-listing, per-pass candidate bound; each may check cached and current bytes. */
 export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
 
 /** Candidates examined by one call: unreadable ones are retried later, rejected ones were read and failed RB-4. */
@@ -316,7 +430,9 @@ export interface RevocationCandidateProgress {
  * Fully verify discovered candidates, in the given order and at most `limit`
  * of them, and return the RB-2 binding this catalog can publish. A bogus
  * candidate never shadows a later valid marker; unexamined candidates are
- * left for a later call.
+ * left for a later call. When the first reader supplies cached observations,
+ * a failed check must use the current reader before recording a rejection.
+ * This bounds work to `limit` current reads and at most `2 * limit` checks.
  */
 export async function findValidListingRevocation(
   candidateRefs: string[],
@@ -326,23 +442,25 @@ export async function findValidListingRevocation(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
   progress: RevocationCandidateProgress = { unread: [], rejected: [] },
   limit = REVOCATION_VERIFICATIONS_PER_PASS,
+  readCurrentCandidate?: (ref: string) => Promise<Record<string, unknown> | null>,
 ): Promise<RevocationBinding | null> {
   for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
-    const candidate = await readCandidate(ref);
+    let candidate = await readCandidate(ref);
+    let valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    if (!valid && readCurrentCandidate) {
+      candidate = await readCurrentCandidate(ref);
+      valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+    }
     if (!candidate) {
       progress.unread.push(ref);
       continue;
     }
-    if (!(await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey))) {
+    if (!valid) {
       progress.rejected.push(ref);
       continue;
     }
     const scope = stripSignature(candidate);
-    // RB-2: SDK readers require the exact `presentedBy` bytes, including any
-    // CF-3 advisory parameters, and the CF-4 address derived from them.
-    const sellerPrimaryClaim = listing.profile === "dacs-v0.1"
-      ? listing.listing.seller.identity.presentedBy
-      : listing.sellerClaim;
+    const sellerPrimaryClaim = revocationSellerClaim(listing);
     return {
       sellerPrimaryClaim,
       listingId: String(scope.listingId),
@@ -382,6 +500,7 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
+    // The SDK's RB-1 isRevocationMarker reads revokedAt as a non-negative safe integer.
     !Number.isSafeInteger(scope.revokedAt) ||
     Number(scope.revokedAt) < 0
   ) return false;
@@ -392,7 +511,8 @@ export async function verifyListingRevocation(
     s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return false;
-  const sig = decodeSignature(s.value);
+  // A marker is a current-profile artifact whatever the listing's profile: SIG-6 applies.
+  const sig = canonicalSignatureBytes(s.value);
   if (!sig) return false;
   const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(

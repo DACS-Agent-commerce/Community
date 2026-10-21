@@ -231,7 +231,8 @@ test("an included receipt cannot advance publication to either registration endp
   await page.goto("/register");
   await page.getByRole("button", { name: "Connect Demos wallet" }).click();
   await page.getByRole("button", { name: "Check chain and resume" }).click();
-  await expect(page.locator(".progress-list li.failed")).toContainText("Confirm");
+  await expect(page.locator(".progress-list li.failed")).toContainText("Verify the listing from chain");
+  await expect(page.getByText("The anchored listing failed independent verification.")).toBeVisible();
   expect(preparePosts).toBe(0);
   expect(registrationPosts).toBe(0);
   expect(await page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();

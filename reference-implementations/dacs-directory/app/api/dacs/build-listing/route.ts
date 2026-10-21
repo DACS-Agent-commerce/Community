@@ -14,12 +14,13 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import {
+  assertValidUnicode,
   canonicalize,
   contentHash,
   listingAddress,
-  logicalToStorageProgramName,
   sha256Hex,
-} from "@kynesyslabs/dacs/canonical";
+} from "../../../../src/catalog/canonical.js";
+import { logicalToStorageProgramName } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { isListing, type ListingDraft } from "@kynesyslabs/dacs/artifacts";
 import {
@@ -35,7 +36,8 @@ import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
-import { verifyListing } from "@/src/catalog/listingVerification";
+import { verifyStoredListing } from "@/src/catalog/listingVerification";
+import { importLegacySignatureValue } from "@/src/catalog/signatureValue";
 import { pinnedNodeDeployment } from "@/src/catalog/listingFinality";
 import {
   negotiationPhaseForPricing,
@@ -93,6 +95,7 @@ export async function POST(req: NextRequest) {
   if (body.description.length > 2000) {
     return NextResponse.json({ error: "description exceeds the 2000-char spec cap" }, { status: 400 });
   }
+  try { assertValidUnicode(body); } catch { return NextResponse.json({ error: "invalid Unicode" }, { status: 400 }); }
   if (
     !Array.isArray(body.rails) || body.rails.length > 16 ||
     !body.rails.every((v) => typeof v === "string" && v.length <= 128 && RAIL_ID_PATTERN.test(v)) ||
@@ -121,7 +124,7 @@ export async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  let listingVersion = Math.max(0, ...priorVersions) + 1;
+  const listingVersion = Math.max(0, ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -147,9 +150,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "pricing needs a positive canonical amount and currency" }, { status: 400 });
   }
   if (pricingKind === "negotiable" && (
-    !Number.isFinite(Number(body.pricing?.minPct)) || !Number.isFinite(Number(body.pricing?.maxPct)) ||
+    !Number.isSafeInteger(body.pricing?.minPct) || !Number.isSafeInteger(body.pricing?.maxPct) ||
     Number(body.pricing?.minPct) < 0 || Number(body.pricing?.minPct) >= 100 || Number(body.pricing?.maxPct) < 0
-  )) return NextResponse.json({ error: "negotiation percentages are invalid" }, { status: 400 });
+  )) return NextResponse.json({ error: "negotiation percentages must be nonnegative integers in this publisher profile" }, { status: 400 });
   if (pricingKind === "auction" && body.pricing?.selectionRule && !["lowest-price", "highest-price", "first-acceptable"].includes(body.pricing.selectionRule)) {
     return NextResponse.json({ error: "unsupported auction selection rule" }, { status: 400 });
   }
@@ -203,7 +206,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ identityMessage, identityPresentedAt });
   }
   const identitySigHex = body.identitySignature.replace(/^(0x)+/i, "");
-  if (!/^[0-9a-fA-F]{128}$/.test(identitySigHex)) {
+  // Wallets return hex; CORE §B.7 SIG-6 stores canonical unpadded base64url.
+  const identitySignatureValue = importLegacySignatureValue(identitySigHex.toLowerCase(), "lowercase-hex");
+  if (!identitySignatureValue) {
     return NextResponse.json({ error: "identity signature must be a 64-byte Ed25519 signature" }, { status: 400 });
   }
   let identityOk = false;
@@ -270,7 +275,7 @@ export async function POST(req: NextRequest) {
         ...identityScope,
         presentation: {
           kind: "per-claim",
-          signatures: [{ ref: did, signature: Buffer.from(identitySigHex, "hex").toString("base64url") }],
+          signatures: [{ ref: did, signature: identitySignatureValue }],
         },
       },
       displayName: knownSeller?.displayName ?? body.name.trim(),
@@ -304,7 +309,7 @@ export async function POST(req: NextRequest) {
   // the native address from the logical one.
   const programNameFor = (version: number) =>
     logicalToStorageProgramName(listingAddress(did, serviceId, version));
-  const recoverable = (verified: Awaited<ReturnType<typeof verifyListing>>) => Boolean(
+  const recoverable = (verified: Awaited<ReturnType<typeof verifyStoredListing>>) => Boolean(
     verified &&
     verified.profile === "dacs-v0.1" &&
     verified.sellerClaim === did &&
@@ -322,7 +327,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
     }
     const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
-    if (!/^[0-9a-fA-F]{128}$/.test(listingSigHex)) {
+    const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
+    if (!listingSignatureValue) {
       return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
     }
     let listingSignatureValid = false;
@@ -333,13 +339,12 @@ export async function POST(req: NextRequest) {
         publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
       );
     } catch { /* malformed signatures fail closed */ }
-    // Wallets return hex; CORE §B.7 SIG-6 stores canonical unpadded base64url.
     signedCandidate = {
       ...listing,
       signature: {
         algorithm: "ed25519",
         signer: did,
-        value: Buffer.from(listingSigHex, "hex").toString("base64url"),
+        value: listingSignatureValue,
       },
     };
     if (!listingSignatureValid || !isListing(signedCandidate)) {
@@ -362,7 +367,7 @@ export async function POST(req: NextRequest) {
   let tx: Record<string, unknown> | null = null;
   const exists = resolution.status === "present";
   if (resolution.status === "present") {
-    const verified = await verifyListing(resolution.record.data);
+    const verified = await verifyStoredListing(resolution.record.data, resolution.address);
     if (!verified || !recoverable(verified)) {
       return NextResponse.json(
         { error: "the existing owner-bound program does not contain the expected authenticated listing candidate; choose a new Service ID" },
@@ -372,7 +377,7 @@ export async function POST(req: NextRequest) {
     // Listing versions are immutable. Recover the already-signed artifact and
     // continue registration; never overwrite it with newly generated bytes.
     anchorAddress = resolution.address;
-    publishedListing = verified.listing as unknown as Record<string, unknown>;
+    publishedListing = resolution.record.data;
     publishedHash = verified.contentHash;
   } else {
     // Do not prepare a broadcastable transaction until the wallet has signed

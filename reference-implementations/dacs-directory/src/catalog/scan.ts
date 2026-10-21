@@ -24,11 +24,11 @@ import { programBindingKey } from "./store.js";
 import { discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
-  boundedBundleBindings,
+  catalogBundleBindings,
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "./types.js";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -79,23 +79,22 @@ export type StorageReadFailureCode =
 /** Safe cause classification; response bodies and upstream text are never persisted. */
 export function storageReadFailureCode(status: number, errorCode?: string): StorageReadFailureCode {
   const normalized = typeof errorCode === "string" ? errorCode.trim().toUpperCase() : undefined;
-  if (status === 404) {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (status === 401 || status === 403) {
-    return "STORAGE_NOT_PUBLIC";
-  }
   // A server-side or transport-class status remains retryable even if an
   // untrusted error body happens to carry a terminal-looking code.
   if (status >= 500 || status < 100) return "STORAGE_RPC_UNAVAILABLE";
-  if (normalized === "NOT_FOUND" || normalized === "STORAGE_NOT_FOUND" || normalized === "PROGRAM_NOT_FOUND") {
-    return "STORAGE_NOT_FOUND";
-  }
-  if (normalized === "PERMISSION_DENIED" || normalized === "UNAUTHORIZED") return "STORAGE_NOT_PUBLIC";
+  // Only the node's own answer is terminal: NOT_FOUND on a 404, PERMISSION_DENIED on a 403. Any
+  // other 4xx (a proxy's, a wrong route's; the node never answers 401) stays retryable rather than
+  // hiding an artifact, such as a revocation marker, for good (RB-6).
+  if (status === 404) return normalized === "NOT_FOUND" ? "STORAGE_NOT_FOUND" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 403) return normalized === "PERMISSION_DENIED" ? "STORAGE_NOT_PUBLIC" : "STORAGE_RPC_UNAVAILABLE";
+  if (status === 401) return "STORAGE_RPC_UNAVAILABLE";
   return status >= 200 && status < 300 ? "STORAGE_INVALID_RESPONSE" : "STORAGE_RPC_UNAVAILABLE";
 }
 
 export async function readStorage(address: string, attempts = 3): Promise<StorageRead> {
+  // Scanner reads use native locators only. Reject malformed input locally; an HTTP 400 for a
+  // valid locator says nothing about the program's existence and must remain retryable.
+  if (!/^stor-[0-9a-f]{40}$/.test(address)) return { success: false, failureCode: "ARTIFACT_REJECTED" };
   let lastFailure: StorageReadFailureCode = "STORAGE_RPC_UNAVAILABLE";
   const boundedAttempts = Number.isSafeInteger(attempts) && attempts >= 1 && attempts <= 5 ? attempts : 3;
   for (let attempt = 1; attempt <= boundedAttempts; attempt++) {
@@ -197,8 +196,8 @@ export function isListingRevocationCandidate(value: unknown): boolean {
     Number(marker.listingVersion) > 0 &&
     typeof marker.listingContentHash === "string" &&
     /^[0-9a-fA-F]{64}$/.test(marker.listingContentHash) &&
-    Number.isSafeInteger(marker.revokedAt) &&
-    Number(marker.revokedAt) >= 0 &&
+    typeof marker.revokedAt === "number" &&
+    Math.abs(marker.revokedAt) <= Number.MAX_SAFE_INTEGER &&
     (marker.reason === undefined || typeof marker.reason === "string") &&
     (signed.algorithm === "ed25519" ||
       signed.algorithm === "ecdsa-secp256k1" ||
@@ -531,10 +530,9 @@ export async function scanChain(
     if (data?.bindingVersion === "1" && !verifiedBundleBinding) omittedBindings++;
     if (verifiedBundleBinding) {
       artifactKind = "bundle-binding";
-      const prior = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
-      const bounded = boundedBundleBindings([...prior, verifiedBundleBinding]);
-      bundleBindings.set(verifiedBundleBinding.jobId, bounded.bindings);
-      for (const key of bounded.overflowKeys) bundleBindingOverflow.add(key);
+      const values = bundleBindings.get(verifiedBundleBinding.jobId) ?? [];
+      values.push(verifiedBundleBinding);
+      bundleBindings.set(verifiedBundleBinding.jobId, values);
     } else if (isListingRevocationCandidate(data)) {
       artifactKind = "listing-revocation";
       addRevocationCandidate(revocations, String(data!.listingContentHash).toLowerCase(), address);
@@ -603,6 +601,14 @@ export async function scanChain(
       owners: { buyer: didOf(bundle.owner), seller: seller ?? "" },
       sellerFromAgreement: seller,
     });
+  }
+
+  // Hash, group and sort once per job after collection. Rebuilding the growing
+  // catalog per publication makes a same-job scan quadratic in its record count.
+  for (const [jobId, values] of bundleBindings) {
+    const catalog = catalogBundleBindings(values);
+    bundleBindings.set(jobId, catalog.bindings);
+    for (const key of catalog.overflowKeys) bundleBindingOverflow.add(key);
   }
 
   // Transactions are walked newest first; candidates queue in chain order.

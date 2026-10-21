@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { phaseSummariesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
+import { currentBundleCopiesDiverge, phaseSummariesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
 import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
@@ -74,6 +74,51 @@ test("fault reconciliation uses absolute attribution for every outcome and buyer
     assert.equal(reconcileCurrentCopies(deal, seller, buyerGraph, contradictory).divergent, true);
     assert.equal(reconcileCurrentCopies(deal, seller, buyerGraph, contradictory).refsVerified, false);
   }
+});
+
+test("absolute-fault copies that disagree on faultedParty or outcome class are a dispute, never reputation", () => {
+  // DACS-5 §10.4.3: two fault-bundle copies diverge when faultedParty, the
+  // outcome class or a shared phaseSummary entry differ. Each copy below is
+  // permissible on its own and the phase summaries agree, so only the named
+  // limb can make the pair divergent.
+  const graph = (role: "buyer" | "seller", outcome: string, faultedParty: string): EvidenceGraph => ({
+    profile: "dacs-v0.1", ok: true, signaturesVerified: true, refsVerified: true,
+    bundleContentHash: `${role}-hash`, artifacts: [], ratings: [],
+    bundle: { faultBundleVersion: "1", jobId: "fault", anchoredByRole: role, outcome, faultedParty,
+      parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+      phaseSummary: [phase] },
+  });
+  const disputes = [
+    // Same faultedParty, different class: the buyer reports a failure, the seller an abort.
+    ["class", ["failed-counterparty", "seller"], ["aborted-by-self", "seller"]],
+    ["class", ["aborted-by-other", "seller"], ["failed-perm", "seller"]],
+    ["class", ["completed", "none"], ["failed-substrate", "none"]],
+    // Same class, different faultedParty: each copy blames the other party.
+    ["faultedParty", ["failed-counterparty", "seller"], ["failed-counterparty", "buyer"]],
+    ["faultedParty", ["aborted-by-self", "buyer"], ["aborted-by-self", "seller"]],
+    ["faultedParty", ["failed-counterparty", "orchestrator"], ["failed-counterparty", "buyer"]],
+  ] as const;
+  for (const [limb, [buyerOutcome, buyerFault], [sellerOutcome, sellerFault]] of disputes) {
+    const label = `${limb}: buyer ${buyerOutcome}/${buyerFault}, seller ${sellerOutcome}/${sellerFault}`;
+    const buyerGraph = graph("buyer", buyerOutcome, buyerFault);
+    const sellerGraph = graph("seller", sellerOutcome, sellerFault);
+    assert.equal(currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph.bundle), true, label);
+    assert.equal(currentBundleCopiesDiverge(sellerGraph.bundle, buyerGraph.bundle), true, label);
+    const result = reconcileCurrentCopies(deal, seller, buyerGraph, sellerGraph);
+    assert.equal(result.buyerOk, true, label);
+    assert.equal(result.sellerOk, true, label);
+    assert.equal(result.divergent, true, label);
+    assert.equal(result.refsVerified, false, label);
+    const record: DealRecord = { ...deal, signatureVerified: true, refsVerified: result.refsVerified,
+      reputationEligible: result.refsVerified, sellerOutcome: result.sellerOutcome,
+      faultedParty: sellerFault, finalisedAt: 100, verifiedAt: 100 };
+    assert.equal(deriveSellerReputation([record], 0, 200).bundleCount, 0, label);
+  }
+  // Role-relative respellings of one absolute fault are the same claim.
+  const agreed = reconcileCurrentCopies(deal, seller,
+    graph("buyer", "aborted-by-other", "seller"), graph("seller", "aborted-by-self", "seller"));
+  assert.equal(agreed.divergent, false);
+  assert.equal(agreed.refsVerified, true);
 });
 
 test("orchestrator faults remain in bundle counts while testnet fault denominators are unavailable", () => {

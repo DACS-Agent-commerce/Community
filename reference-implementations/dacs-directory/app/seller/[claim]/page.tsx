@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import CopyText from "@/src/components/CopyText";
 import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
+import { activeOffer } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { CHECKED_BUNDLES_LABEL, COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetricPolicy";
 
@@ -20,7 +21,7 @@ export async function generateMetadata({ params }: { params: Promise<{ claim: st
   if (!seller) return { title: "Agent not found" };
   return {
     title: seller.displayName,
-    description: `${seller.displayName} offers ${seller.listings.length} verifiable DACS service${seller.listings.length === 1 ? "" : "s"}.`,
+    description: `${seller.displayName} offers ${seller.listings.filter(activeOffer).length} active DACS service${seller.listings.filter(activeOffer).length === 1 ? "" : "s"}.`,
     alternates: {
       canonical: `/seller/${encodeURIComponent(seller.primaryClaim)}`,
       types: { "application/json": `/api/dacs/sellers/${encodeURIComponent(seller.primaryClaim)}` },
@@ -32,7 +33,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const { claim } = await params;
   const seller = findSeller(claim);
   if (!seller) notFound();
-  const activeListingCount = seller.listings.filter((listing) => listing.status === "active").length;
+  const activeListingCount = seller.listings.filter(activeOffer).length;
   const hasFixtureListings = seller.listings.some((listing) => listing.anchor.kind === "fixture");
   const t = tierMeta(seller.identityTier ?? "self-declared");
 
@@ -106,6 +107,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
           <div key={l.listingId} className="card" style={{ marginBottom: 12 }}>
             <h3>
               <Link className="card-title-link" href={`/service/${encodeURIComponent(seller.primaryClaim)}/${encodeURIComponent(l.listingId)}/${l.version}`}>{l.offering.title}</Link>{" "}
+              {!activeOffer(l) && <span className="badge">archival listing</span>}
               {l.status === "revoked" && <span className="badge err">revoked</span>}
               <span className={`badge ${l.artifactProfile === "dacs-v0.1" ? "ok" : ""}`}>{l.artifactProfile === "dacs-v0.1" ? "current DACS" : "legacy SDK"}</span>
             </h3>

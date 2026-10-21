@@ -14,7 +14,7 @@ It uses the Node version and SDK revision already pinned by the repository.
   `reference-implementations/dacs-directory/data/` directory. Verification uses
   a separate disposable directory, as shown below.
 - Do not run the indexer or browser tests as part of local static and unit
-  verification. The indexer is a separate, networked activity, and browser
+  verification. The indexer is a separate, networked activity, and the browser
   tests need their own setup.
 
 ## Install the pinned dependencies
@@ -117,7 +117,8 @@ installation above both use `npm ci` for the SDK and app. Use the same
 placeholder origin as the `env:` block of
 `.github/workflows/dacs-directory-ci.yml` (today only
 `NEXT_PUBLIC_DIRECTORY_URL`). That origin is a reserved documentation name, so,
-as in CI, the origin check runs with `--allow-documentation-names`.
+as in CI, the origin check runs with `--allow-documentation-names`. It still
+rejects `.local` and other non-public hosts, so do not substitute a local origin:
 
 ```bash
 (

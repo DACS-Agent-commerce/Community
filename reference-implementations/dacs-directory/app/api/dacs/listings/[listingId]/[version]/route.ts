@@ -7,7 +7,7 @@ import {
   verifyCounterpartyEvidenceFixtureListing,
 } from "@/src/catalog/counterpartyEvidence";
 import { MAX_CLAIM_QUERY_BYTES, sellerIdentity } from "@/src/catalog/discovery";
-import { verifyListing } from "@/src/catalog/listingVerification";
+import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
 import { inspectServicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
@@ -43,7 +43,7 @@ export async function GET(
     });
   }
   const raw = await readAnchor(hit.anchor.locator);
-  const verified = raw ? await verifyListing(raw) : null;
+  const verified = raw ? await verifyStoredListing(raw, hit.anchor.locator) : null;
   if (!verified || verified.contentHash !== hit.contentHash) {
     return NextResponse.json({ error: "listing anchor failed verification" }, { status: 502 });
   }

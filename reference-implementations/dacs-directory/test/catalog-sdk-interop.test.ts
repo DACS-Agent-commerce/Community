@@ -115,11 +115,12 @@ for (const [name, presentedBy] of [
     const filtered = await (await listingsRoute.GET(new NextRequest(
       `https://directory.test/api/dacs/listings?primaryClaim=${encodeURIComponent(claim)}`,
     ))).json();
-    assert.deepEqual(filtered.listings.map((l: { listingId: string }) => l.listingId), ["interop-active"]);
+    // Machine discovery also serves the authenticated withdrawal tombstone.
+    assert.deepEqual(filtered.listings.map((l: { listingId: string }) => l.listingId), ["interop-active", "interop-revoked"]);
     const tiered = await (await listingsRoute.GET(new NextRequest(
       "https://directory.test/api/dacs/listings?identityTier=self-declared",
     ))).json();
-    assert.deepEqual(tiered.listings.map((l: { listingId: string }) => l.listingId), ["interop-active"]);
+    assert.deepEqual(tiered.listings.map((l: { listingId: string }) => l.listingId), ["interop-active", "interop-revoked"]);
     for (const requested of [claim, presentedBy]) {
       const params = { params: Promise.resolve({ listingId: "interop-active", version: "1" }) };
       const detail = await inspectRoute.GET(new NextRequest(

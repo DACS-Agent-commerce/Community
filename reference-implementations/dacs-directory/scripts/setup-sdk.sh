@@ -76,6 +76,7 @@ else
   # tsc never deletes stale output, so build into an empty dist (this also
   # clears the marker and manifest).
   rm -rf vendor/dacs-sdk/dist
+  # The SDK lockfile at SDK_REV is enforced, so its demosdk and crypto dependencies are the pinned ones.
   (cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
   require_pinned_dist --manifest "$SDK_MANIFEST"
   printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"

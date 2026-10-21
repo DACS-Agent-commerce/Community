@@ -240,6 +240,9 @@ test("upgrading a pre-projection database with object TxRefs withholds all old c
   // but their persisted settlementTxIds are empty. Never treat that as proof
   // that the jobs had no settlement claim.
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/settlement-projection-v0-catalog.json", import.meta.url), "utf8")) as Catalog;
+  // That indexer recorded the pay-dem alias, which now marks an archival offer.
+  // Name the registry rail so the listing, and its hint, are still served.
+  fixture.sellers[0].listings[0].offering.rails = ["demos-native:DEM"];
   saveCatalog(fixture);
   assert.equal(loadStoredCatalog().sellers[0].reputation.bundleCount, 2);
   assert.deepEqual(loadStoredCatalog().sellers[0].deals.map((deal) => deal.settlementTxIds), [[], []]);
@@ -415,7 +418,7 @@ test("every non-rate filter the pinned SDK client sends, and a full-text search 
       requested.push(String(url));
       return getListings(new NextRequest(String(url)));
     },
-  }, { category: "services", tag: ["history"], credential: "none", primaryClaim: noRateClaim, rail: "pay-dem", priceMax: "3", cursor: "0", limit: 10 });
+  }, { category: "services", tag: ["history"], credential: "none", primaryClaim: noRateClaim, rail: "demos-native:DEM", priceMax: "3", cursor: "0", limit: 10 });
   assert.equal(result.status, "ok", JSON.stringify(result));
   assert.deepEqual([...new URL(requested[0]).searchParams.keys()].sort(),
     ["category", "credential", "cursor", "limit", "priceMax", "primaryClaim", "rail", "tag"]);
@@ -436,7 +439,7 @@ test("llms discovery text states the TP-1 null-metric and refused-filter contrac
 test("non-rate search and price filtering still work over the same history", async () => {
   saveCatalog(noRateCatalog());
   for (const [query, expected] of [
-    ["category=services&rail=pay-dem&tag=history&q=inspection&priceMax=3", 1],
+    ["category=services&rail=demos-native:DEM&tag=history&q=inspection&priceMax=3", 1],
     ["priceMax=1", 0],
   ] as const) {
     const response = await getListings(new NextRequest(`https://directory.example/api/dacs/listings?${query}`));

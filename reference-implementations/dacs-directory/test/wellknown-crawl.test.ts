@@ -14,8 +14,9 @@ process.env.DEMOS_RPC = "https://node.test";
 const store = await import("../src/catalog/store.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { findValidListingRevocation, verifyListing } = await import("../src/catalog/listingVerification.js");
-const { crawlDomain, projectActiveListingIndexEntries } = await import("../src/catalog/wellknown.js");
+const { crawlDomain, listingIndexEntryIsComplete } = await import("../src/catalog/wellknown.js");
 const wellknownFiles = await import("../app/api/dacs/wellknown-files/route.js");
+const { logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
 
 const seed = Uint8Array.from(Buffer.alloc(32, 0x31));
 const privateKey = privateKeyFromSeed(seed);
@@ -77,10 +78,12 @@ async function generatedFiles(): Promise<Record<string, string>> {
 
 // A public IP literal needs no DNS lookup; the stub serves every request.
 const domain = "1.1.1.1";
-const served = (files: Record<string, string>) => async (url: string) => {
-  const path = new URL(url).pathname;
-  return path in files ? { status: 200, body: Buffer.from(files[path]!) } : { status: 404, body: Buffer.alloc(0) };
-};
+const served = (files: Record<string, string>) => ({
+  fetchJson: async (url: string) => {
+    const path = new URL(url).pathname;
+    return path in files ? { body: JSON.parse(files[path]!) as unknown, raw: files[path]! } : null;
+  },
+});
 const rehashed = (files: Record<string, string>, listings: string) => {
   const card = JSON.parse(files["/.well-known/agent.json"]!);
   card.dacs.listings.indexHash = `sha256-${sha256Hex(listings)}`;
@@ -94,8 +97,14 @@ test("the crawler accepts the well-known files the Directory generates for a par
   const crawled = await crawlDomain(domain, served(files));
   assert.ok(!("error" in crawled), JSON.stringify(crawled));
   assert.equal(crawled.seller, claim);
-  assert.deepEqual(crawled.listingAnchors, [locator(1)], "only the active listing is indexed");
-  assert.deepEqual(crawled.contentHashes, { [locator(1)]: (await verifyListing(active))!.contentHash });
+  assert.deepEqual(crawled.activeListingAnchors, [locator(1)], "only the active listing introduces an offer");
+  assert.deepEqual(crawled.listingAnchors, [locator(1), locator(2)], "the revoked anchor is withdrawal carriage");
+  assert.deepEqual(crawled.revocations, [binding], "the parameter-bearing binding is carried");
+  assert.deepEqual(crawled.incompleteWithdrawalHashes, []);
+  assert.deepEqual(crawled.contentHashes, {
+    [locator(1)]: (await verifyListing(active))!.contentHash,
+    [locator(2)]: verifiedRevoked.contentHash,
+  });
 });
 
 test("a revocation binding is accepted only for the index seller and the address its own claim derives", () => {
@@ -104,7 +113,7 @@ test("a revocation binding is accepted only for the index seller and the address
     anchor: { kind: "storage-program", locator: locator(2) },
     summary: { title: "wk-revoked", category: "conformance.signature", tags: [] }, status: "revoked", revocation: binding,
   };
-  assert.deepEqual(projectActiveListingIndexEntries([entry], claim), { ok: true, listingAnchors: [], contentHashes: {} });
+  assert.equal(listingIndexEntryIsComplete(entry, claim), true);
   const other = `did:demos:agent:${"b".repeat(64)}`;
   const canonicalAddress = `dacs1-revoked:${claim.replaceAll(":", "%3A")}:wk-revoked:v1`;
   for (const [name, revocation, seller] of [
@@ -113,7 +122,7 @@ test("a revocation binding is accepted only for the index seller and the address
     ["address of the canonical claim, not the presented one", { ...binding, logicalAddress: canonicalAddress }, claim],
     ["another version's address", { ...binding, logicalAddress: binding.logicalAddress.replace(/:v1$/, ":v2") }, claim],
   ] as const) {
-    assert.equal(projectActiveListingIndexEntries([{ ...entry, revocation }], seller).ok, false, name);
+    assert.equal(listingIndexEntryIsComplete({ ...entry, revocation }, seller), false, name);
   }
 });
 
@@ -139,15 +148,12 @@ test("the crawler refuses well-known files whose binding, version or seller does
     ["generatedAt 0", rehashed(files, JSON.stringify({ ...index, generatedAt: 0 })), /invalid version or generatedAt/],
     ["fractional generatedAt", rehashed(files, JSON.stringify({ ...index, generatedAt: 1.5 })), /invalid version or generatedAt/],
     ["non-canonical seller", rehashed(files, JSON.stringify({ ...index, seller: claim.toUpperCase() })), /no canonical Demos seller/],
-    ["another seller", rehashed(files, JSON.stringify({ ...index, seller: `did:demos:agent:${"b".repeat(64)}` })), /no matching revocation binding/],
     ["a null index", rehashed(files, "null"), /invalid version or generatedAt/],
     ["an array index", rehashed(files, JSON.stringify([index])), /invalid version or generatedAt/],
     ["a non-string seller", rehashed(files, JSON.stringify({ ...index, seller: 7 })), /no canonical Demos seller/],
     ["no listings array", rehashed(files, JSON.stringify({ ...index, listings: null })), /at most 200 listings/],
-    ["an entry without its summary", rehashed(files, JSON.stringify({
-      ...index,
-      listings: index.listings.map(({ summary: _summary, ...entry }: Record<string, unknown>) => entry),
-    })), /invalid listing entry/],
+    ["a non-array listings member", rehashed(files, JSON.stringify({ ...index, listings: { entries: index.listings } })), /at most 200 listings/],
+    ["more than 200 listings", rehashed(files, JSON.stringify({ ...index, listings: Array(201).fill(index.listings[0]) })), /at most 200 listings/],
   ];
   for (const [name, hosted, error] of cases) {
     const crawled = await crawlDomain(domain, served(hosted));
@@ -158,13 +164,33 @@ test("the crawler refuses well-known files whose binding, version or seller does
   const upper = withCard((value) => { value.dacs.listings.indexHash = sha256Hex(listings).toUpperCase(); });
   assert.ok(!("error" in await crawlDomain(domain, served(upper))));
   // A server that never answers is an unreachable card, not a crash.
-  const down = await crawlDomain(domain, async () => { throw new Error("connection refused"); });
+  const down = await crawlDomain(domain, { fetchJson: async () => null });
   assert.deepEqual(down, { domain, error: "no .well-known/agent.json" });
+
+  // A row that does not hold is not an offer: it holds its listing's withdrawal check. Incomplete
+  // metadata still carries a binding for this seller; another seller's binding is never carried.
+  for (const [name, hosted, carried] of [
+    ["another seller's binding", rehashed(files, JSON.stringify({ ...index, seller: `did:demos:agent:${"b".repeat(64)}` })), []],
+    ["rows without their summary", rehashed(files, JSON.stringify({
+      ...index,
+      listings: index.listings.map(({ summary: _summary, ...entry }: Record<string, unknown>) => entry),
+    })), [binding]],
+  ] as const) {
+    const crawled = await crawlDomain(domain, served(hosted));
+    assert.ok(!("error" in crawled), name);
+    assert.ok(crawled.incompleteWithdrawalHashes?.includes(verifiedRevoked.contentHash), name);
+    assert.deepEqual(crawled.revocations, carried, name);
+  }
 });
 
 test("a bundle-binding index is bound by its own declared hash", async () => {
   const files = await generatedFiles();
-  const bindings = JSON.stringify({ bindings: [] });
+  const bindingScope = {
+    bindingVersion: "1", jobId: "wk-job", role: "seller", logicalAddress: logicalBundleAddress("wk-job", "seller"),
+    nativeAddress: locator(70), bundleContentHash: "a".repeat(64), signer: claim,
+  };
+  const bundleBinding = { ...bindingScope, signature: { algorithm: "ed25519", signer: claim, value: sign(`dacs-bundle-binding:v1:${contentHash(bindingScope)}`) } };
+  const bindings = JSON.stringify({ bindings: [bundleBinding] });
   const card = JSON.parse(files["/.well-known/agent.json"]!);
   const hosted = (indexHash: string) => {
     card.dacs.bundleBindings = { indexUrl: `https://${domain}/.well-known/dacs/bindings.json`, indexHash };
@@ -172,11 +198,12 @@ test("a bundle-binding index is bound by its own declared hash", async () => {
   };
   const accepted = await crawlDomain(domain, served(hosted(`sha256-${sha256Hex(bindings)}`)));
   assert.ok(!("error" in accepted), JSON.stringify(accepted));
-  assert.deepEqual(accepted.bundleBindings, []);
+  assert.deepEqual(accepted.bundleBindings, [bundleBinding]);
   for (const indexHash of ["", `sha256-${"0".repeat(64)}`]) {
     const refused = await crawlDomain(domain, served(hosted(indexHash)));
-    assert.ok("error" in refused);
-    assert.match(refused.error, /bundle-binding indexHash mismatch/);
+    assert.ok(!("error" in refused), "the listings index still carries withdrawals");
+    assert.deepEqual(refused.bundleBindings, [], "no binding from an index its hash does not bind");
+    assert.deepEqual(refused.activeListingAnchors, accepted.activeListingAnchors);
   }
 });
 

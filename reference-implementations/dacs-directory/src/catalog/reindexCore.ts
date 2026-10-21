@@ -7,9 +7,12 @@ import { rebuildCatalogObservations } from "./testnetMetrics.js";
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
+import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
-import { indexRegistration, type ResolveIdentities } from "./indexer";
-import { boundedBundleBindings, verifyBundleBinding } from "./bundleBinding";
+import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
+import { readAnchorResult, type AnchorRead } from "./chain";
+import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
+import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
   scanChain,
@@ -17,7 +20,7 @@ import {
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { pinnedNodeDeployment } from "./listingFinality";
-import { crawlDomains } from "./wellknown";
+import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
@@ -27,6 +30,12 @@ import {
   loadScanState,
   loadStoredCatalog,
   admitRevocationCandidates,
+  retainListingRevocation,
+  retainedListingRevocation,
+  recordWellKnownWithdrawalCheck,
+  loadWithdrawalCursor,
+  saveWithdrawalCursor,
+  finishWithdrawalCarriageReplay,
   saveCatalog,
   saveScanState,
   beginScanRun,
@@ -62,6 +71,8 @@ export interface ReindexOptions {
    * node's reported build and chain against the pin (pinnedNodeDeployment).
    */
   nodeDeployment?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** Alternate discovery transport for deterministic/offline deployments. */
+  crawlWellKnown?: typeof crawlDomains;
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
@@ -163,14 +174,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
     const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
     omitted.omittedBindings += raw.length - verified.length;
-    state.bundleBindings[jobId] = boundedBundleBindings(verified).bindings;
+    state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
   }
   // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
   // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
   for (const reg of regs) {
     const verified = reg.bundleBindings ?? [];
     for (const binding of verified) {
-      const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
       state.bundleBindings[binding.jobId] = bounded.bindings;
       state.bundleBindingOverflow = [...new Set([
         ...state.bundleBindingOverflow,
@@ -222,14 +233,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       if (!deal.owners.seller) delete deal.sellerBundleRef;
     }
     omitted.omittedBindings += scan.omittedBindings;
-    // Every candidate is queued once, in arrival order, with the owner and content it was read with.
+    // Every candidate is queued once, in arrival order, with the owner and stored value it was read
+    // with. The value hash covers the signature envelope, which the content hash omits, so a marker
+    // re-published with a corrected signature is examined again.
     const observed = new Map(scan.observations.map((observation) => [observation.locator, observation]));
+    const storedValueHash = (data: Record<string, unknown> | undefined) => {
+      const json = data ? boundedJson(data) : null;
+      return json === null ? null : createHash("sha256").update(json, "utf8").digest("hex");
+    };
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
-        ({ locator, owner: observed.get(locator)?.owner, contentHash: observed.get(locator)?.contentHash })));
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
-      const bounded = boundedBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
+      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
       state.bundleBindings[jobId] = bounded.bindings;
       state.bundleBindingOverflow = [...new Set([
         ...state.bundleBindingOverflow,
@@ -298,6 +315,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
     saveScanState(state);
+    finishWithdrawalCarriageReplay();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -348,13 +366,27 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
     if (domains.length > 0) {
-      const crawl = await crawlDomains(domains);
-      for (const e of crawl.errors) log(`well-known: ${e.domain} — ${e.error}`);
+      const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
+      for (const e of crawl.errors) {
+        let domain: string;
+        try { domain = normalizeSubmittedDomain(e.domain); }
+        catch { continue; /* An invalid legacy domain cannot identify an authenticated source. */ }
+        recordWellKnownWithdrawalCheck(domain);
+        log(`well-known: ${e.domain} — ${e.error}`);
+      }
       for (const agent of crawl.agents) {
+        await ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
+          // A revoked or incomplete row can carry a marker, but cannot introduce an
+          // active offer. Authenticated unresolved sources create holds; unsigned
+          // carriage must first resolve a verified tombstone. Independent active
+          // registrations, chain observations and complete mirrors remain usable.
           if (!reg.listingAnchors.includes(anchor)) {
+            const retained = retainedListingRevocation(agent.contentHashes[anchor]);
+            if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
+                retained?.sellerPrimaryClaim !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {
@@ -366,10 +398,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         reg.wellKnownDomains = [...new Set([...(reg.wellKnownDomains ?? []), agent.domain])];
         if (agent.bundleBindings.length > 0) {
           reg.bundleBindings ??= [];
-          const carried = boundedBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
+          const carried = catalogBundleBindings([...reg.bundleBindings, ...agent.bundleBindings]);
           reg.bundleBindings = carried.bindings;
           for (const binding of carried.bindings) {
-            const accumulated = boundedBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+            const accumulated = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
             state.bundleBindings[binding.jobId] = accumulated.bindings;
             state.bundleBindingOverflow = [...new Set([
               ...state.bundleBindingOverflow,
@@ -441,5 +473,91 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });
     throw error;
+  }
+}
+
+/** Total node reads spent resolving one domain's withdrawal carriage per pass. */
+export const WELL_KNOWN_WITHDRAWAL_READS_PER_PASS = 32;
+
+/** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
+export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
+  const domain = normalizeSubmittedDomain(agent.domain);
+  const provenance = wellKnownWithdrawalProvenance(agent);
+  if (provenance) {
+    // Binding resolution has not happened yet. Keep it seller-scoped until a
+    // verified listing read (here or in indexRegistration) establishes ownership.
+    if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
+      agent.incompleteWithdrawalHashes ?? [],
+      agent.withdrawalIndex, agent.revocations, provenance)) return;
+  } else recordWellKnownWithdrawalCheck(domain);
+
+  const byHash = new Map<string, typeof agent.revocations>();
+  for (const binding of new Map(agent.revocations.map((binding) => [revocationBindingKey(binding), binding])).values()) {
+    const group = byHash.get(binding.listingContentHash) ?? [];
+    group.push(binding);
+    byHash.set(binding.listingContentHash, group);
+  }
+  const jobs = [...new Set(agent.listingAnchors)].flatMap((anchor) => {
+    const bindings = byHash.get(agent.contentHashes[anchor]) ?? [];
+    return bindings.map((binding) => ({ anchor, binding }));
+  });
+  if (!jobs.length) return;
+  const indexHash = agent.withdrawalIndex?.hash ?? "";
+  let cursor = loadWithdrawalCursor(domain, agent.seller, indexHash) % jobs.length;
+  let reads = 0;
+  const exhausted = Symbol("withdrawal read budget exhausted");
+  const cache = new Map<string, AnchorRead>();
+  const read = async (locator: string): Promise<AnchorRead> => {
+    const cached = cache.get(locator);
+    if (cached) return cached;
+    if (reads >= WELL_KNOWN_WITHDRAWAL_READS_PER_PASS) throw exhausted;
+    reads++;
+    let result = await readAnchorResult(locator);
+    // One transient read may recover within the pass. Missing unsigned markers
+    // cannot authenticate an alleged publisher and never create pending work.
+    if (result.status === "unavailable" && reads < WELL_KNOWN_WITHDRAWAL_READS_PER_PASS) {
+      reads++;
+      result = await readAnchorResult(locator);
+    }
+    cache.set(locator, result);
+    return result;
+  };
+  const listings = new Map<string, Awaited<ReturnType<typeof verifyStoredListing>>>();
+  const markers = new Map<string, Awaited<ReturnType<typeof findValidListingRevocation>>>();
+  let examined = 0;
+  try {
+    for (; examined < jobs.length; examined++, cursor = (cursor + 1) % jobs.length) {
+      const { anchor, binding } = jobs[cursor];
+      const anchored = await read(anchor);
+      if (anchored.status !== "present") continue;
+      if (!listings.has(anchor)) listings.set(anchor, await verifyStoredListing(anchored.record.data, anchor).catch(() => null));
+      const listing = listings.get(anchor);
+      if (!listing || listingBindingRejection(listing.sellerClaim, anchored.record.owner, agent.seller) ||
+          listing.contentHash !== agent.contentHashes[anchor]) continue;
+      const id = listing.scope.listingId ?? listing.scope.serviceId;
+      const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
+      if (binding.sellerPrimaryClaim !== revocationSellerClaim(listing) || binding.listingContentHash !== listing.contentHash ||
+          binding.listingId !== id || binding.listingVersion !== version) continue;
+      if (provenance) {
+        admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
+      } else {
+        // publicEndpoint is a self-claim, never authority over unresolved hints.
+        // Standard unsigned indexes can still carry independently verified markers.
+        const key = JSON.stringify([listing.contentHash, binding.markerAnchor.locator]);
+        if (!markers.has(key)) markers.set(key,
+          await findValidListingRevocation([binding.markerAnchor.locator], listing, Number(version),
+            async (locator) => { const result = await read(locator); return result.status === "present" ? result.record.data : null; }));
+        const found = markers.get(key);
+        if (found && found.markerContentHash === binding.markerContentHash && found.logicalAddress === binding.logicalAddress) {
+          const marker = cache.get(binding.markerAnchor.locator);
+          if (marker?.status === "present") retainListingRevocation(found, marker.record.data);
+          admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
+        }
+      }
+    }
+  } catch (error) {
+    if (error !== exhausted) throw error;
+  } finally {
+    saveWithdrawalCursor(domain, agent.seller, indexHash, cursor);
   }
 }

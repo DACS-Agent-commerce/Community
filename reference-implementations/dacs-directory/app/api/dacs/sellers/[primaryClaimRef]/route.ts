@@ -3,6 +3,7 @@
  * Listings, identity, observed history and unavailable testnet metrics.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { discoveryListing } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
@@ -22,7 +23,7 @@ export async function GET(
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
   const origin = requestBaseUrl(req);
   return catalogJson(req, {
-    listings: seller.listings.map(withDirectoryTransactionReadiness),
+    listings: seller.listings.filter(discoveryListing).map(withDirectoryTransactionReadiness),
     identity: seller.identityBundle ?? {
       profile: "legacy-sdk-v0.1",
       primaryClaim: seller.primaryClaim,

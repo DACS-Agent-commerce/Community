@@ -28,7 +28,7 @@ const identity = {
 const identitySignature = Buffer.from(ed25519Sign(
   Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "utf8"),
   privateKey,
-)).toString("hex");
+)).toString("base64url");
 const scope = {
   dacsVersion: "1",
   listingId: "verified-service",
@@ -685,7 +685,7 @@ test("only the pinned Demos deployment's report becomes an observation", async (
   }
 });
 
-test("the release pins node2's chain and clean build by default", () => {
+test("the release pins its reviewed chain and clean node build by default", () => {
   delete process.env.DEMOS_CHAIN_IDENTITY;
   try {
     assert.equal(pinnedChainIdentity(), "83082fbb733d76475a33a9f52fe3700d667a976c2d46bef33a149f47057f7dd4");
