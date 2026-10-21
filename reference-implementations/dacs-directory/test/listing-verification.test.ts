@@ -630,3 +630,13 @@ test("independently signed storage-program listing accepts the explicit public a
     offering: { ...fixture.listing.offering, deliverable: { kind: "storage-program", accessModel: "unknown" } },
   }), null);
 });
+
+test("legacy listing schema, signature decoding, and signed-scope tampering keep their rejection codes", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  assert.equal((await verifyListingResult(fixture.data)).ok, true);
+  assert.deepEqual(await verifyListingResult({}), { ok: false, code: "LEGACY_LISTING_INVALID" });
+  assert.deepEqual(await verifyListingResult({ ...fixture.data, signature: "malformed" }),
+    { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.deepEqual(await verifyListingResult({ ...fixture.data, description: "tampered after signing" }),
+    { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+});

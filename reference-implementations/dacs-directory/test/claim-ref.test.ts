@@ -103,3 +103,18 @@ test("large canonical parameter sets remain bounded and reject late duplicates o
   assert.equal(canonicalDemosAgentClaim(`${reference}&${parameters.at(-1)}`), null);
   assert.equal(canonicalDemosAgentClaim(`${reference}&a=last`), null);
 });
+
+test("CF-2 validates parameter keys as strictly as values", () => {
+  for (const key of ["%41", "%3a", "%3", "%GG", "a:b", "a?b", "a%b"]) {
+    const input = `${claim}?${key}=1`;
+    assert.equal(canonicalDemosAgentClaim(input), null, input);
+    assert.equal(canonicalDemosAgentReference(input), null, input);
+    assert.equal(parseDemosAgentClaimReference(input), null, input);
+  }
+  for (const key of ["a%3A", "a%3F", "a%26", "a%3D", "a%25"]) {
+    const input = `${claim}?${key}=1`;
+    assert.equal(canonicalDemosAgentClaim(input), claim, input);
+    assert.equal(canonicalDemosAgentReference(input), input, input);
+    assert.equal(parseDemosAgentClaimReference(input)?.canonicalReference, input, input);
+  }
+});

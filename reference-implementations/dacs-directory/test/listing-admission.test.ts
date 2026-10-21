@@ -407,3 +407,45 @@ test("a declared content hash mismatch excludes a listing and a corrected declar
     globalThis.fetch = originalFetch;
   }
 });
+
+test("diagnostic coordinates preserve current precedence and validate the legacy fallback", async () => {
+  const { listingDiagnosticCoordinates: coordinates } = await import("../src/catalog/listingAdmission.js");
+  assert.deepEqual(coordinates({ serviceId: "legacy", version: 3 }), { listingId: "legacy", listingVersion: 3 });
+  assert.deepEqual(coordinates({ serviceId: "legacy" }), { listingId: "legacy", listingVersion: 1 });
+  assert.deepEqual(coordinates({ listingId: "current", listingVersion: 2, serviceId: "legacy", version: 3 }),
+    { listingId: "current", listingVersion: 2 });
+  for (const raw of [{ serviceId: 123 }, { serviceId: "legacy", version: 0 },
+    { serviceId: "legacy", version: -1 }, { listingId: "", serviceId: "legacy" }]) {
+    assert.equal(coordinates(raw), undefined);
+  }
+});
+
+test("malformed attested deliverables retain verification-method diagnostics", async () => {
+  for (const extra of [{ offering: undefined }, { offering: {} },
+    { offering: { deliverable: { kind: "storage-program", verificationMethod: { kind: "self-signed" } } } },
+    { offering: {}, pipeline: [null, 7, [], ...ATTESTED_PIPELINE] }]) {
+    assert.deepEqual(await verifyListingResult({ dacsVersion: "1", ...extra, pipeline: extra.pipeline ?? ATTESTED_PIPELINE }),
+      { ok: false, code: "VERIFICATION_METHOD_INVALID" });
+  }
+  assert.deepEqual(await verifyListingResult({ signatures: [] }), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+});
+
+test("exception wrappers preserve their selected profile's rejection code", async () => {
+  for (const [raw, code] of [[{ dacsVersion: "1" }, "NORMATIVE_LISTING_INVALID"], [{}, "LEGACY_LISTING_INVALID"]] as const) {
+    const throwing = new Proxy(raw, { get() { throw new Error("fixture read failure"); } });
+    assert.deepEqual(await verifyListingResult(throwing), { ok: false, code });
+  }
+});
+
+test("every rejection has a public explanation and coordinate-free diagnostics omit the version", async () => {
+  const { LISTING_REJECTION_CODES } = await import("../src/catalog/listingAdmission.js");
+  for (const [index, code] of LISTING_REJECTION_CODES.entries()) {
+    const at = `stor-${(800 + index).toString(16).padStart(40, "0")}`;
+    store.recordListingRejection(at, seller, code);
+    const item = store.indexerDiagnostics({ deadLetterLocator: at }).listingRejectionDiagnostics.items[0];
+    assert.equal(item.code, code);
+    assert.ok(item.message.trim().length > 0, code);
+    assert.equal(Object.hasOwn(item, "listingId"), false, code);
+    assert.equal(Object.hasOwn(item, "listingVersion"), false, code);
+  }
+});

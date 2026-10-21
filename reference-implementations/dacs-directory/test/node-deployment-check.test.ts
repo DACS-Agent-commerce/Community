@@ -64,3 +64,14 @@ test("the deployment check refuses the pinned build on another chain and an unre
   assert.equal(other.pin.ok, false);
   await assert.rejects(observeWith(async () => { throw new Error("offline"); }));
 });
+
+test("node build commits must match the whole string even with an explicit pin", async () => {
+  const { nodeBuildRejection, reportedNodeBuild } = await import("../src/catalog/nodeDeployment.js");
+  const commit = PINNED_DEMOS_NODE_BUILDS[0];
+  for (const malformed of [`x${commit}`, `${commit}x`]) {
+    const info = { nodeVersion: { commit: malformed, dirty: false } };
+    assert.equal(reportedNodeBuild(info), null);
+    assert.equal(nodeBuildRejection(info, [malformed]), "Demos node reports no build identity");
+  }
+  assert.equal(reportedNodeBuild({ nodeVersion: { commit, dirty: true } }), `${commit}+dirty@`);
+});

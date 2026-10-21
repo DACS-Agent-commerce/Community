@@ -29,3 +29,19 @@ test("the browser domainToASCII shim agrees with node:url on the reader's inputs
 test("the browser domainToUnicode shim fails the producer path closed", () => {
   assert.equal(domainToUnicode("xn--bcher-kva.example"), "");
 });
+
+test("browser IP parsing refuses malformed zones and address suffixes", () => {
+  for (const value of ["fe80::1%bad%eth0", "::1]/x"]) {
+    assert.equal(nodeIsIP(value), 0);
+    assert.equal(isIP(value), 0, value);
+  }
+});
+
+test("browser util predicates distinguish byte arrays from ordinary JSON", async () => {
+  const { types } = await import("../src/shims/node-util.js");
+  assert.equal(typeof types.isProxy, "function");
+  assert.equal(typeof types.isUint8Array, "function");
+  assert.equal(types.isProxy({ answer: 42 }), false);
+  assert.equal(types.isUint8Array(new Uint8Array([1, 2])), true);
+  assert.equal(types.isUint8Array({ 0: 1, length: 1 }), false);
+});

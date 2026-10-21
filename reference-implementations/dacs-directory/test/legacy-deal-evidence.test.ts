@@ -271,3 +271,19 @@ test("an ordinary per-deal exception reports exactly one omission and keeps the 
   assert.equal(record.deals[0].reputationEligible, false);
   storage = {};
 });
+
+test("legacy discovery requires the expected buyer and both authenticated party signatures", async () => {
+  const { validAgreementForDiscovery } = await import("../src/catalog/scan.js");
+  const jobId = "legacy-discovery";
+  legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
+  const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))];
+  assert.equal(await validAgreementForDiscovery(agreement, jobId, buyer), true);
+  assert.equal(await validAgreementForDiscovery(agreement, jobId, outsider), false);
+  assert.equal(await validAgreementForDiscovery(agreement, "foreign-job", buyer), false);
+  assert.equal(await validAgreementForDiscovery({ ...agreement, price: null }, jobId, buyer), false);
+  for (const signatures of [undefined, [], (agreement.signatures as Obj[]).slice(0, 1),
+    (agreement.signatures as Obj[]).slice(1),
+    (agreement.signatures as Obj[]).map(s => ({ ...s, value: "invalid" }))]) {
+    assert.equal(await validAgreementForDiscovery({ ...agreement, signatures }, jobId, buyer), false);
+  }
+});

@@ -134,3 +134,28 @@ test("orchestrator faults remain in bundle counts but not in buyer/seller fault 
   assert.equal(reputation.counterpartyAdjustedCompletionRate, 1);
   assert.equal(reputation.counterpartyFaultRate, 0);
 });
+
+test("ordinary bundle pairs reconcile perspective-relative outcomes, never just outcome classes", () => {
+  const graph = (role: "buyer" | "seller", outcome: string): EvidenceGraph => ({
+    profile: "dacs-v0.1", ok: true, signaturesVerified: true, refsVerified: true,
+    bundleContentHash: `${role}-hash`, artifacts: [], ratings: [],
+    bundle: { bundleVersion: "1", jobId: deal.jobId, anchoredByRole: role, outcome,
+      parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+      phaseSummary: [phase] },
+  });
+  for (const [outcome, opposite] of [["failed-perm", "failed-counterparty"],
+    ["failed-counterparty", "failed-perm"], ["aborted-by-self", "aborted-by-other"],
+    ["aborted-by-other", "aborted-by-self"]]) {
+    const result = reconcileCurrentCopies(deal, seller, graph("buyer", outcome), graph("seller", outcome));
+    assert.equal(result.buyerOk, true, outcome);
+    assert.equal(result.sellerOk, true, outcome);
+    assert.equal(result.divergent, true, outcome);
+    assert.equal(result.refsVerified, false, outcome);
+    assert.equal(deriveSellerReputation([{ ...deal, signatureVerified: true,
+      refsVerified: result.refsVerified, reputationEligible: result.refsVerified,
+      sellerOutcome: result.sellerOutcome, finalisedAt: 100, verifiedAt: 100 }], 0, 200).bundleCount, 0, outcome);
+    const agreed = reconcileCurrentCopies(deal, seller, graph("buyer", outcome), graph("seller", opposite));
+    assert.equal(agreed.divergent, false, outcome);
+    assert.equal(agreed.refsVerified, true, outcome);
+  }
+});

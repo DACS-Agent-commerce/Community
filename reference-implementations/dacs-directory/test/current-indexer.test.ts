@@ -1229,7 +1229,9 @@ test("indexRegistration publishes verified and institutional tiers with institut
   }
 });
 
-test("a readable invalid owner marker differs from an unavailable owner marker", async () => {
+test("a readable invalid owner marker differs from an unavailable owner marker", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const fixture = await vector("marker-output", 600);
   const scope = signedScope(fixture.listing, "listing");
   scope.listingId = "owner-marker-output";
@@ -1239,6 +1241,8 @@ test("a readable invalid owner marker differs from an unavailable owner marker",
   admitRevocationCandidates(artifactHash(fixture.listing, "listing"), [{ locator: markerAt,
     owner: `0x${dids[1].slice(-64)}`, contentHash: "c".repeat(64) }]);
   assert.equal((await indexFixture(fixture)).listings.length, 0, "unreadable owner evidence is indeterminate");
+  // Retry backoff must expire so this pass actually reads the repaired bytes.
+  now += 61_000;
   maps.set(markerAt, { revocationVersion: "1", signature: "invalid" });
   const record = await indexFixture(fixture);
   assert.equal(record.listings.length, 1, "a readable rejected candidate does not withhold an active listing");
@@ -1781,5 +1785,82 @@ test("pre-upgrade hex listing remains readable at its pinned anchor in a complet
     globalThis.fetch = originalFetch;
     if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
     else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
+});
+
+test("category hints exclude substrate failures and pre-commit cancellations but count ordinary aborts", async () => {
+  const allMaps = new Map<string, Obj>();
+  const fixtures: Awaited<ReturnType<typeof vector>>[] = [];
+  const deals: RegisteredDeal[] = [];
+  const bindings: BundleBinding[] = [];
+  for (const [index, kind] of ["completed", "substrate", "neutral", "ordinary"].entries()) {
+    const jobId = `denominator-${kind}`;
+    const fixture = await vector(jobId, 2000 + index * 10);
+    const listingScope = signedScope(fixture.listing, "listing");
+    listingScope.listingId = "denominator-service";
+    listingScope.terms = { cancellationPolicy: "pre-commit" };
+    fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+    maps.set(fixture.locators.listing, fixture.listing);
+    const listingRef = { listingId: "denominator-service", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+    fixture.buyerBundle.listingRef = listingRef;
+    fixture.sellerBundle.listingRef = listingRef;
+    await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+    for (const [role, at] of [["buyer", fixture.locators.buyer], ["seller", fixture.locators.seller]] as const) {
+      const scope = signedScope(maps.get(at)!, "bundle");
+      if (kind === "substrate") scope.outcome = "failed-substrate";
+      if (kind === "neutral" || kind === "ordinary") {
+        delete scope.agreementRef;
+        scope.outcome = role === "buyer" ? "aborted-by-self" : "aborted-by-other";
+        scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }];
+        if (kind === "neutral") scope.cancellation = { claimedPolicy: "pre-commit" };
+      }
+      const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+      maps.set(at, bundle);
+      bindings.push(await bindingFor(jobId, role, at, bundle, role === "buyer" ? 0 : 1));
+    }
+    fixtures.push(fixture);
+    deals.push(registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller));
+    for (const [at, raw] of maps) allMaps.set(at, raw);
+  }
+  maps.clear();
+  for (const [at, raw] of allMaps) maps.set(at, raw);
+  for (const count of [3, 4]) {
+    const record = await indexFixture(fixtures[0], { deals: deals.slice(0, count), bundleBindings: bindings });
+    assert.equal(record.deals.length, count);
+    for (const deal of record.deals) {
+      assert.equal(deal.signatureVerified, true, deal.jobId);
+      assert.equal(deal.refsVerified, true, deal.jobId);
+      assert.equal(deal.reputationEligible, true, deal.jobId);
+      assert.equal(deal.category, "services.test", deal.jobId);
+    }
+    assert.equal(record.deals.find(d => d.jobId === "denominator-neutral")!.cancellationNeutral, true);
+    if (count === 4) assert.equal(record.deals.find(d => d.jobId === "denominator-ordinary")!.cancellationNeutral, false);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, count);
+    assert.equal(record.listings[0].reputationHint!.completionRate, count === 3 ? 1 : 1 / 2);
+  }
+});
+
+test("the SDK refuses faultedParty on ordinary bundles before absolute attribution", async () => {
+  const { isAttestationBundle } = await import("@kynesyslabs/dacs/artifacts");
+  for (const extension of [false, true]) {
+    const jobId = `ordinary-fault-extension-${extension}`;
+    const fixture = await vector(jobId, 2100);
+    const bindings: BundleBinding[] = [];
+    for (const [role, at] of [["buyer", fixture.locators.buyer], ["seller", fixture.locators.seller]] as const) {
+      const scope = signedScope(maps.get(at)!, "bundle");
+      scope.outcome = role === "buyer" ? "failed-counterparty" : "failed-perm";
+      if (extension) scope.faultedParty = "orchestrator";
+      const bundle = { ...scope, signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: role };
+      assert.equal(isAttestationBundle(bundle), !extension);
+      maps.set(at, bundle);
+      bindings.push(await bindingFor(jobId, role, at, bundle, role === "buyer" ? 0 : 1));
+    }
+    const record = await indexFixture(fixture, { deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)],
+      bundleBindings: bindings });
+    assert.equal(record.deals[0].refsVerified, !extension);
+    assert.equal(record.deals[0].reputationEligible, !extension);
+    assert.equal(record.deals[0].faultedParty, undefined);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, extension ? 0 : 1);
+    assert.equal(record.listings[0].reputationHint!.completionRate, extension ? null : 0);
   }
 });

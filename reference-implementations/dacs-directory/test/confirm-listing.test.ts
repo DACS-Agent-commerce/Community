@@ -699,3 +699,206 @@ test("the release pins its reviewed chain and clean node build by default", () =
   assert.equal(nodeBuildRejection({ nodeVersion: { commit: pinnedCommit.toUpperCase(), dirty: false } }, [pinnedCommit]),
     "Demos node reports no build identity");
 });
+
+const { observeListingAnchorInclusion, pinnedNodeDeployment } = await import("../src/catalog/listingFinality.js");
+const observationInput = { anchorAddress, logicalAddress, programName, listingContentHash: listingHash, sellerClaim };
+
+async function withChain(run: () => Promise<void>) {
+  const originalFetch = globalThis.fetch;
+  try { await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("node observation requests preserve the normalized RPC transport contract", async () => withChain(async () => {
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      posts++;
+      assert.equal(String(input), `${(process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "")}/`);
+      assert.equal(new Headers(init.headers).get("content-type"), "application/json");
+      assert.equal(init.cache, "no-store");
+      assert.equal(JSON.parse(String(init.body)).method, "nodeCall");
+    }
+    return chainFetch(input, init);
+  };
+  assert.equal((await observeListingAnchorInclusion(observationInput)).status, "included");
+  assert.ok(posts > 0);
+}));
+
+test("failed HTTP and RPC envelopes cannot certify otherwise valid response data", async () => withChain(async () => {
+  for (const failure of ["http", "rpc"]) {
+    stubChain();
+    const chainFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const response = await chainFetch(input, init);
+      if (init?.method !== "POST") return response;
+      const body = await response.json();
+      return failure === "http" ? Response.json(body, { status: 503 }) : Response.json({ ...body, result: 500 });
+    };
+    await assert.rejects(pinnedNodeDeployment(), failure === "http" ? /transport failed/ : /returned 500/);
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.length > 0);
+  }
+}));
+
+test("block-one predecessor normalization and non-storage by-hash fallback retain valid observations", async () => withChain(async () => {
+  const normalizedChain = "ab".repeat(32);
+  process.env.DEMOS_CHAIN_IDENTITY = normalizedChain;
+  try {
+    stubChain({ first: { content: { previousHash: `  ${normalizedChain.toUpperCase()}  ` } },
+      byHash: { type: "native", content: { ...transaction.content, type: "native" } } });
+    const result = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+    assert.equal(result.status, "included");
+    assert.equal(result.status === "included" && result.observation.chainIdentity, normalizedChain);
+    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }]);
+  } finally { process.env.DEMOS_CHAIN_IDENTITY = chainId; }
+}));
+
+test("history lookup stops at 5000 rows and requests only its remaining budget", async () => withChain(async () => {
+  for (const matchLast of [false, true]) {
+    stubChain();
+    const chainFetch = globalThis.fetch;
+    const limits: number[] = [];
+    let seen = 0;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === "POST") {
+        const call = JSON.parse(String(init.body)).params[0];
+        if (call.message === "getTransactions") {
+          limits.push(call.data.limit);
+          assert.ok(limits.length <= 51, "history must stop at the work bound");
+          const count = matchLast && seen === 4900 ? 99 : call.data.limit;
+          const rows = matchLast && seen === 4999 ? [historyRow(transaction)]
+            : Array.from({ length: count }, (_, index) => historyRow(transfer(10000 - seen - index)));
+          seen += rows.length;
+          return Response.json({ result: 200, response: rows });
+        }
+      }
+      return chainFetch(input, init);
+    };
+    const result = await observeListingAnchorInclusion(observationInput);
+    if (matchLast) {
+      assert.equal(result.status, "included");
+      assert.deepEqual(limits, [...Array(50).fill(100), 1]);
+    } else {
+      assert.deepEqual(result, { status: "pending", reason: "finality lookup exceeded 5000 transactions" });
+      assert.deepEqual(limits, Array(50).fill(100));
+    }
+    assert.equal(seen, 5000);
+  }
+}));
+
+test("history pages may include null rows without losing the next valid cursor", async () => withChain(async () => {
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  const cursors: unknown[] = [];
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params[0];
+      if (call.message === "getTransactions") {
+        cursors.push(call.data.start);
+        return Response.json({ result: 200, response: cursors.length === 1
+          ? [null, historyRow(transfer(12)), historyRow(transfer(11))] : [historyRow(transaction)] });
+      }
+    }
+    return chainFetch(input, init);
+  };
+  assert.equal((await observeListingAnchorInclusion(observationInput)).status, "included");
+  assert.deepEqual(cursors, ["latest", 10]);
+}));
+
+test("a disappeared second native read is pending and changed coordinates are rejected", async () => withChain(async () => {
+  stubChain();
+  const initialRead = globalThis.fetch;
+  let nativeReads = 0;
+  globalThis.fetch = async (input, init) => init?.method === "POST" || ++nativeReads === 1
+    ? initialRead(input, init) : new Response(null, { status: 503 });
+  const missing = await POST(request(coordinates));
+  assert.equal(missing.status, 202);
+  const missingBody = await missing.json();
+  assert.equal(missingBody.state, "inclusion-pending");
+  assert.equal(missingBody.reason, "native anchor is not readable");
+  assert.equal(Object.hasOwn(missingBody, "nodeObservation"), false);
+
+  stubChain();
+  const changedRead = globalThis.fetch;
+  nativeReads = 0;
+  globalThis.fetch = async (input, init) => {
+    const response = await changedRead(input, init);
+    if (init?.method === "POST" || ++nativeReads === 1) return response;
+    return Response.json({ ...await response.json(), programName: "another-program" });
+  };
+  const changed = await POST(request(coordinates));
+  assert.equal(changed.status, 409);
+  assert.equal((await changed.json()).error, "native anchor coordinates do not match");
+
+  stubChain({ native: { storageAddress: undefined, owner: undefined } });
+  const allowed = await observeListingAnchorInclusion(observationInput);
+  assert.equal(allowed.status, "included");
+  assert.equal(allowed.status === "included" && allowed.observation.nativeRead.owner, "");
+}));
+
+test("observation timestamp boundaries reject negative/fractional values and accept zero", async () => withChain(async () => {
+  for (const [timestamp, expected] of [[-1, null], [1.5, null], [0, 0],
+    [99_999_999_999, 99_999_999_999_000], [100_000_000_000, 100_000_000_000]]) {
+    stubChain({ block: { content: { timestamp, ordered_transactions: [transactionHash] } } });
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, expected === null ? "pending" : "included", String(timestamp));
+    if (result.status === "included") assert.equal(result.observation.blockTimestamp, expected);
+  }
+}));
+
+test("block number zero remains an allowed observation boundary", async () => withChain(async () => {
+  stubChain({ byHash: { blockNumber: 0 } });
+  const chainFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params[0];
+      if (call.message === "getBlockByNumber" && call.data.blockNumber === 0) return Response.json({ result: 200,
+        response: { status: "confirmed", number: 0, hash: chainId,
+          content: { timestamp: 0, ordered_transactions: [transactionHash] },
+          validation_data: { signatures: { [`0x${"aa".repeat(32)}`]: `0x${"bb".repeat(64)}` } } } });
+    }
+    return chainFetch(input, init);
+  };
+  const result = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+  assert.equal(result.status, "included");
+  if (result.status === "included") {
+    assert.equal(result.authenticated, false);
+    assert.equal(result.observation.blockNumber, 0);
+    assert.equal(result.observation.blockTimestamp, 0);
+  }
+}));
+
+test("native data cannot substitute for the original transaction even with consistently rebound metadata", async () => withChain(async () => {
+  const changed = { ...listing, terms: { changed: true } };
+  // Keep the claimed tuple and both metadata copies identical; only the native signed scope disagrees.
+  const rebound = { ...metadata, envelopeHash: sha256Hex(canonicalize(changed)) };
+  stubChain({ native: { data: changed }, nativeMetadata: rebound, transactionMetadata: rebound });
+  const result = await observeListingAnchorInclusion(observationInput);
+  assert.deepEqual(result, { status: "rejected", reason: "native listing metadata does not bind the signed artifact" });
+}));
+
+test("pending observation reasons remain useful for native, history and non-Error failures", async () => withChain(async () => {
+  for (const native of [false, true]) {
+    stubChain({ history: false });
+    if (!native) globalThis.fetch = async () => new Response(null, { status: 503 });
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.length > 0);
+  }
+  for (const overrides of [{ first: { status: "pending" } }, { block: { status: "pending" } }]) {
+    stubChain(overrides);
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.trim().length > 0);
+  }
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") throw "non-Error fixture failure";
+    return chainFetch(input, init);
+  };
+  assert.deepEqual(await observeListingAnchorInclusion(observationInput), { status: "pending", reason: "inclusion observation failed" });
+}));

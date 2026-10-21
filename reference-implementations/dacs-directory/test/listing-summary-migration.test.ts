@@ -52,6 +52,7 @@ seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog
       listingId: "listing-2",
       version: 1,
       status: "active",
+      revocationBinding,
     }],
     deals: [],
     reputation: { completed: 0, bundleCount: 0, totalAgreements: 0, completionRate: null },
@@ -91,4 +92,11 @@ test("startup migrates ready and missing readiness summaries once across restart
     assert.equal(restart.status, 0, restart.stderr);
     assert.deepEqual(readMigration(), before, "a restart does not rewrite the migrated catalog or version marker");
   } finally { db.close(); }
+});
+
+test("an active migrated row drops obsolete revocation evidence while revoked rows retain it", () => {
+  const [revoked, active] = store.loadCatalog().sellers[0].listings;
+  assert.deepEqual(revoked.revocation, revocationBinding);
+  assert.equal(Object.hasOwn(active, "revocationBinding"), false);
+  assert.equal(Object.hasOwn(active, "revocation"), false);
 });

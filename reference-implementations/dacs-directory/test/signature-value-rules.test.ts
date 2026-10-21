@@ -66,3 +66,15 @@ test("the legacy-sdk-v0.1 reader accepts the draft SDK spellings of exactly 64 b
     assert.equal(legacySignatureBytes(value), null, value);
   }
 });
+
+test("presentation signatures accept exact wallet hex or Base64URL and refuse malformed hex", async () => {
+  const { presentationSignatureBytes } = await import("../src/catalog/signatureValue.js");
+  const raw = bytes(64);
+  const hex = Buffer.from(raw).toString("hex");
+  for (const valid of [hex, hex.toUpperCase(), Buffer.from(raw).toString("base64url")]) {
+    assert.deepEqual(presentationSignatureBytes(valid), raw, valid);
+  }
+  for (const invalid of ["g".repeat(128), `${hex}junk`, `junk${hex}`, hex.slice(2)]) {
+    assert.equal(presentationSignatureBytes(invalid), null, invalid);
+  }
+});
