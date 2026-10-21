@@ -40,8 +40,9 @@ npm run index    # verify registrations against chain state → SQLite catalog
 npm run dev      # http://localhost:3400
 ```
 
-The default node (node2) no longer serves the pinned chain and build (see `DEMOS_CHAIN_IDENTITY`
-and `DEMOS_NODE_BUILDS` below), so with default settings `npm run check:node-deployment` exits 1
+The default node (`DEMOS_RPC`, `https://demosnode.discus.sh/`) is not shown to serve the pinned chain and build
+(see `DEMOS_CHAIN_IDENTITY` and `DEMOS_NODE_BUILDS` below; the node2 reset below concerns `node2.demos.sh`,
+and nothing in this repository shows the two hosts are one deployment), so with default settings `npm run check:node-deployment` exits 1
 and `npm run index` refuses without changing the catalog. Review the chain and build the check
 prints and set both variables, or point `DEMOS_RPC` at a node that serves the pinned deployment,
 before indexing. The Railway start script runs the same check once at boot and logs the refusal.
@@ -130,8 +131,8 @@ continue. Moving `SDK_REV` therefore also means rebuilding once and updating `SD
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
-| `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `83082fbb…7dd4`, the chain node2 served when this release was pinned. node2 has since been reset: on 2026-10-20 it served chain `d59b54c2…`, so the defaults refuse it until an operator reviews that chain and sets this variable. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
-| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. node2 reports a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-20) on that other chain, so with the defaults **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until the operator pins the chain and an exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
+| `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `83082fbb…7dd4`, the chain served when this release was pinned. `node2.demos.sh` was rebuilt on 2026-10-20 and serves chain `d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc`; that is not the default `DEMOS_RPC` (`demosnode.discus.sh`), and this repository does not show which chain the default host serves, so the pin is not changed to it. Run `npm run check:node-deployment` against the node you use, review what it prints, and set this variable; until the node serves the pinned chain the defaults refuse it. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
+| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. `node2.demos.sh` reports a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-20) on that other chain. Whenever the configured node does not serve the pinned chain and build, **`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now` fail without changing the catalog** until the operator pins the chain and an exact build. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |

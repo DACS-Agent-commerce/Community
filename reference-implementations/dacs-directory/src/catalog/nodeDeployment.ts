@@ -8,9 +8,10 @@
  */
 
 /**
- * Block one's `previousHash` on the Demos network node2 served when this
- * release was pinned (block zero answers `error`). node2 has since been reset
- * onto another chain; see the README's DEMOS_CHAIN_IDENTITY row.
+ * Block one's `previousHash` on the Demos network served when this release
+ * was pinned (block zero answers `error`). `node2.demos.sh` now serves another
+ * chain, which is not shown to be the default DEMOS_RPC host's; see the
+ * README's DEMOS_CHAIN_IDENTITY row.
  */
 export const PINNED_DEMOS_CHAIN_IDENTITY = "83082fbb733d76475a33a9f52fe3700d667a976c2d46bef33a149f47057f7dd4";
 
