@@ -246,7 +246,7 @@ test("an SDK-profile paid deal retains signatures but remains unverified without
     signatureVerified: true, refsVerified: false, outcome: "completed", sellerOutcome: "completed", anchoredByRole: "seller",
     bundleContentHash: contentHash(bundleScope), fullSignatureStanding: true, reputationEligible: false, cancellationNeutral: false, orchestratorFaultNeutral: false,
     // No settlement claim: the legacy profile cannot verify its pay-dem TxRef, so it never enters the SB-2 ledger.
-    finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", verifiedAt: 0,
+    finalisedAt: 120, anchorTimestamp: undefined, category: "legacy.test", agreementCategory: "legacy.test", verifiedAt: 0,
   });
   assert.equal(record.reputation.completed, 0);
   assert.equal((await run(base, { orchestratorFaultNeutral: true })).deals[0].orchestratorFaultNeutral, false, "registration cannot grant FAB neutrality to a legacy copy");

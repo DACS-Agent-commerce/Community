@@ -104,9 +104,7 @@ test("DACS-3 §8.5.2 agreement-listing-v0.1 through agreementListingConformance"
   interface Vector { name: string; expected: "accept" | "reject" | "indeterminate"; committedAt: number | null; agreement: Obj; listing: Obj }
   const set = load<{ vectors: Vector[] }>("agreement-listing-v0.1.json");
   const PUBLISHER = `did:demos:agent:${"5".repeat(64)}`;
-  // CORE CD-1 canonical amount; the Directory compares canonical amounts and rejects any other spelling.
-  const cd1 = (amount: unknown) => String(amount).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
-  const price = (term: Obj) => ({ ...term, amount: cd1(term.amount) });
+  // The upstream amounts run as published ("95.00", "100.00"): CORE CD-1 makes the verifier canonicalise them.
   const PATTERN_STEP: Record<string, Obj> = {
     // The projection names the pattern only; an RFQ step admits its fixed-price fallback (PS-3).
     rfq: { kind: "negotiate-rfq", parameters: { maxTurns: 4, timeoutSec: 60, fixedPriceFallback: true } },
@@ -121,8 +119,8 @@ test("DACS-3 §8.5.2 agreement-listing-v0.1 through agreementListingConformance"
     const rails = projected.acceptedRails as string[];
     const listing: Obj = {
       listingId: projected.listingId, listingVersion: projected.version,
-      pricing: pricing.kind === "fixed" ? { kind: "fixed", price: price({ amount: pricing.amount, currency: pricing.currency }) }
-        : { ...pricing, bandCenter: price(pricing.bandCenter as Obj) },
+      pricing: pricing.kind === "fixed" ? { kind: "fixed", price: { amount: pricing.amount, currency: pricing.currency } }
+        : pricing,
       pipeline: [PATTERN_STEP[String(projected.pattern)], { kind: "commit-agreement" },
         ...(projected.hasPayPhase ? [{ kind: rails[0], parameters: { rail: rails[0] } }] : []), { kind: "deliver-attested-payload" }],
       acceptedRails: rails.map((railId) => ({ railId })), offering: { deliverable: spec }, terms: projected.terms, validity: projected.validity,
@@ -132,7 +130,7 @@ test("DACS-3 §8.5.2 agreement-listing-v0.1 through agreementListingConformance"
     const agreement: Obj = {
       agreementVersion: "1", derivedFromPattern: vector.agreement.derivedFromPattern,
       parties: [{ role: "buyer", primaryClaim: `did:demos:agent:${"6".repeat(64)}` }, { role: "seller", primaryClaim: PUBLISHER }],
-      terms: { ...terms, price: price(terms.price as Obj), deliverable: {
+      terms: { ...terms, deliverable: {
         ...deliverable,
         // The projection hashes the spec opaquely: an unchanged hash is the listed spec's DeliverableRef hash.
         hash: deliverable.hash === (projected.offering as { deliverable: Obj }).deliverable.hash ? contentHash(spec) : deliverable.hash,
@@ -153,10 +151,17 @@ test("DACS-3 §8.5.2 agreement-listing-v0.1 through agreementListingConformance"
     const verdict = result === null ? "accept" : result === COMMITTED_AT_INDETERMINATE ? "indeterminate" : "reject";
     assert.equal(verdict, deviations[vector.name] ?? vector.expected, `${vector.name}: ${result}`);
   }
-  // Without the CD-1 step the Directory rejects a non-canonical amount outright (fail-closed) rather than canonicalising.
+  // CD-1: every spelling of one value decides alike, and anything that is not a plain decimal fails closed.
   const valid = adapt(set.vectors.find((vector) => vector.name === "valid-in-band-rfq")!);
-  const raw = { ...valid.agreement, terms: { ...(valid.agreement.terms as Obj), price: { currency: "USDC", amount: "95.00" } } };
-  assert.equal(agreementListingConformance(raw, valid.listing, PUBLISHER, 1780000000000), "terms");
+  const priced = (amount: string) => agreementListingConformance({ ...valid.agreement, terms: { ...(valid.agreement.terms as Obj),
+    price: { currency: "USDC", amount } } }, valid.listing, PUBLISHER, 1780000000000);
+  for (const amount of ["95", "95.0", "95.00", "095.000"]) assert.equal(priced(amount), null, amount);
+  for (const amount of ["+95", "9.5e1", "95,00", " 95", "95.", ".95", "-95", "0.00"]) assert.equal(priced(amount), "terms", amount);
+  // §8.5.2 rounds a band bound to the digits of bandCenter's CD-1 form, never to the digits it is spelled with.
+  const band = adapt(set.vectors.find((vector) => vector.name === "fractional-pct-out")!);
+  const centred = (amount: string) => agreementListingConformance(band.agreement, { ...band.listing,
+    pricing: { ...(band.listing.pricing as Obj), bandCenter: { currency: "USDC", amount } } }, PUBLISHER, 1780000000000);
+  assert.deepEqual(["100", "100.0", "100.00", "0100"].map(centred), [null, null, null, null]);
 });
 
 test("DACS-5 §10.4.3 mixed-version-reconciliation-v0.3 and fault-bundle-perspective-pair-v0.3", () => {

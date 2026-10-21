@@ -71,7 +71,16 @@
 #   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not
 #     reference: a session whose listing sets deadlineSecAfterCommit or validity.notAfter is
 #     indeterminate and never counted.
-#   CD-1: a non-canonical amount (e.g. "95.00") is rejected rather than canonicalised (fail-closed).
+#   CD-1: every verifier-side reading of a PriceTerm.amount canonicalises it first (canonicalDecimal.ts
+#     cd1Amount): agreement, paymentAmount and refundAmount shapes, §8.5.2 equality and band bounds
+#     (rounded to bandCenter's canonical digits), fixed-price over negotiable, the §9.7 settled amount,
+#     AMEND-3, DEM to OS and published volume. agreement-listing-v0.1 runs as published ("95.00",
+#     "100.00"). A sign, exponent, other separator, whitespace or bare point is refused. Only a metered
+#     agreement's terms.price must itself be canonical: MTR-4 "in CD-1 canonical form", which
+#     metered-pricing-v0.3 `non-canonical-recomputed-total` pins as reject, unlike agreement-listing-v0.1
+#     for the other kinds (upstream inconsistency). Hashes and signatures stay over the stored bytes.
+#     Listing verification still refuses a non-canonical listed amount, as at f13f233, which excludes
+#     every session on that listing whatever its outcome.
 #   agreement-listing-v0.1 `fractional-pct-out` expects reject; the §8.5.2 text (round to the CD-1
 #     digits of bandCenter) accepts it, and the Directory follows the text.
 #   SB-1: pinned evm/x402 refs omit logIndex; Solana refs omit instructionIndex. These refs are
@@ -183,7 +192,9 @@
 #     cannot decide a session never refutes it. Readers resolve null only for an answer and throw
 #     VerificationUnavailable with its kind (verificationUnavailable.ts; chain.ts readArtifact,
 #     readPayloadRecord, readSettlementNode). A copy whose bundle signatures verified, that nothing
-#     refutes and whose listing passes the gate above is undecided when a check gives no verdict: kind
+#     refutes and whose listing passes the gate above (the indexer applies it to a copy that stopped
+#     before the graph did; one whose listing it cannot resolve this pass stays undecided) is undecided
+#     when a check gives no verdict: kind
 #     "no-answer" (timeout, transport, node error, a node not yet through the cited block nor past the
 #     bundle's anchor, a reply about another transaction or block) or "lasting", a state of the session's
 #     own record that no later pass decides (an extended pointer, §9.6.1; a payload denied to the
@@ -207,6 +218,13 @@
 #     the cited block, and a cited block after the citing bundle's consensus anchor
 #     (test/indexer-binding-rules.test.ts "§10.5.1 at run time", "sweep 13 F1" and "daybreak P1-2";
 #     test/reputation-rules.test.ts range cases; test/chain-storage.test.ts; test/native-payment.test.ts).
+#   DACS-5 §10.5.4 category scope (reputation.ts categoryReputationHint; evidenceGraph.ts agreementCategory):
+#     a listing's ReputationHint counts the sessions whose agreement this pass resolved, by the
+#     offering.category of the listing that agreement pins (DealRecord.agreementCategory). A pre-commit
+#     failure or abort, and a session (decided or undecided) whose agreement or listing went unread, is
+#     in no hint, "not treated as matching any category", and counts in the seller's figures only. A
+#     deal saved without agreementCategory, as earlier releases saved it, is in no hint until re-verified.
+#     (test/indexer-binding-rules.test.ts "sweep 16 F1, F2"; test/reputation-rules.test.ts.)
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
 #     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,

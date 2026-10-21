@@ -1,3 +1,4 @@
+import { cd1Amount } from "./canonicalDecimal.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { VerificationUnavailable, type UndecidedKind } from "./verificationUnavailable.js";
 
@@ -16,10 +17,11 @@ const address = (v: unknown): string | null => {
   const claim = canonicalDemosAgentClaim(v);
   return claim ? `0x${claim.slice(-64)}` : /^0x[a-fA-F0-9]{64}$/.test(v) ? v.toLowerCase() : null;
 };
-/** DEM decimal to OS, using integer arithmetic (DACS-4 §9.5.9). */
+/** DEM decimal to OS, using integer arithmetic (DACS-4 §9.5.9), on the amount's CD-1 form. */
 export function demOs(v: unknown): bigint | null {
-  if (typeof v !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/.test(v)) return null;
-  const [whole, fraction = ""] = v.split(".");
+  const amount = cd1Amount(v);
+  if (amount === null || !/^\d+(?:\.\d{1,9})?$/.test(amount)) return null;
+  const [whole, fraction = ""] = amount.split(".");
   return BigInt(whole) * 1_000_000_000n + BigInt(fraction.padEnd(9, "0"));
 }
 // getTxByHash reconstructs persisted OS as a safe number or an exact string.

@@ -423,7 +423,7 @@ test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly s
     "an agreement with three role holders": agreement((scope) => { scope.parties = [...(scope.parties as Obj[]), { role: "buyer", primaryClaim: dids[OUTSIDER] }]; }),
     "an agreement with one party": agreement((scope) => { scope.parties = (scope.parties as Obj[]).slice(0, 1); }),
     "an agreement without a listingRef": agreement((scope) => { delete scope.listingRef; }),
-    "an agreement price with a leading zero": agreement((scope) => { (scope.terms as Obj).price = { amount: "01.25", currency: "DEM" }; }),
+    "an agreement price with a sign": agreement((scope) => { (scope.terms as Obj).price = { amount: "+1.25", currency: "DEM" }; }),
     "an agreement price of zero": agreement((scope) => { (scope.terms as Obj).price = { amount: "0", currency: "DEM" }; }),
     "an agreement price without a currency": agreement((scope) => { (scope.terms as Obj).price = { amount: "1.25", currency: "" }; }),
     "an agreement with both discriminators": agreement((scope) => { scope.payeeBoundAgreementVersion = "1"; }),
@@ -453,7 +453,7 @@ test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly s
     "an agreement carrying a singular signature too": AGREEMENT, "agreement signatures not an array": AGREEMENT,
     "an agreement signature entry that is not an object": AGREEMENT, "an agreement with three role holders": AGREEMENT,
     "an agreement with one party": AGREEMENT, "an agreement without a listingRef": AGREEMENT,
-    "an agreement price with a leading zero": AGREEMENT, "an agreement price of zero": AGREEMENT,
+    "an agreement price with a sign": AGREEMENT, "an agreement price of zero": AGREEMENT,
     "an agreement price without a currency": AGREEMENT, "an agreement with both discriminators": AGREEMENT,
     "agreementVersion 2": AGREEMENT, "a plain agreement carrying payout bindings": AGREEMENT,
     "evidenceVersion 2": EVIDENCE, "an evidence phase that is not a string": EVIDENCE, "an unknown evidence outcome": EVIDENCE,
@@ -465,14 +465,16 @@ test("DACS-3 and DACS-5 artifact shapes and signatures: a malformed or wrongly s
     "a rating of an orchestrator": RATING, "ratedAt as a string": RATING, "free text over 1,000 characters": RATING,
     "a rating signed by the seller for the buyer": RATING, "a rating whose rater is not a string": RATING,
   });
-  // Boundaries that stay valid: failure evidence for a failed phase, ratings of 1 and 5, and exactly 1,000 characters of free text.
+  // Boundaries that stay valid: failure evidence for a failed phase, ratings of 1 and 5, exactly 1,000 characters of
+  // free text, and an agreement price spelled with a leading zero, which CORE CD-1 canonicalises.
   const failedPayment: Case = { scopes: (scopes) => {
     scopes.evidence.outcome = "failure"; delete scopes.evidence.settlementFinality;
     scopes.bundle.outcome = "failed-perm";
     scopes.bundle.phaseSummary = [{ index: 2, kind: "pay-dem", outcome: "fail", errorClass: "permanent" }];
   } };
   for (const c of [failedPayment, rating((scope) => { scope.value = 1; }),
-    rating((scope) => { scope.freeText = "x".repeat(1000); })]) {
+    rating((scope) => { scope.freeText = "x".repeat(1000); }),
+    agreement((scope) => { (scope.terms as Obj).price = { amount: "01.250", currency: "DEM" }; })]) {
     const graph = await evaluate(c);
     assert.equal(graph.ok, true, graph.reason);
   }

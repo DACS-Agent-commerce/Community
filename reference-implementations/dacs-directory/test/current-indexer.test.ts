@@ -1908,6 +1908,7 @@ test("a buyer-published procurement listing credits its supplier's verified comp
   assert.equal(supplier.primaryClaim, dids[1]);
   assert.deepEqual(supplier.listings, []);
   assert.equal(supplier.deals[0].category, "services.test");
+  assert.equal(supplier.deals[0].agreementCategory, "services.test");
   // The publishing buyer holds the listing but is never scored as the session's seller.
   const publisher = await index(procurement, "procurement-job", 0, { ownListings: true });
   uncounted(publisher, "publisher scored as seller");

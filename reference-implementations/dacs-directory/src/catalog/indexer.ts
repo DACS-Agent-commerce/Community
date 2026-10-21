@@ -62,7 +62,8 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
+import { agreementCategory, agreementPrice, buildCurrentEvidenceGraph, deploymentVerifiability, type EvidenceGraph, type EvidenceGraphDeps,
+  type ResolvedEvidence } from "./evidenceGraph.js";
 import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies, reconcileUndecidedCopies } from "./currentReconciliation.js";
@@ -410,8 +411,8 @@ export async function indexRegistration(
     // No authenticated restricted reader is installed: the node denies this catalog's anonymous
     // restricted reads, so buyer-only delivery is indeterminate for every outcome.
     // No schema validator is installed either, so a deliverable naming a schemaUrl leaves its listing neutral.
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord,
-      resolveListing, readSettlementNode, bundleAnchorTime });
+    const graphDeps: EvidenceGraphDeps = { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing, readSettlementNode, bundleAnchorTime };
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, graphDeps);
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -482,23 +483,29 @@ export async function indexRegistration(
           const listing = sellerSide.graph.listing ?? buyerSide.graph.listing ??
             (listingRef ? (await resolveListing(listingRef).catch(() => null))?.raw : undefined);
           const offering = listing?.offering as Record<string, unknown> | undefined;
-          dealCandidates.push({
-            ...deal,
-            buyerBundleRef: buyerSide.binding.nativeAddress,
-            sellerBundleRef: sellerSide.binding.nativeAddress,
-            signatureVerified: true,
-            refsVerified: false,
-            reputationEligible: false,
-            outcome: String(bundle.outcome),
-            anchoredByRole: "seller",
-            finalisedAt: typeof bundle.finalisedAt === "number" ? bundle.finalisedAt : undefined,
-            anchorTimestamp: artifactAnchorTime(sellerSide.binding.nativeAddress),
-            // Unknown, it is counted in every listing's hint (categoryReputationHint).
-            category: typeof offering?.category === "string" ? offering.category : undefined,
-            undecided,
-            verifiedAt: now,
-          });
-          return;
+          // The gate excludes every outcome on a listing this deployment cannot verify. A copy that stopped before the
+          // graph reached it is held to it here, so how far a session got never decides (DACS-5 §10.5.1).
+          if (!listing || !(await deploymentVerifiability(listing, bundle, graphDeps))) {
+            dealCandidates.push({
+              ...deal,
+              buyerBundleRef: buyerSide.binding.nativeAddress,
+              sellerBundleRef: sellerSide.binding.nativeAddress,
+              signatureVerified: true,
+              refsVerified: false,
+              reputationEligible: false,
+              outcome: String(bundle.outcome),
+              anchoredByRole: "seller",
+              finalisedAt: typeof bundle.finalisedAt === "number" ? bundle.finalisedAt : undefined,
+              anchorTimestamp: artifactAnchorTime(sellerSide.binding.nativeAddress),
+              category: typeof offering?.category === "string" ? offering.category : undefined,
+              // The copies do not diverge, so either names the session's agreement. Neither resolved it and its listing
+              // this pass: the session is in no listing's hint (DACS-5 §10.5.4), only in the seller's ranges.
+              agreementCategory: agreementCategory(sellerSide.graph) ?? agreementCategory(buyerSide.graph),
+              undecided,
+              verifiedAt: now,
+            });
+            return;
+          }
         }
         dealCandidates.push({
           ...deal,
@@ -550,6 +557,8 @@ export async function indexRegistration(
         ratings, settlementTxIds: settlement ?? [],
         category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
+        // A session without an agreement is in no listing's hint (DACS-5 §10.5.4); it counts for the seller.
+        agreementCategory: agreementCategory(authoritative),
         verifiedAt: now,
       });
       return;
@@ -641,6 +650,7 @@ export async function indexRegistration(
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       category: bundleCategory(bundle, categoriesByListing),
+      agreementCategory: bundle?.agreementRef ? bundleCategory(bundle, categoriesByListing) : undefined,
       verifiedAt: now,
     });
   };

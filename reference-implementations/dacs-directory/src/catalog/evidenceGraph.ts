@@ -1,6 +1,7 @@
 import { authenticateAuthorityAttestation, type VerifyAuthorityAttestation } from "./authorityAttestation.js";
 import { boundLogicalAddress, cf4Segment, deliverableLogicalAddress, parsePaymentLogicalAddress, verifyAnchorBindings } from "./anchorBinding.js";
 import { canonicalize, contentHash, sha256Hex } from "./canonical.js";
+import { cd1Amount } from "./canonicalDecimal.js";
 import { MAX_DACS_ARTIFACT_BYTES } from "./artifactLimits.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyIdentityPresentation, verifyStoredListing } from "./listingVerification.js";
@@ -43,6 +44,8 @@ export interface EvidenceGraph {
   artifacts: ResolvedEvidence[];
   /** The bundle's settlementEvidence entries, with payment indices recovered from their anchors. */
   settlement: ResolvedEvidence[];
+  /** The verified agreement and the verified listing of the bundle's listingRef; an undecided graph carries each
+   * one it resolved before it stopped (agreementCategory). */
   agreement?: Record<string, unknown>;
   listing?: Record<string, unknown>;
   ratings: Record<string, unknown>[];
@@ -50,7 +53,8 @@ export interface EvidenceGraph {
   flaggedAmendments: Array<{ locator: string; reason: string }>;
   /** Set when this pass could not decide a session whose bundle signatures verified: nothing refuted it, and a
    * read, adapter or record gave no verdict. A session that reached the listing gate is on a listing this
-   * deployment can verify; a read can also go unanswered before that. `reason` equals the graph's reason, `kind`
+   * deployment can verify; a read can also go unanswered before that, and the indexer then applies the gate to the
+   * session's listing (deploymentVerifiability). `reason` equals the graph's reason, `kind`
    * is lasting when any cause is (no later pass decides it), and bundleContentHash is this copy's, for the BB-5
    * check. The indexer turns a session whose copies stand this way into DealRecord.undecided, which counts neither
    * as completed nor as failed (DACS-5 §10.5.1). A refuted session never carries it. */
@@ -130,9 +134,11 @@ const PHASE_OUTCOMES = new Set(["ok", "fail"]);
 const ERROR_CLASSES = new Set(["permanent", "transient", "counterparty", "substrate", "settlement-atomicity"]);
 const MAX_GRAPH_ARTIFACTS = 64;
 const withinArtifactLimit = (raw: Record<string, unknown>): boolean => Buffer.byteLength(JSON.stringify(raw), "utf8") <= MAX_DACS_ARTIFACT_BYTES;
+/** A positive CD-1 amount in any spelling CD-1 canonicalises (cd1Amount), and a bounded currency. Refusing a
+ * non-canonical spelling would refute only the sessions that carry an agreement, paid or refunded. */
 const priceTermOk = (value: unknown): boolean => {
-  const price = rec(value); const amount = price?.amount;
-  return Boolean(price && typeof amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(amount) && /[1-9]/.test(amount) &&
+  const price = rec(value); const amount = cd1Amount(price?.amount);
+  return Boolean(price && amount !== null && amount !== "0" &&
     typeof price.currency === "string" && price.currency.length > 0 && price.currency.length <= 64);
 };
 const SEPARATORS: Record<Exclude<ArtifactKind, "attestation">, string> = {
@@ -261,12 +267,12 @@ export function agreementMatchesListing(agreement: Record<string, unknown>, list
   if (agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)] && !fixedPriceFallback) return false;
 
   // DACS-3 §8.5.2: fixed-price negotiation over a negotiable band selects
-  // exactly its center. Canonical decimal strings avoid floating-point loss.
+  // exactly its center "per CD-1". Canonical decimal strings avoid floating-point loss.
   if (pricing?.kind === "negotiable" && agreement.derivedFromPattern === "fixed-price") {
     const center = rec(pricing.bandCenter);
     const price = rec(terms.price);
     if (!priceTermOk(center) || !priceTermOk(price) ||
-        price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
+        cd1Amount(price!.amount) !== cd1Amount(center!.amount) || price!.currency !== center!.currency) return false;
   }
 
   if (profile === "legacy") return terms.payoutBindings === undefined;
@@ -285,10 +291,11 @@ export function agreementMatchesListing(agreement: Record<string, unknown>, list
     expected.every((key) => actual.includes(key));
 }
 
-/** A CD-1 decimal as an integer count of 10^-scale units. */
+/** A CD-1 decimal as an integer count of 10^-scale units, scaled on its canonical digits (§8.5.2 rounds a band
+ * bound to bandCenter's "in its CD-1 canonical form"). */
 interface Decimal { units: bigint; scale: number }
 const decimal = (amount: unknown): Decimal => {
-  const [whole, fraction = ""] = String(amount).split(".");
+  const [whole, fraction = ""] = String(cd1Amount(amount) ?? amount).split(".");
   return { units: BigInt(whole + fraction), scale: fraction.length };
 };
 const compareDecimals = (left: Decimal, right: Decimal): number => {
@@ -397,6 +404,9 @@ export function agreementListingConformance(
     const total = { units: unitPrice.units * BigInt(metered.quantity), scale: unitPrice.scale };
     const minimum = rec(pricing.minTotal) ? decimal(rec(pricing.minTotal)!.amount) : null;
     if (compareDecimals(amount, minimum && compareDecimals(minimum, total) > 0 ? minimum : total) !== 0) return "price";
+    // MTR-4 alone asks terms.price itself to be "in CD-1 canonical form" (metered-pricing-v0.3
+    // `non-canonical-recomputed-total`); every other check compares canonicalised amounts.
+    if (cd1Amount(price.amount) !== price.amount) return "price";
   } else return "unrecognized-pricing-kind";
   if (pricing.kind !== "metered" && terms.meteredQuantity !== undefined) return "price";
   // 3. Rail: present exactly when the pipeline pays, and one the listing accepts.
@@ -737,8 +747,8 @@ export async function deploymentVerifiability(
 }
 
 /** What verification established before a check stopped it: the parties whose signatures verified, the bundle's
- * content hash, and the session's verified listing once it is resolved. */
-interface SignedFacts { parties?: string[]; bundleContentHash?: string; listing?: Record<string, unknown> }
+ * content hash, and the session's verified agreement and listing once each is resolved. */
+interface SignedFacts { parties?: string[]; bundleContentHash?: string; agreement?: Record<string, unknown>; listing?: Record<string, unknown> }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   let raw: Record<string, unknown> | null = null;
@@ -754,7 +764,8 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
     if (error instanceof VerificationUnavailable) {
       const reason = `session verification is undecided this pass: ${error.message}`;
       return signed.parties && signed.bundleContentHash ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties,
-        undecided: { reason, kind: error.kind, bundleContentHash: signed.bundleContentHash }, ...(signed.listing ? { listing: signed.listing } : {}) }
+        undecided: { reason, kind: error.kind, bundleContentHash: signed.bundleContentHash },
+        ...(signed.agreement ? { agreement: signed.agreement } : {}), ...(signed.listing ? { listing: signed.listing } : {}) }
         : fail(reason);
     }
     // Untrusted bundle or referenced content that cannot be canonicalized or read fails closed.
@@ -837,7 +848,7 @@ async function verifyCurrentEvidenceGraph(
     if (reserveTopLevelRef("agreement", raw.agreementRef) !== "new") return failSigned("duplicate or invalid top-level reference");
     const resolved = await resolveRef("agreement", raw.agreementRef, deps); if (!resolved) return failSigned("agreement reference failed");
     if (resolved.raw.jobId !== raw.jobId) return failSigned("agreement belongs to another job");
-    artifacts.push(resolved); agreement = resolved.raw;
+    artifacts.push(resolved); agreement = resolved.raw; signed.agreement = agreement;
   }
   // Agreement refs become mandatory only after successful commitment. Earlier terminal
   // failures still belong in reputation denominators (DACS-5 §10.3/§10.4).
@@ -1314,14 +1325,27 @@ async function verifyCurrentEvidenceGraph(
   if (unverifiable) return failSigned(undecided ?? `session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
   // Nothing refuted the session and its listing is verifiable here, but one check gave no verdict.
   if (undecided) {
-    return { ...failSigned(undecided), listing: listed.raw, undecided: { reason: undecided,
+    return { ...failSigned(undecided), ...(agreement ? { agreement } : {}), listing: listed.raw, undecided: { reason: undecided,
       kind: undecidedReasons.lasting === undefined ? "no-answer" : "lasting", bundleContentHash: signed.bundleContentHash! } };
   }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: signed.bundleContentHash!, signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }
 
+/**
+ * DACS-5 §10.5.4 fetch_category for one copy: the offering.category of the listing its verified agreement pins. A
+ * verified or undecided graph carries the agreement it resolved and the verified listing of the bundle's listingRef;
+ * the two refs are compared here because an undecided copy may have stopped before the graph compares them. None
+ * for a copy without an agreementRef, or whose agreement or listing this pass did not resolve.
+ */
+export function agreementCategory(graph: EvidenceGraph | undefined): string | undefined {
+  const category = rec(graph?.listing?.offering)?.category;
+  return graph?.agreement && graph.listing && typeof category === "string" &&
+    canonicalize(graph.agreement.listingRef) === canonicalize(graph.bundle.listingRef) ? category : undefined;
+}
+
+/** The agreed price as published volume, in its CD-1 form. */
 export function agreementPrice(agreement: Record<string, unknown> | undefined): { amount: string; currency: string } | null {
   const price = rec(rec(agreement?.terms)?.price);
-  return priceTermOk(price) ? { amount: price!.amount as string, currency: price!.currency as string } : null;
+  return priceTermOk(price) ? { amount: cd1Amount(price!.amount)!, currency: price!.currency as string } : null;
 }

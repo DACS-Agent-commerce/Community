@@ -281,6 +281,10 @@ test("a numeric legacy send payload leaves only its amount undecided", async () 
 
 test("multi-digit and fractional DEM prices convert exactly to OS", async () => {
   assert.deepEqual(["12", "10.5", "100.000000001"].map(demOs), [12_000_000_000n, 10_500_000_000n, 100_000_000_001n]);
+  // CORE CD-1: the amount is read in its canonical form, so trailing zeros past the ninth decimal and leading zeros
+  // name the same OS; a tenth significant decimal, or anything but a plain decimal, is still no OS amount.
+  assert.deepEqual(["12.0", "012", "10.500000000000", "0.0000000010"].map(demOs), [12_000_000_000n, 12_000_000_000n, 10_500_000_000n, 1n]);
+  assert.deepEqual(["10.5000000001", "+12", "1.2e1", "12.", " 12"].map(demOs), [null, null, null, null, null]);
   for (const [amount, os] of [["12", 12_000_000_000], ["10.5", 10_500_000_000]] as const) {
     const changed = structuredClone(tx);
     changed.content.amount = os;

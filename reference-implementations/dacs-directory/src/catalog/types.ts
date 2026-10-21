@@ -205,7 +205,12 @@ export interface DealRecord extends RegisteredDeal {
   outcome?: string;
   finalisedAt?: number;
   verifiedAt: number;
+  /** The offering.category of the session's own listing, shown with the deal; no figure is scoped by it. */
   category?: string;
+  /** DACS-5 §10.5.4 fetch_category: the offering.category of the listing the session's agreement pins. Set only when
+   * the authoritative copy carries an agreementRef and this pass resolved that agreement and its listing, so a
+   * pre-commit session, or one whose agreement or listing went unread, is in no ReputationHint (categoryReputationHint). */
+  agreementCategory?: string;
   /** Outcome interpreted from this catalog seller's perspective. */
   sellerOutcome?: string;
   anchoredByRole?: "buyer" | "seller" | "orchestrator";

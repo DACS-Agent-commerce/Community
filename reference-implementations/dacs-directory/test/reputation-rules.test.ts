@@ -148,13 +148,14 @@ test("ST-10: a cancellation is neutral only for a pre-commit abort under a signe
 test("DACS-1 §6.3.6 ReputationHint: the listing's category scopes the metrics, sub-categories included, others never", () => {
   const rating = (value: number) => [{ rater: "buyer", target: SELLER, targetRole: "seller" as const, value, ratedAt: 5, contentHash: "1".repeat(64) }];
   const deals = [
-    deal({ category: "data.finance", ratings: rating(5) }),
-    deal({ category: "data.finance.equities", sellerOutcome: "failed-perm", ratings: rating(3) }),
-    deal({ category: "data.finance", sellerOutcome: "failed-substrate" }),
+    deal({ agreementCategory: "data.finance", ratings: rating(5) }),
+    deal({ agreementCategory: "data.finance.equities", sellerOutcome: "failed-perm", ratings: rating(3) }),
+    deal({ agreementCategory: "data.finance", sellerOutcome: "failed-substrate" }),
     // Other categories, including a sibling that only shares a string prefix.
-    deal({ category: "data.weather", sellerOutcome: "failed-perm", ratings: rating(1) }),
-    deal({ category: "data.financial", sellerOutcome: "failed-perm", ratings: rating(1) }),
-    deal({ category: undefined, sellerOutcome: "failed-perm" }),
+    deal({ agreementCategory: "data.weather", sellerOutcome: "failed-perm", ratings: rating(1) }),
+    deal({ agreementCategory: "data.financial", sellerOutcome: "failed-perm", ratings: rating(1) }),
+    // No agreement category: a pre-commit session, in no hint (DACS-5 §10.5.4) whatever its listing's category.
+    deal({ category: "data.finance", agreementCategory: undefined, sellerOutcome: "failed-perm" }),
   ];
   const hint = categoryReputationHint("data.finance", deals, 0, 100, 7);
   assert.deepEqual(hint, {
@@ -166,9 +167,9 @@ test("DACS-1 §6.3.6 ReputationHint: the listing's category scopes the metrics, 
   });
   // The hint applies SB-2 and the window exactly as the seller derivation does.
   const tx = [{ id: "shared", observedAt: 1, phaseIndex: 2, evidenceHash: "a".repeat(64), nodeVerified: true }];
-  const reused = [deal({ category: "data.finance", settlementTxIds: tx }), deal({ category: "data.finance", settlementTxIds: [{ ...tx[0], observedAt: 2 }] })];
+  const reused = [deal({ agreementCategory: "data.finance", settlementTxIds: tx }), deal({ agreementCategory: "data.finance", settlementTxIds: [{ ...tx[0], observedAt: 2 }] })];
   assert.equal(categoryReputationHint("data.finance", reused, 0, 100, 7).bundleCount, 1);
-  assert.equal(categoryReputationHint("data.finance", [deal({ category: "data.finance", finalisedAt: 500 })], 0, 100, 7).bundleCount, 0);
+  assert.equal(categoryReputationHint("data.finance", [deal({ agreementCategory: "data.finance", finalisedAt: 500 })], 0, 100, 7).bundleCount, 0);
 });
 
 test("further derivation rules: the empty basis, SB-2 ties on equal hashes, and rating recency before hash", () => {
@@ -240,8 +241,8 @@ function crossSellerCatalog() {
   const tx = (observedAt: number) => [{ id: "demos:shared-across-sellers", observedAt, phaseIndex: 2, evidenceHash: "c".repeat(64), nodeVerified: true }];
   const OTHER = "did:demos:agent:other-seller";
   const price = { amount: "2", currency: "DEM" };
-  const winner = deal({ jobId: "winner", settlementTxIds: tx(10), agreementPrice: price, category: "rules.sb2" });
-  const later = deal({ jobId: "later", settlementTxIds: tx(11), agreementPrice: price, category: "rules.sb2", owners: { buyer: "did:demos:agent:buyer", seller: OTHER } });
+  const winner = deal({ jobId: "winner", settlementTxIds: tx(10), agreementPrice: price, agreementCategory: "rules.sb2" });
+  const later = deal({ jobId: "later", settlementTxIds: tx(11), agreementPrice: price, agreementCategory: "rules.sb2", owners: { buyer: "did:demos:agent:buyer", seller: OTHER } });
   return { sellers: [sellerRecord(SELLER, [winner]), sellerRecord(OTHER, [later])], winner, later };
 }
 
@@ -370,7 +371,7 @@ test("the ratings an undecided session could add leave the average null, with it
   // A malformed count could be one rating per other party.
   const malformed = undecidedDeal(["completed"], {}, Number.NaN);
   assert.deepEqual(deriveSellerReputation([rated(4), malformed], 0, 100).averageSellerRatingRange, { low: 2, high: 14 / 3 });
-  assert.deepEqual(categoryReputationHint("rules", [rated(4, { category: "rules" }), undecidedDeal(["completed"], { category: "rules" }, 1)], 0, 100, 100).averageSellerRatingRange,
+  assert.deepEqual(categoryReputationHint("rules", [rated(4, { agreementCategory: "rules" }), undecidedDeal(["completed"], { agreementCategory: "rules" }, 1)], 0, 100, 100).averageSellerRatingRange,
     { low: 2.5, high: 4.5 });
 });
 
@@ -392,21 +393,27 @@ test("an undecided session counts once, only in its window, and never beside a d
     { low: 0.5, high: 1 });
 });
 
-test("listing hints carry the undecided sessions of their category, and those of no known category in every hint", () => {
-  const deals = [deal({ category: "data.finance", sellerOutcome: "failed-perm" }), undecidedDeal(["completed"], { category: "data.finance.fx" })];
+test("listing hints carry the undecided sessions of their category, and those of no known category in none (DACS-5 §10.5.4)", () => {
+  const deals = [deal({ agreementCategory: "data.finance", sellerOutcome: "failed-perm" }), undecidedDeal(["completed"], { agreementCategory: "data.finance.fx" })];
   const hint = categoryReputationHint("data.finance", deals, 0, 100, 100);
   assert.equal(hint.completionRate, null); assert.equal(hint.bundleCount, 1); assert.equal(hint.undecidedSessions, 1);
   assert.deepEqual(hint.completionRateRange, { low: 0, high: 0.5 });
   const other = categoryReputationHint("media", deals, 0, 100, 100);
   assert.equal("undecidedSessions" in other || "completionRateRange" in other, false);
-  const unknown = categoryReputationHint("media", [...deals, undecidedDeal(["completed"], { category: undefined })], 0, 100, 100);
-  assert.equal(unknown.undecidedSessions, 1); assert.deepEqual(unknown.completionRateRange, { low: null, high: 1 });
+  // An undecided session whose agreement or listing went unread is not treated as matching any category: it moves
+  // only the seller's figures.
+  const withUnknown = [...deals, undecidedDeal(["completed"], { agreementCategory: undefined })];
+  for (const scope of ["media", "data.finance"]) {
+    assert.deepEqual(categoryReputationHint(scope, withUnknown, 0, 100, 100), categoryReputationHint(scope, deals, 0, 100, 100), scope);
+  }
+  assert.equal(deriveSellerReputation(withUnknown, 0, 100).undecidedSessions, 2);
   // The catalog-wide pass recomputes the same figures from the stored deals.
-  const seller = { primaryClaim: SELLER, displayName: "s", cci: [], deals, reputation: { completed: 0, totalAgreements: 0, completionRate: null },
+  const seller = { primaryClaim: SELLER, displayName: "s", cci: [], deals: withUnknown, reputation: { completed: 0, totalAgreements: 0, completionRate: null },
     listings: [{ offering: { category: "data.finance" } }], registeredAt: 0, lastIndexedAt: 0 } as unknown as SellerRecord;
   reconcileCatalogReputation([seller], 100);
-  assert.deepEqual(seller.reputation.completionRateRange, { low: 0, high: 0.5 }); assert.equal(seller.reputation.undecidedSessions, 1);
+  assert.deepEqual(seller.reputation.completionRateRange, { low: 0, high: 2 / 3 }); assert.equal(seller.reputation.undecidedSessions, 2);
   assert.deepEqual(seller.listings[0].reputationHint?.completionRateRange, { low: 0, high: 0.5 });
+  assert.equal(seller.listings[0].reputationHint?.undecidedSessions, 1);
 });
 
 // Exhaustive over small catalogs: every way the undecided sessions can be decided or refuted gives a rate inside the

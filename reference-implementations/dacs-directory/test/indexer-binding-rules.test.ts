@@ -161,6 +161,7 @@ test("a deal resolved through its holders' bindings carries the authoritative co
   assert.equal(deal.fullSignatureStanding, true);
   assert.equal(deal.rail, "demos-native:DEM");
   assert.equal(deal.category, "rules.binding");
+  assert.equal(deal.agreementCategory, "rules.binding");
   assert.equal(deal.finalisedAt, 120);
   assert.deepEqual(deal.agreementPrice, { amount: "2", currency: "DEM" });
   // SB-1: the key is the canonical demos:{lower-case hash without 0x}, and the phase index is the bundle entry's.
@@ -1657,6 +1658,13 @@ test("agreement presence and pre-commit terminal facts cannot contradict one ano
       assert.match(graph.reason!, /failed commitment|has no agreement|no failed terminal phase|terminal phase classification contradicts/);
       await assertUncounted();
     }
+    // DACS-5 §10.3.1 (sweep 16 G32): a classified pre-commit failure must end in a failed vet, negotiation or commitment
+    // phase. The other checks also refuse this one later, so only the reason shows this guard decided it.
+    const listed = installListedCase(() => {}, (s) => {
+      s.outcome = "failed-perm"; delete s.agreementRef; s.settlementEvidence = []; s.ratingRefs = [];
+      s.phaseSummary = [{ index: 0, kind: "identify", outcome: "fail", errorClass: "permanent" }];
+    });
+    assert.equal((await currentGraph(listed)).reason, "pre-commit failure has no failed terminal phase");
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
 });
 
@@ -1816,9 +1824,11 @@ test("§10.5.1 at run time: a completion this pass cannot decide is a range, nev
         assert.deepEqual(saved.reputation.counterpartyFaultRateRange, { low: 0, high: 0 });
         assert.equal(saved.reputation.counterpartyFaultRate, 0);
         assert.equal("reputationHeld" in saved, false);
+        // The listing's hint holds the undecided completion, whose agreement resolved, and not the pre-commit failure,
+        // which has no agreement (DACS-5 §10.5.4), so it has no decided session and no low end.
         const hint = saved.listings.find((listing) => listing.listingId === "binding-rules")!.reputationHint!;
-        assert.equal(hint.completionRate, null); assert.equal(hint.bundleCount, 1); assert.equal(hint.undecidedSessions, 1);
-        assert.deepEqual(hint.completionRateRange, { low: 0, high: 0.5 });
+        assert.equal(hint.completionRate, null); assert.equal(hint.bundleCount, 0); assert.equal(hint.undecidedSessions, 1);
+        assert.deepEqual(hint.completionRateRange, { low: null, high: 1 });
         assert.equal(hint.averageSellerRating, null); assert.deepEqual(hint.averageSellerRatingRange, { low: null, high: 5 });
         const body = await (await sellerRoute.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
           { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) })).json();
@@ -1826,10 +1836,11 @@ test("§10.5.1 at run time: a completion this pass cannot decide is a range, nev
         assert.deepEqual(body.reputation.completionRateRange, { low: 0, high: 0.5 });
         assert.equal(body.reputation.held, undefined);
         assert.equal(body.deals.find((deal: Obj) => deal.jobId === JOB).undecided.kind, "no-answer");
-        // minCompletionRate keeps a listing only when the rate, or else the range's low end, meets it.
+        // minCompletionRate keeps a listing only when the rate, or else the range's low end, meets it. This hint has
+        // neither, and the undecided completion cannot create one (the sweep 16 F1 test keeps a listing that meets it).
         const listed = async (min: string) => (await (await listingsRoute.GET(new NextRequest(
           `https://directory.example/api/dacs/listings?minCompletionRate=${min}`))).json()).listings.map((listing: Obj) => listing.listingId);
-        assert.deepEqual(await listed("0"), ["binding-rules"]);
+        assert.deepEqual(await listed("0"), []);
         assert.deepEqual(await listed("0.01"), []);
         // minRating likewise: the undecided completion's rating earns no listing a rating floor.
         assert.deepEqual((await (await listingsRoute.GET(new NextRequest("https://directory.example/api/dacs/listings?minRating=1"))).json()).listings, []);
@@ -2235,5 +2246,131 @@ test("cold review P1-1: a payer or legacy payee this profile cannot tie leaves a
       const cosigned = (await indexPass({ node: sent(fromOther) })).deals.find((deal) => deal.jobId === JOB)!;
       assert.deepEqual({ kind: cosigned.undecided?.kind, outcomes: cosigned.undecided?.sellerOutcomes }, { kind: "lasting", outcomes: ["aborted-by-other"] });
     });
+  } finally { reset(); }
+});
+
+// Sweep 16 F1 and F2. DACS-5 §10.5.4 scopes a listing's ReputationHint to the bundles whose agreementRef resolves, by
+// the offering.category of the listing that agreement pins, and excludes every other bundle, "not treated as matching
+// any category". A pre-commit session has no agreement, so it counts for the seller (§10.5.1) and in no hint; so does
+// a session whose agreement this pass could not read.
+test("sweep 16 F1, F2: a listing's hint counts only sessions whose agreement and its listing resolved", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const hintOf = (seller: SellerRecord) => seller.listings.find((listing) => listing.listingId === "binding-rules")!.reputationHint!;
+  const categoryOf = (seller: SellerRecord, jobId: string) => seller.deals.find((deal) => deal.jobId === jobId)?.agreementCategory;
+  /** The failure's job as a pre-commit abort instead, each copy signed by both parties. */
+  const installAbort = () => {
+    installFailure(installListedCase(() => {}));
+    for (const [locator, role, outcome] of [[at(95), "buyer", "aborted-by-other"], [at(96), "seller", "aborted-by-self"]] as const) {
+      const scope = signedScope(store.get(locator)!, "bundle"); delete scope.anchorBindings;
+      scope.outcome = outcome; scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }];
+      store.set(locator, copy(role, scope));
+    }
+  };
+  try {
+    for (const [name, install] of [["failure", () => installFailure(installListedCase(() => {}))], ["abort", installAbort]] as const) {
+      await t.test(`a pre-commit ${name} counts for the seller and in no hint, so the listing passes minCompletionRate=0.9`, async () => {
+        reset(); install();
+        const indexed = await indexPass();
+        assert.deepEqual(figures(indexed), BOTH_COUNTED);
+        const hint = hintOf(indexed);
+        assert.deepEqual({ rate: hint.completionRate, count: hint.bundleCount, rating: hint.averageSellerRating, undecided: hint.undecidedSessions },
+          { rate: 1, count: 1, rating: 4, undecided: undefined });
+        assert.deepEqual([categoryOf(indexed, JOB), categoryOf(indexed, FAILED_JOB)], ["rules.binding", undefined]);
+        // The catalog-wide save recomputes the hint from the stored deals, and discovery filters on it.
+        const { saveCatalog } = await import("../src/catalog/store.js");
+        const listingsRoute = await import("../app/api/dacs/listings/route.js");
+        const { NextRequest } = await import("next/server");
+        const prior = loadCatalog();
+        try {
+          saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [indexed] });
+          assert.equal(hintOf(loadCatalog().sellers[0]).completionRate, 1);
+          const listed = await (await listingsRoute.GET(new NextRequest("https://directory.example/api/dacs/listings?minCompletionRate=0.9"))).json();
+          assert.deepEqual(listed.listings.map((listing: Obj) => listing.listingId), ["binding-rules"]);
+          // A deal saved by an earlier release has only the listing's category, so it is in no hint until a pass re-verifies it.
+          assert.deepEqual(indexed.deals.map((deal) => deal.category), ["rules.binding", "rules.binding"]);
+          const stale: SellerRecord = { ...indexed, deals: indexed.deals.map(({ agreementCategory: _unverified, ...deal }) => deal) };
+          saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [stale] });
+          assert.equal(hintOf(loadCatalog().sellers[0]).bundleCount, 0);
+        } finally { saveCatalog(prior); }
+      });
+    }
+    await t.test("an undecided completion whose agreement and listing resolved is in its listing's hint", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const indexed = await indexPass({ node: async () => { throw new TypeError("fetch failed"); } });
+      assert.deepEqual(figures(indexed), UNDECIDED_COMPLETION);
+      const hint = hintOf(indexed);
+      assert.deepEqual({ rate: hint.completionRate, count: hint.bundleCount, undecided: hint.undecidedSessions, range: hint.completionRateRange },
+        { rate: null, count: 0, undecided: 1, range: { low: null, high: 1 } });
+      assert.equal(categoryOf(indexed, JOB), "rules.binding");
+    });
+    await t.test("an undecided completion whose agreement read gave no answer is in no hint", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const indexed = await indexPass({ storage: (read) => { if (read === at(2)) throw new TypeError("fetch failed"); return undefined; } });
+      assert.deepEqual(figures(indexed), UNDECIDED_COMPLETION);
+      const hint = hintOf(indexed);
+      assert.deepEqual({ rate: hint.completionRate, count: hint.bundleCount, undecided: hint.undecidedSessions }, { rate: null, count: 0, undecided: undefined });
+      assert.equal(categoryOf(indexed, JOB), undefined);
+    });
+  } finally { reset(); }
+});
+
+// Sweep 16 code follow-up 2, daybreak P2 (cold P2-1). The listing gate decides by listing (DACS-5 §10.5.1): a copy that
+// stopped at an unanswered read before the graph reached the gate is held to it too, so a session on a listing this
+// deployment cannot verify is never undecided. The failure counts on the seller's other, verifiable listing.
+test("sweep 16 cold P2-1: a session that stopped before the listing gate is excluded on a listing the gate refuses", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const verifiable = () => {
+    const scope = { ...signedScope(listing, "listing"), listingId: "binding-rules-second" };
+    return { ...scope, signature: signedWith(scope, "listing", SELLER) };
+  };
+  const agreementUnanswered = (read: string) => { if (read === at(2)) throw new TypeError("fetch failed"); return undefined; };
+  try {
+    await t.test("commitment-time bounds: excluded, not undecided", async () => {
+      reset(); installListedCase((scope) => { scope.validity = { notBefore: 1, notAfter: 9_000_000_000_000 }; }); installFailure(verifiable(), SECOND_LISTING);
+      const indexed = await indexPass({ storage: agreementUnanswered });
+      assert.deepEqual(figures(indexed), ONLY_FAILURE);
+      assert.equal(indexed.deals.find((deal) => deal.jobId === JOB)?.undecided, undefined);
+    });
+    await t.test("the same unanswered read on a verifiable listing leaves the session undecided", async () => {
+      reset(); installListedCase(() => {}); installFailure(verifiable(), SECOND_LISTING);
+      assert.deepEqual(figures(await indexPass({ storage: agreementUnanswered })), UNDECIDED_COMPLETION);
+    });
+  } finally { reset(); }
+});
+
+// Sweep 16 daybreak P1 (CORE CD-1): verifiers canonicalise PriceTerm.amount before every price comparison, so an
+// agreement or payment record spelling the price "2.0" settles the listed "2". Refusing that spelling refuted
+// completions only, the sessions that carry an agreement, while the listing's failures still counted.
+test("sweep 16 daybreak P1: a CD-1 spelling of the agreed or paid price counts its completion beside the failure", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const agreedAt = (amount: string) => installListedCase(() => {}, () => {}, (agreed) => {
+    agreed.terms = { ...agreed.terms as Obj, price: { amount, currency: "DEM" } };
+  });
+  try {
+    // A whole number of OS in any CD-1 spelling: trailing zeros past the ninth decimal and leading zeros included.
+    for (const amount of ["2.0", "2.000000000000", "02"]) {
+      await t.test(`an agreement price of "${amount}"`, async () => {
+        reset(); installFailure(agreedAt(amount));
+        assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+      });
+    }
+    await t.test(`a paymentAmount of "2.00"`, async () => {
+      reset();
+      const paidScope: Obj = { ...evidenceScope, paymentAmount: { amount: "2.00", currency: "DEM" } };
+      const paid = { ...paidScope, signature: signedWith(paidScope, "evidence", SELLER) };
+      store.set(at(3), paid);
+      installFailure(installListedCase(() => {}, (scope) => { scope.settlementEvidence = [refTo(at(3), paid, "evidence"), refTo(at(60), delivery, "evidence")]; }));
+      assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+    });
+    // Anything that is not a plain decimal still fails closed, for that completion alone.
+    for (const amount of ["+2", "2e0", "2,0", " 2", "2.", "-2"]) {
+      await t.test(`an agreement price of "${amount}" is refused`, async () => {
+        reset(); installFailure(agreedAt(amount));
+        assert.deepEqual(figures(await indexPass()), ONLY_FAILURE);
+      });
+    }
   } finally { reset(); }
 });

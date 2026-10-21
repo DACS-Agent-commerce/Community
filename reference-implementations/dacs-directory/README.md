@@ -296,7 +296,8 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
    the denominator, so an unverifiable listing yields no rate instead of a 0% one. That
-   covers every choice the listing leaves to a session; a choice made only at payment time that
+   covers every rail and currency the listing leaves to a session (a band or auction price
+   finer than the rail's base unit is refused once agreed, which the seller co-signs); a choice made only at payment time that
    this profile cannot tie to a party leaves that session undecided instead (below). A listing
    whose buyer requirement asks anything has to vet it: on one with no `vet-credentials` phase
    every committed session is refuted, so every session on it is excluded. An agreement may pick any rail the
@@ -481,6 +482,18 @@ eligibility; `settlementRejected` records its current catalog admission separate
 deals contribute no metrics or listing hints, and later saves reconsider them if the winning
 claim disappears or changes. Run a full reindex when upgrading an existing catalog so its
 cached evidence eligibility is refreshed.
+
+A listing's `reputationHint` is the DACS-5 §10.5.4 category-scoped derivation: it counts the
+sessions whose agreement the pass resolved, by the category of the listing that agreement pins
+(`agreementCategory` on the deal). A failure or abort before commitment has no agreement, so it
+counts in the seller's figures and in no hint, and so does a session whose agreement or listing
+went unread. A deal saved without `agreementCategory` is in no hint until a pass verifies it again.
+
+Prices are read in their CORE CD-1 canonical form wherever they are compared: agreement,
+payment and refund amounts, band bounds (rounded to the digits of the band centre's
+canonical form), the DEM amount in OS and published volume, so `"2.0"` settles a listed `"2"`.
+Anything but a plain decimal is refused. Only a metered agreement's price must itself be
+canonical (MTR-4, as the pinned `metered-pricing-v0.3` vectors require).
 
 **Upstream source contracts.** The Directory records these source revisions:
 

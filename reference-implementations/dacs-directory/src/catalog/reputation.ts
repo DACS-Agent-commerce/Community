@@ -245,7 +245,9 @@ export function deriveSellerReputation(
  * DACS-1 §6.3.6 ReputationHint for one listing: categoryScope is the listing's own category, and
  * the metrics come from the §10.5.1 derivation over the deals in that scope only (the category and
  * its sub-categories), so SB-2, the window and the neutral outcomes apply exactly as for the seller.
- * An undecided session whose category this pass could not read may belong to any scope, so it is in every one.
+ * DACS-5 §10.5.4 scopes by the category of the listing a session's agreement pins (DealRecord.agreementCategory)
+ * and excludes a session without one, "not treated as matching any category": a pre-commit session, and a
+ * session, decided or not, whose agreement or listing this pass could not read. Those count for the seller only.
  */
 export function categoryReputationHint(
   category: string,
@@ -255,7 +257,7 @@ export function categoryReputationHint(
   computedAt: number,
 ): ReputationHint {
   const scoped = deriveSellerReputation(deals, windowStart, windowEnd, (deal) =>
-    deal.category === category || deal.category?.startsWith(`${category}.`) === true || (deal.undecided !== undefined && deal.category === undefined));
+    deal.agreementCategory === category || deal.agreementCategory?.startsWith(`${category}.`) === true);
   return {
     categoryScope: category,
     completionRate: scoped.completionRate,
