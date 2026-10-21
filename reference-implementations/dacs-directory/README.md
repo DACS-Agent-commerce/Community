@@ -296,7 +296,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
    listing, pre-commit failures and aborts included, is left out of both the numerator and
    the denominator, so an unverifiable listing yields no rate instead of a 0% one. That
-   covers every choice the listing leaves to a session. An agreement may pick any rail the
+   covers every choice the listing leaves to a session; a choice made only at payment time that
+   this profile cannot tie to a party leaves that session undecided instead (below). A listing
+   whose buyer requirement asks anything has to vet it: on one with no `vet-credentials` phase
+   every committed session is refuted, so every session on it is excluded. An agreement may pick any rail the
    listing accepts, in the currency of the price it lists. On a `pay-dem` listing, each
    accepted rail at the listed price runs the same admission a committed session's agreed
    rail and price run: the pay-dem phase pays it, and it has an installed live DEM definition
@@ -314,7 +317,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    not reached the citing bundle's anchor), or a lasting state of its own record that no later
    pass decides (an extended pointer (§9.6.1), a payload the anonymous reader is denied (DV-2
    over-provision), access metadata the node does not state, a numeric legacy send payload, a
-   block whose applied list leaves the transfer out). Dropping it alone would publish the seller
+   block whose applied list leaves the transfer out, or in a copy the seller signed a transfer from
+   a key this profile cannot tie to the buyer or, under a legacy agreement, to an address it cannot
+   tie to the seller). Dropping it alone would publish the seller
    below its real rate beside its failures, and holding every session of the seller would let
    one undecidable session hide them. So an undecided session counts neither as completed nor as
    failed. It is kept on the seller's record (`undecided` on the deal: kind, reason, the outcomes
@@ -542,13 +547,26 @@ confirms and its SB-1 key describe one payment. Where a block lists the transact
 edits it applied (`attrs.gcrAppliedTxs`, served by node2 but absent from the pinned node source),
 a transfer the list does not name (a lasting state), or a list that cannot be read (no answer), is indeterminate. The node credits and debits the
 exact address string it stores (ac8f45f `handleNativeOperations`), so the transaction's
-sender, recipient and send argument must be the canonical `0x<64 lowercase hex>` payer and
-payee. Another spelling of the same key is a different account. The stored RPC amount is OS,
+sender and recipient must be canonical `0x<64 lowercase hex>` strings and its send argument
+must name the recipient. Another spelling of the same key is a different account. The payer is
+the agreement buyer's primary claim and the payee the seller's. A payee-bound agreement fixes
+its payout address (PB-1), and for `pay-dem` that can only be the seller's own address: PB-2 tier
+1 makes it the destination, tier 3 is legal only where no stronger tier applies, and a payer MUST
+refuse to pay any other. An agreement naming another is therefore refused for every committed
+session; only the seller, which co-signs it, can make one. DACS-4 lets the buyer pay from any key
+in its bundle claims, which this Directory does not resolve, and a legacy agreement binds no
+destination (§9.5.1). A transfer from another key than the buyer's, or under a legacy agreement
+to another address than the seller's, that passes every other check is the session's lasting
+state where the seller signed the copy, so the session is undecided; in a copy only its
+counterparty signed (an abort) such a transfer is refuted, so the counterparty cannot leave the
+seller's session undecided with it. The stored RPC amount is OS,
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
-string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter;
-that is the transaction's lasting state, so the session stays undecided (Discovery, item 3).
-Only the node's answer about the cited transaction refutes a payment: its failed status, other
-endpoints or amount, another block, a block that does not include it, or node2's structured
+string. A historical numeric DEM payload leaves only its amount open pending a historical fork
+adapter: every other check runs first, and a transfer that passes them is the transaction's
+lasting state, so the session stays undecided (Discovery, item 3).
+Only the node's answer about the cited transaction refutes a payment: its failed status, a send
+to the buyer's account or from the seller's, another payee than a payee-bound agreement fixes,
+another amount, another block, a block that does not include it, or node2's structured
 not-found (`result` 404, `reason: "not_found"`) once `checkedThroughBlock` reaches the cited
 block. A not-found below the cited block also refutes it when the last block the node checked is
 already later than the block that consensus-anchored the citing bundle (by that block's own

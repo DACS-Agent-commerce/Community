@@ -1307,6 +1307,11 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     ["a non-DEM payment rail", (s) => { s.acceptedRails = [{ railId: "x402:default" }]; (s.pipeline as Obj[])[2] = { kind: "pay-x402", parameters: { rail: "x402:default" } }; },
       [0, "negotiate-fixed-price"]],
     ["vetting without a historical challenge resolver", (s) => { (s.pipeline as Obj[]).unshift({ kind: "vet-credentials" }); }, [0, "vet-credentials"]],
+    // Cold review P1-A: every committed session on a listing whose requirement no vet phase checks is refuted, so a
+    // failure before commitment, which never shows whether it would have committed, counted alone at 0%.
+    ["cold review P1-A: identity requirements without a vet phase", (s) => {
+      s.buyerRequirement = { requirementVersion: "1", required: [{ scheme: "lei", verificationRequired: true }] };
+    }, [0, "negotiate-fixed-price"]],
     ["no live rail snapshot for the session's registry version", () => {}, [0, "negotiate-fixed-price"],
       () => { process.env.DACS_RAIL_SNAPSHOTS = "[]"; }],
     ["commitment-time bounds", (s) => { s.validity = { ...(s.validity as Obj), notAfter: 4_102_444_800_000 }; }, [0, "negotiate-fixed-price"]],
@@ -2106,6 +2111,129 @@ test("cold review P1: an evidence attestationRef is hash-bound and decides no ou
       assert.equal((await currentGraph(listed)).reason, "delivery attestation reference failed");
       installFailure(listed);
       assert.deepEqual(figures(await indexPass()), ONLY_FAILURE);
+    });
+  } finally { reset(); }
+});
+
+// Cold review P1-1. A paid completion whose transfer comes from another key than the buyer's primary claim (DACS-4
+// payingKey: any key in the buyer's bundle claims), or under a legacy agreement goes to another address than the
+// seller's (§9.5.1: the runtime payee.payeeAddress), was refuted: it dropped out while the listing's failures before
+// commitment still counted. In a copy the seller signed it is now the session's lasting state, a range. A pay-dem payout
+// binding to another address than the seller's own is still refused for every committed session: PB-2 tier 1 makes the
+// pay-dem destination the payee's primary-claim address, tier 3 is legal only where no stronger tier applies, and no
+// conforming payer pays such an agreement. Only the seller, which co-signs its payout bindings, can make one.
+test("cold review P1-1: a payer or legacy payee this profile cannot tie leaves a completion undecided, never dropped beside failures", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const nodeRead = nativeNodeFixture(() => store.values());
+  const other = `0x${dids[OUTSIDER].slice(-64)}`, sellerAddress = `0x${dids[SELLER].slice(-64)}`;
+  const resent = (content: Obj, change: (content: Obj) => void) => { change(content); return content; };
+  const fromOther = (content: Obj) => { content.from = other; };
+  const toOther = (content: Obj) => { content.to = other; ((content.data as Obj[])[1].args as unknown[])[0] = other; };
+  const sent = (change: (content: Obj) => void): NodeReply => async (message, data) => {
+    const reply = await nodeRead(message as never, data) as Obj;
+    if (message === "getTxByHash") resent(reply.content as Obj, change);
+    return nodeAnswer({ result: 200, response: reply });
+  };
+  const PAYER = "native payment verification is indeterminate: the transfer's payer is not the buyer's primary claim, and this profile does not resolve the other keys of the buyer's bundle";
+  const PAYEE = "native payment verification is indeterminate: the legacy agreement binds no destination, and the transfer's payee is not the seller's primary claim";
+  const undecidedCompletion = async (node: NodeReply, reason: string) => {
+    const seller = await indexPass({ node });
+    assert.deepEqual(figures(seller), UNDECIDED_COMPLETION);
+    const completion = seller.deals.find((deal) => deal.jobId === JOB)!;
+    assert.deepEqual({ kind: completion.undecided?.kind, reason: completion.undecided?.reason }, { kind: "lasting", reason });
+  };
+  // A payee-bound listing and agreement (DACS-3 §8.5) naming `payee` for the pay-dem phase, signed under its own domain.
+  const installPayeeBound = (payee: string, changeBundle: (scope: Obj) => void = () => {}) => {
+    const listed = installListedCase((scope) => { (scope.pipeline as Obj[])[1] = { kind: "commit-payee-bound-agreement" }; },
+      (bundle) => { (bundle.phaseSummary as Obj[])[1] = { index: 1, kind: "commit-payee-bound-agreement", outcome: "ok" }; changeBundle(bundle); },
+      (agreed) => { delete agreed.agreementVersion; agreed.payeeBoundAgreementVersion = "1";
+        (agreed.terms as Obj).payoutBindings = [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: payee }]; });
+    const scope = signedScope(store.get(at(2))!, "agreement");
+    const signature = (signer: number) => ({ party: dids[signer], algorithm: "ed25519",
+      value: value(`dacs-payee-bound-agreement:v1:${artifactHash(scope, "agreement")}`, signer) });
+    const signed = { ...scope, signatures: [signature(BUYER), signature(SELLER)] };
+    store.set(at(2), signed);
+    for (const [locator, role] of [[at(5), "buyer"], [at(6), "seller"]] as const) {
+      const bundle = signedScope(store.get(locator)!, "bundle"); delete bundle.anchorBindings;
+      bundle.agreementRef = refTo(at(2), signed, "agreement");
+      store.set(locator, copy(role, bundle));
+    }
+    return listed;
+  };
+  try {
+    await t.test("control: a payee-bound agreement paying the seller's own address counts beside the failure", async () => {
+      reset(); installFailure(installPayeeBound(sellerAddress));
+      assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+    });
+    await t.test("the buyer pays from another key: the completion is undecided, on either agreement type", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await undecidedCompletion(sent(fromOther), PAYER);
+      reset(); installFailure(installPayeeBound(sellerAddress));
+      await undecidedCompletion(sent(fromOther), PAYER);
+    });
+    await t.test("a legacy agreement pays another address than the seller's: the completion is undecided", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await undecidedCompletion(sent(toOther), PAYEE);
+    });
+    await t.test("a transfer the agreement refutes still refutes that completion only", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      assert.deepEqual(figures(await indexPass({ node: sent((content) => { fromOther(content); content.amount = 1; }) })), ONLY_FAILURE);
+      // A payee-bound agreement fixes its destination (PB-1).
+      reset(); installFailure(installPayeeBound(sellerAddress));
+      assert.deepEqual(figures(await indexPass({ node: sent(toOther) })), ONLY_FAILURE);
+    });
+    await t.test("PB-2 tier 1: a pay-dem payout binding to another address is refused for every committed session", async () => {
+      reset(); const listed = installPayeeBound(other);
+      const graph = await currentGraph(listed);
+      assert.equal(graph.reason, "the payee is not the agreement seller");
+      installFailure(listed);
+      assert.deepEqual(figures(await indexPass()), ONLY_FAILURE);
+      // An abort after commitment on that agreement is refused the same way, so the agreement decides nothing by outcome.
+      const abortAfterCommit = (scope: Obj) => {
+        scope.settlementEvidence = []; scope.ratingRefs = [];
+        scope.phaseSummary = [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }, { index: 1, kind: "commit-payee-bound-agreement", outcome: "ok" }];
+      };
+      const asSellerAbort = () => {
+        for (const [locator, role, outcome] of [[at(5), "buyer", "aborted-by-other"], [at(6), "seller", "aborted-by-self"]]) {
+          const scope = signedScope(store.get(locator)!, "bundle"); scope.outcome = outcome; store.set(locator, copy(role, scope));
+        }
+      };
+      for (const [payee, expected] of [[sellerAddress, { completed: 0, bundleCount: 2, completionRate: 0 }], [other, { completed: 0, bundleCount: 1, completionRate: 0 }]] as const) {
+        reset(); installFailure(installPayeeBound(payee, abortAfterCommit)); asSellerAbort();
+        const { completed, bundleCount, completionRate } = figures(await indexPass());
+        assert.deepEqual({ completed, bundleCount, completionRate }, expected, payee);
+      }
+    });
+    // A copy only the buyer signed is an abort (bundleSignerPolicy). There a key this profile cannot tie is refuted, so
+    // the buyer cannot leave the seller's session undecided with a transfer it cites alone.
+    await t.test("a copy without the seller's signature refutes such a transfer instead", async () => {
+      const abortAfterPayment = (buyerSigners: number[]) => {
+        reset(); installListedCase(() => {});
+        for (const [locator, role, outcome, signers] of [[at(5), "buyer", "aborted-by-self", buyerSigners], [at(6), "seller", "aborted-by-other", [SELLER]]] as const) {
+          const scope = signedScope(store.get(locator)!, "bundle"); delete scope.anchorBindings;
+          scope.outcome = outcome; scope.ratingRefs = [];
+          scope.phaseSummary = (scope.phaseSummary as Obj[]).slice(0, 3); scope.settlementEvidence = [refTo(at(3), evidence, "evidence")];
+          store.set(locator, copy(role, scope, [...signers]));
+        }
+      };
+      const graphOf = (locator: string) => buildCurrentEvidenceGraph(locator, {
+        readSettlementNode: async (message, data) => { const reply = await nodeRead(message, data) as Obj; if (message === "getTxByHash") fromOther(reply.content as Obj); return reply; },
+        read: async (read) => store.get(read) ?? null, resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }),
+        readAnchorRecord: async (read) => ({ data: store.get(read)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }) });
+      abortAfterPayment([BUYER]);
+      const buyerCopy = await graphOf(at(5));
+      assert.deepEqual(buyerCopy.signedParties, [dids[BUYER]]);
+      assert.deepEqual({ ok: buyerCopy.ok, undecided: buyerCopy.undecided, reason: buyerCopy.reason },
+        { ok: false, undecided: undefined, reason: "native payment verification is fail: the transaction is not the agreed native send in the cited block" });
+      const sellerCopy = await graphOf(at(6));
+      assert.deepEqual({ kind: sellerCopy.undecided?.kind, reason: sellerCopy.undecided?.reason }, { kind: "lasting", reason: PAYER });
+      const alone = (await indexPass({ node: sent(fromOther) })).deals.find((deal) => deal.jobId === JOB)!;
+      assert.deepEqual({ verified: alone.refsVerified, undecided: alone.undecided }, { verified: false, undecided: undefined });
+      // The same buyer copy co-signed by the seller leaves the session undecided.
+      abortAfterPayment([BUYER, SELLER]);
+      const cosigned = (await indexPass({ node: sent(fromOther) })).deals.find((deal) => deal.jobId === JOB)!;
+      assert.deepEqual({ kind: cosigned.undecided?.kind, outcomes: cosigned.undecided?.sellerOutcomes }, { kind: "lasting", outcomes: ["aborted-by-other"] });
     });
   } finally { reset(); }
 });

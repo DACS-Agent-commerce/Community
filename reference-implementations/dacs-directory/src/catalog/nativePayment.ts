@@ -54,6 +54,10 @@ function agreedNativeTransfer(agreement: Obj, phaseIndex: number) {
  * agreement seller (PB-2 tier 1), and the payer, the payee and a positive DEM price in whole OS are known.
  * These are terms fixed at commitment, so every committed session is held to them, whatever its outcome;
  * checking them only beside a successful payment would refute completions while that agreement's failures count.
+ * A payout binding to any other address is refused by the Standard, not by a limit of this profile: for pay-dem the
+ * destination is definitionally the payee's primary-claim address (DACS-4 §9.5.1 PB-2 tier 1), tier 3 is legal only
+ * where no stronger tier applies, and where no tier holds the payer MUST refuse to pay. No conforming session settles
+ * such an agreement, and only the seller, who co-signs its payout bindings, can make one.
  */
 export function nativeAgreementAdmission(agreement: Obj, phaseIndex: number): string | null {
   const { currency, amount, payer, payee, seller } = agreedNativeTransfer(agreement, phaseIndex);
@@ -63,23 +67,35 @@ export function nativeAgreementAdmission(agreement: Obj, phaseIndex: number): st
 }
 
 /**
+ * What an endpoint this profile cannot tie to its party does to a payment. DACS-4 PaymentPhaseInput lets the
+ * payingKey be any key in the buyer's bundle claims, which this Directory does not resolve, and a legacy
+ * agreement binds no destination: its payer pays the runtime payee.payeeAddress (§9.5.1). A transfer from
+ * another key than the buyer's primary claim, or under a legacy agreement to another than the seller's, is
+ * then `undecided` (lasting: no later pass ties it) or `refuted`. Every term the agreement fixes, and the node's
+ * own record of the transfer, still refutes it first.
+ */
+export type UntiedKeys = "undecided" | "refuted";
+
+/**
  * Public node reads establish terminal inclusion and the actual native-send payload. Only the node's answer
  * about this transaction refutes it (`fail`), and so does a cited block after the block in which the citing
  * bundle was consensus-anchored (`bundleAnchoredAt`, ms): inclusion cannot follow the bundle that asserts it.
  * Otherwise the payment is undecided (`indeterminate`), never refuted, and the reason keeps the cause. Its kind
  * says whether a later pass may decide it: no answer, a node behind the bundle's anchor, or a reply about
  * another transaction or block is `no-answer`; a send payload or applied list this profile cannot read as a
- * settlement is the transaction's `lasting` state, which no later pass changes.
+ * settlement, or an endpoint it cannot tie to its party (`untiedKeys`), is the transaction's `lasting` state,
+ * which no later pass changes. A transfer is left undecided only once every check that could refute it passed.
  */
 export async function nativePaymentVerdict(ref: Obj, agreement: Obj, phaseIndex: number, read?: SettlementNodeRead,
-  bundleAnchoredAt?: number): Promise<NativePaymentVerdict> {
+  bundleAnchoredAt?: number, untiedKeys: UntiedKeys = "refuted"): Promise<NativePaymentVerdict> {
   const fail = (reason: string): NativePaymentVerdict => ({ verdict: "fail", reason });
   const undecided = (reason: string, kind: UndecidedKind = "no-answer"): NativePaymentVerdict => ({ verdict: "indeterminate", reason, kind });
   const txHash = hash(ref.txHash);
   if (!txHash || !Number.isSafeInteger(ref.blockNumber) || Number(ref.blockNumber) < 1) return fail("the payment reference names no transaction and block");
   const refused = nativeAgreementAdmission(agreement, phaseIndex);
   if (refused) return fail(refused);
-  const { amount, payer, payee } = agreedNativeTransfer(agreement, phaseIndex);
+  const { amount, payer, payee, seller } = agreedNativeTransfer(agreement, phaseIndex);
+  const payeeBound = agreement.payeeBoundAgreementVersion === "1";
   if (!read) return undecided("no node reader is installed", "lasting");
   try {
     const answer = await read("getTxByHash", { hash: txHash });
@@ -104,14 +120,21 @@ export async function nativePaymentVerdict(ref: Obj, agreement: Obj, phaseIndex:
     const data = content?.data;
     const payload = Array.isArray(data) && data[0] === "native" ? rec(data[1]) : null;
     const args = payload?.args;
-    if (Array.isArray(args) && typeof args[1] === "number") return undecided("a numeric legacy DEM send payload needs historical fork semantics", "lasting");
+    // A numeric payload states its amount under historical fork semantics, so only the amount stays open.
+    const numeric = Array.isArray(args) && typeof args[1] === "number";
     // The node credits and debits the exact address string it stores (ac8f45f handleNativeOperations,
     // GCRBalanceRoutines findOneBy({ pubkey })), and its TO check accepts hex in any case. Another spelling
-    // of the payee's key is another account, so only the canonical payer and payee strings match.
+    // of a key is another account that no key controls, so only canonical endpoint strings name anyone, the
+    // send credits its own recipient, and a send to the buyer's account or from the seller's pays no seller.
+    const canonical = (v: unknown) => typeof v === "string" && /^0x[0-9a-f]{64}$/.test(v);
+    const untied = content?.from !== payer ? "the transfer's payer is not the buyer's primary claim, and this profile does not resolve the other keys of the buyer's bundle"
+      : content?.to !== payee ? "the legacy agreement binds no destination, and the transfer's payee is not the seller's primary claim" : null;
     if (tx.blockNumber !== ref.blockNumber || content?.type !== "native" ||
-        content.from !== payer || content.to !== payee ||
-        payload?.nativeOperation !== "send" || !Array.isArray(args) || args.length !== 2 ||
-        args[0] !== payee || payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount) {
+        !canonical(content.from) || !canonical(content.to) || content.from === content.to ||
+        content.to === payer || content.from === seller || (payeeBound && content.to !== payee) ||
+        payload?.nativeOperation !== "send" || !Array.isArray(args) || args.length !== 2 || args[0] !== content.to ||
+        (!numeric && (payloadOs(args[1]) !== amount || storedOs(content.amount) !== amount)) ||
+        (untied && untiedKeys === "refuted")) {
       return fail("the transaction is not the agreed native send in the cited block");
     }
     const blockAnswer = await read("getBlockByNumber", { blockNumber: ref.blockNumber });
@@ -129,7 +152,10 @@ export async function nativePaymentVerdict(ref: Obj, agreement: Obj, phaseIndex:
     }
     const transactions = rec(block.content)?.ordered_transactions;
     if (!Array.isArray(transactions)) return undecided("the node's block reply lists no transactions");
-    return transactions.some((h) => hash(h) === txHash) ? { verdict: "pass" } : fail("the cited block does not include the transaction");
+    if (!transactions.some((h) => hash(h) === txHash)) return fail("the cited block does not include the transaction");
+    if (untied) return undecided(untied, "lasting");
+    if (numeric) return undecided("a numeric legacy DEM send payload needs historical fork semantics", "lasting");
+    return { verdict: "pass" };
   } catch (error) {
     // The production reader classifies its own failures. Anything else has no known cause that a later pass would
     // answer, so it is reported as lasting.

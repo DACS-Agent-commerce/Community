@@ -134,15 +134,23 @@
 #     the payment when the node's last checked block is later, by its own timestamp, than the citing
 #     bundle's recorded consensus anchor: inclusion cannot follow the bundle that asserts it.
 #     The node credits and debits the exact address string (handleNativeOperations, GCRBalanceRoutines
-#     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from, to and
-#     send argument must therefore be the canonical 0x<64 lowercase hex> payer and payee.
-#     Profile limit: the payer is the agreement buyer's primary claim. DACS-4 PaymentPhaseInput lets the
-#     payingKey be any key in the buyer's bundle claims; this Directory resolves no IdentityBundle for
-#     payment, so a transfer from another of the buyer's keys is refuted for its session.
+#     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from and to
+#     must therefore be canonical 0x<64 lowercase hex> strings, and the send argument must name the
+#     recipient. A send to the buyer's account or from the seller's pays no seller and is refuted.
+#     PB-1/PB-2: a payee-bound pay-dem phase pays its payout binding, which tier 1 (intrinsic for pay-dem)
+#     makes the seller's primary-claim address; tier 3 is legal only where no stronger tier applies, so
+#     an agreement binding any other address is refused for every committed session (only the seller,
+#     a co-signer, can make one). Profile limit: the payer is the agreement buyer's primary claim, and
+#     under a legacy agreement, which binds no destination (§9.5.1), the payee is the seller's.
+#     DACS-4 PaymentPhaseInput lets the payingKey be any key in the buyer's bundle claims, and this
+#     Directory resolves no IdentityBundle for payment. A transfer outside that limit that passes every
+#     other check is lasting-undecided in a copy the seller signed, and refuted in a copy only its
+#     counterparty signed (an abort), so a counterparty cannot leave the seller's session undecided
+#     with it (test/indexer-binding-rules.test.ts "cold review P1-1").
 #     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
-#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Such a session,
-#     like one whose reads get no answer, is undecided and published as a range (§10.5.1 at run time,
-#     below). The node source calls terminal inclusion "confirmed".
+#     Numeric legacy DEM payloads need historical fork semantics: only their amount stays open, after
+#     every other check. Such a session, like one whose reads get no answer, is undecided and published
+#     as a range (§10.5.1 at run time, below). The node source calls terminal inclusion "confirmed".
 #   Attested-payload and entitlement success remain indeterminate until authoritative attestation
 #     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
 #   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
@@ -164,7 +172,8 @@
 #     without an authenticated restricted reader (none is installed), a deliverable schemaUrl without an
 #     authenticated schema validator (none is installed), or no payload reader;
 #     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
-#     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price,
+#     identity requirements) a control adapter; identity requirements without a vet-credentials phase,
+#     which refute every committed session; listing commitment-time bounds; negotiate-fixed-price,
 #     or an RFQ step enabling the fixed-price fallback, on a negotiable listing. The agreed rail and
 #     price are checked for every session with an agreement.
 #     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
@@ -179,7 +188,8 @@
 #     bundle's anchor, a reply about another transaction or block) or "lasting", a state of the session's
 #     own record that no later pass decides (an extended pointer, §9.6.1; a payload denied to the
 #     anonymous reader, DV-2 over-provision; access metadata the node does not state; a numeric legacy
-#     send payload; a stated gcrAppliedTxs list without the transfer). The session is undecided when its
+#     send payload; a stated gcrAppliedTxs list without the transfer; in a seller-signed copy, a payer
+#     or legacy payee outside the profile limit above). The session is undecided when its
 #     seller copy (seller-signed, bundleSignerPolicy) and buyer copy each verified or are undecided, at
 #     least one undecided, and they do not diverge. Only sessions that paid or delivered make those reads,
 #     so dropping one alone would bias the rates against the seller (guard (iv)'s per-jobId exclusion

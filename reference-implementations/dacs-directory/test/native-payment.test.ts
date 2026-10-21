@@ -214,6 +214,71 @@ test("only a native send operation settles the agreement", async () => {
   }
 });
 
+// Cold review P1-1. DACS-4 PaymentPhaseInput lets the buyer pay from any key in its bundle claims, and a legacy agreement
+// pays the runtime payee.payeeAddress (§9.5.1). Refuting such a transfer dropped the completion while the listing's
+// failures before commitment still counted. In a copy the seller signed it is the session's lasting state; in one it did
+// not sign it is refuted, as before. Every term the agreement fixes, and the node's own record, still refutes it first.
+test("cold review P1-1: a payer key, or a legacy payee, this profile cannot tie to its party leaves the payment undecided", async () => {
+  const other = `0x${"e".repeat(64)}`;
+  const verdict = (changed: unknown, untiedKeys?: "undecided" | "refuted", agreed: Record<string, unknown> = agreement, changedBlock: unknown = block) =>
+    nativePaymentVerdict(ref, agreed, 2, async (message) => message === "getTxByHash" ? changed : changedBlock, undefined, untiedKeys);
+  const sent = (change: (content: any) => void) => { const changed = structuredClone(tx); change(changed.content); return changed; };
+  const fromOther = sent((content) => { content.from = other; });
+  const toOther = sent((content) => { content.to = other; content.data[1].args[0] = other; });
+  const payer = { verdict: "indeterminate", kind: "lasting",
+    reason: "the transfer's payer is not the buyer's primary claim, and this profile does not resolve the other keys of the buyer's bundle" };
+  const payee = { verdict: "indeterminate", kind: "lasting",
+    reason: "the legacy agreement binds no destination, and the transfer's payee is not the seller's primary claim" };
+  assert.deepEqual(await verdict(fromOther, "undecided"), payer);
+  assert.deepEqual(await verdict(toOther, "undecided"), payee);
+  assert.deepEqual(await verdict(sent((content) => { content.from = `0x${"d".repeat(64)}`; content.to = other; content.data[1].args[0] = other; }), "undecided"), payer);
+  // In a copy the seller did not sign, and by default, the same transfers are refuted.
+  for (const changed of [fromOther, toOther]) {
+    assert.deepEqual(await verdict(changed), { verdict: "fail", reason: "the transaction is not the agreed native send in the cited block" });
+    assert.equal((await verdict(changed, "refuted")).verdict, "fail");
+  }
+  // A payee-bound agreement fixes the destination (PB-1): another payee is refuted, another paying key is not.
+  const payeeBound = { ...agreement, payeeBoundAgreementVersion: "1", terms: { ...agreement.terms,
+    rail: { railId: "demos-native:DEM" }, payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: tx.content.to }] } };
+  assert.equal((await verdict(toOther, "undecided", payeeBound)).verdict, "fail");
+  assert.deepEqual(await verdict(fromOther, "undecided", payeeBound), payer);
+  const buyer = tx.content.from, seller = tx.content.to;
+  for (const [name, changed, changedBlock] of [
+    ["another block", { ...fromOther, blockNumber: tx.blockNumber + 1 }, block],
+    ["another amount", sent((content) => { content.from = other; content.amount = 1; content.data[1].args[1] = "1"; }), block],
+    ["not a native transaction", sent((content) => { content.from = other; content.type = "storageProgram"; }), block],
+    ["not a send", sent((content) => { content.from = other; content.data[1].nativeOperation = "transfer"; }), block],
+    ["a send argument naming another account", sent((content) => { content.from = other; content.data[1].args[0] = other; }), block],
+    ["another spelling of a key", sent((content) => { content.from = `0x${"E".repeat(64)}`; }), block],
+    ["a transfer to its own sender", sent((content) => { content.from = other; content.to = other; content.data[1].args[0] = other; }), block],
+    ["a transfer to the buyer's account", sent((content) => { content.from = other; content.to = buyer; content.data[1].args[0] = buyer; }), block],
+    ["a transfer from the seller's account", sent((content) => { content.from = seller; content.to = other; content.data[1].args[0] = other; }), block],
+    ["a block that does not include it", fromOther, { ...block, content: { ...block.content, ordered_transactions: [] } }],
+  ] as Array<[string, unknown, unknown]>) assert.equal((await verdict(changed, "undecided", agreement, changedBlock)).verdict, "fail", name);
+});
+
+// Cold review P2-N1: the numeric-payload check ran first, so it left any such transfer undecided, whatever it moved
+// between whom and in which block. Only the amount is open in a numeric payload; every other check still refutes it.
+test("a numeric legacy send payload leaves only its amount undecided", async () => {
+  const numeric = (change: (changed: any) => void = () => {}) => {
+    const changed = structuredClone(tx); changed.content.data[1].args[1] = 7; change(changed); return changed;
+  };
+  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2, async (message) => message === "getTxByHash" ? numeric() : block),
+    { verdict: "indeterminate", reason: "a numeric legacy DEM send payload needs historical fork semantics", kind: "lasting" });
+  const stranger = `0x${"e".repeat(64)}`;
+  for (const [name, changed, changedBlock] of [
+    ["another block", numeric((changed) => { changed.blockNumber += 1; }), block],
+    ["not a native transaction", numeric((changed) => { changed.content.type = "storageProgram"; }), block],
+    ["a transfer between strangers", numeric((changed) => {
+      changed.content.from = `0x${"d".repeat(64)}`; changed.content.to = stranger; changed.content.data[1].args[0] = stranger;
+    }), block],
+    ["a send crediting another account", numeric((changed) => { changed.content.data[1].args[0] = stranger; }), block],
+    ["a block that does not include it", numeric(), { ...block, content: { ...block.content, ordered_transactions: [] } }],
+  ] as Array<[string, unknown, unknown]>) {
+    assert.equal(await verifyNativePayment(ref, agreement, 2, async (message) => message === "getTxByHash" ? changed : changedBlock), "fail", name);
+  }
+});
+
 test("multi-digit and fractional DEM prices convert exactly to OS", async () => {
   assert.deepEqual(["12", "10.5", "100.000000001"].map(demOs), [12_000_000_000n, 10_500_000_000n, 100_000_000_001n]);
   for (const [amount, os] of [["12", 12_000_000_000], ["10.5", 10_500_000_000]] as const) {

@@ -338,6 +338,12 @@ function paymentPhaseAdmission(phase: Record<string, unknown>, registryVersion: 
   return nativeRailAdmission(registryVersion, rail, phase.kind, price);
 }
 
+/** Whether a listing's BundleRequirement asks anything of the counterparty, which only a vet phase checks. */
+function statesRequirements(requirement: Record<string, unknown> | null): boolean {
+  return Boolean(requirement && (arr(requirement.required).length > 0 ||
+    (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined));
+}
+
 /** Returned when every evaluated check passed but check 5 or 6 needs a committedAt that was not supplied. */
 export const COMMITTED_AT_INDETERMINATE = "committed-at-indeterminate";
 
@@ -705,11 +711,12 @@ export async function deploymentVerifiability(
   if (kinds.filter((kind) => kind === "pay-dem").length > 1) {
     return "a repeated pay-dem phase leaves no listed phase index for each payment";
   }
+  // Every committed session on a listing whose requirement no vet phase checks is refuted (verifyCurrentEvidenceGraph),
+  // and a failure before commitment never shows whether it would have committed, so every session on it is neutral.
+  const hasRequirements = statesRequirements(rec(listing.buyerRequirement));
+  if (hasRequirements && !kinds.includes("vet-credentials")) return "the listing's buyer requirement has no vet phase to check it";
   if (kinds.includes("vet-credentials")) {
     if (!deps.resolveSessionChallenge) return "authenticated historical session challenges are unavailable";
-    const requirement = rec(listing.buyerRequirement);
-    const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
-      (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
     if (hasRequirements && !deps.verifyPrimaryClaimControl) return "primary-claim control verification is unavailable";
     // Vet records, passing or failing, are judged under the session's recipe registry snapshot.
     const snapshot = await (deps.resolveRecipeSnapshot ?? resolveConfiguredRecipeSnapshot)(Number(bundle.recipeRegistryVersion));
@@ -1068,10 +1075,9 @@ async function verifyCurrentEvidenceGraph(
     normalizedHash(artifact.raw.requirementHash) !== sha256Hex(canonicalize(requirement)))) {
     return failSigned("composite record is not bound to the listing's requirement");
   }
-  const hasRequirements = requirement && (arr(requirement.required).length > 0 ||
-    (Array.isArray(requirement.oneOf) && requirement.oneOf.length > 0) || requirement.primaryClaimSelector !== undefined);
+  // A listing whose requirement no vet phase checks is neutral for every outcome (deploymentVerifiability).
   const vets = pipeline.some((phase) => phase.kind === "vet-credentials");
-  if (agreement && hasRequirements && (!vets || !phases.some((phase) => phase.kind === "vet-credentials" && phase.outcome === "ok"))) {
+  if (agreement && statesRequirements(requirement) && (!vets || !phases.some((phase) => phase.kind === "vet-credentials" && phase.outcome === "ok"))) {
     return failSigned("committed session has identity requirements without a successful vet phase");
   }
   // VPC-2 / VPC-3: the party's signed bundleHash must resolve to its actual
@@ -1194,6 +1200,12 @@ async function verifyCurrentEvidenceGraph(
   // means no later pass decides it either.
   const undecidedReasons: Record<UndecidedKind, string | undefined> = { "no-answer": undefined, lasting: undefined };
   const noteUndecided = (reason: string, kind: UndecidedKind) => { undecidedReasons[kind] ??= reason; };
+  // A transfer from a key this profile cannot tie to the buyer, or under a legacy agreement to one it cannot tie to the
+  // seller, is the session's lasting state only in a copy the seller signed: the seller is the party scored, and only
+  // its own signature may leave its session in a state no pass decides. A copy without it is an abort its counterparty
+  // signed alone (bundleSignerPolicy); there such a transfer is refuted, as before, which excludes that abort alone.
+  const seller = parties.find((party) => party.role === "seller")!;
+  const untiedKeys = signedParties.includes(canonicalSigningIdentity(String(seller.primaryClaim))) ? "undecided" : "refuted";
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
@@ -1211,7 +1223,7 @@ async function verifyCurrentEvidenceGraph(
     // a single native transfer is one settlement).
     const ref = arr(evidence.raw.paymentTxRefs)[0];
     const payment = await nativePaymentVerdict(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode,
-      deps.bundleAnchorTime?.(bundleLocator, raw));
+      deps.bundleAnchorTime?.(bundleLocator, raw), untiedKeys);
     if (payment.verdict === "fail") return failSigned(`native payment verification is fail: ${payment.reason}`);
     if (payment.verdict === "indeterminate") {
       noteUndecided(`native payment verification is indeterminate: ${payment.reason}`, payment.kind);
