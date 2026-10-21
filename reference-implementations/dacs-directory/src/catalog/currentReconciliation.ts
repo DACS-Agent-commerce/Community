@@ -102,6 +102,35 @@ const roleOf = (graph: EvidenceGraph | null, claim: string) => {
   return parties.find((party) => String(party.primaryClaim).toLowerCase() === claim.toLowerCase())?.role;
 };
 
+/**
+ * DACS-5 §10.5.1 at run time: a session this pass could not decide. Each copy is bound to this job, its anchoring
+ * role and its parties as reconcileCurrentCopies requires, and either verified or stopped at a check that gave no
+ * verdict (EvidenceGraph.undecided), at least one stopped. Their copies must not diverge, which would exclude the
+ * session whatever is decided. The seller copy standing means the seller signed it (bundleSignerPolicy requires the
+ * anchoring role), so a counterparty cannot leave the seller's session undecided alone. Null otherwise.
+ */
+export function reconcileUndecidedCopies(
+  deal: RegisteredDeal,
+  sellerClaim: string,
+  buyerGraph: EvidenceGraph,
+  sellerGraph: EvidenceGraph,
+): { kind: "no-answer" | "lasting"; reason: string; sellerOutcomes: string[]; ratingsAtMost: number } | null {
+  const stands = (graph: EvidenceGraph, expectedRole: "buyer" | "seller") => (graph.ok || graph.undecided !== undefined) &&
+    graph.bundle.jobId === deal.jobId && graph.bundle.anchoredByRole === expectedRole &&
+    roleOf(graph, deal.owners.buyer) === "buyer" && roleOf(graph, sellerClaim) === "seller";
+  if (!stands(buyerGraph, "buyer") || !stands(sellerGraph, "seller")) return null;
+  const stopped = [sellerGraph.undecided, buyerGraph.undecided].filter((undecided) => undecided !== undefined);
+  if (stopped.length === 0 || currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph.bundle)) return null;
+  // A lasting state in either copy keeps the session undecided on every later pass.
+  const cause = stopped.find((undecided) => undecided.kind === "lasting") ?? stopped[0];
+  // DACS-5 keeps one rating per rater, session and role, and the seller's own does not count: a copy that cites
+  // any rating can add one per other party.
+  const citesRating = [buyerGraph, sellerGraph].some((graph) => Array.isArray(graph.bundle.ratingRefs) && graph.bundle.ratingRefs.length > 0);
+  return { kind: cause.kind, reason: cause.reason,
+    sellerOutcomes: [...new Set([sellerRelativeOutcome(sellerGraph, sellerClaim), sellerRelativeOutcome(buyerGraph, sellerClaim)])],
+    ratingsAtMost: citesRating ? records(sellerGraph.bundle.parties).filter((party) => party.role !== "seller").length : 0 };
+}
+
 /** Pure two-copy selection used by the indexer and by byte-stable fixtures. */
 export function reconcileCurrentCopies(
   deal: RegisteredDeal,

@@ -1,12 +1,12 @@
 /**
- * Why a read or adapter decided nothing (DACS-5 §10.5.1 at run time):
+ * Why a read or adapter decided nothing (DACS-5 §10.5.1 at run time). Either way the session is undecided: it
+ * counts neither as completed nor as failed, and the rates it could change are published as ranges
+ * (reputation.ts). The kind only says whether a later pass may decide it:
  * - `no-answer`: the infrastructure gave no reply about the record: a transport failure or timeout, a
  *   node error or unstructured reply, a node that has not reached the citing bundle's anchor. A later
- *   pass may get one, so the seller is held, for a bounded time (indexer.ts MAX_SELLER_HOLD_MS).
+ *   pass may get one.
  * - `lasting`: the reply describes a state the session's own record keeps, which a party to it chose
- *   and no later pass decides: a payload this anonymous reader is denied, an extended pointer. It
- *   excludes that session alone; holding the seller for it would let a party suppress the seller's
- *   failures for good.
+ *   and no later pass decides: a payload this anonymous reader is denied, an extended pointer.
  */
 export type UndecidedKind = "no-answer" | "lasting";
 

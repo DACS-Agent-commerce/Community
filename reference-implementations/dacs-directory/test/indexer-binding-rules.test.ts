@@ -16,7 +16,7 @@ import type { SellerRecord } from "../src/catalog/types.js";
 // role holder signed (DACS-5 BB-5..BB-7), and reports the deal unverified otherwise.
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-indexer-binding-rules-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
-const { indexRegistration, MAX_SELLER_HOLD_MS } = await import("../src/catalog/indexer.js");
+const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { artifactHash, buildCurrentEvidenceGraph, paymentTxRefsOk, signedScope } = await import("../src/catalog/evidenceGraph.js");
 const { bundleBindingOverflowKey, logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
 const { loadScanState, saveScanState, loadCatalog, recordArtifact, clearChainDerivedArtifacts } = await import("../src/catalog/store.js");
@@ -1657,11 +1657,12 @@ test("agreement presence and pre-commit terminal facts cannot contradict one ano
 
 // DACS-5 §10.5.1 at run time. The static listing gate decides only what the listing fixes. A paid, delivered
 // completion also reads its agreement, evidence, the node and the payload; a pre-commit failure makes none of
-// those reads. When one of them gets no answer here, dropping that completion alone while the seller's failures
-// still count publishes the seller at 0%. The seller is held instead, for a bounded time: no session of its
-// counts this pass, whatever its outcome or listing. A lasting state of the session's own record (an external
-// pointer, a payload the anonymous reader is denied) excludes only that session, and so does a record that is
-// false or that a node answer refutes.
+// those reads. When one of them gives no verdict, whether no answer or a lasting state of the session's own record
+// (an external pointer, a payload the anonymous reader is denied), the session is undecided. Dropping it alone
+// would publish the seller at 0% beside its failures (daybreak P1-1, P1-2), and holding every session of the
+// seller would let one undecidable session hide its failures (sweep 13 F1). An undecided session counts neither as
+// completed nor as failed: each rate it could change is null, with the range it can take once decided. A record
+// that is false, or that a node answer refutes, still excludes that session alone.
 const FAILED_JOB = "indexer-binding-failed-job";
 const SECOND_LISTING = at(97);
 /** A signed pre-commit failure of another job of this seller, on `listed` (stored at `locator`). */
@@ -1713,10 +1714,24 @@ async function indexPass(options: { node?: NodeReply; storage?: (locator: string
 }
 const figures = (seller: Awaited<ReturnType<typeof indexPass>>) => ({ completed: seller.reputation.completed, bundleCount: seller.reputation.bundleCount,
   completionRate: seller.reputation.completionRate, volume: seller.reputation.observedTransactionalVolume,
-  held: typeof (seller as { reputationHeld?: unknown }).reputationHeld === "string" });
-const BOTH_COUNTED = { completed: 1, bundleCount: 2, completionRate: 0.5, volume: [{ currency: "DEM", amount: "2" }], held: false };
-const HELD = { completed: 0, bundleCount: 0, completionRate: null, volume: [], held: true };
-const ONLY_FAILURE = { completed: 0, bundleCount: 1, completionRate: 0, volume: [], held: false };
+  undecided: seller.reputation.undecidedSessions ?? 0, range: seller.reputation.completionRateRange ?? null,
+  rating: seller.reputation.averageSellerRating ?? null, ratingRange: seller.reputation.averageSellerRatingRange ?? null });
+/** The completion carries the buyer's rating of 4. */
+const BOTH_COUNTED = { completed: 1, bundleCount: 2, completionRate: 0.5, volume: [{ currency: "DEM", amount: "2" }], undecided: 0, range: null,
+  rating: 4, ratingRange: null };
+/** The paid completion is undecided and the failure counts: no point rate, and the range runs from the failure
+ * alone (0) to both counted (0.5). Its rating may count once it is decided, and no decided rating floors it. */
+const UNDECIDED_COMPLETION = { completed: 0, bundleCount: 1, completionRate: null, volume: [], undecided: 1, range: { low: 0, high: 0.5 },
+  rating: null, ratingRange: { low: null, high: 5 } };
+const ONLY_FAILURE = { completed: 0, bundleCount: 1, completionRate: 0, volume: [], undecided: 0, range: null, rating: null, ratingRange: null };
+/** Read the page text without rendering: the server component is written for the classic JSX runtime. */
+async function sellerPageText(): Promise<string> {
+  (globalThis as { React?: typeof React }).React = React;
+  const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
+  const texts = (node: React.ReactNode): string[] => typeof node === "string" || typeof node === "number" ? [String(node)]
+    : Array.isArray(node) ? node.flatMap(texts) : React.isValidElement<{ children?: React.ReactNode }>(node) ? texts(node.props.children) : [];
+  return texts(await SellerPage({ params: Promise.resolve({ claim: encodeURIComponent(dids[SELLER]) }) })).join("");
+}
 const nodeAnswer = (body: Obj, status = 200) => Response.json(body, { status });
 const notFound = (checkedThroughBlock: number) => nodeAnswer({ result: 404, response: null, require_reply: false, extra: { reason: "not_found", checkedThroughBlock } });
 /** Replace the payment evidence with `change` applied, re-signed, in both copies of the completion. */
@@ -1732,9 +1747,10 @@ function replacePaymentEvidence(change: (scope: Obj) => void): Obj {
   return replaced;
 }
 
-test("§10.5.1 at run time: a completion this pass cannot decide holds the seller, never drops alone beside its failures", async (t) => {
+test("§10.5.1 at run time: a completion this pass cannot decide is a range, never a failure-only rate or a hold", async (t) => {
   const original = new Map(store);
   const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const undecidedKind = (seller: SellerRecord) => seller.deals.find((deal) => deal.jobId === JOB)?.undecided?.kind;
   try {
     await t.test("control: a verifiable completion and a pre-commit failure both count", async () => {
       reset(); installFailure(installListedCase(() => {}));
@@ -1754,11 +1770,13 @@ test("§10.5.1 at run time: a completion this pass cannot decide holds the selle
       ["the node answers an unstructured 404", async () => nodeAnswer({ result: 404, response: null })],
       ["the node answers the pinned source's 400", async () => nodeAnswer({ result: 400, response: "error" })],
     ] as Array<[string, NodeReply]>) {
-      await t.test(`${name}: the seller is held`, async () => {
+      await t.test(`${name}: the completion is undecided and the failure counts`, async () => {
         reset(); installFailure(installListedCase(() => {}));
-        assert.deepEqual(figures(await indexPass({ node })), HELD);
+        const seller = await indexPass({ node });
+        assert.deepEqual(figures(seller), UNDECIDED_COMPLETION);
+        assert.equal(undecidedKind(seller), "no-answer");
         reset(); installListedCase(() => {}); installFailure(secondListing(), SECOND_LISTING);
-        assert.deepEqual(figures(await indexPass({ node })), HELD, "failure on another listing");
+        assert.deepEqual(figures(await indexPass({ node })), UNDECIDED_COMPLETION, "failure on another listing");
       });
     }
     await t.test("a node that checked past the cited block and has no such transfer refutes that completion only", async () => {
@@ -1766,53 +1784,74 @@ test("§10.5.1 at run time: a completion this pass cannot decide holds the selle
       const seller = await indexPass({ node: async (message) => message === "getTxByHash" ? notFound(3901) : nodeAnswer({ result: 200, response: null }) });
       assert.deepEqual(figures(seller), ONLY_FAILURE);
       assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.refsVerified, false);
+      assert.equal(undecidedKind(seller), undefined);
     });
-    // Daybreak P1-1's delivery choices the listing leaves open (an extended pointer, a private payload on a public
-    // listing) are lasting states: sweep 13 F1 below excludes them alone and never holds the seller for them.
-    await t.test("a held seller stays held through the catalog-wide save, and the seller API, page and listings say so", async () => {
+    await t.test("an undecided seller with no decided session has no verified floor", async () => {
+      reset(); installListedCase(() => {});
+      assert.deepEqual(figures(await indexPass({ node: async () => { throw new TypeError("fetch failed"); } })),
+        { completed: 0, bundleCount: 0, completionRate: null, volume: [], undecided: 1, range: { low: null, high: 1 }, rating: null, ratingRange: { low: null, high: 5 } });
+    });
+    // Code F-A: every surface that publishes the figures shows the range and the count, and no filter or ranking
+    // credits an undecided completion: they use the rate, or else the range's low end.
+    await t.test("the range survives the catalog-wide save and reaches the seller API, the listings API, the page and the card", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      const held = await indexPass({ node: async () => { throw new TypeError("fetch failed"); } });
+      const indexed = await indexPass({ node: async () => { throw new TypeError("fetch failed"); } });
       const { saveCatalog } = await import("../src/catalog/store.js");
-      const route = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+      const sellerRoute = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+      const listingsRoute = await import("../app/api/dacs/listings/route.js");
+      const { directoryEvidenceState } = await import("../src/components/directory-evidence-state.js");
       const { NextRequest } = await import("next/server");
-      // The page is a server component written for the classic JSX runtime; read its text without rendering.
-      (globalThis as { React?: typeof React }).React = React;
-      const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
-      const texts = (node: React.ReactNode): string[] => typeof node === "string" || typeof node === "number" ? [String(node)]
-        : Array.isArray(node) ? node.flatMap(texts) : React.isValidElement<{ children?: React.ReactNode }>(node) ? texts(node.props.children) : [];
       const prior = loadCatalog();
       try {
-        saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [held] });
+        saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [indexed] });
         const saved = loadCatalog().sellers[0];
-        assert.equal(saved.reputation.completionRate, null); assert.equal(saved.reputation.bundleCount, 0);
-        assert.match(saved.reputationHeld!, /^indexer-binding-job: native payment verification is indeterminate: the node's getTxByHash reply failed \(transport\)$/);
-        assert.equal(typeof saved.reputationHeldSince, "number");
-        assert.ok(saved.listings.length > 0 && saved.listings.every((listing) => listing.reputationHeld === true));
-        const response = await route.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
-          { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
-        const body = await response.json();
-        assert.equal(body.reputation.held, saved.reputationHeld); assert.equal(body.reputation.completionRate, null);
-        assert.equal(body.reputation.heldSince, saved.reputationHeldSince);
-        assert.ok(body.listings.every((listing: Obj) => listing.reputationHeld === true));
-        const page = texts(await SellerPage({ params: Promise.resolve({ claim: encodeURIComponent(dids[SELLER]) }) })).join("");
-        assert.match(page, /Figures held this pass/);
-        assert.match(page, /held/);
-        assert.doesNotMatch(page, /0\/0/);
+        assert.deepEqual(figures(saved), UNDECIDED_COMPLETION);
+        // A rate the undecided session cannot move stays a point: the failure is the seller's own, so the
+        // counterparty-fault rate is 0 whether the completion counts or not.
+        assert.deepEqual(saved.reputation.counterpartyFaultRateRange, { low: 0, high: 0 });
+        assert.equal(saved.reputation.counterpartyFaultRate, 0);
+        assert.equal("reputationHeld" in saved, false);
+        const hint = saved.listings.find((listing) => listing.listingId === "binding-rules")!.reputationHint!;
+        assert.equal(hint.completionRate, null); assert.equal(hint.bundleCount, 1); assert.equal(hint.undecidedSessions, 1);
+        assert.deepEqual(hint.completionRateRange, { low: 0, high: 0.5 });
+        assert.equal(hint.averageSellerRating, null); assert.deepEqual(hint.averageSellerRatingRange, { low: null, high: 5 });
+        const body = await (await sellerRoute.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
+          { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) })).json();
+        assert.equal(body.reputation.completionRate, null); assert.equal(body.reputation.undecidedSessions, 1);
+        assert.deepEqual(body.reputation.completionRateRange, { low: 0, high: 0.5 });
+        assert.equal(body.reputation.held, undefined);
+        assert.equal(body.deals.find((deal: Obj) => deal.jobId === JOB).undecided.kind, "no-answer");
+        // minCompletionRate keeps a listing only when the rate, or else the range's low end, meets it.
+        const listed = async (min: string) => (await (await listingsRoute.GET(new NextRequest(
+          `https://directory.example/api/dacs/listings?minCompletionRate=${min}`))).json()).listings.map((listing: Obj) => listing.listingId);
+        assert.deepEqual(await listed("0"), ["binding-rules"]);
+        assert.deepEqual(await listed("0.01"), []);
+        // minRating likewise: the undecided completion's rating earns no listing a rating floor.
+        assert.deepEqual((await (await listingsRoute.GET(new NextRequest("https://directory.example/api/dacs/listings?minRating=1"))).json()).listings, []);
+        const page = await sellerPageText();
+        assert.match(page, /1 session this pass could not decide counts neither as completed nor as failed/);
+        assert.match(page, /so the completion rate is between 0% and 50%/);
+        // The ledger names the undecided session as such, not as a failed check.
+        assert.match(page, /undecided this pass/);
+        assert.doesNotMatch(page, /held|sig only/);
+        const card = directoryEvidenceState(saved.listings[0], saved).deals;
+        assert.equal(card.label, "0 strict-verified / 1 agreement · 1 undecided");
+        assert.match(card.explanation, /between 0% and 50%/);
       } finally { saveCatalog(prior); }
     });
     // The same pattern on the other reads only a committed session makes.
     for (const [name, locator] of [["agreement", at(2)], ["payment evidence", at(3)], ["delivery evidence", at(60)], ["payload", at(61)]] as const) {
-      await t.test(`the ${name} read has no answer: the seller is held`, async () => {
+      await t.test(`the ${name} read has no answer: the completion is undecided`, async () => {
         reset(); installFailure(installListedCase(() => {}));
-        assert.deepEqual(figures(await indexPass({ storage: (read) => { if (read === locator) throw new TypeError("fetch failed"); return undefined; } })), HELD);
+        assert.deepEqual(figures(await indexPass({ storage: (read) => { if (read === locator) throw new TypeError("fetch failed"); return undefined; } })), UNDECIDED_COMPLETION);
         reset(); installFailure(installListedCase(() => {}));
-        assert.deepEqual(figures(await indexPass({ storage: (read) => read === locator ? new Response("bad gateway", { status: 502 }) : undefined })), HELD);
+        assert.deepEqual(figures(await indexPass({ storage: (read) => read === locator ? new Response("bad gateway", { status: 502 }) : undefined })), UNDECIDED_COMPLETION);
       });
     }
   } finally { reset(); }
 });
 
-test("§10.5.1 at run time: an answer refutes one session, and only a session the seller signed can hold it", async (t) => {
+test("§10.5.1 at run time: an answer refutes one session, and only a session whose seller copy stands is undecided", async (t) => {
   const original = new Map(store);
   const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
   const denied = () => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
@@ -1821,7 +1860,7 @@ test("§10.5.1 at run time: an answer refutes one session, and only a session th
   const unanswered = (locator: string) => (read: string) => { if (read === locator) throw new TypeError("fetch failed"); return undefined; };
   try {
     // Closing or bloating a record is an answer its owner gives, like deleting it: it refutes only the session that
-    // cites it. A counterparty that owns such a record therefore cannot hold the seller with it.
+    // cites it. A counterparty that owns such a record therefore cannot leave the seller's session undecided with it.
     for (const [name, locator] of [["agreement", at(2)], ["payment evidence", at(3)], ["delivery evidence", at(60)]] as const) {
       for (const [how, reply] of [["denied", denied], ["oversized", oversized]] as const) {
         await t.test(`${how === "oversized" ? "an" : "a"} ${how} ${name} refutes that completion only`, async () => {
@@ -1840,84 +1879,90 @@ test("§10.5.1 at run time: an answer refutes one session, and only a session th
       store.set(at(95), copy("buyer", { ...(ratingOn === "buyer" ? rated : scope), outcome: "aborted-by-other" }, [BUYER]))
         .set(at(96), copy("seller", { ...(ratingOn === "seller" ? rated : scope), outcome: "aborted-by-self" }, [SELLER]));
     };
-    await t.test("an undecided copy only the buyer signed leaves that session uncounted and the seller counted", async () => {
+    // The completed session counts (1 of 1); the abort, which reads aborted-by-self for the seller, is undecided,
+    // so the rate lies between counting it (0.5) and its refutation (1). The rating it cites, unread this pass,
+    // could take the completion's 4 anywhere from (4 + 1) / 2 to (4 + 5) / 2.
+    const PAID_AND_UNDECIDED_ABORT = { completed: 1, bundleCount: 1, completionRate: null, volume: [{ currency: "DEM", amount: "2" }],
+      undecided: 1, range: { low: 0.5, high: 1 }, rating: null, ratingRange: { low: 2.5, high: 4.5 } };
+    await t.test("an undecided copy only the buyer signed, beside the seller's verified copy, leaves the session undecided", async () => {
       reset(); installListedCase(() => {}); abortCopies("buyer");
-      // That copy is held, and its only verified signature is the buyer's.
+      // That copy is undecided, and its only verified signature is the buyer's.
       const buyerCopy = await buildCurrentEvidenceGraph(at(95), { resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }),
         read: async (locator) => { if (locator === at(98)) throw new VerificationUnavailable("no answer", "no-answer"); return store.get(locator) ?? null; } });
-      assert.equal(buyerCopy.held, "session verification is undecided this pass: no answer");
+      assert.equal(buyerCopy.undecided?.reason, "session verification is undecided this pass: no answer");
+      assert.equal(buyerCopy.undecided?.kind, "no-answer");
+      assert.equal(buyerCopy.undecided?.bundleContentHash, artifactHash(store.get(at(95))!, "bundle"));
       assert.deepEqual(buyerCopy.signedParties, [dids[BUYER]]);
+      // Before this round the session was dropped alone and the seller published at 1 of 1.
       const seller = await indexPass({ storage: unanswered(at(98)) });
-      assert.deepEqual(figures(seller), { completed: 1, bundleCount: 1, completionRate: 1, volume: [{ currency: "DEM", amount: "2" }], held: false });
-      assert.equal(seller.deals.find((deal) => deal.jobId === FAILED_JOB)?.refsVerified, false);
+      assert.deepEqual(figures(seller), PAID_AND_UNDECIDED_ABORT);
+      const abort = seller.deals.find((deal) => deal.jobId === FAILED_JOB)!;
+      assert.equal(abort.refsVerified, false);
+      assert.deepEqual(abort.undecided?.sellerOutcomes, ["aborted-by-self"]);
     });
-    await t.test("the same unanswered read in the seller's own copy holds the seller", async () => {
+    await t.test("the same unanswered read in the seller's own copy is the same undecided session", async () => {
       reset(); installListedCase(() => {}); abortCopies("seller");
-      assert.deepEqual(figures(await indexPass({ storage: unanswered(at(98)) })), HELD);
+      assert.deepEqual(figures(await indexPass({ storage: unanswered(at(98)) })), PAID_AND_UNDECIDED_ABORT);
     });
-    await t.test("a bundle that cannot be read is no one's session yet: it is not held", async () => {
+    // Code F-E: a copy only the counterparty signed cannot make the seller's session undecided on its own.
+    for (const [name, sellerCopy] of [["is missing", () => { store.delete(at(96)); }],
+      ["is refuted", () => { store.set(at(96), { ...store.get(at(96))!, outcome: "completed" }); }]] as const) {
+      await t.test(`an undecided buyer copy whose seller copy ${name} is not an undecided session`, async () => {
+        reset(); installListedCase(() => {}); abortCopies("buyer"); sellerCopy();
+        const seller = await indexPass({ storage: unanswered(at(98)) });
+        assert.deepEqual(figures(seller), { completed: 1, bundleCount: 1, completionRate: 1, volume: [{ currency: "DEM", amount: "2" }], undecided: 0, range: null,
+          rating: 4, ratingRange: null });
+        assert.equal(seller.deals.find((deal) => deal.jobId === FAILED_JOB)?.undecided, undefined);
+      });
+    }
+    await t.test("a bundle that cannot be read is no one's session yet: it is not undecided", async () => {
       reset(); installListedCase(() => {});
       const graph = await buildCurrentEvidenceGraph(at(5), { read: async () => { throw new VerificationUnavailable("the storage read had no answer (transport)", "no-answer"); },
         resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }) });
-      assert.equal(graph.ok, false); assert.equal(graph.held, undefined); assert.equal(graph.signaturesVerified, false);
+      assert.equal(graph.ok, false); assert.equal(graph.undecided, undefined); assert.equal(graph.signaturesVerified, false);
       assert.equal(graph.reason, "session verification is undecided this pass: the storage read had no answer (transport)");
     });
   } finally { reset(); }
 });
 
-// Sweep 13 code F1. A lasting state is the session's own record, chosen by a party to it, and no later pass decides
-// it. Holding the seller for one would let the seller, or its own sybil buyer, suppress the seller's real failures
-// for good. It excludes that session alone, as DACS-5 guard (iv) and an unresolvable ST-10 marker do, and the seller
-// record counts the exclusion. The party that chose the state can only lose by it.
-test("sweep 13 F1: a lasting undecided state excludes its session alone, and the seller's failures still count", async (t) => {
+// Sweep 13 code F1 and daybreak P1-1. A lasting state is the session's own record, chosen by a party to it, and no
+// later pass decides it. Holding the seller for one would let the seller, or its own sybil buyer, suppress the
+// seller's real failures for good; dropping it alone publishes the seller at 0% beside them. It is undecided like
+// no answer: the failure counts, the completion counts neither way, and the rate is the range between.
+test("sweep 13 F1, daybreak P1-1: a lasting undecided state is a range, never dropped alone beside the seller's failures", async (t) => {
   const original = new Map(store);
   const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
   const nodeRead = nativeNodeFixture(() => store.values());
-  const excludedAlone = async (options: Parameters<typeof indexPass>[0] = {}) => {
+  const undecidedLasting = async (options: Parameters<typeof indexPass>[0] = {}) => {
     const seller = await indexPass(options);
-    assert.deepEqual(figures(seller), ONLY_FAILURE);
-    assert.equal(seller.undecidedExcluded, 1);
-    assert.equal(seller.reputationHeldSince, undefined, "a lasting state starts no hold clock");
-    assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.refsVerified, false);
+    assert.deepEqual(figures(seller), UNDECIDED_COMPLETION);
+    const completion = seller.deals.find((deal) => deal.jobId === JOB)!;
+    assert.equal(completion.refsVerified, false);
+    assert.equal(completion.undecided?.kind, "lasting");
+    assert.deepEqual(completion.undecided?.sellerOutcomes, ["completed"]);
     return seller;
   };
   try {
-    await t.test("a completion delivered by extended pointer (§9.6.1), as the seller API and page publish it", async () => {
+    await t.test("a completion delivered by extended pointer (§9.6.1)", async () => {
       reset(); installFailure(installListedCase(() => {}));
       store.set(at(61), { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) });
-      const seller = await excludedAlone();
-      const { saveCatalog } = await import("../src/catalog/store.js");
-      const route = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
-      const { NextRequest } = await import("next/server");
-      (globalThis as { React?: typeof React }).React = React;
-      const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
-      const texts = (node: React.ReactNode): string[] => typeof node === "string" || typeof node === "number" ? [String(node)]
-        : Array.isArray(node) ? node.flatMap(texts) : React.isValidElement<{ children?: React.ReactNode }>(node) ? texts(node.props.children) : [];
-      const prior = loadCatalog();
-      try {
-        saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [seller] });
-        const body = await (await route.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
-          { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) })).json();
-        assert.equal(body.reputation.undecidedExcluded, 1); assert.equal(body.reputation.held, undefined);
-        assert.equal(body.reputation.completionRate, 0); assert.equal(body.reputation.bundleCount, 1);
-        const page = texts(await SellerPage({ params: Promise.resolve({ claim: encodeURIComponent(dids[SELLER]) }) })).join("");
-        assert.match(page, /1 session this Directory cannot decide is left out/);
-        assert.doesNotMatch(page, /Figures held/);
-      } finally { saveCatalog(prior); }
+      const seller = await undecidedLasting();
+      assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.undecided?.reason,
+        "storage delivery is indeterminate: external cleartext is unavailable");
     });
     await t.test("a payload the anonymous reader is denied (DV-2 over-provision)", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      await excludedAlone({ storage: (locator) => locator === at(61)
+      await undecidedLasting({ storage: (locator) => locator === at(61)
         ? Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 }) : undefined });
     });
     await t.test("a payload whose node reply states no access mode", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      await excludedAlone({ storage: (locator) => locator === at(61)
+      await undecidedLasting({ storage: (locator) => locator === at(61)
         ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, data: payload }) : undefined });
     });
     await t.test("a numeric legacy DEM send payload", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      await excludedAlone({ node: async (message, data) => {
+      await undecidedLasting({ node: async (message, data) => {
         const reply = await nodeRead(message as never, data) as Obj;
         if (message === "getTxByHash") {
           const content = reply.content as Obj;
@@ -1928,7 +1973,7 @@ test("sweep 13 F1: a lasting undecided state excludes its session alone, and the
     });
     await t.test("a block whose applied-transaction list does not name the transfer", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      await excludedAlone({ node: async (message, data) => {
+      await undecidedLasting({ node: async (message, data) => {
         const reply = await nodeRead(message as never, data) as Obj;
         return nodeAnswer({ result: 200, response: message === "getBlockByNumber" ? { ...reply, attrs: { gcrAppliedTxs: [] } } : reply });
       } });
@@ -1956,60 +2001,41 @@ test("sweep 13 F1: a pay-dem reference to a block after its bundle's consensus a
       reset(); installFailure(installListedCase(() => {})); citeFutureBlock(); anchor(at(5)); anchor(at(6));
       const seller = await indexPass({ node: node(anchoredAt / 1000 + 1) });
       assert.deepEqual(figures(seller), ONLY_FAILURE);
-      assert.equal(seller.undecidedExcluded ?? 0, 0, "a refuted session is not an undecided one");
+      assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.undecided, undefined, "a refuted session is not an undecided one");
     });
     await t.test("the node has not reached the bundle's anchor: no answer", async () => {
       reset(); installFailure(installListedCase(() => {})); citeFutureBlock(); anchor(at(5)); anchor(at(6));
-      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000) })), HELD);
+      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000) })), UNDECIDED_COMPLETION);
     });
     await t.test("an anchor time recorded for other content decides nothing", async () => {
       reset(); installFailure(installListedCase(() => {})); anchor(at(5)); anchor(at(6)); citeFutureBlock();
-      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000 + 1) })), HELD);
+      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000 + 1) })), UNDECIDED_COMPLETION);
     });
   } finally { reset(); clearChainDerivedArtifacts(); }
 });
 
-// Sweep 13 code F1(b). A hold rests on a claim about the future, that the missing answer will come. A seller-level
-// clock carried from the prior record bounds it: after MAX_SELLER_HOLD_MS of continuous holds, the seller's
-// undecided sessions are excluded alone and counted. Only a pass that holds nothing resets the clock, so a new
-// self-arranged session cannot restart it.
-test("sweep 13 F1: a seller is held for at most MAX_SELLER_HOLD_MS of continuous passes", async (t) => {
+// Daybreak P1-2. A wall-clock limit cannot turn missing evidence into a verdict, and a figure that depends on a
+// clock saved between two writes changes with a crash (code F-G). No clock decides anything: an outage of any
+// length publishes the range, and the first pass that gets an answer counts the session.
+test("daybreak P1-2: no wall clock turns an undecided session into a verdict", async (t) => {
   const original = new Map(store);
   const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
   const unreachable: NodeReply = async () => { throw new TypeError("fetch failed"); };
+  const DAY = 24 * 60 * 60 * 1000;
   try {
-    assert.equal(MAX_SELLER_HOLD_MS, 24 * 60 * 60 * 1000);
-    await t.test("a first hold starts the clock and marks every listing", async () => {
+    await t.test("an outage longer than a day still publishes the range", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      const before = Date.now();
-      const seller = await indexPass({ node: unreachable });
-      assert.deepEqual(figures(seller), HELD);
-      assert.ok(seller.reputationHeldSince! >= before && seller.reputationHeldSince! <= Date.now());
-      assert.ok(seller.listings.length > 0 && seller.listings.every((listing) => listing.reputationHeld === true));
-    });
-    await t.test("a later hold keeps the prior start", async () => {
-      reset(); installFailure(installListedCase(() => {}));
-      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - 60_000 };
+      // A record from an earlier release carried a hold clock; it decides nothing now.
+      const prior = { ...await indexPass({ node: unreachable }), lastIndexedAt: Date.now() - 2 * DAY, reputationHeldSince: Date.now() - 2 * DAY } as SellerRecord;
       const seller = await indexPass({ node: unreachable, prior });
-      assert.deepEqual(figures(seller), HELD);
-      assert.equal(seller.reputationHeldSince, prior.reputationHeldSince);
+      assert.deepEqual(figures(seller), UNDECIDED_COMPLETION);
+      assert.equal("reputationHeldSince" in seller || "reputationHeld" in seller, false);
+      assert.ok(seller.listings.every((listing) => !("reputationHeld" in listing)));
     });
-    await t.test("past the limit the seller is not held: the undecided completion is excluded alone", async () => {
+    await t.test("the first pass that gets an answer counts both", async () => {
       reset(); installFailure(installListedCase(() => {}));
-      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - MAX_SELLER_HOLD_MS - 1 };
-      const seller = await indexPass({ node: unreachable, prior });
-      assert.deepEqual(figures(seller), ONLY_FAILURE);
-      assert.equal(seller.undecidedExcluded, 1);
-      assert.equal(seller.reputationHeldSince, prior.reputationHeldSince, "the clock runs on while sessions stay undecided");
-      assert.ok(seller.listings.every((listing) => listing.reputationHeld === undefined));
-    });
-    await t.test("a pass that holds nothing clears the clock", async () => {
-      reset(); installFailure(installListedCase(() => {}));
-      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - MAX_SELLER_HOLD_MS - 1 };
-      const seller = await indexPass({ prior });
-      assert.deepEqual(figures(seller), BOTH_COUNTED);
-      assert.equal(seller.reputationHeldSince, undefined);
-      assert.equal(seller.undecidedExcluded, undefined);
+      const prior = await indexPass({ node: unreachable });
+      assert.deepEqual(figures(await indexPass({ prior })), BOTH_COUNTED);
     });
   } finally { reset(); }
 });
@@ -2033,14 +2059,14 @@ test("daybreak sweep 13 P1: a deliverable schemaUrl is checked by an authenticat
     await t.test("production installs no validator: the completion and the failure are both neutral", async () => {
       reset(); const listed = withSchema(); installFailure(listed);
       const graph = await graphWith(listed);
-      assert.equal(graph.ok, false); assert.equal(graph.held, undefined);
+      assert.equal(graph.ok, false); assert.equal(graph.undecided, undefined);
       assert.equal(graph.reason, "session verification is indeterminate for every outcome on this listing: the deliverable schema needs an authenticated schema validator");
-      assert.deepEqual(figures(await indexPass()), { completed: 0, bundleCount: 0, completionRate: null, volume: [], held: false });
+      assert.deepEqual(figures(await indexPass()), { completed: 0, bundleCount: 0, completionRate: null, volume: [], undecided: 0, range: null, rating: null, ratingRange: null });
     });
     await t.test("a payload the validator rejects refutes the completion", async () => {
       reset(); const listed = withSchema();
       const graph = await graphWith(listed, async () => false);
-      assert.equal(graph.ok, false); assert.equal(graph.held, undefined);
+      assert.equal(graph.ok, false); assert.equal(graph.undecided, undefined);
       assert.equal(graph.reason, "storage delivery payload does not conform to the listing's deliverable schema");
     });
     await t.test("a payload the validator accepts completes, and the validator sees the hash-bound cleartext", async () => {
@@ -2054,7 +2080,8 @@ test("daybreak sweep 13 P1: a deliverable schemaUrl is checked by an authenticat
       reset(); const listed = withSchema();
       const graph = await graphWith(listed, async () => { throw new VerificationUnavailable("the schema registry had no answer (timeout)", "no-answer"); });
       assert.equal(graph.ok, false);
-      assert.equal(graph.held, "storage delivery is indeterminate: the schema registry had no answer (timeout)");
+      assert.deepEqual({ reason: graph.undecided?.reason, kind: graph.undecided?.kind },
+        { reason: "storage delivery is indeterminate: the schema registry had no answer (timeout)", kind: "no-answer" });
     });
   } finally { reset(); }
 });

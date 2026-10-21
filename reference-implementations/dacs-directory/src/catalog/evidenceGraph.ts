@@ -50,14 +50,11 @@ export interface EvidenceGraph {
   flaggedAmendments: Array<{ locator: string; reason: string }>;
   /** Set when this pass could not decide a session whose bundle signatures verified: nothing refuted it, and a
    * read, adapter or record gave no verdict. A session that reached the listing gate is on a listing this
-   * deployment can verify; a read can also go unanswered before that. Equal to `reason`. The indexer excludes
-   * such a session alone and counts it (SellerRecord.undecidedExcluded). A refuted session never carries it
-   * (DACS-5 §10.5.1). */
-  undecided?: string;
-  /** Set, equal to `undecided`, only when every cause was no answer (UndecidedKind "no-answer"): a later pass
-   * may decide the session, so the indexer holds the seller it signed for a bounded time instead. A lasting
-   * state (an extended pointer, a payload closed to this reader) never holds anyone. */
-  held?: string;
+   * deployment can verify; a read can also go unanswered before that. `reason` equals the graph's reason, `kind`
+   * is lasting when any cause is (no later pass decides it), and bundleContentHash is this copy's, for the BB-5
+   * check. The indexer turns a session whose copies stand this way into DealRecord.undecided, which counts neither
+   * as completed nor as failed (DACS-5 §10.5.1). A refuted session never carries it. */
+  undecided?: { reason: string; kind: UndecidedKind; bundleContentHash: string };
 }
 export interface HistoricalSessionChallenge {
   jobId: string;
@@ -77,7 +74,7 @@ export interface HistoricalSessionChallenge {
  * referenced. They throw VerificationUnavailable when they give no verdict, with its kind: no answer
  * (transport failure, timeout, node error, a node behind the bundle's anchor) or a lasting state the
  * record keeps. After the bundle's signatures verify, that leaves the session undecided
- * (EvidenceGraph.undecided, and EvidenceGraph.held for no answer), never refuted.
+ * (EvidenceGraph.undecided), never refuted.
  */
 export interface EvidenceGraphDeps {
   /** Authenticates VerifyResult and supplementary vet attestations. An evidence attestationRef decides
@@ -732,22 +729,26 @@ export async function deploymentVerifiability(
   return null;
 }
 
+/** What verification established before a check stopped it: the parties whose signatures verified, the bundle's
+ * content hash, and the session's verified listing once it is resolved. */
+interface SignedFacts { parties?: string[]; bundleContentHash?: string; listing?: Record<string, unknown> }
+
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
   let raw: Record<string, unknown> | null = null;
   // A failed graph carries no content hash: a rejected bundle is never hashed again.
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: "", signaturesVerified: false, signedParties: [], refsVerified: false, artifacts: [], settlement: [], ratings: [], flaggedAmendments: [] });
-  const signed: { parties?: string[] } = {};
+  const signed: SignedFacts = {};
   try {
     raw = await deps.read(bundleLocator);
     return await verifyCurrentEvidenceGraph(bundleLocator, raw, deps, fail, signed);
   } catch (error) {
     // A read or an adapter that gives no verdict decides nothing about the session. Once its signatures
-    // verified, it is undecided, never refuted, and held only for no answer; before that, nothing says whose
-    // session it is.
+    // verified, it is undecided, never refuted; before that, nothing says whose session it is.
     if (error instanceof VerificationUnavailable) {
       const reason = `session verification is undecided this pass: ${error.message}`;
-      return signed.parties ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties, undecided: reason,
-        ...(error.kind === "no-answer" ? { held: reason } : {}) } : fail(reason);
+      return signed.parties && signed.bundleContentHash ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties,
+        undecided: { reason, kind: error.kind, bundleContentHash: signed.bundleContentHash }, ...(signed.listing ? { listing: signed.listing } : {}) }
+        : fail(reason);
     }
     // Untrusted bundle or referenced content that cannot be canonicalized or read fails closed.
     return fail("bundle or a referenced artifact could not be processed");
@@ -759,7 +760,7 @@ async function verifyCurrentEvidenceGraph(
   raw: Record<string, unknown> | null,
   deps: EvidenceGraphDeps,
   fail: (reason: string) => EvidenceGraph,
-  signed: { parties?: string[] },
+  signed: SignedFacts,
 ): Promise<EvidenceGraph> {
   const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
@@ -784,6 +785,7 @@ async function verifyCurrentEvidenceGraph(
   if (!signaturesVerified) return fail("required current bundle signatures are missing or invalid");
   const signedParties = [...new Set(validParties.map(canonicalSigningIdentity))];
   signed.parties = signedParties;
+  signed.bundleContentHash = artifactHash(raw, "bundle");
   // Every later failure keeps the verified signature facts, so a caller can tell the two apart.
   const failSigned = (reason: string): EvidenceGraph => ({ ...fail(reason), signaturesVerified, signedParties });
 
@@ -1041,6 +1043,7 @@ async function verifyCurrentEvidenceGraph(
   const verifiedListing = listed && tupleOk && artifactHash(listed.raw, "listing") === listingHash
     ? await verifyStoredListing(listed.raw, listed.locator, resolveKey) : null;
   if (!listed || verifiedListing?.profile !== "dacs-v0.1") return failSigned("listing reference failed");
+  signed.listing = listed.raw;
   // A summary entry is an invocation of the signed pipeline at this exact index. A completed
   // session executed every mandatory phase. ST-5 permits rate to be declined.
   const pipeline = arr(listed.raw.pipeline);
@@ -1184,11 +1187,11 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("payment evidence anchor binding failed");
     }
   }
-  // DACS-5 §10.5.1: only completed sessions reach the node and payload checks below, so one they cannot
-  // decide must not refute the session. It is noted here with its kind and the remaining checks still run; a
-  // later refutation wins. A lasting state (an external pointer, a payload closed to this reader) can never be
-  // decided, and a party to the session chose it, so it excludes this session alone. Only when every cause is
-  // no answer may the indexer hold the seller, for a bounded time (EvidenceGraph.held).
+  // DACS-5 §10.5.1: only sessions that paid or delivered reach the node and payload checks below, so one they
+  // cannot decide must not refute the session. It is noted here with its kind and the remaining checks still run;
+  // a later refutation wins. Whatever the kind, the session is then undecided, which counts neither as completed
+  // nor as failed (reputation.ts); a lasting state (an external pointer, a payload closed to this reader) only
+  // means no later pass decides it either.
   const undecidedReasons: Record<UndecidedKind, string | undefined> = { "no-answer": undefined, lasting: undefined };
   const noteUndecided = (reason: string, kind: UndecidedKind) => { undecidedReasons[kind] ??= reason; };
   // Success assertions must settle this agreement's price. Receipt-only rails stay
@@ -1297,11 +1300,13 @@ async function verifyCurrentEvidenceGraph(
   const undecided = undecidedReasons.lasting ?? undecidedReasons["no-answer"];
   const unverifiable = await deploymentVerifiability(listed.raw, raw, deps);
   if (unverifiable) return failSigned(undecided ?? `session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
-  // Nothing refuted the session and its listing is verifiable here, but one check gave no verdict. A lasting
-  // state excludes this session alone; only no answer lets the indexer hold the seller instead.
-  if (undecided) return { ...failSigned(undecided), undecided, ...(undecidedReasons.lasting === undefined ? { held: undecided } : {}) };
+  // Nothing refuted the session and its listing is verifiable here, but one check gave no verdict.
+  if (undecided) {
+    return { ...failSigned(undecided), listing: listed.raw, undecided: { reason: undecided,
+      kind: undecidedReasons.lasting === undefined ? "no-answer" : "lasting", bundleContentHash: signed.bundleContentHash! } };
+  }
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
-  return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
+  return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: signed.bundleContentHash!, signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }
 
 export function agreementPrice(agreement: Record<string, unknown> | undefined): { amount: string; currency: string } | null {

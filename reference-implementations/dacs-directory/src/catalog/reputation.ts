@@ -1,4 +1,5 @@
 import { dealSessionKey } from "./bundleSignerPolicy.js";
+import { averageRange, rateRange, type RateRange } from "./rateRange.js";
 import { admitSettlement, type SettlementClaim } from "./settlementKey.js";
 import type { DealRecord, ReputationHint, SellerRecord } from "./types.js";
 
@@ -87,17 +88,67 @@ export function reconcileCatalogReputation(sellers: SellerRecord[], now: number)
   }
 }
 
+/** DACS-5 RatingRecord.value: an integer from 1 to 5 (evidenceGraph.ts shapeOk). */
+const RATING_MIN = 1;
+const RATING_MAX = 5;
+const COUNTERPARTY_FAULT = new Set(["failed-counterparty", "aborted-by-other"]);
+const OWN_FAULT = new Set(["failed-perm", "aborted-by-self"]);
+type Rate = "completionRate" | "counterpartyAdjustedCompletionRate" | "counterpartyFaultRate";
+/** What one session with this outcome adds to each rate: to the numerator and the denominator, to the denominator
+ * only, or nothing. Neutral sessions add nothing; ST-10 and orchestrator neutrality are not known for an undecided
+ * session, so it may add as a party fault, which only widens its range. */
+const CONTRIBUTION: Record<Rate, (outcome: string) => "both" | "denominator" | null> = {
+  completionRate: (outcome) => outcome === "completed" ? "both" : OWN_FAULT.has(outcome) || COUNTERPARTY_FAULT.has(outcome) ? "denominator" : null,
+  counterpartyAdjustedCompletionRate: (outcome) => outcome === "completed" ? "both" : OWN_FAULT.has(outcome) ? "denominator" : null,
+  counterpartyFaultRate: (outcome) => COUNTERPARTY_FAULT.has(outcome) ? "both" : outcome === "completed" || OWN_FAULT.has(outcome) ? "denominator" : null,
+};
+
+/**
+ * DACS-5 §10.5.1 at run time: the sessions this pass could not decide, one per session, with the outcomes their
+ * copies claim. A session any record of which was decided is not undecided. A session is in the window when either
+ * of its times is, so a basis the decided set chooses can only narrow what it could add.
+ */
+function undecidedSessions(deals: DealRecord[], windowStart: number, windowEnd: number) {
+  const sessions = new Map<string, { deal: DealRecord; outcomes: Set<string>; ratingsAtMost: number }>();
+  if (!deals.some((deal) => deal.undecided)) return sessions;
+  // A stored record without owners names no session; an undecided one then stands alone, which only widens a range.
+  const sessionKey = (deal: DealRecord) => deal.owners && typeof deal.owners === "object" ? dealSessionKey(deal)
+    : `${String(deal.jobId)}\n${String(deal.buyerBundleRef)}`;
+  const decided = new Set(deals.filter((deal) => deal.refsVerified).map(sessionKey));
+  const inWindow = (time: number | undefined) => typeof time === "number" && time >= windowStart && time <= windowEnd;
+  for (const deal of deals) {
+    const key = sessionKey(deal);
+    if (!deal.undecided || decided.has(key) || !(inWindow(deal.anchorTimestamp) || inWindow(deal.finalisedAt))) continue;
+    // An outcome the copies do not state, or one this derivation does not know, could be any; a rating count that
+    // is not a count could be one per party besides the seller (buyer and orchestrator).
+    const claimed = deal.undecided.sellerOutcomes.filter((outcome) => CURRENT_OUTCOMES.has(outcome));
+    const outcomes = claimed.length > 0 && claimed.length === deal.undecided.sellerOutcomes.length ? claimed : [...CURRENT_OUTCOMES];
+    const ratingsAtMost = Number.isSafeInteger(deal.undecided.ratingsAtMost) && deal.undecided.ratingsAtMost >= 0 ? deal.undecided.ratingsAtMost : 2;
+    const session = sessions.get(key) ?? { deal, outcomes: new Set<string>(), ratingsAtMost: 0 };
+    for (const outcome of outcomes) session.outcomes.add(outcome);
+    session.ratingsAtMost = Math.max(session.ratingsAtMost, ratingsAtMost);
+    sessions.set(key, session);
+  }
+  return sessions;
+}
+
 /**
  * DACS-5 scalar derivation over already signature/reference-verified,
  * seller-perspective records. Reconciliation and divergence exclusion happen
  * before this function; unresolved ratings/volume intentionally remain absent.
+ * `inScope` narrows the scored deals after the SB-2 ledger, as a ReputationHint's category does.
+ *
+ * Undecided sessions (DealRecord.undecided) are in no count, and each rate they could change is null with its
+ * range (rateRange.ts), never a figure over a partial denominator (DACS-5 §10.5.1: exclusion neither helps nor
+ * harms).
  */
 export function deriveSellerReputation(
   deals: DealRecord[],
   windowStart = 0,
   windowEnd = Date.now(),
+  inScope: (deal: DealRecord) => boolean = () => true,
 ): SellerRecord["reputation"] {
-  const eligible = settlementEligibleDeals(deals);
+  const eligible = settlementEligibleDeals(deals).filter(inScope);
   // A determinism receipt declares one timestamp basis for its entire input
   // set. Use SR-2 anchor time only when it is available for every eligible
   // record; otherwise fall back to finalisedAt uniformly and exclude records
@@ -149,23 +200,44 @@ export function deriveSellerReputation(
   }).sort((a, b) => byteOrder(a.currency, b.currency));
   const observedTransactionalVolume = currencyTotals.map(({ currency, amount }) => ({ currency, amount }));
   const transactionCountByCurrency = currencyTotals.map(({ currency, count }) => ({ currency, count }));
+  const undecided = [...undecidedSessions(deals, windowStart, windowEnd).values()].filter(({ deal }) => inScope(deal));
+  const decidedRates: Record<Rate, [number, number]> = {
+    completionRate: [completed, partyFaultDenominator],
+    counterpartyAdjustedCompletionRate: [completed, blameDenominator],
+    counterpartyFaultRate: [counterpartyFault, partyFaultDenominator],
+  };
+  const rates = {} as Record<Rate, number | null>;
+  const ranges = {} as Record<`${Rate}Range`, RateRange>;
+  for (const [rate, [numerator, denominator]] of Object.entries(decidedRates) as Array<[Rate, [number, number]]>) {
+    const could = (contribution: "both" | "denominator") => undecided.filter(({ outcomes }) =>
+      [...outcomes].some((outcome) => CONTRIBUTION[rate](outcome) === contribution)).length;
+    const both = could("both"), denominatorOnly = could("denominator");
+    const range = rateRange(numerator, denominator, both, denominatorOnly);
+    // A point is published only when no way of deciding the undecided sessions can change it.
+    const settled = (both === 0 && denominatorOnly === 0) || (denominator > 0 && range.low === range.high);
+    rates[rate] = settled && denominator > 0 ? numerator / denominator : null;
+    ranges[`${rate}Range`] = range;
+  }
+  // Ratings track outcomes, so the ratings an undecided session could add move the average the same way.
+  const ratingSum = sellerRatings.reduce((a, b) => a + b, 0);
+  const ratingsAtMost = undecided.reduce((sum, session) => sum + session.ratingsAtMost, 0);
+  const averageSellerRatingRange = averageRange(ratingSum, sellerRatings.length, ratingsAtMost, RATING_MIN, RATING_MAX);
   return {
     completed,
     bundleCount: scoped.length,
     totalAgreements: scoped.length,
-    completionRate: partyFaultDenominator > 0 ? completed / partyFaultDenominator : null,
-    counterpartyAdjustedCompletionRate: blameDenominator > 0 ? completed / blameDenominator : null,
-    counterpartyFaultRate: partyFaultDenominator > 0 ? counterpartyFault / partyFaultDenominator : null,
+    ...rates,
     // This catalog record is seller-scoped. Buyer-side sessions are not part
     // of its input set, so surfacing a buyer rating here would invent signal.
     averageBuyerRating: null,
-    averageSellerRating: sellerRatings.length ? sellerRatings.reduce((a, b) => a + b, 0) / sellerRatings.length : null,
+    averageSellerRating: sellerRatings.length && ratingsAtMost === 0 ? ratingSum / sellerRatings.length : null,
     observedTransactionalVolume,
     transactionCountByCurrency,
     bundleRefs,
     windowStart,
     windowEnd,
     windowingBasis: useAnchorTimestamps ? "sr2-anchor-timestamp" : "finalisedAt",
+    ...(undecided.length > 0 ? { undecidedSessions: undecided.length, ...ranges, averageSellerRatingRange } : {}),
   };
 }
 
@@ -173,6 +245,7 @@ export function deriveSellerReputation(
  * DACS-1 §6.3.6 ReputationHint for one listing: categoryScope is the listing's own category, and
  * the metrics come from the §10.5.1 derivation over the deals in that scope only (the category and
  * its sub-categories), so SB-2, the window and the neutral outcomes apply exactly as for the seller.
+ * An undecided session whose category this pass could not read may belong to any scope, so it is in every one.
  */
 export function categoryReputationHint(
   category: string,
@@ -181,9 +254,8 @@ export function categoryReputationHint(
   windowEnd: number,
   computedAt: number,
 ): ReputationHint {
-  const scoped = deriveSellerReputation(
-    settlementEligibleDeals(deals).filter((deal) => deal.category === category || deal.category?.startsWith(`${category}.`)), windowStart, windowEnd,
-  );
+  const scoped = deriveSellerReputation(deals, windowStart, windowEnd, (deal) =>
+    deal.category === category || deal.category?.startsWith(`${category}.`) === true || (deal.undecided !== undefined && deal.category === undefined));
   return {
     categoryScope: category,
     completionRate: scoped.completionRate,
@@ -192,6 +264,8 @@ export function categoryReputationHint(
     windowStart,
     windowEnd,
     computedAt,
+    ...(scoped.undecidedSessions ? { undecidedSessions: scoped.undecidedSessions, completionRateRange: scoped.completionRateRange,
+      averageSellerRatingRange: scoped.averageSellerRatingRange } : {}),
   };
 }
 

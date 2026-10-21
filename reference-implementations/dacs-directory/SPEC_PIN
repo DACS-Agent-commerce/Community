@@ -140,9 +140,9 @@
 #     payingKey be any key in the buyer's bundle claims; this Directory resolves no IdentityBundle for
 #     payment, so a transfer from another of the buyer's keys is refuted for its session.
 #     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
-#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate, excluding that
-#     session alone. Unanswered reads never count; they hold the seller for a bounded time (§10.5.1 at run
-#     time, below). The node source calls terminal inclusion "confirmed".
+#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Such a session,
+#     like one whose reads get no answer, is undecided and published as a range (§10.5.1 at run time,
+#     below). The node source calls terminal inclusion "confirmed".
 #   Attested-payload and entitlement success remain indeterminate until authoritative attestation
 #     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
 #   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
@@ -169,27 +169,34 @@
 #     price are checked for every session with an agreement.
 #     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
 #     or settle phase.
-#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.undecided/held; indexer.ts reputationHeld,
-#     MAX_SELLER_HOLD_MS): a pass that cannot decide a session never refutes it. Readers resolve null
-#     only for an answer and throw VerificationUnavailable with its kind (verificationUnavailable.ts;
-#     chain.ts readArtifact, readPayloadRecord, readSettlementNode). A session whose bundle signatures
-#     verified, that nothing refutes and whose listing passes the gate above is undecided when a check
-#     gives no verdict. Kind "no-answer" (timeout, transport, node error, a node not yet through the
-#     cited block nor past the bundle's anchor, a reply about another transaction or block): a held
-#     session the seller signed holds the seller, so none of its sessions counts in that pass, on any
-#     listing, whatever the outcome, since a listing with only failures never makes those reads. The
-#     hold is bounded: reputationHeldSince is carried from the prior record and saved with the catalog,
-#     and after MAX_SELLER_HOLD_MS (24 h) of continuous holds the undecided sessions are excluded alone;
-#     only a pass that holds nothing clears the clock. Kind "lasting", a state of the session's own
-#     record that no later pass decides and a party to it chose (an extended pointer, §9.6.1; a payload
-#     denied to the anonymous reader, DV-2 over-provision; access metadata the node does not state; a
-#     numeric legacy send payload; a stated gcrAppliedTxs list without the transfer): that session is
-#     excluded alone and never holds anyone, as guard (iv) and an unresolvable ST-10 marker exclude one
-#     jobId. Both are counted (SellerRecord.undecidedExcluded). An answer refutes its own session only:
-#     absent, unhashed, denied (non-payload) or over-bound records, all states their owner controls, a
-#     transfer node2's structured not-found has no record of through the cited block, and a cited block
-#     after the citing bundle's consensus anchor (test/indexer-binding-rules.test.ts "§10.5.1 at run
-#     time" and "sweep 13 F1", test/chain-storage.test.ts, test/native-payment.test.ts).
+#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.undecided; currentReconciliation.ts
+#     reconcileUndecidedCopies; indexer.ts DealRecord.undecided; reputation.ts; rateRange.ts): a pass that
+#     cannot decide a session never refutes it. Readers resolve null only for an answer and throw
+#     VerificationUnavailable with its kind (verificationUnavailable.ts; chain.ts readArtifact,
+#     readPayloadRecord, readSettlementNode). A copy whose bundle signatures verified, that nothing
+#     refutes and whose listing passes the gate above is undecided when a check gives no verdict: kind
+#     "no-answer" (timeout, transport, node error, a node not yet through the cited block nor past the
+#     bundle's anchor, a reply about another transaction or block) or "lasting", a state of the session's
+#     own record that no later pass decides (an extended pointer, §9.6.1; a payload denied to the
+#     anonymous reader, DV-2 over-provision; access metadata the node does not state; a numeric legacy
+#     send payload; a stated gcrAppliedTxs list without the transfer). The session is undecided when its
+#     seller copy (seller-signed, bundleSignerPolicy) and buyer copy each verified or are undecided, at
+#     least one undecided, and they do not diverge. Only sessions that paid or delivered make those reads,
+#     so dropping one alone would bias the rates against the seller (guard (iv)'s per-jobId exclusion
+#     assumes exclusion independent of outcome), and holding all of the seller's sessions would let one
+#     hide its failures. Profile deviation from derive(): an undecided session is in no count, and every
+#     rate, and averageSellerRating, it could change is published as null with its range (low end: each
+#     undecided session that could fail counted as failed, every other one refuted, and only with a
+#     decided session in the denominator; high end: each that could complete counted), on the seller
+#     API, the listing ReputationHint (Directory extension members undecidedSessions,
+#     completionRateRange, averageSellerRatingRange), the seller page and the discovery card.
+#     minCompletionRate, minRating and the good-record filter use the figure or else the low end, which no
+#     undecided session can raise or create. No clock or earlier verdict is carried between passes. An
+#     answer refutes its own session only: absent, unhashed, denied (non-payload) or over-bound records,
+#     all states their owner controls, a transfer node2's structured not-found has no record of through
+#     the cited block, and a cited block after the citing bundle's consensus anchor
+#     (test/indexer-binding-rules.test.ts "§10.5.1 at run time", "sweep 13 F1" and "daybreak P1-2";
+#     test/reputation-rules.test.ts range cases; test/chain-storage.test.ts; test/native-payment.test.ts).
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
 #     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,

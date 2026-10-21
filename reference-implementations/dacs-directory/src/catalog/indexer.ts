@@ -39,7 +39,7 @@ import {
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
-import { canonicalSigningIdentity, resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
+import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
@@ -65,10 +65,11 @@ import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralC
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph, type ResolvedEvidence } from "./evidenceGraph.js";
 import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies, reconcileUndecidedCopies } from "./currentReconciliation.js";
 import {
   boundedBundleBindings,
   bundleBindingOverflowKey,
+  EVERY_CANDIDATE_FAILED_POST_FETCH,
   resolveBundleSide,
   verifyBundleBinding,
 } from "./bundleBinding.js";
@@ -150,9 +151,6 @@ export type { ResolvePublisherListingAnchors } from "./publisherListings.js";
 
 /** Work bound per publisher and discovery tier when resolving another registration's sessions. */
 export const MAX_PUBLISHER_LISTING_READS = 32;
-/** Longest continuous hold of one seller (DACS-5 §10.5.1 at run time). A hold assumes a missing answer will
- * come; past this, the seller's undecided sessions are excluded alone and counted instead. */
-export const MAX_SELLER_HOLD_MS = 24 * 60 * 60 * 1000;
 
 /** Consensus anchor time of exactly these bundle bytes, as the scanner recorded it. */
 const bundleAnchorTime = (locator: string, bundle: Record<string, unknown>): number | undefined => {
@@ -339,17 +337,6 @@ export async function indexRegistration(
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
-  // DACS-5 §10.5.1 at run time. Only a completed or committed session makes the reads that can go unanswered,
-  // and a listing with only failures never makes them, so dropping such a session alone would publish the
-  // seller below its real rate. A session of this seller that got no answer (EvidenceGraph.held) therefore
-  // holds every one of its sessions out of the figures, whatever the outcome or listing, for at most
-  // MAX_SELLER_HOLD_MS of continuous passes. Only a bundle the seller itself signed can hold it. A lasting
-  // state (EvidenceGraph.undecided without held) is the session's own record, which a party chose and no
-  // pass decides: it excludes that session alone, as does no answer once the hold has run out, and both are
-  // counted (undecidedExcluded). Holding for a lasting state would let the seller hide its failures for good.
-  const sellerIdentity = canonicalSigningIdentity(reg.primaryClaim);
-  let heldReason: string | undefined;
-  const undecidedDeals = new Set<RegisteredDeal>();
   const scanState = loadScanState();
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
@@ -423,13 +410,8 @@ export async function indexRegistration(
     // No authenticated restricted reader is installed: the node denies this catalog's anonymous
     // restricted reads, so buyer-only delivery is indeterminate for every outcome.
     // No schema validator is installed either, so a deliverable naming a schemaUrl leaves its listing neutral.
-    const graphFor = async (locator: string) => {
-      const graph = await buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing,
-        readSettlementNode, bundleAnchorTime });
-      if (graph.undecided) undecidedDeals.add(deal);
-      if (graph.held && graph.signedParties.includes(sellerIdentity)) heldReason ??= `${deal.jobId}: ${graph.held}`;
-      return graph;
-    };
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord,
+      resolveListing, readSettlementNode, bundleAnchorTime });
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -442,6 +424,9 @@ export async function indexRegistration(
       if (sellerCurrentProbe && deal.sellerBundleRef) {
         graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
       }
+      // A copy this pass could not decide is no BB-5 candidate, but where it is the side's only standing copy the
+      // session is undecided (DACS-5 §10.5.1 at run time). The first such copy per role, in binding order, is kept.
+      const undecidedCopies = new Map<string, { graph: EvidenceGraph; binding: BundleBinding }>();
       const inspect = async (binding: BundleBinding) => {
         let pending = graphCache.get(binding.nativeAddress);
         if (!pending) {
@@ -454,12 +439,12 @@ export async function indexRegistration(
             Boolean(party && typeof party === "object" && !Array.isArray(party)))
           : [];
         const roleHolder = parties.find((party) => party.role === binding.role)?.primaryClaim;
-        if (
-          !graph.ok || graph.bundle.jobId !== binding.jobId ||
-          graph.bundle.anchoredByRole !== binding.role ||
-          typeof roleHolder !== "string" ||
-          canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
-        ) return null;
+        const binds = graph.bundle.jobId === binding.jobId && graph.bundle.anchoredByRole === binding.role &&
+          typeof roleHolder === "string" && canonicalDemosAgentClaim(roleHolder) === canonicalDemosAgentClaim(binding.signer);
+        if (!graph.ok && binds && graph.undecided?.bundleContentHash === binding.bundleContentHash && !undecidedCopies.has(binding.role)) {
+          undecidedCopies.set(binding.role, { graph, binding });
+        }
+        if (!graph.ok || !binds) return null;
         return {
           value: graph,
           bundleContentHash: graph.bundleContentHash,
@@ -484,6 +469,37 @@ export async function indexRegistration(
         inspect,
       });
       if (buyerResolution.disposition !== "present" || sellerResolution.disposition !== "present") {
+        // A side stands when it resolved, or when every candidate failed its post-fetch checks and one of them
+        // only because this pass could not decide it. Any other indeterminate side excludes the session.
+        const side = (resolution: typeof buyerResolution, role: "buyer" | "seller") => resolution.disposition === "present"
+          ? { graph: resolution.inspected.value, binding: resolution.binding }
+          : resolution.reason === EVERY_CANDIDATE_FAILED_POST_FETCH ? undecidedCopies.get(role) : undefined;
+        const buyerSide = side(buyerResolution, "buyer"), sellerSide = side(sellerResolution, "seller");
+        const undecided = buyerSide && sellerSide ? reconcileUndecidedCopies(deal, reg.primaryClaim, buyerSide.graph, sellerSide.graph) : null;
+        if (buyerSide && sellerSide && undecided) {
+          const bundle = sellerSide.graph.bundle;
+          const listingRef = bundle.listingRef && typeof bundle.listingRef === "object" ? bundle.listingRef as Record<string, unknown> : null;
+          const listing = sellerSide.graph.listing ?? buyerSide.graph.listing ??
+            (listingRef ? (await resolveListing(listingRef).catch(() => null))?.raw : undefined);
+          const offering = listing?.offering as Record<string, unknown> | undefined;
+          dealCandidates.push({
+            ...deal,
+            buyerBundleRef: buyerSide.binding.nativeAddress,
+            sellerBundleRef: sellerSide.binding.nativeAddress,
+            signatureVerified: true,
+            refsVerified: false,
+            reputationEligible: false,
+            outcome: String(bundle.outcome),
+            anchoredByRole: "seller",
+            finalisedAt: typeof bundle.finalisedAt === "number" ? bundle.finalisedAt : undefined,
+            anchorTimestamp: artifactAnchorTime(sellerSide.binding.nativeAddress),
+            // Unknown, it is counted in every listing's hint (categoryReputationHint).
+            category: typeof offering?.category === "string" ? offering.category : undefined,
+            undecided,
+            verifiedAt: now,
+          });
+          return;
+        }
         dealCandidates.push({
           ...deal,
           signatureVerified: false,
@@ -638,31 +654,18 @@ export async function indexRegistration(
       dealCandidates.push({ ...deal, signatureVerified: false, refsVerified: false, reputationEligible: false, verifiedAt: now });
     }
   }
-  const verifiedDeals = dedupeVerifiedDeals(dealCandidates);
-  // The hold clock runs from the first of an unbroken series of passes with an unanswered session of this
-  // seller; it is saved with the catalog, and a pass that holds nothing clears it. A start the prior record
-  // cannot vouch for begins now, which only ever shortens a hold.
-  const priorSince = prior?.reputationHeldSince;
-  const reputationHeldSince = heldReason === undefined ? undefined
-    : Number.isSafeInteger(priorSince) && Number(priorSince) <= now ? Number(priorSince) : now;
-  const reputationHeld = reputationHeldSince !== undefined && now - reputationHeldSince <= MAX_SELLER_HOLD_MS ? heldReason : undefined;
-  // A held seller keeps every deal and its verdict on record, but none counts until a pass decides them all.
-  const deals = reputationHeld ? verifiedDeals.map((deal) => ({ ...deal, reputationEligible: false })) : verifiedDeals;
-  // Otherwise every undecided session is out of the figures on its own; say how many, so a reader can tell.
-  const undecidedExcluded = reputationHeld ? 0 : [...undecidedDeals].filter((deal) => !deals.some((counted) =>
-    counted.jobId === deal.jobId && counted.owners.buyer === deal.owners.buyer && counted.refsVerified)).length;
+  const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
-  const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
+  // DACS-5 §10.5.1 at run time: only sessions that paid or delivered make the reads that can give no verdict, so
+  // an undecided session must neither drop alone beside the seller's failures nor hold them all out. It is kept
+  // on record (DealRecord.undecided) and every rate it could change is published as a range (reputation.ts).
   const reputation = deriveSellerReputation(deals, 0, now);
-  const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
-  // A held seller's hints carry no rate; reputationHeld tells discovery why, so it does not read as a newcomer's.
   const listingsWithHint = listings.map((l) => ({
     ...l,
-    reputationHint: categoryReputationHint(l.offering.category, counted, windowStart, windowEnd, now),
-    ...(reputationHeld ? { reputationHeld: true as const } : {}),
+    reputationHint: categoryReputationHint(l.offering.category, deals, windowStart, windowEnd, now),
   }));
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
@@ -685,9 +688,6 @@ export async function indexRegistration(
     listings: listingsWithHint,
     deals,
     reputation,
-    ...(reputationHeld ? { reputationHeld } : {}),
-    ...(reputationHeldSince !== undefined ? { reputationHeldSince } : {}),
-    ...(undecidedExcluded > 0 ? { undecidedExcluded } : {}),
     registeredAt: prior?.registeredAt ?? now,
     lastIndexedAt: now,
   };

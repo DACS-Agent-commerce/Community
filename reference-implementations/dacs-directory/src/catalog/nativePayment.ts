@@ -131,7 +131,8 @@ export async function nativePaymentVerdict(ref: Obj, agreement: Obj, phaseIndex:
     if (!Array.isArray(transactions)) return undecided("the node's block reply lists no transactions");
     return transactions.some((h) => hash(h) === txHash) ? { verdict: "pass" } : fail("the cited block does not include the transaction");
   } catch (error) {
-    // The production reader classifies its own failures. Anything else has no known cause, so it holds nothing.
+    // The production reader classifies its own failures. Anything else has no known cause that a later pass would
+    // answer, so it is reported as lasting.
     if (error instanceof VerificationUnavailable) return undecided(error.message, error.kind);
     return undecided(error instanceof Error && error.message ? error.message : "the node read failed", "lasting");
   }

@@ -70,8 +70,27 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
-    reputationHint: { type: "object" },
-    reputationHeld: { const: true },
+    reputationHint: {
+      type: "object",
+      properties: {
+        completionRate: { type: ["number", "null"], minimum: 0, maximum: 1 },
+        // Directory extension (DACS-5 §10.5.1 at run time): sessions this pass could not decide are in no count,
+        // and completionRate is null when they could change it; the range says what it can be once decided.
+        undecidedSessions: { type: "integer", minimum: 1 },
+        completionRateRange: {
+          type: "object", required: ["low", "high"], additionalProperties: false,
+          properties: { low: { type: ["number", "null"], minimum: 0, maximum: 1 }, high: { type: ["number", "null"], minimum: 0, maximum: 1 } },
+        },
+        averageSellerRatingRange: {
+          type: "object", required: ["low", "high"], additionalProperties: false,
+          properties: { low: { type: ["number", "null"], minimum: 1, maximum: 5 }, high: { type: ["number", "null"], minimum: 1, maximum: 5 } },
+        },
+      },
+      dependentRequired: {
+        undecidedSessions: ["completionRateRange", "averageSellerRatingRange"],
+        completionRateRange: ["undecidedSessions"], averageSellerRatingRange: ["undecidedSessions"],
+      },
+    },
     inspection: {
       type: "object",
       required: ["artifactType", "maturity", "href"],

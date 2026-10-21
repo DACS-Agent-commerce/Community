@@ -308,25 +308,34 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    the Standard pins no schema bytes and the catalog installs no authenticated schema validator
    (`validateDeliverableSchema`); with one installed, a payload it rejects refutes its
    completion. What a pass cannot decide is not refuted either. Only a committed session reads
-   its agreement, evidence, the node's transfer and the payload. When one of those reads gets no
-   answer (a timeout, a transport or node error, a node that has not reached the citing bundle's
-   anchor) and nothing refutes the session, the seller is held: none of its sessions counts in
-   that pass, on any listing, whatever the outcome (`reputationHeld`, `held` and `heldSince` on
-   the seller API, `reputationHeld` on its listings, a notice on the seller page and discovery
-   cards). A listing with only failures never makes those reads, so dropping that one session
-   alone would publish the seller below its real rate. Only a bundle the seller signed can hold
-   it, and a hold lasts at most 24 hours of continuous passes (`MAX_SELLER_HOLD_MS`): the clock
-   (`reputationHeldSince`) is saved with the catalog, a new session does not restart it, and only
-   a pass that holds nothing clears it. After that, the undecided sessions are excluded alone. A
-   lasting state of the session's own record never holds anyone, because no later pass decides it
-   and a party to the session chose it: an extended pointer (§9.6.1), a payload the anonymous
-   reader is denied (DV-2 over-provision), access metadata the node does not state, a numeric
-   legacy send payload, or a block whose applied list leaves the transfer out. Such a session is
-   excluded alone. Both kinds of exclusion are counted (`undecidedExcluded`). An answer still refutes just
-   its own session: a record that is absent, does not hash, is denied to this reader or exceeds
-   the bounds (all states its owner controls, as deleting it is), a transfer the node has no
-   record of through the cited block, or a cited block after the block that consensus-anchored
-   the citing bundle. Each pass re-derives every verdict from the chain; only the hold clock is carried over. Copies are
+   its agreement, evidence, the node's transfer and the payload, so a listing with only failures
+   never makes those reads. When one of them gives no verdict and nothing refutes the session,
+   the session is **undecided**: no answer (a timeout, a transport or node error, a node that has
+   not reached the citing bundle's anchor), or a lasting state of its own record that no later
+   pass decides (an extended pointer (§9.6.1), a payload the anonymous reader is denied (DV-2
+   over-provision), access metadata the node does not state, a numeric legacy send payload, a
+   block whose applied list leaves the transfer out). Dropping it alone would publish the seller
+   below its real rate beside its failures, and holding every session of the seller would let
+   one undecidable session hide them. So an undecided session counts neither as completed nor as
+   failed. It is kept on the seller's record (`undecided` on the deal: kind, reason, the outcomes
+   its copies claim), counted in `undecidedSessions`, and every figure it could change is
+   published as `null` with its range: `completionRateRange`, `counterpartyAdjustedCompletionRateRange`,
+   `counterpartyFaultRateRange` and `averageSellerRatingRange` on the seller API, `completionRateRange`
+   and `averageSellerRatingRange` on each listing's `reputationHint`, the count and the range on the
+   seller page and discovery cards. The low end counts every undecided session that could fail
+   as failed and every other one as refuted, and needs a decided session; the high end counts
+   every one that could complete as completed. `minCompletionRate`, `minRating` and the "good
+   record" filter use the figure, or else the low end, which no undecided session can raise or
+   create, so leaving sessions undecided can neither hide a failure nor earn a listing a place;
+   the high end is only shown. A session is undecided only when its seller copy, which the seller
+   signed, and its buyer copy each verified or stopped at such a check, nothing refuted either and
+   they do not diverge, so a counterparty cannot leave the seller's session undecided alone. An
+   answer still refutes just its own session: a record that is absent, does not hash, is denied
+   to this reader or exceeds the bounds (all states its owner controls, as deleting it is), a
+   transfer the node has no record of through the cited block, or a cited block after the block
+   that consensus-anchored the citing bundle. Each pass re-derives every verdict from the chain;
+   no clock or earlier verdict is carried over, so an undecided session counts as soon as a pass
+   decides it. Volume counts decided completions only. Copies are
    reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
@@ -429,10 +438,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   listing in the same way, and so does a deliverable `schemaUrl` while no authenticated schema
   validator is installed (none is). The seller's own delivery choices the listing leaves open, an
   external pointer whose size the listing did not declare or a public listing delivered through
-  a restricted ACL the anonymous reader cannot open, exclude that session alone and are counted
-  in `undecidedExcluded`; a payload read with no answer holds the seller for at most 24 hours
-  (Discovery, item 3). An absent payload, or one over the inline bounds, refutes that session
-  only. None contributes a completion or volume.
+  a restricted ACL the anonymous reader cannot open, leave that session undecided, and so does a
+  payload read with no answer: it counts neither as completed nor as failed, and the seller's rates
+  are published as ranges (Discovery, item 3). An absent payload, or one over the inline bounds,
+  refutes that session only. None contributes a completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -537,7 +546,7 @@ sender, recipient and send argument must be the canonical `0x<64 lowercase hex>`
 payee. Another spelling of the same key is a different account. The stored RPC amount is OS,
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
 string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter;
-that is the transaction's lasting state, so it excludes the session alone and never holds the seller.
+that is the transaction's lasting state, so the session stays undecided (Discovery, item 3).
 Only the node's answer about the cited transaction refutes a payment: its failed status, other
 endpoints or amount, another block, a block that does not include it, or node2's structured
 not-found (`result` 404, `reason: "not_found"`) once `checkedThroughBlock` reaches the cited
@@ -545,7 +554,7 @@ block. A not-found below the cited block also refutes it when the last block the
 already later than the block that consensus-anchored the citing bundle (by that block's own
 timestamp against the bundle's recorded anchor time): a bundle cannot cite a transfer made after
 it was anchored, and nothing bounds the `blockNumber` it cites. Every other reply is no answer and
-leaves the payment undecided, which holds the seller for at most 24 hours: a transport failure or
+leaves the payment undecided, until a pass gets an answer: a transport failure or
 timeout, an HTTP or `result` error (including the pinned source's bare 400), a `result` 200 without
 a transaction, a not-found from a node that has not reached the bundle's anchor, a reply about
 another transaction or block, and a non-terminal status.

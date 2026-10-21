@@ -37,11 +37,18 @@ test("separates listing evidence, endpoint declaration, and unmeasured reachabil
   assert.match(state.deals.explanation, /Both parties/);
 });
 
-// Sweep 13 code F1(d): a held seller publishes no figures, which must not read as a newcomer's "no history yet".
-test("a held seller's record reads as held, not as an empty history", () => {
-  const held = directoryEvidenceState(listing(), { ...seller(), reputationHeld: "job: native payment verification is indeterminate: no answer" });
-  assert.equal(held.deals.label, "record held this pass");
-  assert.match(held.deals.explanation, /no answer/);
+// Code F-A: a card must not present a partial record as complete. Undecided sessions are counted on the label and
+// the completion rate is the range they leave, never a newcomer's "no history yet".
+test("a seller with undecided sessions shows their count and the completion rate's range", () => {
+  const partial = (completed: number, total: number, undecidedSessions: number, low: number | null, high: number | null) =>
+    directoryEvidenceState(listing(), { identityTier: "verified", reputation: { completed, totalAgreements: total, completionRate: null,
+      undecidedSessions, completionRateRange: { low, high } } }).deals;
+  assert.deepEqual(partial(0, 1, 100, 0, 100 / 101), {
+    completed: 0, total: 1, label: "0 strict-verified / 1 agreement · 100 undecided",
+    explanation: "100 sessions this pass could not decide count neither as completed nor as failed, so the completion rate is between 0% and 99%",
+  });
+  assert.equal(partial(0, 0, 1, null, 1).explanation,
+    "1 session this pass could not decide counts neither as completed nor as failed, so no completion rate is verified yet; it is at most 100%");
   assert.equal(directoryEvidenceState(listing(), seller()).deals.explanation, "No verified two-sided bundle history yet");
 });
 

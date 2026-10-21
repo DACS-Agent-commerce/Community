@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation, reconcileCatalogReputation, settlementEligibleDeals } from "../src/catalog/reputation.js";
 import { admitSettlement } from "../src/catalog/settlementKey.js";
+import { rateRange } from "../src/catalog/rateRange.js";
 import type { DealRecord, SellerRecord } from "../src/catalog/types.js";
 
 // DACS-5 §10.5 derivation: which deals count, on which time basis, and what the reported
@@ -311,4 +312,142 @@ test("equal-time/hash/job settlement claims choose the lower phase index in both
   const high = deal({ jobId: "same", settlementTxIds: [{ ...claim, phaseIndex: 1 }] });
   assert.deepEqual(settlementEligibleDeals([low, high]), [low]);
   assert.deepEqual(settlementEligibleDeals([high, low]), [low]);
+});
+
+// DACS-5 §10.5.1 at run time (daybreak P1-1, P1-2; code F-A). A session this pass could not decide counts neither as
+// completed nor as failed. Each rate it could change is null, with the range it can take once every such session is
+// decided or refuted. The low end, which filters and ranking use, credits no undecided completion.
+const undecidedDeal = (sellerOutcomes: string[], change: Partial<DealRecord> = {}, ratingsAtMost = 0) => deal({ refsVerified: false, reputationEligible: false,
+  sellerOutcome: undefined, bundleContentHash: undefined, undecided: { kind: "no-answer", reason: "the node had no answer", sellerOutcomes, ratingsAtMost }, ...change });
+
+test("rateRange: the low end counts every possible failure, the high end every possible completion", () => {
+  assert.deepEqual(rateRange(0, 1, 1, 0), { low: 0, high: 0.5 });
+  assert.deepEqual(rateRange(1, 1, 0, 1), { low: 0.5, high: 1 });
+  assert.deepEqual(rateRange(2, 4, 0, 0), { low: 0.5, high: 0.5 });
+  // No decided denominator: there is no verified low end at all, so no undecided session can create one.
+  assert.deepEqual(rateRange(0, 0, 3, 0), { low: null, high: 1 });
+  assert.deepEqual(rateRange(0, 0, 0, 2), { low: null, high: 0 });
+  assert.deepEqual(rateRange(0, 0, 0, 0), { low: null, high: null });
+});
+
+test("an undecided session leaves each rate it can move null, with its range, and every other figure decided", () => {
+  const derived = deriveSellerReputation([deal({ sellerOutcome: "failed-perm" }), undecidedDeal(["completed"])], 0, 100);
+  assert.equal(derived.completed, 0); assert.equal(derived.bundleCount, 1); assert.equal(derived.undecidedSessions, 1);
+  assert.equal(derived.completionRate, null); assert.deepEqual(derived.completionRateRange, { low: 0, high: 0.5 });
+  assert.equal(derived.counterpartyAdjustedCompletionRate, null); assert.deepEqual(derived.counterpartyAdjustedCompletionRateRange, { low: 0, high: 0.5 });
+  // The failure is the seller's own, so the counterparty-fault rate is 0 either way and stays a point.
+  assert.equal(derived.counterpartyFaultRate, 0); assert.deepEqual(derived.counterpartyFaultRateRange, { low: 0, high: 0 });
+  // An undecided failure lowers the floor and caps nothing: it may still count.
+  const failure = deriveSellerReputation([deal(), undecidedDeal(["failed-perm"])], 0, 100);
+  assert.equal(failure.completionRate, null); assert.deepEqual(failure.completionRateRange, { low: 0.5, high: 1 });
+  // A substrate failure moves no party rate.
+  const substrate = deriveSellerReputation([deal(), undecidedDeal(["failed-substrate"])], 0, 100);
+  assert.equal(substrate.completionRate, 1); assert.deepEqual(substrate.completionRateRange, { low: 1, high: 1 }); assert.equal(substrate.undecidedSessions, 1);
+  // An outcome the copies do not state is either.
+  assert.deepEqual(deriveSellerReputation([deal(), undecidedDeal([])], 0, 100).completionRateRange, { low: 0.5, high: 1 });
+  // Without undecided sessions nothing new is published.
+  const decided = deriveSellerReputation([deal()], 0, 100);
+  assert.equal("undecidedSessions" in decided || "completionRateRange" in decided, false);
+});
+
+test("the ratings an undecided session could add leave the average null, with its range", () => {
+  const rated = (value: number, change: Partial<DealRecord> = {}) => deal({ ...change, ratings: [{ rater: "did:demos:agent:buyer", target: SELLER,
+    targetRole: "seller", value, ratedAt: 1, contentHash: `${value}`.repeat(64) }] });
+  // Daybreak P1-1's shape for ratings: a completion rated 5 left out beside a failure rated 1 published 1.
+  const derived = deriveSellerReputation([rated(1, { sellerOutcome: "failed-perm" }), undecidedDeal(["completed"], {}, 1)], 0, 100);
+  assert.equal(derived.averageSellerRating, null);
+  assert.deepEqual(derived.averageSellerRatingRange, { low: 1, high: 3 });
+  // Every value the undecided rating can take lands inside, and so does leaving it out.
+  for (const value of [1, 2, 3, 4, 5]) {
+    const average = deriveSellerReputation([rated(1, { sellerOutcome: "failed-perm" }), rated(value)], 0, 100).averageSellerRating!;
+    assert.ok(average >= 1 && average <= 3, String(value));
+  }
+  assert.deepEqual(deriveSellerReputation([rated(4), undecidedDeal(["failed-perm"], {}, 2)], 0, 100).averageSellerRatingRange, { low: 2, high: 14 / 3 });
+  // No decided rating: no low end. A session that cites no rating leaves the average a point.
+  assert.deepEqual(deriveSellerReputation([undecidedDeal(["completed"], {}, 1)], 0, 100).averageSellerRatingRange, { low: null, high: 5 });
+  const unrated = deriveSellerReputation([rated(4), undecidedDeal(["completed"])], 0, 100);
+  assert.equal(unrated.averageSellerRating, 4); assert.deepEqual(unrated.averageSellerRatingRange, { low: 4, high: 4 });
+  // A malformed count could be one rating per other party.
+  const malformed = undecidedDeal(["completed"], {}, Number.NaN);
+  assert.deepEqual(deriveSellerReputation([rated(4), malformed], 0, 100).averageSellerRatingRange, { low: 2, high: 14 / 3 });
+  assert.deepEqual(categoryReputationHint("rules", [rated(4, { category: "rules" }), undecidedDeal(["completed"], { category: "rules" }, 1)], 0, 100, 100).averageSellerRatingRange,
+    { low: 2.5, high: 4.5 });
+});
+
+test("an undecided session counts once, only in its window, and never beside a decided record of itself", () => {
+  const session = { jobId: "one-session", owners: { buyer: "did:demos:agent:buyer", seller: SELLER } };
+  const counted = (deals: DealRecord[]) => deriveSellerReputation(deals, 5, 50).undecidedSessions ?? 0;
+  assert.equal(counted([undecidedDeal(["completed"], session), undecidedDeal(["completed"], { ...session, buyerBundleRef: "stor-other" })]), 1);
+  assert.equal(counted([undecidedDeal(["completed"], session), deal({ ...session, sellerOutcome: "failed-perm" })]), 0);
+  assert.equal(counted([undecidedDeal(["completed"], session), deal({ ...session, reputationEligible: false })]), 0);
+  assert.equal(counted([undecidedDeal(["completed"], { finalisedAt: 60 })]), 0);
+  assert.equal(counted([undecidedDeal(["completed"], { finalisedAt: 60, anchorTimestamp: 40 })]), 1);
+  assert.equal(counted([undecidedDeal(["completed"], { finalisedAt: undefined })]), 0);
+  // A stored record without owners (as older fixtures and catalogs hold) neither throws nor hides an undecided session.
+  const ownerless = { ...deal(), owners: undefined } as unknown as DealRecord;
+  assert.equal(counted([ownerless, undecidedDeal(["completed"])]), 1);
+  assert.equal(deriveSellerReputation([ownerless], 0, 100).bundleCount, 1);
+  // Two undecided records of one session merge the outcomes their copies claim.
+  assert.deepEqual(deriveSellerReputation([deal(), undecidedDeal(["completed"], session), undecidedDeal(["failed-perm"], session)], 0, 100).completionRateRange,
+    { low: 0.5, high: 1 });
+});
+
+test("listing hints carry the undecided sessions of their category, and those of no known category in every hint", () => {
+  const deals = [deal({ category: "data.finance", sellerOutcome: "failed-perm" }), undecidedDeal(["completed"], { category: "data.finance.fx" })];
+  const hint = categoryReputationHint("data.finance", deals, 0, 100, 100);
+  assert.equal(hint.completionRate, null); assert.equal(hint.bundleCount, 1); assert.equal(hint.undecidedSessions, 1);
+  assert.deepEqual(hint.completionRateRange, { low: 0, high: 0.5 });
+  const other = categoryReputationHint("media", deals, 0, 100, 100);
+  assert.equal("undecidedSessions" in other || "completionRateRange" in other, false);
+  const unknown = categoryReputationHint("media", [...deals, undecidedDeal(["completed"], { category: undefined })], 0, 100, 100);
+  assert.equal(unknown.undecidedSessions, 1); assert.deepEqual(unknown.completionRateRange, { low: null, high: 1 });
+  // The catalog-wide pass recomputes the same figures from the stored deals.
+  const seller = { primaryClaim: SELLER, displayName: "s", cci: [], deals, reputation: { completed: 0, totalAgreements: 0, completionRate: null },
+    listings: [{ offering: { category: "data.finance" } }], registeredAt: 0, lastIndexedAt: 0 } as unknown as SellerRecord;
+  reconcileCatalogReputation([seller], 100);
+  assert.deepEqual(seller.reputation.completionRateRange, { low: 0, high: 0.5 }); assert.equal(seller.reputation.undecidedSessions, 1);
+  assert.deepEqual(seller.listings[0].reputationHint?.completionRateRange, { low: 0, high: 0.5 });
+});
+
+// Exhaustive over small catalogs: every way the undecided sessions can be decided or refuted gives a rate inside the
+// published range, a published point is the only value they can give, and the low end never rises when a decided
+// session becomes undecided or an undecided one is added. So undecided sessions can neither hide a failure from the
+// floor nor raise it.
+test("the range contains every outcome the undecided sessions can have, and its low end cannot be raised by them", () => {
+  const OUTCOMES = ["completed", "failed-perm", "failed-counterparty", "failed-substrate"];
+  const RATES = ["completionRate", "counterpartyAdjustedCompletionRate", "counterpartyFaultRate"] as const;
+  type Derived = ReturnType<typeof deriveSellerReputation>;
+  const lowEnd = (derived: Derived, rate: typeof RATES[number]) => (derived[`${rate}Range`] ? derived[`${rate}Range`]!.low : derived[rate]) ?? -1;
+  const derive = (decided: string[], undecided: string[]) =>
+    deriveSellerReputation([...decided.map((sellerOutcome) => deal({ sellerOutcome })), ...undecided.map((outcome) => undecidedDeal([outcome]))], 0, 100);
+  const resolutions = (undecided: string[]): string[][] => undecided.length === 0 ? [[]]
+    : resolutions(undecided.slice(1)).flatMap((rest) => [rest, [undecided[0], ...rest]]);
+  const multisets = (size: number, from = 0): string[][] => size === 0 ? [[]]
+    : OUTCOMES.slice(from).flatMap((outcome, index) => multisets(size - 1, from + index).map((rest) => [outcome, ...rest]));
+  let checked = 0;
+  for (const decided of [0, 1, 2].flatMap((size) => multisets(size))) for (const undecided of [0, 1, 2].flatMap((size) => multisets(size))) {
+    const published = derive(decided, undecided);
+    const label = `${decided.join(",")} | ${undecided.join(",")}`;
+    for (const resolved of resolutions(undecided)) {
+      const eventual = derive([...decided, ...resolved], []);
+      for (const rate of RATES) {
+        const value = eventual[rate] ?? null;
+        const point = published[rate] ?? null;
+        const range = published[`${rate}Range`] ?? { low: point, high: point };
+        if (point !== null) assert.equal(value, point, `${rate} ${label} -> ${resolved.join(",")}`);
+        if (value !== null) assert.ok((range.low ?? -1) <= value && range.high !== null && value <= range.high, `${rate} ${label} -> ${resolved.join(",")}`);
+        checked++;
+      }
+    }
+    // Making one decided session undecided, or adding one, never raises a low end.
+    for (const index of decided.keys()) {
+      const moved = derive(decided.filter((_, other) => other !== index), [...undecided, decided[index]]);
+      for (const rate of RATES) assert.ok(lowEnd(moved, rate) <= lowEnd(published, rate), `${rate} moved ${label}`);
+    }
+    for (const outcome of OUTCOMES) {
+      const added = derive(decided, [...undecided, outcome]);
+      for (const rate of RATES) assert.ok(lowEnd(added, rate) <= lowEnd(published, rate), `${rate} added ${outcome} to ${label}`);
+    }
+  }
+  assert.ok(checked > 1000, String(checked));
 });

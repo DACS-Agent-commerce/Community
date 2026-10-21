@@ -1557,8 +1557,9 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     assert.equal(graph.refsVerified, c.expected ?? false);
     if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
     if (c.absent) assert.equal(graph.reason, "storage delivery payload is absent or not a usable record");
-    assert.equal(graph.undecided, c.undecided ? graph.reason : undefined, name);
-    assert.equal(graph.held, undefined, name);
+    // Only the extended pointer is a valid delivery this deployment cannot decide; it is a lasting state.
+    assert.deepEqual(graph.undecided && { reason: graph.undecided.reason, kind: graph.undecided.kind },
+      c.undecided ? { reason: graph.reason, kind: "lasting" } : undefined, name);
   });
 });
 

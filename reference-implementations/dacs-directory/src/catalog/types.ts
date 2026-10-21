@@ -4,6 +4,8 @@
  * or explicitly labelled a hint (§6.3.6: consumers MUST NOT treat hints as
  * authoritative without deriving from the underlying bundles themselves).
  */
+import type { RateRange } from "./rateRange.js";
+import type { UndecidedKind } from "./verificationUnavailable.js";
 
 /** What an agent (or its operator) submits to appear in the catalog. */
 export interface Registration {
@@ -123,9 +125,6 @@ export interface ListingSummary {
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
   reputationHint?: ReputationHint;
-  /** Directory extension: the seller's figures are held this pass (SellerRecord.reputationHeld), so the hint's
-   * null rate means "held", not "no sessions". Absent otherwise. */
-  reputationHeld?: true;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
 }
@@ -152,12 +151,21 @@ export interface DirectoryInspectionAffordance {
 /** §6.3.6 ReputationHint — advisory; derived, never authoritative. */
 export interface ReputationHint {
   categoryScope: string;
+  /** Null as well when undecided sessions could change it; completionRateRange then says what it can be. */
   completionRate: number | null;
   averageSellerRating?: number | null;
   bundleCount: number;
   windowStart: number;
   windowEnd: number;
   computedAt: number;
+  /** Directory extension: sessions in this scope this pass could not decide (DealRecord.undecided). They are in
+   * neither bundleCount nor the rate. Absent when there are none. */
+  undecidedSessions?: number;
+  /** Directory extension, present with undecidedSessions: the values completionRate can take once they are decided. */
+  completionRateRange?: RateRange;
+  /** Directory extension, present with undecidedSessions: the same for averageSellerRating, which is null when
+   * their ratings could change it. */
+  averageSellerRatingRange?: RateRange;
 }
 
 export interface VerifiedRating {
@@ -204,9 +212,15 @@ export interface DealRecord extends RegisteredDeal {
   bundleContentHash?: string;
   /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
   fullSignatureStanding?: boolean;
-  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission.
-   * False for every deal of a seller whose pass was held (SellerRecord.reputationHeld). */
+  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission. */
   reputationEligible?: boolean;
+  /** This pass could not decide the session (DACS-5 §10.5.1 at run time): its seller copy, which the seller signed,
+   * and its buyer copy each verified or stopped at a check that gave no verdict, at least one stopped, nothing
+   * refuted either and they do not diverge. It counts neither as completed nor as failed; the rates it could change
+   * are published as ranges. `kind` says whether a later pass may decide it (no-answer) or not (lasting),
+   * sellerOutcomes are the seller-relative outcomes its copies claim, and ratingsAtMost is the most ratings of the
+   * seller it could add once decided (0 when neither copy cites a rating). */
+  undecided?: { kind: UndecidedKind; reason: string; sellerOutcomes: string[]; ratingsAtMost: number };
   /** Recomputed catalog-wide SB-2 rejection; never overwrites evidence eligibility. */
   settlementRejected?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
@@ -258,17 +272,15 @@ export interface SellerRecord {
     windowStart?: number;
     windowEnd?: number;
     windowingBasis?: "finalisedAt" | "sr2-anchor-timestamp";
+    /** Directory extension: sessions this pass could not decide (DealRecord.undecided), in no other figure.
+     * When present, each of the three rates and averageSellerRating is null if they could change it, and its
+     * range says what it can be. Volume counts decided completions only. */
+    undecidedSessions?: number;
+    completionRateRange?: RateRange;
+    counterpartyAdjustedCompletionRateRange?: RateRange;
+    counterpartyFaultRateRange?: RateRange;
+    averageSellerRatingRange?: RateRange;
   };
-  /** Why this pass held the seller's figures (DACS-5 §10.5.1): one of its own signed sessions got no answer
-   * here, so none of its sessions counts until a pass decides them all, for at most MAX_SELLER_HOLD_MS (indexer.ts).
-   * Absent when nothing is held, including once that time has run out. */
-  reputationHeld?: string;
-  /** Start (ms) of the unbroken series of passes in which a session of this seller got no answer. Carried from
-   * the prior record, saved with the catalog and cleared by a pass that holds nothing; it bounds the hold. */
-  reputationHeldSince?: number;
-  /** Sessions this pass excluded alone because it could not decide them: a lasting state of their own record
-   * (an extended pointer, a payload closed to this reader), or no answer after the hold ran out. Absent when 0. */
-  undecidedExcluded?: number;
   registeredAt: number;
   lastIndexedAt: number;
 }
