@@ -315,7 +315,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    below its real rate. Only a bundle the seller signed can hold it. An answer still refutes just
    its own session: a record that is absent, does not hash, is denied to this reader or exceeds
    the bounds (all states its owner controls, as deleting it is), or a transfer the node has no
-   record of through the cited block. Each pass re-derives every verdict; none is carried over. Copies are
+   record of through the cited block. Each pass re-derives every verdict; none is carried over, so
+   an outage holds one pass while a choice that stays (a pointer, a private payload) holds every
+   pass, and the seller is published with no rate rather than a biased one. Copies are
    reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's

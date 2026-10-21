@@ -173,7 +173,8 @@
 #     with only failures never makes those reads. An answer refutes its own session only: absent,
 #     unhashed, denied (non-payload) or over-bound records, all states their owner controls, and a
 #     transfer node2's structured not-found has no record of through the cited block. Each pass
-#     re-derives every verdict (test/indexer-binding-rules.test.ts "§10.5.1 at run time", test/chain-storage.test.ts,
+#     re-derives every verdict, so an outage holds one pass and a lasting choice holds every pass
+#     (test/indexer-binding-rules.test.ts "§10.5.1 at run time", test/chain-storage.test.ts,
 #     test/native-payment.test.ts).
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
