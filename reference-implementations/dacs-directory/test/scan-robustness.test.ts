@@ -162,6 +162,7 @@ for (const jobId of ["constructor", "__proto__", "toString", "hasOwnProperty"]) 
     transactions = [];
     await reindex();
     assert.ok(store.loadCatalog().generatedAt > 5);
+    assert.equal(store.loadCatalog().catalogVersion, "1", "the rebuilt catalog is persisted at catalog version 1");
     assert.ok(Object.hasOwn(store.loadScanState().deals, dealKey(jobId)));
     assert.ok(store.loadCatalog().sellers.some((s) => s.displayName === "Later"));
   });

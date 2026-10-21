@@ -60,6 +60,9 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   const manifest = directoryManifest("https://directory.example", "https://node.example/demos");
   assert.equal(manifest.dacsDirectoryVersion, "2");
   assert.deepEqual([...manifest.restrictions], ["TP-1"]);
+  assert.match(manifest.maturity.reputation, /^Completion verification unavailable\./);
+  assert.match(manifest.maturity.reputation, /Testnet publishes observed counts and individual evidence/);
+  assert.match(manifest.maturity.reputation, /completion and fault rates and numeric reputation scores are null/);
   assert.deepEqual(manifest.filters, [
     "category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "q", "profile", "limit", "cursor",
   ]);
