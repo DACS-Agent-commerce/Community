@@ -436,7 +436,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       log(
         `  listings=${record.listings.length} cci=${record.cci.length} deals=${record.deals.length} ` +
           `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}` +
-          (record.reputationHeld ? ` held: ${record.reputationHeld}` : ""),
+          (record.reputationHeld ? ` held: ${record.reputationHeld}` : "") +
+          (record.undecidedExcluded ? ` undecided-excluded=${record.undecidedExcluded}` : ""),
       );
       sellers.push(record);
     }

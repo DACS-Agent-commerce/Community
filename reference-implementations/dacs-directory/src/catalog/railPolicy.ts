@@ -1,4 +1,5 @@
 import { canonicalize } from "./canonical.js";
+import { demOs } from "./nativePayment.js";
 type Obj = Record<string, unknown>;
 const rec = (v: unknown): Obj | null => v && typeof v === "object" && !Array.isArray(v) ? v as Obj : null;
 
@@ -41,8 +42,9 @@ export function nativeRailDefinitionAdmission(registryVersion: unknown, rail: Ob
 }
 
 /** The agreed rail on one payment phase: its definition, a pay-dem handler, and a price in the
- * rail's asset (PC-5). */
+ * rail's asset (PC-5) that is a whole number of its 9-decimal base units (DACS-4 §9.5.9 step 2). */
 export function nativeRailAdmission(registryVersion: unknown, rail: Obj | null, phase: unknown, price: unknown): string | null {
   return nativeRailDefinitionAdmission(registryVersion, rail) ??
-    (phase !== "pay-dem" || rec(price)?.currency !== "DEM" ? MISMATCH : null);
+    (phase !== "pay-dem" || rec(price)?.currency !== "DEM" ? MISMATCH
+      : demOs(rec(price)?.amount) === null ? "payment verification is indeterminate: the DEM price is not a whole number of OS" : null);
 }

@@ -119,24 +119,26 @@ export async function readArtifact(address: string): Promise<Record<string, unkn
   const read = await readAnchorResult(address);
   if (read.status === "present") return read.record.data;
   if (read.status === "unavailable" && read.cause !== "denied" && read.cause !== "too-large") {
-    throw new VerificationUnavailable(`the storage read of ${address} had no answer (${read.cause})`);
+    throw new VerificationUnavailable(`the storage read of ${address} had no answer (${read.cause})`, "no-answer");
   }
   return null;
 }
 
 /**
  * The evidence graph's payload reader. A payload this anonymous reader is denied is a valid
- * delivery too (DACS-4 §9.6.1 DV-2: a public listing may be delivered privately), so it
- * throws VerificationUnavailable like no answer. An inline payload over the bounds breaks
+ * delivery too (DACS-4 §9.6.1 DV-2: a public listing may be delivered privately), so it throws
+ * VerificationUnavailable rather than refuting it. Its owner keeps it closed, so that is a
+ * lasting state, unlike a read with no answer. An inline payload over the bounds breaks
  * §9.6.1's 128 KB limit and is null.
  */
 export async function readPayloadRecord(address: string): Promise<AnchorRecord | null> {
   const read = await readAnchorResult(address);
   if (read.status === "present") return read.record;
+  if (read.status === "unavailable" && read.cause === "denied") {
+    throw new VerificationUnavailable(`the payload at ${address} is not readable anonymously`, "lasting");
+  }
   if (read.status === "unavailable" && read.cause !== "too-large") {
-    throw new VerificationUnavailable(read.cause === "denied"
-      ? `the payload at ${address} is not readable anonymously`
-      : `the payload read of ${address} had no answer (${read.cause})`);
+    throw new VerificationUnavailable(`the payload read of ${address} had no answer (${read.cause})`, "no-answer");
   }
   return null;
 }
@@ -308,7 +310,7 @@ export async function readSettlementNode(message: "getTxByHash" | "getBlockByNum
     method: "nodeCall", params: [{ type: "nodeCall", message, data, sender: "", signature: "", extra: "" }],
   });
   if (result.status !== "ok") {
-    throw new VerificationUnavailable(`the node's ${message} reply ${result.status === "failed" ? `failed (${result.cause})` : "is not JSON"}`);
+    throw new VerificationUnavailable(`the node's ${message} reply ${result.status === "failed" ? `failed (${result.cause})` : "is not JSON"}`, "no-answer");
   }
   const { result: code, response, extra } = result.body;
   if (code === 200 && response !== null && response !== undefined) return response;
@@ -316,5 +318,5 @@ export async function readSettlementNode(message: "getTxByHash" | "getBlockByNum
   if (code === 404 && response === null && detail?.reason === "not_found" && Number.isSafeInteger(detail.checkedThroughBlock)) {
     return { notFound: true, checkedThroughBlock: Number(detail.checkedThroughBlock) } satisfies SettlementNotFound;
   }
-  throw new VerificationUnavailable(`the node's ${message} reply has no answer (result ${Number.isSafeInteger(code) ? code : "not a status"})`);
+  throw new VerificationUnavailable(`the node's ${message} reply has no answer (result ${Number.isSafeInteger(code) ? code : "not a status"})`, "no-answer");
 }

@@ -9,15 +9,17 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import * as React from "react";
+import type { SellerRecord } from "../src/catalog/types.js";
 
 // The indexer resolves each side of a current-profile deal only through BundleBindings its own
 // role holder signed (DACS-5 BB-5..BB-7), and reports the deal unverified otherwise.
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-indexer-binding-rules-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
-const { indexRegistration } = await import("../src/catalog/indexer.js");
+const { indexRegistration, MAX_SELLER_HOLD_MS } = await import("../src/catalog/indexer.js");
 const { artifactHash, buildCurrentEvidenceGraph, paymentTxRefsOk, signedScope } = await import("../src/catalog/evidenceGraph.js");
 const { bundleBindingOverflowKey, logicalBundleAddress } = await import("../src/catalog/bundleBinding.js");
-const { loadScanState, saveScanState, loadCatalog } = await import("../src/catalog/store.js");
+const { loadScanState, saveScanState, loadCatalog, recordArtifact, clearChainDerivedArtifacts } = await import("../src/catalog/store.js");
 const { verifyIdentityPresentation } = await import("../src/catalog/listingVerification.js");
 const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
 const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
@@ -1654,12 +1656,12 @@ test("agreement presence and pre-commit terminal facts cannot contradict one ano
 });
 
 // DACS-5 §10.5.1 at run time. The static listing gate decides only what the listing fixes. A paid, delivered
-// completion also reads its agreement, evidence, the node and the payload, and can use a delivery choice the
-// listing leaves open; a pre-commit failure makes none of those reads. When one of them cannot be decided here
-// (no authoritative reply, an external pointer, a payload the anonymous reader is denied), dropping that
-// completion alone while the seller's failures still count publishes the seller at 0%. The seller is held
-// instead: no session of its counts this pass, whatever its outcome or listing. A record that is false, or
-// that a node answer refutes, still excludes only its own session.
+// completion also reads its agreement, evidence, the node and the payload; a pre-commit failure makes none of
+// those reads. When one of them gets no answer here, dropping that completion alone while the seller's failures
+// still count publishes the seller at 0%. The seller is held instead, for a bounded time: no session of its
+// counts this pass, whatever its outcome or listing. A lasting state of the session's own record (an external
+// pointer, a payload the anonymous reader is denied) excludes only that session, and so does a record that is
+// false or that a node answer refutes.
 const FAILED_JOB = "indexer-binding-failed-job";
 const SECOND_LISTING = at(97);
 /** A signed pre-commit failure of another job of this seller, on `listed` (stored at `locator`). */
@@ -1676,8 +1678,9 @@ function secondListing(): Obj {
   return { ...scope, signature: signedWith(scope, "listing", SELLER) };
 }
 type NodeReply = (message: string, data: Obj) => Promise<Response>;
-/** One pass over both sessions. `node` and `storage` replace the node's reply or one storage read; either may throw. */
-async function indexPass(options: { node?: NodeReply; storage?: (locator: string) => Response | undefined } = {}) {
+/** One pass over both sessions. `node` and `storage` replace the node's reply or one storage read; either may throw.
+ * `prior` is the seller record an earlier pass published. */
+async function indexPass(options: { node?: NodeReply; storage?: (locator: string) => Response | undefined; prior?: SellerRecord } = {}) {
   const nodeRead = nativeNodeFixture(() => store.values());
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -1703,7 +1706,7 @@ async function indexPass(options: { node?: NodeReply; storage?: (locator: string
         { jobId: FAILED_JOB, rail: "demos-native:DEM", buyerBundleRef: at(92), sellerBundleRef: at(93), owners: { buyer: dids[BUYER], seller: dids[SELLER] } },
       ],
       bundleBindings: [...holders(), failedBinding("buyer", at(95), BUYER), failedBinding("seller", at(96), SELLER)] as never },
-    undefined, async () => { throw new Error("identity unavailable"); });
+    options.prior, async () => { throw new Error("identity unavailable"); });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1764,33 +1767,37 @@ test("§10.5.1 at run time: a completion this pass cannot decide holds the selle
       assert.deepEqual(figures(seller), ONLY_FAILURE);
       assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.refsVerified, false);
     });
-    // Daybreak P1-1: delivery choices the listing leaves open.
-    await t.test("an extended-pointer payload (§9.6.1) holds the seller", async () => {
-      reset(); installFailure(installListedCase(() => {}));
-      store.set(at(61), { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) });
-      assert.deepEqual(figures(await indexPass()), HELD);
-    });
-    await t.test("a public listing delivered privately (DV-2 over-provision) holds the seller", async () => {
-      reset(); installFailure(installListedCase(() => {}));
-      const denied = () => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
-      assert.deepEqual(figures(await indexPass({ storage: (locator) => locator === at(61) ? denied() : undefined })), HELD);
-    });
-    await t.test("a held seller stays held through the catalog-wide save, and the seller API says why", async () => {
+    // Daybreak P1-1's delivery choices the listing leaves open (an extended pointer, a private payload on a public
+    // listing) are lasting states: sweep 13 F1 below excludes them alone and never holds the seller for them.
+    await t.test("a held seller stays held through the catalog-wide save, and the seller API, page and listings say so", async () => {
       reset(); installFailure(installListedCase(() => {}));
       const held = await indexPass({ node: async () => { throw new TypeError("fetch failed"); } });
       const { saveCatalog } = await import("../src/catalog/store.js");
       const route = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
       const { NextRequest } = await import("next/server");
+      // The page is a server component written for the classic JSX runtime; read its text without rendering.
+      (globalThis as { React?: typeof React }).React = React;
+      const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
+      const texts = (node: React.ReactNode): string[] => typeof node === "string" || typeof node === "number" ? [String(node)]
+        : Array.isArray(node) ? node.flatMap(texts) : React.isValidElement<{ children?: React.ReactNode }>(node) ? texts(node.props.children) : [];
       const prior = loadCatalog();
       try {
         saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [held] });
         const saved = loadCatalog().sellers[0];
         assert.equal(saved.reputation.completionRate, null); assert.equal(saved.reputation.bundleCount, 0);
         assert.match(saved.reputationHeld!, /^indexer-binding-job: native payment verification is indeterminate: the node's getTxByHash reply failed \(transport\)$/);
+        assert.equal(typeof saved.reputationHeldSince, "number");
+        assert.ok(saved.listings.length > 0 && saved.listings.every((listing) => listing.reputationHeld === true));
         const response = await route.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
           { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
         const body = await response.json();
         assert.equal(body.reputation.held, saved.reputationHeld); assert.equal(body.reputation.completionRate, null);
+        assert.equal(body.reputation.heldSince, saved.reputationHeldSince);
+        assert.ok(body.listings.every((listing: Obj) => listing.reputationHeld === true));
+        const page = texts(await SellerPage({ params: Promise.resolve({ claim: encodeURIComponent(dids[SELLER]) }) })).join("");
+        assert.match(page, /Figures held this pass/);
+        assert.match(page, /held/);
+        assert.doesNotMatch(page, /0\/0/);
       } finally { saveCatalog(prior); }
     });
     // The same pattern on the other reads only a committed session makes.
@@ -1837,7 +1844,7 @@ test("§10.5.1 at run time: an answer refutes one session, and only a session th
       reset(); installListedCase(() => {}); abortCopies("buyer");
       // That copy is held, and its only verified signature is the buyer's.
       const buyerCopy = await buildCurrentEvidenceGraph(at(95), { resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }),
-        read: async (locator) => { if (locator === at(98)) throw new VerificationUnavailable("no answer"); return store.get(locator) ?? null; } });
+        read: async (locator) => { if (locator === at(98)) throw new VerificationUnavailable("no answer", "no-answer"); return store.get(locator) ?? null; } });
       assert.equal(buyerCopy.held, "session verification is undecided this pass: no answer");
       assert.deepEqual(buyerCopy.signedParties, [dids[BUYER]]);
       const seller = await indexPass({ storage: unanswered(at(98)) });
@@ -1850,10 +1857,204 @@ test("§10.5.1 at run time: an answer refutes one session, and only a session th
     });
     await t.test("a bundle that cannot be read is no one's session yet: it is not held", async () => {
       reset(); installListedCase(() => {});
-      const graph = await buildCurrentEvidenceGraph(at(5), { read: async () => { throw new VerificationUnavailable("the storage read had no answer (transport)"); },
+      const graph = await buildCurrentEvidenceGraph(at(5), { read: async () => { throw new VerificationUnavailable("the storage read had no answer (transport)", "no-answer"); },
         resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }) });
       assert.equal(graph.ok, false); assert.equal(graph.held, undefined); assert.equal(graph.signaturesVerified, false);
       assert.equal(graph.reason, "session verification is undecided this pass: the storage read had no answer (transport)");
+    });
+  } finally { reset(); }
+});
+
+// Sweep 13 code F1. A lasting state is the session's own record, chosen by a party to it, and no later pass decides
+// it. Holding the seller for one would let the seller, or its own sybil buyer, suppress the seller's real failures
+// for good. It excludes that session alone, as DACS-5 guard (iv) and an unresolvable ST-10 marker do, and the seller
+// record counts the exclusion. The party that chose the state can only lose by it.
+test("sweep 13 F1: a lasting undecided state excludes its session alone, and the seller's failures still count", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const nodeRead = nativeNodeFixture(() => store.values());
+  const excludedAlone = async (options: Parameters<typeof indexPass>[0] = {}) => {
+    const seller = await indexPass(options);
+    assert.deepEqual(figures(seller), ONLY_FAILURE);
+    assert.equal(seller.undecidedExcluded, 1);
+    assert.equal(seller.reputationHeldSince, undefined, "a lasting state starts no hold clock");
+    assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.refsVerified, false);
+    return seller;
+  };
+  try {
+    await t.test("a completion delivered by extended pointer (§9.6.1), as the seller API and page publish it", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      store.set(at(61), { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) });
+      const seller = await excludedAlone();
+      const { saveCatalog } = await import("../src/catalog/store.js");
+      const route = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+      const { NextRequest } = await import("next/server");
+      (globalThis as { React?: typeof React }).React = React;
+      const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
+      const texts = (node: React.ReactNode): string[] => typeof node === "string" || typeof node === "number" ? [String(node)]
+        : Array.isArray(node) ? node.flatMap(texts) : React.isValidElement<{ children?: React.ReactNode }>(node) ? texts(node.props.children) : [];
+      const prior = loadCatalog();
+      try {
+        saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [seller] });
+        const body = await (await route.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
+          { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) })).json();
+        assert.equal(body.reputation.undecidedExcluded, 1); assert.equal(body.reputation.held, undefined);
+        assert.equal(body.reputation.completionRate, 0); assert.equal(body.reputation.bundleCount, 1);
+        const page = texts(await SellerPage({ params: Promise.resolve({ claim: encodeURIComponent(dids[SELLER]) }) })).join("");
+        assert.match(page, /1 session this Directory cannot decide is left out/);
+        assert.doesNotMatch(page, /Figures held/);
+      } finally { saveCatalog(prior); }
+    });
+    await t.test("a payload the anonymous reader is denied (DV-2 over-provision)", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await excludedAlone({ storage: (locator) => locator === at(61)
+        ? Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 }) : undefined });
+    });
+    await t.test("a payload whose node reply states no access mode", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await excludedAlone({ storage: (locator) => locator === at(61)
+        ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, programName: OPAQUE_PROGRAM_NAME, data: payload }) : undefined });
+    });
+    await t.test("a numeric legacy DEM send payload", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await excludedAlone({ node: async (message, data) => {
+        const reply = await nodeRead(message as never, data) as Obj;
+        if (message === "getTxByHash") {
+          const content = reply.content as Obj;
+          content.data = ["native", { nativeOperation: "send", args: [content.to, 2] }];
+        }
+        return nodeAnswer({ result: 200, response: reply });
+      } });
+    });
+    await t.test("a block whose applied-transaction list does not name the transfer", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      await excludedAlone({ node: async (message, data) => {
+        const reply = await nodeRead(message as never, data) as Obj;
+        return nodeAnswer({ result: 200, response: message === "getBlockByNumber" ? { ...reply, attrs: { gcrAppliedTxs: [] } } : reply });
+      } });
+    });
+  } finally { reset(); }
+});
+
+// Sweep 13 code F1(c). A completed bundle asserts a transfer that happened before it was anchored, so a cited block
+// after the block that anchored the citing bundle is false. Only an exact consensus anchor time and a node block
+// whose own timestamp is later decide that; a node behind the anchor is still no answer.
+test("sweep 13 F1: a pay-dem reference to a block after its bundle's consensus anchor is refuted", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const anchoredAt = 1_792_505_174_000;
+  const anchor = (locator: string) => recordArtifact({ locator, kind: "bundle", profile: "dacs-v0.1",
+    contentHash: contentHash(store.get(locator)!), data: store.get(locator)!, observedAt: 1, anchorTime: anchoredAt });
+  const citeFutureBlock = () => replacePaymentEvidence((scope) => {
+    scope.paymentTxRefs = [{ kind: "demos", blockNumber: Number.MAX_SAFE_INTEGER, txHash: `0x${"CD".repeat(32)}` }];
+  });
+  /** The node has checked through block 10 and has no such transfer; block 10 has the given timestamp (seconds). */
+  const node = (blockTimestamp: number): NodeReply => async (message, data) => message === "getTxByHash" ? notFound(10)
+    : nodeAnswer({ result: 200, response: { number: data.blockNumber, status: "confirmed", content: { timestamp: blockTimestamp, ordered_transactions: [] } } });
+  try {
+    await t.test("the node checked past the bundle's anchor: the completion is refuted, the failure counts", async () => {
+      reset(); installFailure(installListedCase(() => {})); citeFutureBlock(); anchor(at(5)); anchor(at(6));
+      const seller = await indexPass({ node: node(anchoredAt / 1000 + 1) });
+      assert.deepEqual(figures(seller), ONLY_FAILURE);
+      assert.equal(seller.undecidedExcluded ?? 0, 0, "a refuted session is not an undecided one");
+    });
+    await t.test("the node has not reached the bundle's anchor: no answer", async () => {
+      reset(); installFailure(installListedCase(() => {})); citeFutureBlock(); anchor(at(5)); anchor(at(6));
+      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000) })), HELD);
+    });
+    await t.test("an anchor time recorded for other content decides nothing", async () => {
+      reset(); installFailure(installListedCase(() => {})); anchor(at(5)); anchor(at(6)); citeFutureBlock();
+      assert.deepEqual(figures(await indexPass({ node: node(anchoredAt / 1000 + 1) })), HELD);
+    });
+  } finally { reset(); clearChainDerivedArtifacts(); }
+});
+
+// Sweep 13 code F1(b). A hold rests on a claim about the future, that the missing answer will come. A seller-level
+// clock carried from the prior record bounds it: after MAX_SELLER_HOLD_MS of continuous holds, the seller's
+// undecided sessions are excluded alone and counted. Only a pass that holds nothing resets the clock, so a new
+// self-arranged session cannot restart it.
+test("sweep 13 F1: a seller is held for at most MAX_SELLER_HOLD_MS of continuous passes", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const unreachable: NodeReply = async () => { throw new TypeError("fetch failed"); };
+  try {
+    assert.equal(MAX_SELLER_HOLD_MS, 24 * 60 * 60 * 1000);
+    await t.test("a first hold starts the clock and marks every listing", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const before = Date.now();
+      const seller = await indexPass({ node: unreachable });
+      assert.deepEqual(figures(seller), HELD);
+      assert.ok(seller.reputationHeldSince! >= before && seller.reputationHeldSince! <= Date.now());
+      assert.ok(seller.listings.length > 0 && seller.listings.every((listing) => listing.reputationHeld === true));
+    });
+    await t.test("a later hold keeps the prior start", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - 60_000 };
+      const seller = await indexPass({ node: unreachable, prior });
+      assert.deepEqual(figures(seller), HELD);
+      assert.equal(seller.reputationHeldSince, prior.reputationHeldSince);
+    });
+    await t.test("past the limit the seller is not held: the undecided completion is excluded alone", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - MAX_SELLER_HOLD_MS - 1 };
+      const seller = await indexPass({ node: unreachable, prior });
+      assert.deepEqual(figures(seller), ONLY_FAILURE);
+      assert.equal(seller.undecidedExcluded, 1);
+      assert.equal(seller.reputationHeldSince, prior.reputationHeldSince, "the clock runs on while sessions stay undecided");
+      assert.ok(seller.listings.every((listing) => listing.reputationHeld === undefined));
+    });
+    await t.test("a pass that holds nothing clears the clock", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const prior = { ...await indexPass({ node: unreachable }), reputationHeldSince: Date.now() - MAX_SELLER_HOLD_MS - 1 };
+      const seller = await indexPass({ prior });
+      assert.deepEqual(figures(seller), BOTH_COUNTED);
+      assert.equal(seller.reputationHeldSince, undefined);
+      assert.equal(seller.undecidedExcluded, undefined);
+    });
+  } finally { reset(); }
+});
+
+// Daybreak sweep 13 P1. DACS-4 §9.6.1 step 2: a storage deliverable conforms to the listing's schemaUrl when it names
+// one. The Standard pins no schema bytes, so only an operator-installed authenticated validator can check that
+// promise. Without one, every session on such a listing is neutral, whatever its outcome; with one, a payload it
+// rejects refutes its completion, and a validator with no answer leaves the session undecided this pass.
+test("daybreak sweep 13 P1: a deliverable schemaUrl is checked by an authenticated validator, or every session is neutral", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const SCHEMA = "https://schemas.example/report.schema.json";
+  const withSchema = () => installListedCase((scope) => { ((scope.offering as Obj).deliverable as Obj).schemaUrl = SCHEMA; },
+    () => {}, (agreed) => { ((agreed.terms as Obj).deliverable as Obj).schemaUrl = SCHEMA; });
+  const graphWith = (listed: Obj, validateDeliverableSchema?: (schemaUrl: string, payload: Obj) => Promise<boolean>) =>
+    buildCurrentEvidenceGraph(at(5), { readSettlementNode: nativeNodeFixture(() => store.values()),
+      read: async (locator) => store.get(locator) ?? null,
+      readAnchorRecord: async (locator) => ({ data: store.get(locator)!, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME }),
+      resolveListing: async () => ({ locator: at(1), raw: listed }), validateDeliverableSchema });
+  try {
+    await t.test("production installs no validator: the completion and the failure are both neutral", async () => {
+      reset(); const listed = withSchema(); installFailure(listed);
+      const graph = await graphWith(listed);
+      assert.equal(graph.ok, false); assert.equal(graph.held, undefined);
+      assert.equal(graph.reason, "session verification is indeterminate for every outcome on this listing: the deliverable schema needs an authenticated schema validator");
+      assert.deepEqual(figures(await indexPass()), { completed: 0, bundleCount: 0, completionRate: null, volume: [], held: false });
+    });
+    await t.test("a payload the validator rejects refutes the completion", async () => {
+      reset(); const listed = withSchema();
+      const graph = await graphWith(listed, async () => false);
+      assert.equal(graph.ok, false); assert.equal(graph.held, undefined);
+      assert.equal(graph.reason, "storage delivery payload does not conform to the listing's deliverable schema");
+    });
+    await t.test("a payload the validator accepts completes, and the validator sees the hash-bound cleartext", async () => {
+      reset(); const listed = withSchema();
+      const seen: Array<[string, Obj]> = [];
+      const graph = await graphWith(listed, async (schemaUrl, delivered) => { seen.push([schemaUrl, delivered]); return true; });
+      assert.equal(graph.ok, true, graph.reason);
+      assert.deepEqual(seen, [[SCHEMA, payload]]);
+    });
+    await t.test("a validator with no answer leaves the session undecided this pass", async () => {
+      reset(); const listed = withSchema();
+      const graph = await graphWith(listed, async () => { throw new VerificationUnavailable("the schema registry had no answer (timeout)", "no-answer"); });
+      assert.equal(graph.ok, false);
+      assert.equal(graph.held, "storage delivery is indeterminate: the schema registry had no answer (timeout)");
     });
   } finally { reset(); }
 });

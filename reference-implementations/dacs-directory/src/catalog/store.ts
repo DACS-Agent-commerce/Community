@@ -829,6 +829,10 @@ export const loadRetryableArtifacts = db.transaction((now: number = Date.now()):
 });
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
+/** Consensus anchor time of exactly this content at this locator; a row observed with other content says nothing. */
+export const artifactAnchorTimeFor = (locator: string, contentHash: string): number | undefined =>
+  (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ? AND content_hash = ?").get(locator, contentHash) as
+    { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
 /** Canonical storage owner recorded when the locator was last read, if any. */
 export const artifactOwner = (locator: string): string | null => {
   const owner = (db.prepare("SELECT owner FROM artifacts WHERE locator = ?").get(locator) as { owner: string | null } | undefined)?.owner;

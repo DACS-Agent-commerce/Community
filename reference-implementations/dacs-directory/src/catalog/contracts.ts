@@ -71,6 +71,7 @@ export const listingSummarySchema = {
     },
     catalogObservedAt: { type: "integer" },
     reputationHint: { type: "object" },
+    reputationHeld: { const: true },
     inspection: {
       type: "object",
       required: ["artifactType", "maturity", "href"],

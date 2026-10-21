@@ -137,17 +137,73 @@ test("a structured not-found refutes the payment only when the node checked thro
     async (message) => message === "getTxByHash" ? { notFound: true, checkedThroughBlock } : block);
   assert.deepEqual(await missing(tx.blockNumber), { verdict: "fail", reason: `the node has no such transaction through block ${tx.blockNumber}` });
   assert.deepEqual(await missing(tx.blockNumber + 1), { verdict: "fail", reason: `the node has no such transaction through block ${tx.blockNumber + 1}` });
-  assert.deepEqual(await missing(tx.blockNumber - 1), { verdict: "indeterminate", reason: `the node has checked only through block ${tx.blockNumber - 1}` });
+  assert.deepEqual(await missing(tx.blockNumber - 1), { verdict: "indeterminate", reason: `the node has checked only through block ${tx.blockNumber - 1}`, kind: "no-answer" });
   // Not a not-found answer without a safe block number.
   for (const answer of [{ notFound: true }, { notFound: true, checkedThroughBlock: "9" }, { notFound: true, checkedThroughBlock: 1.5 }]) {
     assert.equal(await check(answer as never), "indeterminate", JSON.stringify(answer));
   }
 });
 
-test("an undecided payment keeps the node's cause", async () => {
-  const verdict = await nativePaymentVerdict(ref, agreement, 2, async () => { throw new VerificationUnavailable("the node's getTxByHash reply failed (timeout)"); });
-  assert.deepEqual(verdict, { verdict: "indeterminate", reason: "the node's getTxByHash reply failed (timeout)" });
-  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2), { verdict: "indeterminate", reason: "no node reader is installed" });
+test("an undecided payment keeps the node's cause and its kind", async () => {
+  const verdict = await nativePaymentVerdict(ref, agreement, 2, async () => { throw new VerificationUnavailable("the node's getTxByHash reply failed (timeout)", "no-answer"); });
+  assert.deepEqual(verdict, { verdict: "indeterminate", reason: "the node's getTxByHash reply failed (timeout)", kind: "no-answer" });
+  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2, async () => { throw new VerificationUnavailable("a record kept closed", "lasting"); }),
+    { verdict: "indeterminate", reason: "a record kept closed", kind: "lasting" });
+  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2), { verdict: "indeterminate", reason: "no node reader is installed", kind: "lasting" });
+});
+
+// Sweep 13 code F1: only no answer may hold a seller. A state of the transaction or block itself, which no later
+// read changes, is lasting; a reply about something else, or one that cannot be read, is no answer.
+test("each undecided payment says whether a later pass can decide it", async () => {
+  const kind = async (changed: unknown, changedBlock: unknown = block) => {
+    const verdict = await nativePaymentVerdict(ref, agreement, 2, async (message) => message === "getTxByHash" ? changed : changedBlock);
+    return verdict.verdict === "indeterminate" ? verdict.kind : verdict.verdict;
+  };
+  const numeric = structuredClone(tx); numeric.content.data[1].args[1] = 1;
+  assert.equal(await kind(numeric), "lasting", "a numeric legacy send payload");
+  assert.equal(await kind(tx, { ...block, attrs: { gcrAppliedTxs: [] } }), "lasting", "a stated applied list without the transfer");
+  assert.equal(await kind(tx, { ...block, attrs: { gcrAppliedTxs: ["cd".repeat(32)] } }), "lasting", "an applied list naming another transfer");
+  for (const [name, changed, changedBlock] of [
+    ["no transaction in the reply", null, block],
+    ["another transaction", { ...tx, hash: "cd".repeat(32) }, block],
+    ["a pending transaction", { ...tx, status: "pending" }, block],
+    ["another block", tx, { ...block, number: tx.blockNumber + 1 }],
+    ["a block listing no transactions", tx, { ...block, content: {} }],
+    ["an applied list that is not a list", tx, { ...block, attrs: { gcrAppliedTxs: tx.hash } }],
+    ["block attrs that are not an object", tx, { ...block, attrs: [tx.hash] }],
+  ] as Array<[string, unknown, unknown]>) assert.equal(await kind(changed, changedBlock), "no-answer", name);
+  // A reader error the production reader would never throw has no known cause, so it holds nothing.
+  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2, async () => { throw new Error("node unreachable"); }),
+    { verdict: "indeterminate", reason: "node unreachable", kind: "lasting" });
+});
+
+// Sweep 13 code F1(c): a completed bundle asserts a transfer that existed when it was anchored. A cited block beyond
+// the node's checked height refutes the payment only when that height is already later than the bundle's
+// consensus anchor, as the node's own block timestamp shows; otherwise the node is behind, which is no answer.
+test("a cited block after the citing bundle's consensus anchor is refuted", async () => {
+  const anchoredAt = block.content.timestamp * 1_000;
+  const future = { txHash: "cd".repeat(32), blockNumber: Number.MAX_SAFE_INTEGER };
+  const reads: unknown[] = [];
+  const verdict = (checkedBlock: unknown, bundleAnchoredAt: number | null = anchoredAt) => nativePaymentVerdict(future, agreement, 2,
+    async (message, data) => { reads.push([message, data]); return message === "getTxByHash" ? { notFound: true, checkedThroughBlock: block.number } : checkedBlock; },
+    bundleAnchoredAt ?? undefined);
+  const later = { ...block, content: { ...block.content, timestamp: block.content.timestamp + 1 } };
+  assert.deepEqual(await verdict(later), { verdict: "fail",
+    reason: `the cited block ${Number.MAX_SAFE_INTEGER} follows block ${block.number}, which is later than the bundle's consensus anchor` });
+  assert.deepEqual(reads.at(-1), ["getBlockByNumber", { blockNumber: block.number }]);
+  const behind = { verdict: "indeterminate", reason: `the node has checked only through block ${block.number}`, kind: "no-answer" };
+  for (const [name, checkedBlock] of [
+    ["a block at the anchor time", block],
+    ["a block that is not confirmed", { ...later, status: "pending" }],
+    ["a reply about another block", { ...later, number: block.number + 1 }],
+    ["a block without a timestamp", { ...later, content: { ordered_transactions: [] } }],
+    ["a block with a fractional timestamp", { ...later, content: { ...later.content, timestamp: block.content.timestamp + 0.5 } }],
+    ["no block", null],
+  ] as Array<[string, unknown]>) assert.deepEqual(await verdict(checkedBlock), behind, name);
+  // Without the bundle's own anchor time nothing is compared, and the block is not read.
+  reads.length = 0;
+  assert.deepEqual(await verdict(later, null), behind);
+  assert.deepEqual(reads, [["getTxByHash", { hash: future.txHash }]]);
 });
 
 test("only a native send operation settles the agreement", async () => {
@@ -229,6 +285,8 @@ test("the production node reader returns only answers and throws, with the cause
     globalThis.fetch = async () => respond();
     try { return { value: await readSettlementNode("getTxByHash", { hash: "ab".repeat(32) }) }; } catch (error) {
       assert.ok(error instanceof VerificationUnavailable, String(error));
+      // Every reply the reader cannot use is no answer about the transaction, never a lasting state.
+      assert.equal(error.kind, "no-answer");
       return { unavailable: (error as Error).message };
     }
   };

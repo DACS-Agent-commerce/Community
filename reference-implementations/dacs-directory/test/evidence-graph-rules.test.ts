@@ -819,6 +819,44 @@ test("DACS-3 §8.5 and CA-7: the agreement binds the session's listing and parti
   });
 });
 
+// Code sweep 13 P3-a, the §10.5.1 pattern again: the payee and a DEM price in whole OS are agreement terms, fixed
+// at commitment. Checked only beside a successful payment, an agreement naming another payee, or a price the
+// rail cannot settle, refuted the completion while a committed abort on the same terms still counted.
+test("sweep 13 P3-a: a committed session is held to its agreed payee and a whole-OS DEM price, whatever its outcome", async () => {
+  const abortAfterCommit = (bundle: Obj) => {
+    bundle.outcome = "aborted-by-self"; bundle.settlementEvidence = []; bundle.ratingRefs = [];
+    bundle.phaseSummary = (bundle.phaseSummary as Obj[]).slice(0, 2);
+  };
+  const otherPayee: Case = { listing: payeeBoundListing, scopes: (scopes) => {
+    delete scopes.agreement.agreementVersion; scopes.agreement.payeeBoundAgreementVersion = "1";
+    (scopes.agreement.terms as Obj).payoutBindings = [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[OUTSIDER] }];
+  } };
+  const fine = "1.2500000001";
+  const fineScope = { ...signedScopeOf(listing), pricing: { kind: "fixed", price: { amount: fine, currency: "DEM" } } };
+  const fineListing = { ...fineScope, signature: await envelope(fineScope, "listing", SELLER) };
+  const finePrice: Case = { listing: fineListing, scopes: (scopes) => {
+    (scopes.agreement.terms as Obj).price = { amount: fine, currency: "DEM" };
+    scopes.evidence.paymentAmount = { amount: fine, currency: "DEM" };
+  } };
+  const PRECISION = "payment verification is indeterminate: the DEM price is not a whole number of OS";
+  assert.deepEqual(await verdicts({
+    "a completion paying another payee": otherPayee,
+    "an abort after commitment on that agreement": { ...otherPayee, bundle: abortAfterCommit },
+    "a completion at a price finer than OS": finePrice,
+    "an abort after commitment at that price": { ...finePrice, bundle: abortAfterCommit },
+    "control: an abort after commitment on settleable terms": { bundle: abortAfterCommit },
+  }), {
+    "a completion paying another payee": "the payee is not the agreement seller",
+    "an abort after commitment on that agreement": "the payee is not the agreement seller",
+    "a completion at a price finer than OS": PRECISION,
+    "an abort after commitment at that price": PRECISION,
+    "control: an abort after commitment on settleable terms": "ok",
+  });
+  // A pre-commit failure on the fine-priced listing never states an agreement: the listing gate refuses it too.
+  assert.equal(await deploymentVerifiability(fineListing, { railRegistryVersion: 1 }, { readSettlementNode: async () => null, readAnchorRecord: async () => null }),
+    `accepted rail ${canonicalize({ railId: "demos-native:DEM" })} at the listed price: ${PRECISION}`);
+});
+
 test("DACS-3 §8.5.2: terms, pricing kinds and the band's inputs are checked before any amount", () => {
   const base = baseScopes().agreement;
   const withListing = (pricing: unknown, pipeline: unknown = listing.pipeline, extra: Obj = {}) => ({ ...listing, pricing, pipeline, ...extra });
@@ -1403,7 +1441,9 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
   type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; owner?: string; unreadable?: boolean;
     payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean; noRestrictedReader?: boolean;
     /** The reader answered that there is no payload: that refutes this session. */ absent?: boolean;
-    /** No answer, or a payload this deployment cannot read: undecided, and the indexer holds the seller. */ held?: boolean;
+    /** A lasting state of the delivered record this deployment cannot read (an external pointer, access metadata
+     * the node does not state): undecided, so the indexer excludes this session alone and never holds the seller. */
+    undecided?: boolean;
     /** Which reader can open the payload, as the pinned node decides: anonymous reads are denied a restricted program. */
     openedBy?: "anonymous" | "restricted" };
   const outsiderAddress = `0x${dids[OUTSIDER].slice(-64)}`;
@@ -1434,8 +1474,8 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "absent anchored payload": { unreadable: true, absent: true },
     "changed payload bytes": { payload: { report: "different cleartext" } },
     "payload bound to another job": { logicalAddress: "dacs4:deliverable:other-job" },
-    "missing ACL": { acl: null, indeterminate: true, held: true },
-    "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true, held: true },
+    "missing ACL": { acl: null, indeterminate: true, undecided: true },
+    "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true, undecided: true },
     "public ACL with allowed buyer is still a downgrade": { accessModel: "buyer-only", acl: { mode: "public", allowed: [buyerAddress] }, indeterminate: true },
     "private declaration with public ACL": { accessModel: "buyer-only", indeterminate: true },
     "buyer-only wrong buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [`0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
@@ -1488,7 +1528,7 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "a public payload never reads through the restricted reader": { openedBy: "restricted", absent: true },
     "a list mixing strings and non-strings fails closed": { acl: { mode: "public", blacklisted: [outsiderAddress, 7] }, indeterminate: true },
     "sealed payload cannot establish its cleartext hash": { accessModel: "encrypt-to-buyer", payload: { ciphertext: "sealed", recipient: buyerAddress }, indeterminate: true },
-    "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true, held: true },
+    "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true, undecided: true },
   };
   for (const [name, c] of Object.entries(cases)) await t.test(name, async () => {
     const deliverable = c.kind === "attested-payload" ? { kind: c.kind, payloadFormat: "application/json" } : { kind: "storage-program", accessModel: c.accessModel ?? "public" };
@@ -1517,7 +1557,8 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     assert.equal(graph.refsVerified, c.expected ?? false);
     if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
     if (c.absent) assert.equal(graph.reason, "storage delivery payload is absent or not a usable record");
-    assert.equal(graph.held, c.held ? graph.reason : undefined, name);
+    assert.equal(graph.undecided, c.undecided ? graph.reason : undefined, name);
+    assert.equal(graph.held, undefined, name);
   });
 });
 
@@ -1729,4 +1770,9 @@ test("§10.5.1: a pay-dem listing is admitted only when every rail and currency 
   const buyerOnly = (s: Obj) => { ((s.offering as Obj).deliverable as Obj).accessModel = "buyer-only"; };
   assert.equal(await gate(buyerOnly, { readSettlementNode: deps.readSettlementNode, readRestrictedAnchorRecord: async () => null }), null);
   assert.equal(await gate(buyerOnly), "buyer-only payloads need an authenticated restricted reader");
+  // Daybreak sweep 13 P1, DACS-4 §9.6.1 step 2: a deliverable that names a schema needs a validator to check it.
+  const schema = (s: Obj) => { ((s.offering as Obj).deliverable as Obj).schemaUrl = "https://schemas.example/report.schema.json"; };
+  assert.equal(await gate(schema), "the deliverable schema needs an authenticated schema validator");
+  assert.equal(await gate((s) => { schema(s); ((s.offering as Obj).deliverable as Obj).schemaUrl = ""; }), "the deliverable schema needs an authenticated schema validator");
+  assert.equal(await gate(schema, { ...deps, validateDeliverableSchema: async () => false }), null);
 });

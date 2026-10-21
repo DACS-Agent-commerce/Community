@@ -32,7 +32,7 @@ export type DirectoryEvidenceState = Readonly<{
 
 export function directoryEvidenceState(
   listing: ListingSummary,
-  seller: Pick<SellerRecord, "identityTier" | "reputation">,
+  seller: Pick<SellerRecord, "identityTier" | "reputation" | "reputationHeld">,
   now = Date.now(),
 ): DirectoryEvidenceState {
   const endpoint = safePublicEndpoint(listing.publicEndpoint);
@@ -77,13 +77,21 @@ export function directoryEvidenceState(
         }),
     reachability: Object.freeze(reachability),
     identityTier: seller.identityTier ?? "self-declared",
-    deals: Object.freeze({
-      completed,
-      total,
-      label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}`,
-      explanation: total === 0
-        ? "No verified two-sided bundle history yet"
-        : "Both parties' signed copies must verify and agree before a bundle counts",
-    }),
+    // A held seller publishes no figures this pass (DACS-5 §10.5.1 at run time): say so, never "no history yet".
+    deals: Object.freeze(seller.reputationHeld
+      ? {
+        completed,
+        total,
+        label: "record held this pass",
+        explanation: "A session this agent signed got no answer from the node or storage; no session counts until one pass decides them all",
+      }
+      : {
+        completed,
+        total,
+        label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}`,
+        explanation: total === 0
+          ? "No verified two-sided bundle history yet"
+          : "Both parties' signed copies must verify and agree before a bundle counts",
+      }),
   });
 }

@@ -94,8 +94,20 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         They show account linkage, not a fresh DACS-2 identity-verification result.
       </p>
 
+      {seller.reputationHeld && (
+        <p className="note" role="status">
+          Figures held this pass: a session this agent signed got no answer from the node or storage, so none of
+          its sessions is counted until one pass decides them all. A hold lasts at most a day. ({seller.reputationHeld})
+        </p>
+      )}
+      {!!seller.undecidedExcluded && (
+        <p className="note">
+          {seller.undecidedExcluded} session{seller.undecidedExcluded === 1 ? "" : "s"} this Directory cannot decide
+          {seller.undecidedExcluded === 1 ? " is" : " are"} left out of the figures below.
+        </p>
+      )}
       <div className="stat-row">
-        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">strict bundles completed</div></div>
+        <div className="stat"><div className="n">{seller.reputationHeld ? "held" : `${seller.reputation.completed}/${seller.reputation.totalAgreements}`}</div><div className="l">strict bundles completed</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
         <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
       </div>

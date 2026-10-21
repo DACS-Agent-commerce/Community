@@ -11,8 +11,8 @@ import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolic
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
 import { nativeRailAdmission } from "./railPolicy.js";
-import { nativePaymentVerdict, type SettlementNodeRead } from "./nativePayment.js";
-import { VerificationUnavailable } from "./verificationUnavailable.js";
+import { nativeAgreementAdmission, nativePaymentVerdict, type SettlementNodeRead } from "./nativePayment.js";
+import { VerificationUnavailable, type UndecidedKind } from "./verificationUnavailable.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -48,10 +48,15 @@ export interface EvidenceGraph {
   ratings: Record<string, unknown>[];
   /** DACS-4 AMEND-4: amendments that fail AMEND-1..3 are flagged, kept for audit, and never an unwind. */
   flaggedAmendments: Array<{ locator: string; reason: string }>;
-  /** Set when this pass could not decide a session whose bundle signatures verified: a read or adapter gave
-   * no answer, the node has not reached the cited block, or the session used a valid choice this deployment
-   * cannot check (an extended-pointer or anonymously unreadable payload). Nothing refuted it, and its
-   * listing is verifiable here. Equal to `reason`. A refuted session never carries it (DACS-5 §10.5.1). */
+  /** Set when this pass could not decide a session whose bundle signatures verified: nothing refuted it, and a
+   * read, adapter or record gave no verdict. A session that reached the listing gate is on a listing this
+   * deployment can verify; a read can also go unanswered before that. Equal to `reason`. The indexer excludes
+   * such a session alone and counts it (SellerRecord.undecidedExcluded). A refuted session never carries it
+   * (DACS-5 §10.5.1). */
+  undecided?: string;
+  /** Set, equal to `undecided`, only when every cause was no answer (UndecidedKind "no-answer"): a later pass
+   * may decide the session, so the indexer holds the seller it signed for a bounded time instead. A lasting
+   * state (an extended pointer, a payload closed to this reader) never holds anyone. */
   held?: string;
 }
 export interface HistoricalSessionChallenge {
@@ -69,9 +74,10 @@ export interface HistoricalSessionChallenge {
 }
 /**
  * Readers and adapters resolve null only for an answer: the record is absent, or is not usable as
- * referenced. They throw VerificationUnavailable when they get no answer (transport failure, timeout,
- * node error, a node behind the cited block); after the bundle's signatures verify, that leaves the
- * session undecided (EvidenceGraph.held), never refuted.
+ * referenced. They throw VerificationUnavailable when they give no verdict, with its kind: no answer
+ * (transport failure, timeout, node error, a node behind the bundle's anchor) or a lasting state the
+ * record keeps. After the bundle's signatures verify, that leaves the session undecided
+ * (EvidenceGraph.undecided, and EvidenceGraph.held for no answer), never refuted.
  */
 export interface EvidenceGraphDeps {
   /** Authenticates VerifyResult and supplementary vet attestations. An evidence attestationRef decides
@@ -90,13 +96,22 @@ export interface EvidenceGraphDeps {
    * session vet admission stays fail-closed: a verified primary claim alone is not control proof. */
   verifyPrimaryClaimControl?: VerifyPrimaryClaimControl;
   /** Payload reader. A payload it cannot open anonymously is a valid delivery (DV-2 over-provision), so
-   * it throws VerificationUnavailable for that as for no answer (chain.ts readPayloadRecord). */
+   * it throws VerificationUnavailable ("lasting") for that, and ("no-answer") for no answer (chain.ts readPayloadRecord). */
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   /** Authenticated reader for restricted StorageProgram records, the only way to open a buyer-only
    * payload (DACS-4 §9.6.1). The pinned node denies anonymous restricted reads (ac8f45f
    * checkReadPermission), so the catalog installs none and buyer-only delivery is indeterminate
    * for every outcome. */
   readRestrictedAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
+  /** Authenticated validator for a storage deliverable's `schemaUrl` (DACS-4 §9.6.1 step 2). The Standard pins
+   * no schema bytes, so it must resolve the URL only to a schema the operator reviewed and pinned, never to
+   * whatever the URL serves now. It resolves true when the hash-bound cleartext conforms and false when it does
+   * not, and throws VerificationUnavailable when it gives no verdict. The catalog installs none, so every
+   * session on a listing whose deliverable names a schemaUrl is indeterminate for every outcome. */
+  validateDeliverableSchema?: (schemaUrl: string, payload: Record<string, unknown>) => Promise<boolean>;
+  /** Consensus anchor time (ms) of exactly these bundle bytes at this locator, if this deployment observed it.
+   * A pay-dem reference to a later block is refuted (nativePaymentVerdict). */
+  bundleAnchorTime?: (locator: string, bundle: Record<string, unknown>) => number | undefined;
   /** Artifact reader (chain.ts readArtifact). */
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
@@ -641,14 +656,14 @@ function buyerMayRead(acl: Record<string, unknown>, owner: unknown, buyerAddress
  * or delivered would drop unverifiable completions while still counting failures. The payment and
  * delivery checks below therefore use the same helpers as the success path, for every choice the
  * listing leaves open to an agreement (each accepted rail, in the listed price's currency) or to its
- * delivery (the declared size).
+ * delivery (the declared size and schema).
  * Returns null when every phase the listing's pipeline can reach is verifiable here.
  */
 export async function deploymentVerifiability(
   listing: Record<string, unknown>,
   bundle: Record<string, unknown>,
   deps: Pick<EvidenceGraphDeps, "readSettlementNode" | "readAnchorRecord" | "readRestrictedAnchorRecord" | "resolveSessionChallenge" |
-    "verifyPrimaryClaimControl" | "resolveRecipeSnapshot">,
+    "verifyPrimaryClaimControl" | "resolveRecipeSnapshot" | "validateDeliverableSchema">,
 ): Promise<string | null> {
   const pipeline = arr(listing.pipeline);
   const kinds = pipeline.map((phase) => String(phase.kind));
@@ -680,6 +695,9 @@ export async function deploymentVerifiability(
     // DACS-4 §9.6.1: a payload above the Standard's 128 KB storage limit MUST be an extended pointer,
     // and this deployment cannot read external cleartext.
     if (Number(deliverable.expectedSizeBytes) > MAX_DACS_ARTIFACT_BYTES) return "the declared payload exceeds the inline storage cap";
+    // DACS-4 §9.6.1 step 2: the payload conforms to the deliverable's schemaUrl when it names one. A
+    // completion is checked against it; without a validator nothing is, so no outcome on the listing counts.
+    if (deliverable.schemaUrl !== undefined && !deps.validateDeliverableSchema) return "the deliverable schema needs an authenticated schema validator";
     if (accessModel === "buyer-only" && !deps.readRestrictedAnchorRecord) return "buyer-only payloads need an authenticated restricted reader";
     if (accessModel !== "buyer-only" && !deps.readAnchorRecord) return "the storage payload reader is unavailable";
   }
@@ -721,13 +739,15 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
   const signed: { parties?: string[] } = {};
   try {
     raw = await deps.read(bundleLocator);
-    return await verifyCurrentEvidenceGraph(raw, deps, fail, signed);
+    return await verifyCurrentEvidenceGraph(bundleLocator, raw, deps, fail, signed);
   } catch (error) {
-    // No answer from a read or an adapter decides nothing about the session. Once its signatures verified,
-    // it is undecided this pass (held), never refuted; before that, nothing says whose session it is.
+    // A read or an adapter that gives no verdict decides nothing about the session. Once its signatures
+    // verified, it is undecided, never refuted, and held only for no answer; before that, nothing says whose
+    // session it is.
     if (error instanceof VerificationUnavailable) {
       const reason = `session verification is undecided this pass: ${error.message}`;
-      return signed.parties ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties, held: reason } : fail(reason);
+      return signed.parties ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties, undecided: reason,
+        ...(error.kind === "no-answer" ? { held: reason } : {}) } : fail(reason);
     }
     // Untrusted bundle or referenced content that cannot be canonicalized or read fails closed.
     return fail("bundle or a referenced artifact could not be processed");
@@ -735,6 +755,7 @@ export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: Evi
 }
 
 async function verifyCurrentEvidenceGraph(
+  bundleLocator: string,
   raw: Record<string, unknown> | null,
   deps: EvidenceGraphDeps,
   fail: (reason: string) => EvidenceGraph,
@@ -1136,8 +1157,11 @@ async function verifyCurrentEvidenceGraph(
   // whatever its outcome. Checking them only once a payment succeeded would drop completions on an
   // agreement that failed sessions still count on. Listing admission runs this same check for every
   // choice an agreement could make.
-  if (agreement) for (const phase of pipeline.filter((entry) => PAYMENT_PHASES.has(String(entry.kind)))) {
-    const refused = paymentPhaseAdmission(phase, raw.railRegistryVersion, rec(rec(agreement.terms)?.rail), rec(agreement.terms)?.price);
+  // The payee and parties a pay-dem transfer must name are agreement terms too (PB-2, §9.5.9 step 3).
+  if (agreement) for (const [index, phase] of pipeline.entries()) {
+    if (!PAYMENT_PHASES.has(String(phase.kind))) continue;
+    const refused = paymentPhaseAdmission(phase, raw.railRegistryVersion, rec(rec(agreement.terms)?.rail), rec(agreement.terms)?.price) ??
+      (phase.kind === "pay-dem" ? nativeAgreementAdmission(agreement, index) : null);
     if (refused) return failSigned(refused);
   }
   // SB-1 / PC-2: a Demos StorageProgram name is an opaque write input, never a resolution key
@@ -1161,10 +1185,12 @@ async function verifyCurrentEvidenceGraph(
     }
   }
   // DACS-5 §10.5.1: only completed sessions reach the node and payload checks below, so one they cannot
-  // decide (no answer, an external pointer, a payload closed to this reader) must not refute the session
-  // while its seller's failures still count. It is noted here and the remaining checks still run; a later
-  // refutation wins, and only a session on a listing this deployment can verify is held (EvidenceGraph.held).
-  let undecided: string | undefined;
+  // decide must not refute the session. It is noted here with its kind and the remaining checks still run; a
+  // later refutation wins. A lasting state (an external pointer, a payload closed to this reader) can never be
+  // decided, and a party to the session chose it, so it excludes this session alone. Only when every cause is
+  // no answer may the indexer hold the seller, for a bounded time (EvidenceGraph.held).
+  const undecidedReasons: Record<UndecidedKind, string | undefined> = { "no-answer": undefined, lasting: undefined };
+  const noteUndecided = (reason: string, kind: UndecidedKind) => { undecidedReasons[kind] ??= reason; };
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
@@ -1181,10 +1207,11 @@ async function verifyCurrentEvidenceGraph(
     // The shape admits exactly one transfer for a pay-dem success (DACS-4 §9.5.9 single payee; SB-1:
     // a single native transfer is one settlement).
     const ref = arr(evidence.raw.paymentTxRefs)[0];
-    const payment = await nativePaymentVerdict(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
+    const payment = await nativePaymentVerdict(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode,
+      deps.bundleAnchorTime?.(bundleLocator, raw));
     if (payment.verdict === "fail") return failSigned(`native payment verification is fail: ${payment.reason}`);
     if (payment.verdict === "indeterminate") {
-      undecided ??= `native payment verification is indeterminate: ${payment.reason}`;
+      noteUndecided(`native payment verification is indeterminate: ${payment.reason}`, payment.kind);
       continue;
     }
     evidence.verifiedSettlementId = settlementTxId(ref) ?? undefined;
@@ -1218,13 +1245,14 @@ async function verifyCurrentEvidenceGraph(
     } catch (error) {
       if (!(error instanceof VerificationUnavailable)) throw error;
       // No answer, or a payload this reader may not open: DV-2 lets a public listing deliver privately.
-      undecided ??= `storage delivery is indeterminate: ${error.message}`;
+      noteUndecided(`storage delivery is indeterminate: ${error.message}`, error.kind);
       continue;
     }
     if (!delivered) return failSigned("storage delivery payload is absent or not a usable record");
-    // §9.6.1: an extended-pointer record is a valid delivery whose external cleartext this deployment cannot read.
+    // §9.6.1: an extended-pointer record is a valid delivery whose external cleartext this deployment cannot
+    // read. The seller chose to deliver that way, and no later pass reads it.
     if (delivered.data.externalUrl !== undefined) {
-      undecided ??= "storage delivery is indeterminate: external cleartext is unavailable";
+      noteUndecided("storage delivery is indeterminate: external cleartext is unavailable", "lasting");
       continue;
     }
     // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
@@ -1233,8 +1261,9 @@ async function verifyCurrentEvidenceGraph(
     }
     const acl = rec(delivered.acl);
     if (!acl || !["public", "restricted", "owner"].includes(String(acl.mode))) {
-      // The node's reply states no access mode this profile knows: no answer about the buyer's read right.
-      undecided ??= "storage delivery is indeterminate: access metadata is unavailable";
+      // The node's answer about the record states no access mode this profile knows, so it says nothing about
+      // the buyer's read right. That is the record as stored, not a missing reply.
+      noteUndecided("storage delivery is indeterminate: access metadata is unavailable", "lasting");
       continue;
     }
     const buyer = arr(agreement.parties).find((party) => party.role === "buyer");
@@ -1249,14 +1278,28 @@ async function verifyCurrentEvidenceGraph(
         acl.allowed[0] !== buyerAddress || !(acl.groups === undefined || (rec(acl.groups) && Object.keys(acl.groups as object).length === 0)))) {
       return failSigned("storage delivery is indeterminate: buyer-only access binding failed");
     }
+    // DACS-4 §9.6.1 step 2: the hash-bound cleartext conforms to the deliverable's schemaUrl. Without a
+    // validator, deploymentVerifiability below leaves every session on this listing indeterminate.
+    if (deliverable.schemaUrl !== undefined && deps.validateDeliverableSchema) {
+      let conforms: boolean;
+      try {
+        conforms = await deps.validateDeliverableSchema(String(deliverable.schemaUrl), delivered.data);
+      } catch (error) {
+        if (!(error instanceof VerificationUnavailable)) throw error;
+        noteUndecided(`storage delivery is indeterminate: ${error.message}`, error.kind);
+        continue;
+      }
+      if (conforms !== true) return failSigned("storage delivery payload does not conform to the listing's deliverable schema");
+    }
   }
   // Last, so every specific evidence failure above keeps its own reason; any session still standing
   // here, whatever its outcome, is excluded when its listing is not verifiable by this deployment.
+  const undecided = undecidedReasons.lasting ?? undecidedReasons["no-answer"];
   const unverifiable = await deploymentVerifiability(listed.raw, raw, deps);
   if (unverifiable) return failSigned(undecided ?? `session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
-  // Nothing refuted the session and its listing is verifiable here, but one check had no answer: the
-  // indexer holds the seller's figures this pass rather than drop this completion alone.
-  if (undecided) return { ...failSigned(undecided), held: undecided };
+  // Nothing refuted the session and its listing is verifiable here, but one check gave no verdict. A lasting
+  // state excludes this session alone; only no answer lets the indexer hold the seller instead.
+  if (undecided) return { ...failSigned(undecided), undecided, ...(undecidedReasons.lasting === undefined ? { held: undecided } : {}) };
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }

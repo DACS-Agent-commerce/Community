@@ -280,25 +280,27 @@ test("a storage read separates a definitive answer from a transport failure (RB-
 
 // DACS-5 §10.5.1: the evidence graph refutes a session only on an answer. A record its owner keeps
 // unreadable here (denied, over the bounds) refutes only the session citing it, as deleting it would;
-// no answer leaves that session undecided (VerificationUnavailable), and so does a payload closed to
-// this anonymous reader, since DV-2 lets a public listing be delivered privately.
+// no answer leaves that session undecided (VerificationUnavailable "no-answer"). A payload closed to
+// this anonymous reader is undecided too, since DV-2 lets a public listing be delivered privately, but
+// its owner keeps it closed, so it is a lasting state that never holds the seller (sweep 13 F1).
 test("the graph's artifact and payload readers refute only on an answer", async () => {
   const at = `stor-${"5".repeat(40)}`;
   const body = (value: unknown, status = 200) => Response.json(value, { status });
   const data = { marker: 1 };
-  const replies: Array<[string, () => Response, "data" | "null" | "throws", "data" | "null" | "throws"]> = [
+  type Outcome = "data" | "null" | "no-answer" | "lasting";
+  const replies: Array<[string, () => Response, Outcome, Outcome]> = [
     ["present", () => body({ success: true, owner, programName, data, acl: { mode: "public" } }), "data", "data"],
     ["absent", () => body({ success: false, errorCode: "NOT_FOUND" }, 404), "null", "null"],
     ["invalid", () => body({ success: true, owner, programName, data: "text" }), "null", "null"],
-    ["denied", () => body({ success: false, errorCode: "PERMISSION_DENIED" }, 403), "null", "throws"],
+    ["denied", () => body({ success: false, errorCode: "PERMISSION_DENIED" }, 403), "null", "lasting"],
     ["too large", () => body({ success: true, owner, programName, data: { text: "x".repeat(256 * 1024) } }), "null", "null"],
-    ["a node error", () => new Response(null, { status: 503 }), "throws", "throws"],
-    ["a transport failure", () => { throw new TypeError("fetch failed"); }, "throws", "throws"],
+    ["a node error", () => new Response(null, { status: 503 }), "no-answer", "no-answer"],
+    ["a transport failure", () => { throw new TypeError("fetch failed"); }, "no-answer", "no-answer"],
   ];
-  const outcome = async (read: () => Promise<unknown>) => {
+  const outcome = async (read: () => Promise<unknown>): Promise<Outcome> => {
     try { const value = await read(); return value === null ? "null" : "data"; } catch (error) {
       assert.ok(error instanceof VerificationUnavailable, String(error));
-      return "throws";
+      return error.kind;
     }
   };
   const originalFetch = globalThis.fetch;

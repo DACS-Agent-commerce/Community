@@ -304,20 +304,29 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    an auction without a reserve (any currency), is excluded. Neither a declared payload above
    the Standard's 128 KB storage limit (an extended pointer) nor a buyer-only payload is
    readable here. The agreed rail and price are checked for every session that has an
-   agreement. What a pass cannot decide is not refuted either. Only a committed session reads
-   its agreement, evidence, the node's transfer and the payload, and it may deliver through an
-   extended pointer or a private ACL the listing leaves open (§9.6.1, DV-2). When one of those
-   reads gets no answer (a timeout, a node error, a node that has not checked through the cited
-   block), or the payload is a pointer or closed to this anonymous reader, and nothing refutes
-   the session, the seller is held: none of its sessions counts in that pass, on any listing,
-   whatever the outcome (`reputationHeld`, `held` on the seller API). A listing with only
-   failures never makes those reads, so holding that one session alone would publish the seller
-   below its real rate. Only a bundle the seller signed can hold it. An answer still refutes just
+   agreement. A deliverable that names a `schemaUrl` excludes every session on its listing, since
+   the Standard pins no schema bytes and the catalog installs no authenticated schema validator
+   (`validateDeliverableSchema`); with one installed, a payload it rejects refutes its
+   completion. What a pass cannot decide is not refuted either. Only a committed session reads
+   its agreement, evidence, the node's transfer and the payload. When one of those reads gets no
+   answer (a timeout, a transport or node error, a node that has not reached the citing bundle's
+   anchor) and nothing refutes the session, the seller is held: none of its sessions counts in
+   that pass, on any listing, whatever the outcome (`reputationHeld`, `held` and `heldSince` on
+   the seller API, `reputationHeld` on its listings, a notice on the seller page and discovery
+   cards). A listing with only failures never makes those reads, so dropping that one session
+   alone would publish the seller below its real rate. Only a bundle the seller signed can hold
+   it, and a hold lasts at most 24 hours of continuous passes (`MAX_SELLER_HOLD_MS`): the clock
+   (`reputationHeldSince`) is saved with the catalog, a new session does not restart it, and only
+   a pass that holds nothing clears it. After that, the undecided sessions are excluded alone. A
+   lasting state of the session's own record never holds anyone, because no later pass decides it
+   and a party to the session chose it: an extended pointer (§9.6.1), a payload the anonymous
+   reader is denied (DV-2 over-provision), access metadata the node does not state, a numeric
+   legacy send payload, or a block whose applied list leaves the transfer out. Such a session is
+   excluded alone. Both kinds of exclusion are counted (`undecidedExcluded`). An answer still refutes just
    its own session: a record that is absent, does not hash, is denied to this reader or exceeds
-   the bounds (all states its owner controls, as deleting it is), or a transfer the node has no
-   record of through the cited block. Each pass re-derives every verdict; none is carried over, so
-   an outage holds one pass while a choice that stays (a pointer, a private payload) holds every
-   pass, and the seller is published with no rate rather than a biased one. Copies are
+   the bounds (all states its owner controls, as deleting it is), a transfer the node has no
+   record of through the cited block, or a cited block after the block that consensus-anchored
+   the citing bundle. Each pass re-derives every verdict from the chain; only the hold clock is carried over. Copies are
    reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
@@ -417,11 +426,13 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   catalog installs no such reader, so every session on a buyer-only listing is indeterminate,
   whatever its outcome; the buyer-only acceptance tests inject a fixture reader. Encrypted
   payloads and declared payloads above the Standard's 128 KB storage limit exclude every session on the
-  listing in the same way. The seller's own delivery choices the listing leaves open, an
+  listing in the same way, and so does a deliverable `schemaUrl` while no authenticated schema
+  validator is installed (none is). The seller's own delivery choices the listing leaves open, an
   external pointer whose size the listing did not declare or a public listing delivered through
-  a restricted ACL the anonymous reader cannot open, hold the seller for the pass, as does a
-  payload read with no answer (Discovery, item 3). An absent payload, or one over
-  the inline bounds, refutes that session only. None contributes a completion or volume.
+  a restricted ACL the anonymous reader cannot open, exclude that session alone and are counted
+  in `undecidedExcluded`; a payload read with no answer holds the seller for at most 24 hours
+  (Discovery, item 3). An absent payload, or one over the inline bounds, refutes that session
+  only. None contributes a completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -520,20 +531,24 @@ and payee, and the exact agreed amount (1 DEM = 10^9 OS). A successful `pay-dem`
 exactly one native transfer (DACS-4 §9.5.9), so its `paymentAmount`, the transfer the node
 confirms and its SB-1 key describe one payment. Where a block lists the transactions whose GCR
 edits it applied (`attrs.gcrAppliedTxs`, served by node2 but absent from the pinned node source),
-a transfer the list does not name, or a list that cannot be read, is indeterminate. The node credits and debits the
+a transfer the list does not name (a lasting state), or a list that cannot be read (no answer), is indeterminate. The node credits and debits the
 exact address string it stores (ac8f45f `handleNativeOperations`), so the transaction's
 sender, recipient and send argument must be the canonical `0x<64 lowercase hex>` payer and
 payee. Another spelling of the same key is a different account. The stored RPC amount is OS,
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
-string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
+string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter;
+that is the transaction's lasting state, so it excludes the session alone and never holds the seller.
 Only the node's answer about the cited transaction refutes a payment: its failed status, other
 endpoints or amount, another block, a block that does not include it, or node2's structured
 not-found (`result` 404, `reason: "not_found"`) once `checkedThroughBlock` reaches the cited
-block. Every other reply is no answer and leaves the payment undecided, which holds the seller
-for the pass: a transport failure or timeout, an HTTP or `result` error (including the pinned
-source's bare 400), a `result` 200 without a transaction, a not-found from a node that has not
-reached the block, a reply about another transaction or block, a non-terminal status, and the
-indeterminate cases above.
+block. A not-found below the cited block also refutes it when the last block the node checked is
+already later than the block that consensus-anchored the citing bundle (by that block's own
+timestamp against the bundle's recorded anchor time): a bundle cannot cite a transfer made after
+it was anchored, and nothing bounds the `blockNumber` it cites. Every other reply is no answer and
+leaves the payment undecided, which holds the seller for at most 24 hours: a transport failure or
+timeout, an HTTP or `result` error (including the pinned source's bare 400), a `result` 200 without
+a transaction, a not-found from a node that has not reached the bundle's anchor, a reply about
+another transaction or block, and a non-terminal status.
 All other current payment rails and paid SDK legacy sessions remain indeterminate until their
 authoritative settlement adapters are available. Every session on such a listing, failed or
 completed, contributes no completion, denominator or volume.

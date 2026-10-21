@@ -123,6 +123,9 @@ export interface ListingSummary {
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
   reputationHint?: ReputationHint;
+  /** Directory extension: the seller's figures are held this pass (SellerRecord.reputationHeld), so the hint's
+   * null rate means "held", not "no sessions". Absent otherwise. */
+  reputationHeld?: true;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
 }
@@ -256,9 +259,16 @@ export interface SellerRecord {
     windowEnd?: number;
     windowingBasis?: "finalisedAt" | "sr2-anchor-timestamp";
   };
-  /** Why this pass held the seller's figures (DACS-5 §10.5.1): one of its own signed sessions could not be
-   * decided here, so none of its sessions counts until a pass decides them all. Absent when nothing was held. */
+  /** Why this pass held the seller's figures (DACS-5 §10.5.1): one of its own signed sessions got no answer
+   * here, so none of its sessions counts until a pass decides them all, for at most MAX_SELLER_HOLD_MS (indexer.ts).
+   * Absent when nothing is held, including once that time has run out. */
   reputationHeld?: string;
+  /** Start (ms) of the unbroken series of passes in which a session of this seller got no answer. Carried from
+   * the prior record, saved with the catalog and cleared by a pass that holds nothing; it bounds the hold. */
+  reputationHeldSince?: number;
+  /** Sessions this pass excluded alone because it could not decide them: a lasting state of their own record
+   * (an extended pointer, a payload closed to this reader), or no answer after the hold ran out. Absent when 0. */
+  undecidedExcluded?: number;
   registeredAt: number;
   lastIndexedAt: number;
 }

@@ -44,6 +44,7 @@ import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
+  artifactAnchorTimeFor,
   clearListingRejection,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -149,6 +150,18 @@ export type { ResolvePublisherListingAnchors } from "./publisherListings.js";
 
 /** Work bound per publisher and discovery tier when resolving another registration's sessions. */
 export const MAX_PUBLISHER_LISTING_READS = 32;
+/** Longest continuous hold of one seller (DACS-5 §10.5.1 at run time). A hold assumes a missing answer will
+ * come; past this, the seller's undecided sessions are excluded alone and counted instead. */
+export const MAX_SELLER_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/** Consensus anchor time of exactly these bundle bytes, as the scanner recorded it. */
+const bundleAnchorTime = (locator: string, bundle: Record<string, unknown>): number | undefined => {
+  try {
+    return artifactAnchorTimeFor(locator, contentHash(bundle));
+  } catch {
+    return undefined;
+  }
+};
 
 /**
  * Index one registration into a verified SellerRecord.
@@ -326,13 +339,17 @@ export async function indexRegistration(
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
-  // DACS-5 §10.5.1: a session of this seller that this pass could not decide (EvidenceGraph.held) holds
-  // every one of its sessions out of the figures, whatever the outcome or listing. Only a completed or
-  // committed session makes the reads that can go unanswered, and a listing with only failures never makes
-  // them, so dropping that session alone would publish the seller below its real rate. Only a bundle the
-  // seller itself signed can hold it: anyone else's stays a verdict on that one session.
+  // DACS-5 §10.5.1 at run time. Only a completed or committed session makes the reads that can go unanswered,
+  // and a listing with only failures never makes them, so dropping such a session alone would publish the
+  // seller below its real rate. A session of this seller that got no answer (EvidenceGraph.held) therefore
+  // holds every one of its sessions out of the figures, whatever the outcome or listing, for at most
+  // MAX_SELLER_HOLD_MS of continuous passes. Only a bundle the seller itself signed can hold it. A lasting
+  // state (EvidenceGraph.undecided without held) is the session's own record, which a party chose and no
+  // pass decides: it excludes that session alone, as does no answer once the hold has run out, and both are
+  // counted (undecidedExcluded). Holding for a lasting state would let the seller hide its failures for good.
   const sellerIdentity = canonicalSigningIdentity(reg.primaryClaim);
-  let reputationHeld: string | undefined;
+  let heldReason: string | undefined;
+  const undecidedDeals = new Set<RegisteredDeal>();
   const scanState = loadScanState();
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
@@ -405,9 +422,12 @@ export async function indexRegistration(
     };
     // No authenticated restricted reader is installed: the node denies this catalog's anonymous
     // restricted reads, so buyer-only delivery is indeterminate for every outcome.
+    // No schema validator is installed either, so a deliverable naming a schemaUrl leaves its listing neutral.
     const graphFor = async (locator: string) => {
-      const graph = await buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing, readSettlementNode });
-      if (graph.held && graph.signedParties.includes(sellerIdentity)) reputationHeld ??= `${deal.jobId}: ${graph.held}`;
+      const graph = await buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing,
+        readSettlementNode, bundleAnchorTime });
+      if (graph.undecided) undecidedDeals.add(deal);
+      if (graph.held && graph.signedParties.includes(sellerIdentity)) heldReason ??= `${deal.jobId}: ${graph.held}`;
       return graph;
     };
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
@@ -619,8 +639,18 @@ export async function indexRegistration(
     }
   }
   const verifiedDeals = dedupeVerifiedDeals(dealCandidates);
+  // The hold clock runs from the first of an unbroken series of passes with an unanswered session of this
+  // seller; it is saved with the catalog, and a pass that holds nothing clears it. A start the prior record
+  // cannot vouch for begins now, which only ever shortens a hold.
+  const priorSince = prior?.reputationHeldSince;
+  const reputationHeldSince = heldReason === undefined ? undefined
+    : Number.isSafeInteger(priorSince) && Number(priorSince) <= now ? Number(priorSince) : now;
+  const reputationHeld = reputationHeldSince !== undefined && now - reputationHeldSince <= MAX_SELLER_HOLD_MS ? heldReason : undefined;
   // A held seller keeps every deal and its verdict on record, but none counts until a pass decides them all.
   const deals = reputationHeld ? verifiedDeals.map((deal) => ({ ...deal, reputationEligible: false })) : verifiedDeals;
+  // Otherwise every undecided session is out of the figures on its own; say how many, so a reader can tell.
+  const undecidedExcluded = reputationHeld ? 0 : [...undecidedDeals].filter((deal) => !deals.some((counted) =>
+    counted.jobId === deal.jobId && counted.owners.buyer === deal.owners.buyer && counted.refsVerified)).length;
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
   const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
@@ -628,9 +658,11 @@ export async function indexRegistration(
   const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
+  // A held seller's hints carry no rate; reputationHeld tells discovery why, so it does not read as a newcomer's.
   const listingsWithHint = listings.map((l) => ({
     ...l,
     reputationHint: categoryReputationHint(l.offering.category, counted, windowStart, windowEnd, now),
+    ...(reputationHeld ? { reputationHeld: true as const } : {}),
   }));
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
@@ -654,6 +686,8 @@ export async function indexRegistration(
     deals,
     reputation,
     ...(reputationHeld ? { reputationHeld } : {}),
+    ...(reputationHeldSince !== undefined ? { reputationHeldSince } : {}),
+    ...(undecidedExcluded > 0 ? { undecidedExcluded } : {}),
     registeredAt: prior?.registeredAt ?? now,
     lastIndexedAt: now,
   };

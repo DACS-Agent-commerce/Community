@@ -112,6 +112,10 @@
 #     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
 #     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
 #     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
+#     §9.6.1 step 2 (schema conformance): the Standard pins no bytes for deliverable.schemaUrl, so only
+#     an operator-installed authenticated validator (EvidenceGraphDeps.validateDeliverableSchema) can
+#     check it; the catalog installs none, and every session on such a listing is indeterminate for
+#     every outcome. With one installed, a hash-bound payload it rejects refutes its completion.
 #     The buyer's read right is node ac8f45f checkReadPermission for the buyer's canonical 0x address,
 #     with exact string comparison as on the node. Public admits anyone not blacklisted; owner mode
 #     admits only the owner; restricted admits the owner first, then anyone not blacklisted who is in
@@ -126,7 +130,9 @@
 #     is one settlement") and additionally requires blockNumber and getTxByHash/getBlockByNumber
 #     reads establishing confirmed inclusion, native-send endpoints and the exact DEM price in OS.
 #     Where a block states attrs.gcrAppliedTxs (node2; absent from ac8f45f), the transfer must be
-#     listed there, and an unreadable list is indeterminate.
+#     listed there, and an unreadable list is indeterminate. A not-found below the cited block refutes
+#     the payment when the node's last checked block is later, by its own timestamp, than the citing
+#     bundle's recorded consensus anchor: inclusion cannot follow the bundle that asserts it.
 #     The node credits and debits the exact address string (handleNativeOperations, GCRBalanceRoutines
 #     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from, to and
 #     send argument must therefore be the canonical 0x<64 lowercase hex> payer and payee.
@@ -134,8 +140,9 @@
 #     payingKey be any key in the buyer's bundle claims; this Directory resolves no IdentityBundle for
 #     payment, so a transfer from another of the buyer's keys is refuted for its session.
 #     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
-#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Unavailable reads never count;
-#     they hold the seller (§10.5.1 at run time, below). The node source calls terminal inclusion "confirmed".
+#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate, excluding that
+#     session alone. Unanswered reads never count; they hold the seller for a bounded time (§10.5.1 at run
+#     time, below). The node source calls terminal inclusion "confirmed".
 #   Attested-payload and entitlement success remain indeterminate until authoritative attestation
 #     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
 #   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
@@ -154,28 +161,35 @@
 #     railRegistryVersion, or a price not in DEM (including an auction with no reserve, whose currency
 #     is open); a repeated pay-dem phase, whatever the bundle's anchorBindings member holds; a non-storage or encrypt-to-buyer delivery, a declared expectedSizeBytes above the
 #     Standard's 128 KB storage limit (§9.6.1 extended pointer), buyer-only delivery
-#     without an authenticated restricted reader (none is installed), or no payload reader;
+#     without an authenticated restricted reader (none is installed), a deliverable schemaUrl without an
+#     authenticated schema validator (none is installed), or no payload reader;
 #     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
 #     identity requirements) a control adapter; listing commitment-time bounds; negotiate-fixed-price,
 #     or an RFQ step enabling the fixed-price fallback, on a negotiable listing. The agreed rail and
 #     price are checked for every session with an agreement.
 #     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
 #     or settle phase.
-#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.held; indexer.ts reputationHeld): a pass
-#     that cannot decide a session never refutes it. Readers resolve null only for an answer and throw
-#     VerificationUnavailable for none (chain.ts readArtifact, readPayloadRecord, readSettlementNode). A
-#     session whose bundle signatures verified is held when nothing refutes it, its listing passes the
-#     gate above, and one check had no answer (timeout, transport, node error, a node not yet through the
-#     cited block, a reply about another transaction or block) or met a delivery choice the listing
-#     leaves open that this deployment cannot read (an extended pointer, §9.6.1; a payload denied to
-#     the anonymous reader, DV-2 over-provision). A held session the seller signed holds the seller:
-#     none of its sessions counts in that pass, on any listing, whatever the outcome, since a listing
-#     with only failures never makes those reads. An answer refutes its own session only: absent,
-#     unhashed, denied (non-payload) or over-bound records, all states their owner controls, and a
-#     transfer node2's structured not-found has no record of through the cited block. Each pass
-#     re-derives every verdict, so an outage holds one pass and a lasting choice holds every pass
-#     (test/indexer-binding-rules.test.ts "§10.5.1 at run time", test/chain-storage.test.ts,
-#     test/native-payment.test.ts).
+#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.undecided/held; indexer.ts reputationHeld,
+#     MAX_SELLER_HOLD_MS): a pass that cannot decide a session never refutes it. Readers resolve null
+#     only for an answer and throw VerificationUnavailable with its kind (verificationUnavailable.ts;
+#     chain.ts readArtifact, readPayloadRecord, readSettlementNode). A session whose bundle signatures
+#     verified, that nothing refutes and whose listing passes the gate above is undecided when a check
+#     gives no verdict. Kind "no-answer" (timeout, transport, node error, a node not yet through the
+#     cited block nor past the bundle's anchor, a reply about another transaction or block): a held
+#     session the seller signed holds the seller, so none of its sessions counts in that pass, on any
+#     listing, whatever the outcome, since a listing with only failures never makes those reads. The
+#     hold is bounded: reputationHeldSince is carried from the prior record and saved with the catalog,
+#     and after MAX_SELLER_HOLD_MS (24 h) of continuous holds the undecided sessions are excluded alone;
+#     only a pass that holds nothing clears the clock. Kind "lasting", a state of the session's own
+#     record that no later pass decides and a party to it chose (an extended pointer, §9.6.1; a payload
+#     denied to the anonymous reader, DV-2 over-provision; access metadata the node does not state; a
+#     numeric legacy send payload; a stated gcrAppliedTxs list without the transfer): that session is
+#     excluded alone and never holds anyone, as guard (iv) and an unresolvable ST-10 marker exclude one
+#     jobId. Both are counted (SellerRecord.undecidedExcluded). An answer refutes its own session only:
+#     absent, unhashed, denied (non-payload) or over-bound records, all states their owner controls, a
+#     transfer node2's structured not-found has no record of through the cited block, and a cited block
+#     after the citing bundle's consensus anchor (test/indexer-binding-rules.test.ts "§10.5.1 at run
+#     time" and "sweep 13 F1", test/chain-storage.test.ts, test/native-payment.test.ts).
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
 #     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,
