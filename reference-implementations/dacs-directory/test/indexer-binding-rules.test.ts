@@ -23,6 +23,7 @@ const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClai
 const { fullSignatureStanding } = await import("../src/catalog/bundleSignerPolicy.js");
 const { ANCHOR_BINDING_DOMAIN, deliverableLogicalAddress, paymentLogicalAddress } = await import("../src/catalog/anchorBinding.js");
 const { OPAQUE_PROGRAM_NAME } = await import("./helpers/anchor-binding.js");
+const { VerificationUnavailable } = await import("../src/catalog/verificationUnavailable.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 type Obj = Record<string, unknown>;
@@ -1219,6 +1220,12 @@ test("paid completion requires an authenticated matching versioned live rail def
       process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify([{ ...snapshot[0], rails }]);
       assert.equal((await currentGraph(listing)).reason, "payment verification is indeterminate: authenticated pinned rail definition is unavailable");
     }
+    // Two snapshots for the session's registryVersion are ambiguous, whichever comes first (code review P2-4).
+    for (const snapshots of [[snapshot[0], { ...snapshot[0], rails: [] }], [{ ...snapshot[0], rails: [] }, snapshot[0]], [snapshot[0], snapshot[0]]]) {
+      process.env.DACS_RAIL_SNAPSHOTS = JSON.stringify(snapshots);
+      assert.equal((await currentGraph(listing)).reason, "payment verification is indeterminate: authenticated pinned rail definition is unavailable");
+      await assertUncounted();
+    }
     process.env.DACS_RAIL_SNAPSHOTS = policy;
     const unknownRegistry = installListedCase(() => {}, (s) => { s.railRegistryVersion = 999; });
     assert.match((await currentGraph(unknownRegistry)).reason!, /pinned rail definition is unavailable/);
@@ -1327,6 +1334,11 @@ test("§10.5.1: what the deployment cannot verify excludes every outcome on the 
     ["an RFQ step that enables the fixed-price fallback on a negotiable listing", (s) => {
       s.pricing = { kind: "negotiable", bandCenter: { amount: "2", currency: "DEM" }, minPct: 10, maxPct: 10 };
       (s.pipeline as Obj[])[0] = { kind: "negotiate-rfq", parameters: { maxTurns: 6, timeoutSec: 60, fixedPriceFallback: true } };
+    }, [0, "negotiate-rfq"]],
+    // DACS-3 §8.8 declares the fallback "in the pipeline step"; the step member enables it the same way (code review P3-2).
+    ["an RFQ step that declares the fixed-price fallback on the step itself", (s) => {
+      s.pricing = { kind: "negotiable", bandCenter: { amount: "2", currency: "DEM" }, minPct: 10, maxPct: 10 };
+      (s.pipeline as Obj[])[0] = { kind: "negotiate-rfq", fixedPriceFallback: true, parameters: { maxTurns: 6, timeoutSec: 60 } };
     }, [0, "negotiate-rfq"]],
     // DACS-4 §9.6.1: above the 128 KB cap the payload MUST be an extended pointer, whose external
     // cleartext this deployment cannot read; the honest completion delivers that pointer.
@@ -1639,4 +1651,233 @@ test("agreement presence and pre-commit terminal facts cannot contradict one ano
       await assertUncounted();
     }
   } finally { store.clear(); for (const [key, raw] of original) store.set(key, raw); }
+});
+
+// DACS-5 §10.5.1 at run time. The static listing gate decides only what the listing fixes. A paid, delivered
+// completion also reads its agreement, evidence, the node and the payload, and can use a delivery choice the
+// listing leaves open; a pre-commit failure makes none of those reads. When one of them cannot be decided here
+// (no authoritative reply, an external pointer, a payload the anonymous reader is denied), dropping that
+// completion alone while the seller's failures still count publishes the seller at 0%. The seller is held
+// instead: no session of its counts this pass, whatever its outcome or listing. A record that is false, or
+// that a node answer refutes, still excludes only its own session.
+const FAILED_JOB = "indexer-binding-failed-job";
+const SECOND_LISTING = at(97);
+/** A signed pre-commit failure of another job of this seller, on `listed` (stored at `locator`). */
+function installFailure(listed: Obj, locator = at(1)) {
+  const pinned = { listingId: listed.listingId, version: listed.listingVersion, contentHash: artifactHash(listed, "listing") };
+  const scope = bundleScope({ jobId: FAILED_JOB, listingRef: pinned, settlementEvidence: [], ratingRefs: [],
+    phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "fail", errorClass: "permanent" }] });
+  delete scope.agreementRef;
+  store.set(locator, listed).set(at(95), copy("buyer", { ...scope, outcome: "failed-counterparty" })).set(at(96), copy("seller", { ...scope, outcome: "failed-perm" }));
+}
+/** The same listing under another listingId, so a second listing of the seller can carry the failure. */
+function secondListing(): Obj {
+  const scope = { ...signedScope(store.get(at(1))!, "listing"), listingId: "binding-rules-second" };
+  return { ...scope, signature: signedWith(scope, "listing", SELLER) };
+}
+type NodeReply = (message: string, data: Obj) => Promise<Response>;
+/** One pass over both sessions. `node` and `storage` replace the node's reply or one storage read; either may throw. */
+async function indexPass(options: { node?: NodeReply; storage?: (locator: string) => Response | undefined } = {}) {
+  const nodeRead = nativeNodeFixture(() => store.values());
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params?.[0];
+      if (["getTxByHash", "getBlockByNumber"].includes(call?.message)) {
+        return options.node ? options.node(call.message, call.data) : Response.json({ result: 200, response: await nodeRead(call.message, call.data) });
+      }
+    }
+    const locator = String(input).split("/").pop() ?? "";
+    const replaced = options.storage?.(locator);
+    if (replaced) return replaced;
+    const data = store.get(locator);
+    return data ? Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  const failedBinding = (role: "buyer" | "seller", nativeAddress: string, signer: number) =>
+    binding(role, nativeAddress, signer, { jobId: FAILED_JOB, logicalAddress: logicalBundleAddress(FAILED_JOB, role) });
+  try {
+    return await indexRegistration({ primaryClaim: dids[SELLER], displayName: "seller", listingAnchors: [at(1), SECOND_LISTING],
+      deals: [
+        { jobId: JOB, rail: "demos-native:DEM", buyerBundleRef: at(90), sellerBundleRef: at(91), owners: { buyer: dids[BUYER], seller: dids[SELLER] } },
+        { jobId: FAILED_JOB, rail: "demos-native:DEM", buyerBundleRef: at(92), sellerBundleRef: at(93), owners: { buyer: dids[BUYER], seller: dids[SELLER] } },
+      ],
+      bundleBindings: [...holders(), failedBinding("buyer", at(95), BUYER), failedBinding("seller", at(96), SELLER)] as never },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+const figures = (seller: Awaited<ReturnType<typeof indexPass>>) => ({ completed: seller.reputation.completed, bundleCount: seller.reputation.bundleCount,
+  completionRate: seller.reputation.completionRate, volume: seller.reputation.observedTransactionalVolume,
+  held: typeof (seller as { reputationHeld?: unknown }).reputationHeld === "string" });
+const BOTH_COUNTED = { completed: 1, bundleCount: 2, completionRate: 0.5, volume: [{ currency: "DEM", amount: "2" }], held: false };
+const HELD = { completed: 0, bundleCount: 0, completionRate: null, volume: [], held: true };
+const ONLY_FAILURE = { completed: 0, bundleCount: 1, completionRate: 0, volume: [], held: false };
+const nodeAnswer = (body: Obj, status = 200) => Response.json(body, { status });
+const notFound = (checkedThroughBlock: number) => nodeAnswer({ result: 404, response: null, require_reply: false, extra: { reason: "not_found", checkedThroughBlock } });
+/** Replace the payment evidence with `change` applied, re-signed, in both copies of the completion. */
+function replacePaymentEvidence(change: (scope: Obj) => void): Obj {
+  const scope = signedScope(evidence, "evidence"); change(scope);
+  const replaced = { ...scope, signature: signedWith(scope, "evidence", SELLER) };
+  store.set(at(3), replaced);
+  for (const [locator, role] of [[at(5), "buyer"], [at(6), "seller"]] as const) {
+    const bundle = signedScope(store.get(locator)!, "bundle"); delete bundle.anchorBindings;
+    bundle.settlementEvidence = [refTo(at(3), replaced, "evidence"), refTo(at(60), delivery, "evidence")];
+    store.set(locator, copy(role, bundle));
+  }
+  return replaced;
+}
+
+test("§10.5.1 at run time: a completion this pass cannot decide holds the seller, never drops alone beside its failures", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  try {
+    await t.test("control: a verifiable completion and a pre-commit failure both count", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+      // The failure on the seller's second listing counts the same way.
+      reset(); installListedCase(() => {}); installFailure(secondListing(), SECOND_LISTING);
+      assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+    });
+    // Daybreak P1-2: a node outage, an error reply, a reply without the transaction and a node that has not
+    // reached the cited block are no answer about the transfer.
+    for (const [name, node] of [
+      ["the node is unreachable", async () => { throw new TypeError("fetch failed"); }],
+      ["the node answers HTTP 500", async () => new Response("upstream error", { status: 500 })],
+      ["the node answers result 500", async () => nodeAnswer({ result: 500, response: "internal error" })],
+      ["the node answers result 200 without a transaction", async () => nodeAnswer({ result: 200, response: null })],
+      ["the node has not reached the cited block", async () => notFound(0)],
+      ["the node answers an unstructured 404", async () => nodeAnswer({ result: 404, response: null })],
+      ["the node answers the pinned source's 400", async () => nodeAnswer({ result: 400, response: "error" })],
+    ] as Array<[string, NodeReply]>) {
+      await t.test(`${name}: the seller is held`, async () => {
+        reset(); installFailure(installListedCase(() => {}));
+        assert.deepEqual(figures(await indexPass({ node })), HELD);
+        reset(); installListedCase(() => {}); installFailure(secondListing(), SECOND_LISTING);
+        assert.deepEqual(figures(await indexPass({ node })), HELD, "failure on another listing");
+      });
+    }
+    await t.test("a node that checked past the cited block and has no such transfer refutes that completion only", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const seller = await indexPass({ node: async (message) => message === "getTxByHash" ? notFound(3901) : nodeAnswer({ result: 200, response: null }) });
+      assert.deepEqual(figures(seller), ONLY_FAILURE);
+      assert.equal(seller.deals.find((deal) => deal.jobId === JOB)?.refsVerified, false);
+    });
+    // Daybreak P1-1: delivery choices the listing leaves open.
+    await t.test("an extended-pointer payload (§9.6.1) holds the seller", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      store.set(at(61), { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) });
+      assert.deepEqual(figures(await indexPass()), HELD);
+    });
+    await t.test("a public listing delivered privately (DV-2 over-provision) holds the seller", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const denied = () => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
+      assert.deepEqual(figures(await indexPass({ storage: (locator) => locator === at(61) ? denied() : undefined })), HELD);
+    });
+    await t.test("a held seller stays held through the catalog-wide save, and the seller API says why", async () => {
+      reset(); installFailure(installListedCase(() => {}));
+      const held = await indexPass({ node: async () => { throw new TypeError("fetch failed"); } });
+      const { saveCatalog } = await import("../src/catalog/store.js");
+      const route = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+      const { NextRequest } = await import("next/server");
+      const prior = loadCatalog();
+      try {
+        saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [held] });
+        const saved = loadCatalog().sellers[0];
+        assert.equal(saved.reputation.completionRate, null); assert.equal(saved.reputation.bundleCount, 0);
+        assert.match(saved.reputationHeld!, /^indexer-binding-job: native payment verification is indeterminate: the node's getTxByHash reply failed \(transport\)$/);
+        const response = await route.GET(new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
+          { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
+        const body = await response.json();
+        assert.equal(body.reputation.held, saved.reputationHeld); assert.equal(body.reputation.completionRate, null);
+      } finally { saveCatalog(prior); }
+    });
+    // The same pattern on the other reads only a committed session makes.
+    for (const [name, locator] of [["agreement", at(2)], ["payment evidence", at(3)], ["delivery evidence", at(60)], ["payload", at(61)]] as const) {
+      await t.test(`the ${name} read has no answer: the seller is held`, async () => {
+        reset(); installFailure(installListedCase(() => {}));
+        assert.deepEqual(figures(await indexPass({ storage: (read) => { if (read === locator) throw new TypeError("fetch failed"); return undefined; } })), HELD);
+        reset(); installFailure(installListedCase(() => {}));
+        assert.deepEqual(figures(await indexPass({ storage: (read) => read === locator ? new Response("bad gateway", { status: 502 }) : undefined })), HELD);
+      });
+    }
+  } finally { reset(); }
+});
+
+test("§10.5.1 at run time: an answer refutes one session, and only a session the seller signed can hold it", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const denied = () => Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
+  const oversized = () => Response.json({ success: true, owner: `0x${dids[SELLER].slice(-64)}`, acl: { mode: "public" }, programName: OPAQUE_PROGRAM_NAME,
+    data: { padding: "x".repeat(256 * 1024) } });
+  const unanswered = (locator: string) => (read: string) => { if (read === locator) throw new TypeError("fetch failed"); return undefined; };
+  try {
+    // Closing or bloating a record is an answer its owner gives, like deleting it: it refutes only the session that
+    // cites it. A counterparty that owns such a record therefore cannot hold the seller with it.
+    for (const [name, locator] of [["agreement", at(2)], ["payment evidence", at(3)], ["delivery evidence", at(60)]] as const) {
+      for (const [how, reply] of [["denied", denied], ["oversized", oversized]] as const) {
+        await t.test(`${how === "oversized" ? "an" : "a"} ${how} ${name} refutes that completion only`, async () => {
+          reset(); installFailure(installListedCase(() => {}));
+          assert.deepEqual(figures(await indexPass({ storage: (read) => read === locator ? reply() : undefined })), ONLY_FAILURE);
+        });
+      }
+    }
+    // A pre-commit abort whose copies are each signed by their anchor alone, beside the paid completion. A rating
+    // that copy cites cannot be read this pass.
+    const abortCopies = (ratingOn: "buyer" | "seller") => {
+      const scope = bundleScope({ jobId: FAILED_JOB, settlementEvidence: [], ratingRefs: [],
+        phaseSummary: [{ index: 0, kind: "negotiate-fixed-price", outcome: "ok" }] });
+      delete scope.agreementRef;
+      const rated = { ...scope, ratingRefs: [{ anchor: { kind: "storage-program", locator: at(98) }, contentHash: "c".repeat(64) }] };
+      store.set(at(95), copy("buyer", { ...(ratingOn === "buyer" ? rated : scope), outcome: "aborted-by-other" }, [BUYER]))
+        .set(at(96), copy("seller", { ...(ratingOn === "seller" ? rated : scope), outcome: "aborted-by-self" }, [SELLER]));
+    };
+    await t.test("an undecided copy only the buyer signed leaves that session uncounted and the seller counted", async () => {
+      reset(); installListedCase(() => {}); abortCopies("buyer");
+      // That copy is held, and its only verified signature is the buyer's.
+      const buyerCopy = await buildCurrentEvidenceGraph(at(95), { resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }),
+        read: async (locator) => { if (locator === at(98)) throw new VerificationUnavailable("no answer"); return store.get(locator) ?? null; } });
+      assert.equal(buyerCopy.held, "session verification is undecided this pass: no answer");
+      assert.deepEqual(buyerCopy.signedParties, [dids[BUYER]]);
+      const seller = await indexPass({ storage: unanswered(at(98)) });
+      assert.deepEqual(figures(seller), { completed: 1, bundleCount: 1, completionRate: 1, volume: [{ currency: "DEM", amount: "2" }], held: false });
+      assert.equal(seller.deals.find((deal) => deal.jobId === FAILED_JOB)?.refsVerified, false);
+    });
+    await t.test("the same unanswered read in the seller's own copy holds the seller", async () => {
+      reset(); installListedCase(() => {}); abortCopies("seller");
+      assert.deepEqual(figures(await indexPass({ storage: unanswered(at(98)) })), HELD);
+    });
+    await t.test("a bundle that cannot be read is no one's session yet: it is not held", async () => {
+      reset(); installListedCase(() => {});
+      const graph = await buildCurrentEvidenceGraph(at(5), { read: async () => { throw new VerificationUnavailable("the storage read had no answer (transport)"); },
+        resolveListing: async () => ({ locator: at(1), raw: store.get(at(1))! }) });
+      assert.equal(graph.ok, false); assert.equal(graph.held, undefined); assert.equal(graph.signaturesVerified, false);
+      assert.equal(graph.reason, "session verification is undecided this pass: the storage read had no answer (transport)");
+    });
+  } finally { reset(); }
+});
+
+test("cold review P1: an evidence attestationRef is hash-bound and decides no outcome under the production adapters", async (t) => {
+  const original = new Map(store);
+  const reset = () => { store.clear(); for (const [key, raw] of original) store.set(key, raw); };
+  const attestation = { attestationVersion: "1", note: "payment observed by an external service" };
+  const attested = (hash = artifactHash(attestation, "attestation")) => replacePaymentEvidence((scope) => {
+    scope.attestationRef = { anchor: { kind: "storage-program", locator: at(80) }, contentHash: hash };
+  });
+  try {
+    await t.test("the paid completion counts beside the seller's failure", async () => {
+      reset(); const listed = installListedCase(() => {}); store.set(at(80), attestation); attested();
+      // Production installs no verifyAttestation adapter.
+      assert.equal((await currentGraph(listed)).ok, true, (await currentGraph(listed)).reason);
+      installFailure(listed);
+      assert.deepEqual(figures(await indexPass()), BOTH_COUNTED);
+    });
+    await t.test("a record that does not hash to the reference refutes that completion only", async () => {
+      reset(); const listed = installListedCase(() => {}); store.set(at(80), { ...attestation, note: "rewritten" }); attested();
+      assert.equal((await currentGraph(listed)).reason, "delivery attestation reference failed");
+      installFailure(listed);
+      assert.deepEqual(figures(await indexPass()), ONLY_FAILURE);
+    });
+  } finally { reset(); }
 });

@@ -570,7 +570,7 @@ test("v9 scan state is completed by a full deal-history replay before it is mark
   await reindex();
   unavailable.clear();
   assert.equal(lastRun().from_tx, 0, "a replay from genesis");
-  assert.equal(store.loadScanState().schemaVersion, 10);
+  assert.equal(store.loadScanState().schemaVersion, 11);
   assert.deepEqual(entries(), [buyer, otherBuyer].sort());
   assert.deepEqual(store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals.map((d) => d.buyerBundleRef), [locator(45)]);
   // Once migrated, passes are incremental and the result is unchanged.
@@ -579,6 +579,34 @@ test("v9 scan state is completed by a full deal-history replay before it is mark
   assert.deepEqual(entries(), [buyer, otherBuyer].sort());
   const saved = JSON.parse(String(sql("SELECT value_json FROM kv_state WHERE key='scan-state'")[0].value_json)) as ScanState;
   assert.deepEqual(Object.keys(saved.deals).sort(), [`${ownerOf(buyer)}\n${jobId}`, `${ownerOf(otherBuyer)}\n${jobId}`].sort());
+});
+
+// Cold review P2: this branch attributes a current-profile deal through the agreementRef its bundle signs.
+// Merge-base (v10) scan state holds such deals as the base scanned them, without a seller when no program
+// name named the agreement, and history before the cursor is never scanned again unless the version changes.
+test("v10 scan state is replayed once so stored deals take the signed agreementRef attribution", async () => {
+  const jobId = "replayed-attribution";
+  const agreement = await agreementFor(jobId, 0, 1);
+  resetIndex([later], 38);
+  chain({
+    [locator(940)]: { name: "opaque-bundle", data: JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer",
+      agreementRef: { anchor: { kind: "storage-program", locator: locator(941) }, contentHash: artifactHash(agreement, "agreement") } }), owner: ownerOf(buyer) },
+    [locator(941)]: { name: "opaque-agreement", data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+  }, [locator(940), locator(941)]);
+  transactions.unshift(memo(30));
+  // As the merge base stored it: the agreement's program name did not name the job, so no seller.
+  const key = `${ownerOf(buyer)}\n${jobId}`;
+  store.saveScanState({ ...emptyState(), schemaVersion: 10, lastSeenTxId: 30,
+    deals: { [key]: { jobId, rail: "pay-dem", buyerBundleRef: locator(940), owners: { buyer, seller: "" } } } });
+  await reindex();
+  assert.equal(lastRun().from_tx, 0, "a replay from genesis");
+  assert.equal(store.loadScanState().schemaVersion, 11);
+  assert.equal(store.loadScanState().deals[key]?.owners.seller, seller);
+  assert.equal((store.loadScanState().deals[key] as { agreementLocator?: string } | undefined)?.agreementLocator, locator(941));
+  // Once migrated, passes are incremental and the attribution stays.
+  await reindex();
+  assert.equal(lastRun().from_tx, 28);
+  assert.equal(store.loadScanState().deals[key]?.owners.seller, seller);
 });
 
 test("a discovered deal keeps its seller copy when a later window has none", async () => {
@@ -783,7 +811,7 @@ test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has
   const binding = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } } as BundleBinding;
   assert.ok(await verifyBundleBinding(binding));
-  store.saveScanState({ ...emptyState(), schemaVersion: 10, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
+  store.saveScanState({ ...emptyState(), schemaVersion: 11, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: seller, listings: [],
     deals: [{ ...scanned, buyerBundleRef: locator(951), signatureVerified: true, refsVerified: true, verifiedAt: 1 }] }] } as never);
   const lookup = ownersLookup(jobId);

@@ -47,7 +47,7 @@ test("reindex clears replaced-chain discoveries and rescans from genesis in one 
   } });
 
   assert.equal(result.cursor, 3, "finality depth leaves the newest two transactions for replay");
-  assert.equal(store.loadScanState().schemaVersion, 10);
+  assert.equal(store.loadScanState().schemaVersion, 11);
   assert.deepEqual(Object.keys(store.loadScanState().listings), []);
   assert.deepEqual(Object.keys(store.loadScanState().publisherListingDiscoveries), []);
   assert.equal(store.indexerDiagnostics().deadLetters, 0);

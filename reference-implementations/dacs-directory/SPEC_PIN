@@ -130,13 +130,19 @@
 #     The node credits and debits the exact address string (handleNativeOperations, GCRBalanceRoutines
 #     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from, to and
 #     send argument must therefore be the canonical 0x<64 lowercase hex> payer and payee.
+#     Profile limit: the payer is the agreement buyer's primary claim. DACS-4 PaymentPhaseInput lets the
+#     payingKey be any key in the buyer's bundle claims; this Directory resolves no IdentityBundle for
+#     payment, so a transfer from another of the buyer's keys is refuted for its session.
 #     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
-#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Unavailable reads never count. The node source calls terminal inclusion "confirmed".
+#     Numeric legacy DEM payloads need historical fork semantics and remain indeterminate. Unavailable reads never count;
+#     they hold the seller (§10.5.1 at run time, below). The node source calls terminal inclusion "confirmed".
 #   Attested-payload and entitlement success remain indeterminate until authoritative attestation
 #     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
 #   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
 #     adapters; they never contribute completion or volume. AP2 and x402 success is indeterminate: this profile has no authenticated provider-receipt
 #     resolver. A signed receipt pointer/hash alone cannot establish provider or HTTP settlement.
+#     No x402 source revision is pinned: only the DACS-4 X402-1 reference shape is mirrored
+#     (protocolVersion "1" or "2"), and no x402 verdict is ever positive here.
 #   DACS-5 §10.5.1 (exclusion neither helps nor harms): what this deployment cannot verify is decided
 #     from the pinned listing, the session's signed profile and the installed adapters, never from the
 #     outcome (evidenceGraph.ts deploymentVerifiability; bundlePolicy.ts legacyListingSettlementIndeterminate).
@@ -154,10 +160,21 @@
 #     or an RFQ step enabling the fixed-price fallback, on a negotiable listing. The agreed rail and
 #     price are checked for every session with an agreement.
 #     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
-#     or settle phase. Still per session: a transient read failure of one pass (node, payload), which
-#     the next pass rechecks, and the seller's own delivery choices the listing does not declare (an
-#     external pointer without expectedSizeBytes, or a public listing delivered through a restricted
-#     ACL the anonymous reader cannot open).
+#     or settle phase.
+#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.held; indexer.ts reputationHeld): a pass
+#     that cannot decide a session never refutes it. Readers resolve null only for an answer and throw
+#     VerificationUnavailable for none (chain.ts readArtifact, readPayloadRecord, readSettlementNode). A
+#     session whose bundle signatures verified is held when nothing refutes it, its listing passes the
+#     gate above, and one check had no answer (timeout, transport, node error, a node not yet through the
+#     cited block, a reply about another transaction or block) or met a delivery choice the listing
+#     leaves open that this deployment cannot read (an extended pointer, §9.6.1; a payload denied to
+#     the anonymous reader, DV-2 over-provision). A held session the seller signed holds the seller:
+#     none of its sessions counts in that pass, on any listing, whatever the outcome, since a listing
+#     with only failures never makes those reads. An answer refutes its own session only: absent,
+#     unhashed, denied (non-payload) or over-bound records, all states their owner controls, and a
+#     transfer node2's structured not-found has no record of through the cited block. Each pass
+#     re-derives every verdict (test/indexer-binding-rules.test.ts "§10.5.1 at run time", test/chain-storage.test.ts,
+#     test/native-payment.test.ts).
 #   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
 #     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
 #     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,
@@ -210,7 +227,9 @@
 # Pending production integration (split 4/5): method-specific authority-proof
 # authentication. The session graph authenticates VerifyResult authority evidence only
 # through EvidenceGraphDeps.verifyAttestation and fails closed without it; no production
-# verifier is installed. Identity-tier derivation still checks authority content hashes
+# verifier is installed. A SettlementEvidence attestationRef decides no verdict here and is
+# bound by its content hash alone, as at the merge base (test/indexer-binding-rules.test.ts
+# "cold review P1"). Identity-tier derivation still checks authority content hashes
 # only, and the adapter is not wired into tiers.
 # Tier policy still accepts operator_gated/closed_data/bilateral without disclosing
 # per-result availability. Session admission uses a live-only profile.

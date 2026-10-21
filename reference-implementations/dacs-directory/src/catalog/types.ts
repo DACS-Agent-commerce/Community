@@ -201,7 +201,8 @@ export interface DealRecord extends RegisteredDeal {
   bundleContentHash?: string;
   /** Every declared buyer/seller/orchestrator signed the authoritative copy (§10.4.1); BB-6 precedence. */
   fullSignatureStanding?: boolean;
-  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission. */
+  /** Verified evidence, keyable settlements and a current DACS-5 outcome, before catalog admission.
+   * False for every deal of a seller whose pass was held (SellerRecord.reputationHeld). */
   reputationEligible?: boolean;
   /** Recomputed catalog-wide SB-2 rejection; never overwrites evidence eligibility. */
   settlementRejected?: boolean;
@@ -255,6 +256,9 @@ export interface SellerRecord {
     windowEnd?: number;
     windowingBasis?: "finalisedAt" | "sr2-anchor-timestamp";
   };
+  /** Why this pass held the seller's figures (DACS-5 §10.5.1): one of its own signed sessions could not be
+   * decided here, so none of its sessions counts until a pass decides them all. Absent when nothing was held. */
+  reputationHeld?: string;
   registeredAt: number;
   lastIndexedAt: number;
 }

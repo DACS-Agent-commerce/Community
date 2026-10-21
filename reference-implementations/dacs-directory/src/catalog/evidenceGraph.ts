@@ -11,7 +11,8 @@ import { resolveConfiguredRecipeSnapshot, validateRecipeResult, type RecipePolic
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { AnchorRecord } from "./chain.js";
 import { nativeRailAdmission } from "./railPolicy.js";
-import { verifyNativePayment, type SettlementNodeRead } from "./nativePayment.js";
+import { nativePaymentVerdict, type SettlementNodeRead } from "./nativePayment.js";
+import { VerificationUnavailable } from "./verificationUnavailable.js";
 import {
   canonicalSigningIdentity,
   resolveDemosPrimaryClaimKey,
@@ -47,6 +48,11 @@ export interface EvidenceGraph {
   ratings: Record<string, unknown>[];
   /** DACS-4 AMEND-4: amendments that fail AMEND-1..3 are flagged, kept for audit, and never an unwind. */
   flaggedAmendments: Array<{ locator: string; reason: string }>;
+  /** Set when this pass could not decide a session whose bundle signatures verified: a read or adapter gave
+   * no answer, the node has not reached the cited block, or the session used a valid choice this deployment
+   * cannot check (an extended-pointer or anonymously unreadable payload). Nothing refuted it, and its
+   * listing is verifiable here. Equal to `reason`. A refuted session never carries it (DACS-5 §10.5.1). */
+  held?: string;
 }
 export interface HistoricalSessionChallenge {
   jobId: string;
@@ -61,7 +67,15 @@ export interface HistoricalSessionChallenge {
    * scope hash (which omits presentation) cannot identify the consuming attempt. */
   consumedByPresentationHash: string;
 }
+/**
+ * Readers and adapters resolve null only for an answer: the record is absent, or is not usable as
+ * referenced. They throw VerificationUnavailable when they get no answer (transport failure, timeout,
+ * node error, a node behind the cited block); after the bundle's signatures verify, that leaves the
+ * session undecided (EvidenceGraph.held), never refuted.
+ */
 export interface EvidenceGraphDeps {
+  /** Authenticates VerifyResult and supplementary vet attestations. An evidence attestationRef decides
+   * no verdict here and is bound by its content hash alone, as at the merge base. */
   verifyAttestation?: VerifyAuthorityAttestation;
   resolveRecipeSnapshot?: ResolveRecipeSnapshot;
   readSettlementNode?: SettlementNodeRead;
@@ -69,17 +83,21 @@ export interface EvidenceGraphDeps {
    * presentation attempt (CORE SN-1..4). Record its complete digest before verification,
    * including on failure; do not derive it from the requested party's signed scope hash.
    * Historical reads are idempotent; they never issue or consume a challenge.
-   * Return null for unavailable evidence or a replay attempt. */
+   * Return null for a replay attempt or a challenge that was never issued; throw
+   * VerificationUnavailable when the challenge store gives no answer. */
   resolveSessionChallenge?: (jobId: string, party: Record<string, unknown>) => Promise<HistoricalSessionChallenge | null>;
   /** Trusted control verifier for the presented primary claim (DACS-2 §7.12). Without one,
    * session vet admission stays fail-closed: a verified primary claim alone is not control proof. */
   verifyPrimaryClaimControl?: VerifyPrimaryClaimControl;
+  /** Payload reader. A payload it cannot open anonymously is a valid delivery (DV-2 over-provision), so
+   * it throws VerificationUnavailable for that as for no answer (chain.ts readPayloadRecord). */
   readAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
   /** Authenticated reader for restricted StorageProgram records, the only way to open a buyer-only
    * payload (DACS-4 §9.6.1). The pinned node denies anonymous restricted reads (ac8f45f
    * checkReadPermission), so the catalog installs none and buyer-only delivery is indeterminate
    * for every outcome. */
   readRestrictedAnchorRecord?: (locator: string) => Promise<AnchorRecord | null>;
+  /** Artifact reader (chain.ts readArtifact). */
   read: (locator: string) => Promise<Record<string, unknown> | null>;
   resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
@@ -203,6 +221,11 @@ function payoutBindingShapeOk(value: unknown): boolean {
     typeof binding.payeeAddress === "string" && binding.payeeAddress.length > 0);
 }
 
+/** DACS-3 §8.8 enables the RFQ fixed-price fallback with `fixedPriceFallback: true` "in the pipeline step", while the
+ * negotiate-rfq parameter table omits the member, so a step declares it in either place. */
+const rfqFixedPriceFallback = (step: Record<string, unknown> | undefined): boolean =>
+  step?.kind === "negotiate-rfq" && (rec(step.parameters)?.fixedPriceFallback === true || step.fixedPriceFallback === true);
+
 /** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
 export function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
   const profile = agreementProfile(agreement);
@@ -221,8 +244,7 @@ export function agreementMatchesListing(agreement: Record<string, unknown>, list
   if (negotiations.length !== 1) return false;
   const negotiation = negotiations[0];
   const pricing = rec(listing.pricing);
-  const fixedPriceFallback = negotiation.kind === "negotiate-rfq" &&
-    rec(negotiation.parameters)?.fixedPriceFallback === true && agreement.derivedFromPattern === "fixed-price" &&
+  const fixedPriceFallback = rfqFixedPriceFallback(negotiation) && agreement.derivedFromPattern === "fixed-price" &&
     pricing?.kind === "negotiable";
   if (agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)] && !fixedPriceFallback) return false;
 
@@ -387,8 +409,7 @@ export function agreementListingConformance(
   // 7. Pattern. An RFQ step declaring fixedPriceFallback also admits the fixed-price fallback,
   // whose price check 2 already held to the band centre.
   const negotiation = pipeline.find((phase) => typeof phase.kind === "string" && phase.kind.startsWith("negotiate-"));
-  const fallback = negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true &&
-    agreement.derivedFromPattern === "fixed-price";
+  const fallback = rfqFixedPriceFallback(negotiation) && agreement.derivedFromPattern === "fixed-price";
   if (!negotiation || (!fallback && agreement.derivedFromPattern !== NEGOTIATION_PATTERNS[String(negotiation.kind)])) return "pattern";
   // 8. Role direction: the publisher is the agreement seller, or the buyer of a procurement (SE-8).
   const publisherRole = negotiation.kind === "negotiate-sealed-envelope-procurement" ? "buyer" : "seller";
@@ -558,12 +579,22 @@ export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): 
   } catch { return false; }
 }
 
-async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps, authorityResult?: Record<string, unknown>): Promise<ResolvedEvidence | null> {
+/** How an attestation is admitted: a vet result it backs is authenticated by the authority adapter; an evidence
+ * attestationRef decides no verdict here, so its content hash binds it ("hash-bound"), as at the merge base.
+ * Requiring the adapter there refused completions, the only sessions that carry evidence, where production
+ * installs none, while failures before commitment still counted (DACS-5 §10.5.1). */
+type AttestationCheck = Record<string, unknown> | "hash-bound";
+async function attestationOk(raw: Record<string, unknown>, ref: CurrentRef, check: AttestationCheck | undefined, deps: EvidenceGraphDeps): Promise<boolean> {
+  if (check === "hash-bound") return artifactHash(raw, "attestation") === normalizedHash(ref.contentHash);
+  return Boolean(check && await authenticateAuthorityAttestation(raw, ref, check, deps.verifyAttestation));
+}
+
+async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps, attestation?: AttestationCheck): Promise<ResolvedEvidence | null> {
   if (kind === "attestation") {
     if (!isCurrentRef(ref)) return null;
     const hash = normalizedHash(ref.contentHash);
     const raw = await deps.read(ref.anchor.locator);
-    if (!raw || !withinArtifactLimit(raw) || (!authorityResult || !(await authenticateAuthorityAttestation(raw, ref, authorityResult, deps.verifyAttestation)))) return null;
+    if (!raw || !withinArtifactLimit(raw) || !(await attestationOk(raw, ref, attestation, deps))) return null;
     return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
   }
   if (!isCurrentRef(ref)) return null;
@@ -677,20 +708,27 @@ export async function deploymentVerifiability(
   // negotiate-fixed-price every agreement is one; an RFQ step that enables the fixed-price fallback
   // lets any session choose one, and a pre-commit failure never says whether it would have.
   const negotiation = pipeline.find((phase) => String(phase.kind).startsWith("negotiate-"));
-  if (rec(listing.pricing)?.kind === "negotiable" && (negotiation?.kind === "negotiate-fixed-price" ||
-      (negotiation?.kind === "negotiate-rfq" && rec(negotiation.parameters)?.fixedPriceFallback === true))) {
+  if (rec(listing.pricing)?.kind === "negotiable" && (negotiation?.kind === "negotiate-fixed-price" || rfqFixedPriceFallback(negotiation))) {
     return "fixed-price agreements on negotiable listings have no settlement semantics";
   }
   return null;
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
-  const raw = await deps.read(bundleLocator);
+  let raw: Record<string, unknown> | null = null;
   // A failed graph carries no content hash: a rejected bundle is never hashed again.
   const fail = (reason: string): EvidenceGraph => ({ profile: "dacs-v0.1", ok: false, reason, bundle: raw ?? {}, bundleContentHash: "", signaturesVerified: false, signedParties: [], refsVerified: false, artifacts: [], settlement: [], ratings: [], flaggedAmendments: [] });
+  const signed: { parties?: string[] } = {};
   try {
-    return await verifyCurrentEvidenceGraph(raw, deps, fail);
-  } catch {
+    raw = await deps.read(bundleLocator);
+    return await verifyCurrentEvidenceGraph(raw, deps, fail, signed);
+  } catch (error) {
+    // No answer from a read or an adapter decides nothing about the session. Once its signatures verified,
+    // it is undecided this pass (held), never refuted; before that, nothing says whose session it is.
+    if (error instanceof VerificationUnavailable) {
+      const reason = `session verification is undecided this pass: ${error.message}`;
+      return signed.parties ? { ...fail(reason), signaturesVerified: true, signedParties: signed.parties, held: reason } : fail(reason);
+    }
     // Untrusted bundle or referenced content that cannot be canonicalized or read fails closed.
     return fail("bundle or a referenced artifact could not be processed");
   }
@@ -700,6 +738,7 @@ async function verifyCurrentEvidenceGraph(
   raw: Record<string, unknown> | null,
   deps: EvidenceGraphDeps,
   fail: (reason: string) => EvidenceGraph,
+  signed: { parties?: string[] },
 ): Promise<EvidenceGraph> {
   const resolveKey = deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey;
   const phases = arr(raw?.phaseSummary);
@@ -723,6 +762,7 @@ async function verifyCurrentEvidenceGraph(
     signatureChecks.length > 0 && signatureChecks.every((check) => check.valid));
   if (!signaturesVerified) return fail("required current bundle signatures are missing or invalid");
   const signedParties = [...new Set(validParties.map(canonicalSigningIdentity))];
+  signed.parties = signedParties;
   // Every later failure keeps the verified signature facts, so a caller can tell the two apart.
   const failSigned = (reason: string): EvidenceGraph => ({ ...fail(reason), signaturesVerified, signedParties });
 
@@ -819,7 +859,7 @@ async function verifyCurrentEvidenceGraph(
   // content hash all agree.
   const seen = new Map(artifacts.map((artifact) => [`${artifact.kind}\n${artifact.locator}`, artifact]));
   let graphLimitExceeded = false;
-  const addNested = async (kind: ArtifactKind, value: unknown, authorityResult?: Record<string, unknown>): Promise<boolean> => {
+  const addNested = async (kind: ArtifactKind, value: unknown, attestation?: AttestationCheck): Promise<boolean> => {
     if (!isCurrentRef(value)) return false;
     // A VerifyResultRef's recipeVersion is load-bearing (CORE §B.3) and must equal the resolved result's.
     const recipeOk = (artifact: ResolvedEvidence) => kind !== "verify-result" ||
@@ -828,9 +868,9 @@ async function verifyCurrentEvidenceGraph(
     const hash = normalizedHash(value.contentHash);
     const known = seen.get(key);
     if (known) return known.contentHash === hash && recipeOk(known) &&
-      (kind !== "attestation" || Boolean(authorityResult && await authenticateAuthorityAttestation(known.raw, value, authorityResult, deps.verifyAttestation)));
+      (kind !== "attestation" || await attestationOk(known.raw, value, attestation, deps));
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
-    const nested = await resolveRef(kind, value, deps, authorityResult); if (!nested || !recipeOk(nested)) return false;
+    const nested = await resolveRef(kind, value, deps, attestation); if (!nested || !recipeOk(nested)) return false;
     if ((kind === "evidence" || kind === "composite" || kind === "amendment") && nested.raw.jobId !== raw.jobId) return false;
     if ((kind === "evidence" || kind === "amendment") && !parties.some((party) =>
       sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
@@ -849,7 +889,7 @@ async function verifyCurrentEvidenceGraph(
       }
     }
     if (artifact.kind === "evidence") {
-      if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef, { ...artifact.raw, method: artifact.raw.phase }))) {
+      if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef, "hash-bound"))) {
         return failSigned(graphLimitExceeded ? "evidence graph exceeds size limit" : "delivery attestation reference failed");
       }
       // amendmentRefs name SettlementAmendment records (DACS-4 §9.7.1), never more evidence.
@@ -1120,6 +1160,11 @@ async function verifyCurrentEvidenceGraph(
       return failSigned("payment evidence anchor binding failed");
     }
   }
+  // DACS-5 §10.5.1: only completed sessions reach the node and payload checks below, so one they cannot
+  // decide (no answer, an external pointer, a payload closed to this reader) must not refute the session
+  // while its seller's failures still count. It is noted here and the remaining checks still run; a later
+  // refutation wins, and only a session on a listing this deployment can verify is held (EvidenceGraph.held).
+  let undecided: string | undefined;
   // Success assertions must settle this agreement's price. Receipt-only rails stay
   // indeterminate until this profile can authenticate their authoritative responses.
   for (const evidence of topLevelEvidence) {
@@ -1136,8 +1181,12 @@ async function verifyCurrentEvidenceGraph(
     // The shape admits exactly one transfer for a pay-dem success (DACS-4 §9.5.9 single payee; SB-1:
     // a single native transfer is one settlement).
     const ref = arr(evidence.raw.paymentTxRefs)[0];
-    const verdict = await verifyNativePayment(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
-    if (verdict !== "pass") return failSigned(`native payment verification is ${verdict}: terminal inclusion and transfer binding required`);
+    const payment = await nativePaymentVerdict(ref, agreement, evidence.phaseIndex!, deps.readSettlementNode);
+    if (payment.verdict === "fail") return failSigned(`native payment verification is fail: ${payment.reason}`);
+    if (payment.verdict === "indeterminate") {
+      undecided ??= `native payment verification is indeterminate: ${payment.reason}`;
+      continue;
+    }
     evidence.verifiedSettlementId = settlementTxId(ref) ?? undefined;
   }
   // DV-1..3: a signed success assertion alone does not establish storage delivery.
@@ -1162,16 +1211,31 @@ async function verifyCurrentEvidenceGraph(
     }
     // A buyer-only payload is node-enforced private: only an authenticated restricted reader opens it.
     const reader = accessModel === "buyer-only" ? deps.readRestrictedAnchorRecord : deps.readAnchorRecord;
-    const delivered = await reader?.(String(anchor.locator));
-    if (!delivered) return failSigned("storage delivery is indeterminate: payload or access metadata is unavailable");
-    if (delivered.data.externalUrl !== undefined) return failSigned("storage delivery is indeterminate: external cleartext is unavailable");
+    if (!reader) return failSigned("storage delivery is indeterminate: no payload reader is installed");
+    let delivered: AnchorRecord | null;
+    try {
+      delivered = await reader(String(anchor.locator));
+    } catch (error) {
+      if (!(error instanceof VerificationUnavailable)) throw error;
+      // No answer, or a payload this reader may not open: DV-2 lets a public listing deliver privately.
+      undecided ??= `storage delivery is indeterminate: ${error.message}`;
+      continue;
+    }
+    if (!delivered) return failSigned("storage delivery payload is absent or not a usable record");
+    // §9.6.1: an extended-pointer record is a valid delivery whose external cleartext this deployment cannot read.
+    if (delivered.data.externalUrl !== undefined) {
+      undecided ??= "storage delivery is indeterminate: external cleartext is unavailable";
+      continue;
+    }
     // DV-1 hashes the complete payload; artifact contentHash omits signature fields.
     if (!withinArtifactLimit(delivered.data) || sha256Hex(canonicalize(delivered.data)) !== deliverableHash) {
       return failSigned("storage delivery payload binding failed");
     }
     const acl = rec(delivered.acl);
     if (!acl || !["public", "restricted", "owner"].includes(String(acl.mode))) {
-      return failSigned("storage delivery is indeterminate: access metadata is unavailable");
+      // The node's reply states no access mode this profile knows: no answer about the buyer's read right.
+      undecided ??= "storage delivery is indeterminate: access metadata is unavailable";
+      continue;
     }
     const buyer = arr(agreement.parties).find((party) => party.role === "buyer");
     const claim = typeof buyer?.primaryClaim === "string" ? canonicalDemosAgentClaim(buyer.primaryClaim) : null;
@@ -1189,7 +1253,10 @@ async function verifyCurrentEvidenceGraph(
   // Last, so every specific evidence failure above keeps its own reason; any session still standing
   // here, whatever its outcome, is excluded when its listing is not verifiable by this deployment.
   const unverifiable = await deploymentVerifiability(listed.raw, raw, deps);
-  if (unverifiable) return failSigned(`session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
+  if (unverifiable) return failSigned(undecided ?? `session verification is indeterminate for every outcome on this listing: ${unverifiable}`);
+  // Nothing refuted the session and its listing is verifiable here, but one check had no answer: the
+  // indexer holds the seller's figures this pass rather than drop this completion alone.
+  if (undecided) return { ...failSigned(undecided), held: undecided };
   artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
   return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, signedParties, refsVerified: true, artifacts, settlement: topLevelEvidence, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw), flaggedAmendments };
 }

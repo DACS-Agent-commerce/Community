@@ -68,10 +68,12 @@ test("native settlement verifies terminal inclusion, native payload, endpoints a
   assert.equal(await check(), "pass");
   assert.equal(await check(null), "indeterminate");
   assert.equal(await check({ ...tx, status: "pending" }), "indeterminate");
-  for (const changed of [{ ...tx, status: "failed" }, { ...tx, blockNumber: 8 }, { ...tx, hash: "c".repeat(64) },
+  for (const changed of [{ ...tx, status: "failed" }, { ...tx, blockNumber: 8 },
     ...[{ to: payer }, { from: payee }, { amount: "1" }, { type: "storageProgram" }, { data: ["native", { nativeOperation: "send", args: [payer, "1250000000"] }] }, { data: ["native", { nativeOperation: "send", args: [payee, "1"] }] }].map((change) => ({ ...tx, content: { ...tx.content, ...change } }))]) assert.equal(await check(changed), "fail");
   assert.equal(await check(tx, { ...block, content: { ordered_transactions: [] } }), "fail");
-  assert.equal(await check(tx, { ...block, number: 8 }), "fail");
+  // A reply about another transaction or block is no answer about this one (DACS-5 §10.5.1).
+  assert.equal(await check({ ...tx, hash: "c".repeat(64) }), "indeterminate");
+  assert.equal(await check(tx, { ...block, number: 8 }), "indeterminate");
   assert.equal(await check(tx, null), "indeterminate");
   assert.equal(await verifyNativePayment(ref, agreement, 2), "indeterminate");
   assert.equal(await check(tx, block, { ...ref, blockNumber: undefined } as never), "fail");

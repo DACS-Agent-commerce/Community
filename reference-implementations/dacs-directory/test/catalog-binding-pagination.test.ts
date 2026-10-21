@@ -57,7 +57,7 @@ test("scan to persisted unauthenticated pages carries every valid binding regard
   assert.deepEqual(carried.overflowKeys, [`${jobId}\nbuyer\n${signers[0]}`]);
   // Persist the scanner's complete output directly. reindexCore's inherited
   // accumulation cap is separate from the scanner and read endpoint under test.
-  store.saveScanState({ schemaVersion: 10, lastSeenTxId: scan.highestTxId, listings: {}, deals: {},
+  store.saveScanState({ schemaVersion: 11, lastSeenTxId: scan.highestTxId, listings: {}, deals: {},
     bundleBindings: Object.fromEntries(scan.bundleBindings), bundleBindingOverflow: [...scan.bundleBindingOverflow] });
   const readAll = async () => {
     const seen: BundleBinding[] = [];

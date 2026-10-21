@@ -715,6 +715,12 @@ test("DACS-3 §8.5.2: an agreement conforms to its listing in currency, price, r
   assert.equal(check(agreement(price("200")), fallback(false)), "pattern");
   assert.equal(check(agreement(price("200")), fallback("true")), "pattern");
   assert.equal(check(agreement(price("205"), { derivedFromPattern: "rfq" }), fallback(true)), null);
+  // DACS-3 §8.8 declares the fallback "in the pipeline step": the step member admits it the same way.
+  const stepFallback = (fixedPriceFallback: unknown) => listing({ kind: "negotiable", bandCenter: { amount: "200", currency: "DEM" }, minPct: 5, maxPct: 5 },
+    { kind: "negotiate-rfq", fixedPriceFallback, parameters: { maxTurns: 6, timeoutSec: 60 } });
+  assert.equal(check(agreement(price("200")), stepFallback(true)), null);
+  assert.equal(check(agreement(price("205")), stepFallback(true)), "price");
+  assert.equal(check(agreement(price("200")), stepFallback("true")), "pattern");
   // 8. Role direction: the publisher sells, except in a procurement, where it buys (SE-8).
   const swapped = { parties: [{ role: "buyer", primaryClaim: dids[1] }, { role: "seller", primaryClaim: dids[0] }] };
   assert.equal(check(agreement({}, swapped), fixed), "role-direction");
@@ -1584,7 +1590,7 @@ test("passive reindex carries signed holder bindings and unions sticky cache and
       const buyerOverflow = bundleBindingOverflowKey("passive-binding-job", "buyer", dids[0]);
       const sellerOverflow = bundleBindingOverflowKey("passive-binding-job", "seller", dids[1]);
       const unrelated = bundleBindingOverflowKey("other-job", "buyer", dids[0]);
-      store.saveScanState({ schemaVersion: 10, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, programs: {},
+      store.saveScanState({ schemaVersion: 11, lastSeenTxId: 0, lastChainTip: 0, listings: {}, deals: {}, programs: {},
         bundleBindings: { "passive-binding-job": [bindings[0]] }, bundleBindingOverflow: sticky ? [unrelated, buyerOverflow] : [],
         revocations: {}, verifiedRevocations: {} });
       globalThis.fetch = async (input, init) => {
@@ -1639,7 +1645,7 @@ test("history replay discards pre-v9 attribution and a later duplicate invalidat
     for (const name of [`dacs3:agreement:${deal.jobId}`, `dacs5:bundle:${deal.jobId}`]) {
       const programKey = store.programBindingKey(dids[0], name);
       const duplicate = locator(3003);
-      store.saveScanState({ schemaVersion: 10, lastSeenTxId: 0, listings: {}, deals: { [key]: structuredClone(deal) }, programs: { [programKey]: locator(3000) } });
+      store.saveScanState({ schemaVersion: 11, lastSeenTxId: 0, listings: {}, deals: { [key]: structuredClone(deal) }, programs: { [programKey]: locator(3000) } });
       globalThis.fetch = async (input, init) => {
     if (init?.method === "POST") {
       const call = JSON.parse(String(init.body)).params?.[0];

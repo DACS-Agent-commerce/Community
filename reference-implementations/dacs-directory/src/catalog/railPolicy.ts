@@ -9,7 +9,9 @@ const rec = (v: unknown): Obj | null => v && typeof v === "object" && !Array.isA
 function railDefinitions(registryVersion: unknown): Array<Obj | null> {
   let snapshots: unknown;
   try { snapshots = JSON.parse(process.env.DACS_RAIL_SNAPSHOTS ?? "[]"); } catch { snapshots = []; }
-  const snapshot = Array.isArray(snapshots) ? snapshots.map(rec).find((item) => item?.registryVersion === registryVersion) : null;
+  // Two snapshots for one registryVersion are ambiguous: neither is the session's, as for recipe snapshots.
+  const matching = Array.isArray(snapshots) ? snapshots.map(rec).filter((item) => item?.registryVersion === registryVersion) : [];
+  const snapshot = matching.length === 1 ? matching[0] : null;
   return Array.isArray(snapshot?.rails) ? snapshot.rails.map(rec) : [];
 }
 

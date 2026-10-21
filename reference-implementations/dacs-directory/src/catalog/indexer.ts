@@ -29,7 +29,7 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 // barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
 // reach into the vendored build until the pin moves.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
-import { readAnchor, readAnchorRecord, readAnchorResult, readSettlementNode } from "./chain.js";
+import { readAnchor, readAnchorRecord, readAnchorResult, readArtifact, readPayloadRecord, readSettlementNode } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
@@ -39,7 +39,7 @@ import {
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
-import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
+import { canonicalSigningIdentity, resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
@@ -326,6 +326,13 @@ export async function indexRegistration(
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
+  // DACS-5 §10.5.1: a session of this seller that this pass could not decide (EvidenceGraph.held) holds
+  // every one of its sessions out of the figures, whatever the outcome or listing. Only a completed or
+  // committed session makes the reads that can go unanswered, and a listing with only failures never makes
+  // them, so dropping that session alone would publish the seller below its real rate. Only a bundle the
+  // seller itself signed can hold it: anyone else's stays a verdict on that one session.
+  const sellerIdentity = canonicalSigningIdentity(reg.primaryClaim);
+  let reputationHeld: string | undefined;
   const scanState = loadScanState();
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
@@ -398,7 +405,11 @@ export async function indexRegistration(
     };
     // No authenticated restricted reader is installed: the node denies this catalog's anonymous
     // restricted reads, so buyer-only delivery is indeterminate for every outcome.
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, readAnchorRecord, resolveListing, readSettlementNode });
+    const graphFor = async (locator: string) => {
+      const graph = await buildCurrentEvidenceGraph(locator, { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing, readSettlementNode });
+      if (graph.held && graph.signedParties.includes(sellerIdentity)) reputationHeld ??= `${deal.jobId}: ${graph.held}`;
+      return graph;
+    };
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -607,7 +618,9 @@ export async function indexRegistration(
       dealCandidates.push({ ...deal, signatureVerified: false, refsVerified: false, reputationEligible: false, verifiedAt: now });
     }
   }
-  const deals = dedupeVerifiedDeals(dealCandidates);
+  const verifiedDeals = dedupeVerifiedDeals(dealCandidates);
+  // A held seller keeps every deal and its verdict on record, but none counts until a pass decides them all.
+  const deals = reputationHeld ? verifiedDeals.map((deal) => ({ ...deal, reputationEligible: false })) : verifiedDeals;
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
   const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
@@ -640,6 +653,7 @@ export async function indexRegistration(
     listings: listingsWithHint,
     deals,
     reputation,
+    ...(reputationHeld ? { reputationHeld } : {}),
     registeredAt: prior?.registeredAt ?? now,
     lastIndexedAt: now,
   };

@@ -139,7 +139,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
-  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
+  // v10 replays it again so every owner's deal and binding is rebuilt under its own key, and
+  // v11 so stored deals take the seller their bundle's signed agreementRef attributes.
   const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
   // Overflow is recomputed per signer from the replayed bindings.
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
@@ -434,7 +435,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       record.wellKnownDomains = (reg as { wellKnownDomains?: string[] }).wellKnownDomains;
       log(
         `  listings=${record.listings.length} cci=${record.cci.length} deals=${record.deals.length} ` +
-          `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}`,
+          `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}` +
+          (record.reputationHeld ? ` held: ${record.reputationHeld}` : ""),
       );
       sellers.push(record);
     }

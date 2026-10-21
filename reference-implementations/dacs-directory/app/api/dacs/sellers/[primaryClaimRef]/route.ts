@@ -34,6 +34,8 @@ export async function GET(
     reputation: {
       profile: "dacs-5-scalar-derivation-v1",
       ...seller.reputation,
+      // Null figures here mean this pass held the seller (§10.5.1), not that it has no sessions.
+      ...(seller.reputationHeld ? { held: seller.reputationHeld } : {}),
       limitation: "Two-sided reconciliation, perspective/fault metrics, neutral exclusions, resolved ratings, and exact-decimal volume are applied over chain-verified bundles. averageBuyerRating is intentionally null (these records are seller-scoped). Completeness is best-effort: no oracle guarantees every relevant bundle is present.",
     },
     deals: seller.deals,

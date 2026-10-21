@@ -178,7 +178,7 @@ test("well-known binding ingestion preserves all 40 records through reindex and 
   } }) });
   const priorState = store.loadScanState();
   const priorOverflow = bundleBindingOverflowKey("prior-job", "buyer", dids[BUYER]);
-  store.saveScanState({ ...priorState, schemaVersion: 10, bundleBindings: { ...priorState.bundleBindings, [jobId]: bindings.slice(0, 5) as never },
+  store.saveScanState({ ...priorState, schemaVersion: 11, bundleBindings: { ...priorState.bundleBindings, [jobId]: bindings.slice(0, 5) as never },
     bundleBindingOverflow: [...(priorState.bundleBindingOverflow ?? []), priorOverflow] });
   await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
   assert.ok(store.loadScanState().bundleBindingOverflow?.includes(priorOverflow));

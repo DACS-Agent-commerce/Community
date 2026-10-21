@@ -32,10 +32,13 @@ export const discoveredDealKey = (buyer: string, jobId: string): string => `${ca
 
 /**
  * v10 replays the full deal history so entries that jobId-keyed state could
- * not hold are rebuilt under their owner key. A pass records the version only
- * after its complete replay is saved; an interrupted replay simply runs again.
+ * not hold are rebuilt under their owner key. v11 replays it again so deals
+ * scanned before a current bundle's signed agreementRef attributed its seller
+ * take that attribution instead of a program name's, or none. A pass records
+ * the version only after its complete replay is saved; an interrupted replay
+ * simply runs again.
  */
-export const SCAN_STATE_SCHEMA_VERSION = 10;
+export const SCAN_STATE_SCHEMA_VERSION = 11;
 
 /** JSON/SQLite restore prototypes: rebuild every attacker-keyed dictionary on ingress. */
 export type NormalizedScanState = ScanState & Required<Pick<ScanState, "programs" | "revocations" | "verifiedRevocations" | "bundleBindings" | "bundleBindingOverflow" | "publisherListingDiscoveries">>;

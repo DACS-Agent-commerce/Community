@@ -1402,6 +1402,8 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
   const buyerAddress = `0x${dids[BUYER].slice(-64)}`;
   type DeliveryCase = { sellerFirst?: boolean; kind?: string; accessModel?: string; evidence?: Obj; acl?: unknown; owner?: string; unreadable?: boolean;
     payload?: Obj; logicalAddress?: string; expected?: boolean; indeterminate?: boolean; noRestrictedReader?: boolean;
+    /** The reader answered that there is no payload: that refutes this session. */ absent?: boolean;
+    /** No answer, or a payload this deployment cannot read: undecided, and the indexer holds the seller. */ held?: boolean;
     /** Which reader can open the payload, as the pinned node decides: anonymous reads are denied a restricted program. */
     openedBy?: "anonymous" | "restricted" };
   const outsiderAddress = `0x${dids[OUTSIDER].slice(-64)}`;
@@ -1429,17 +1431,17 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "missing anchor": { evidence: { deliverableAnchor: undefined } },
     "unsupported anchor kind": { evidence: { deliverableAnchor: { kind: "http", locator: at(51) } } },
     "invalid storage locator": { evidence: { deliverableAnchor: { kind: "storage-program", locator: "stor-bad" } } },
-    "absent anchored payload": { unreadable: true, indeterminate: true },
+    "absent anchored payload": { unreadable: true, absent: true },
     "changed payload bytes": { payload: { report: "different cleartext" } },
     "payload bound to another job": { logicalAddress: "dacs4:deliverable:other-job" },
-    "missing ACL": { acl: null, indeterminate: true },
-    "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true },
+    "missing ACL": { acl: null, indeterminate: true, held: true },
+    "unknown ACL mode": { acl: { mode: "unknown" }, indeterminate: true, held: true },
     "public ACL with allowed buyer is still a downgrade": { accessModel: "buyer-only", acl: { mode: "public", allowed: [buyerAddress] }, indeterminate: true },
     "private declaration with public ACL": { accessModel: "buyer-only", indeterminate: true },
     "buyer-only wrong buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [`0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
     "buyer-only missing allowed list": { accessModel: "buyer-only", acl: { mode: "restricted" }, indeterminate: true },
     "buyer-only extra reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress, `0x${dids[OUTSIDER].slice(-64)}`] }, indeterminate: true },
-    "buyer-only unreadable": { accessModel: "buyer-only", unreadable: true, indeterminate: true },
+    "buyer-only unreadable": { accessModel: "buyer-only", unreadable: true, absent: true },
     "buyer-only without an authenticated restricted reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, noRestrictedReader: true, indeterminate: true },
     "buyer-only with a group granting another reader": { accessModel: "buyer-only", indeterminate: true,
       acl: { mode: "restricted", allowed: [buyerAddress], groups: { team: { members: [outsiderAddress], permissions: ["read"] } } } },
@@ -1481,12 +1483,12 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     "buyer-only with a group granting the buyer": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress], groups: readGroup([buyerAddress]) }, indeterminate: true },
     // Each access model reads through its own reader: buyer-only only through the authenticated one.
     "buyer-only reads through the authenticated restricted reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, openedBy: "restricted", expected: true },
-    "buyer-only never reads through the anonymous reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, openedBy: "anonymous", indeterminate: true },
+    "buyer-only never reads through the anonymous reader": { accessModel: "buyer-only", acl: { mode: "restricted", allowed: [buyerAddress] }, openedBy: "anonymous", absent: true },
     "a public payload reads through the anonymous reader": { openedBy: "anonymous", expected: true },
-    "a public payload never reads through the restricted reader": { openedBy: "restricted", indeterminate: true },
+    "a public payload never reads through the restricted reader": { openedBy: "restricted", absent: true },
     "a list mixing strings and non-strings fails closed": { acl: { mode: "public", blacklisted: [outsiderAddress, 7] }, indeterminate: true },
     "sealed payload cannot establish its cleartext hash": { accessModel: "encrypt-to-buyer", payload: { ciphertext: "sealed", recipient: buyerAddress }, indeterminate: true },
-    "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true },
+    "external pointer cannot establish external cleartext": { payload: { externalUrl: "https://payload.example/report", externalContentHash: contentHash(payload) }, indeterminate: true, held: true },
   };
   for (const [name, c] of Object.entries(cases)) await t.test(name, async () => {
     const deliverable = c.kind === "attested-payload" ? { kind: c.kind, payloadFormat: "application/json" } : { kind: "storage-program", accessModel: c.accessModel ?? "public" };
@@ -1514,6 +1516,8 @@ test("storage delivery requires hash-bound payload and agreement-bound access", 
     assert.equal(graph.ok, c.expected ?? false, graph.reason);
     assert.equal(graph.refsVerified, c.expected ?? false);
     if (c.indeterminate) assert.match(graph.reason!, /indeterminate/);
+    if (c.absent) assert.equal(graph.reason, "storage delivery payload is absent or not a usable record");
+    assert.equal(graph.held, c.held ? graph.reason : undefined, name);
   });
 });
 

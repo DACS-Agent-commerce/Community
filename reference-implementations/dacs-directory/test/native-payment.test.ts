@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { demOs, verifyNativePayment } from "../src/catalog/nativePayment.js";
+import { demOs, nativePaymentVerdict, verifyNativePayment } from "../src/catalog/nativePayment.js";
+import { VerificationUnavailable } from "../src/catalog/verificationUnavailable.js";
 
 // Read-only node2 (https://node2.demos.sh) replies, retained byte-for-byte: transaction/block and the
 // -556299 pair were captured on 2026-10-17 and are gone since node2's chain reset; the -873 pair and
@@ -116,7 +117,37 @@ test("§9.5.9 inclusion needs this transaction's hash in the block, not just the
   const others = ["cd".repeat(32), `0x${"ef".repeat(32)}`];
   assert.equal(await check(tx, { ...block, content: { ...block.content, ordered_transactions: others } }), "fail");
   assert.equal(await check(tx, { ...block, content: { ...block.content, ordered_transactions: [...others, tx.hash] } }), "pass");
-  assert.equal(await check(tx, { ...block, number: tx.blockNumber + 1 }), "fail");
+  // The transaction itself names another block than the evidence cites: the evidence is refuted.
+  assert.equal(await check({ ...tx, blockNumber: tx.blockNumber + 1 }), "fail");
+});
+
+// DACS-5 §10.5.1: only the node's answer about this transaction refutes it. A reply about another
+// transaction or block, or one that lists nothing, is no answer, and the payment stays undecided.
+test("a node reply about another transaction or block leaves the payment undecided", async () => {
+  assert.equal(await check({ ...tx, hash: "cd".repeat(32) }), "indeterminate");
+  assert.equal(await check({ ...tx, hash: undefined }), "indeterminate");
+  assert.equal(await check(tx, { ...block, number: tx.blockNumber + 1 }), "indeterminate");
+  assert.equal(await check(tx, { ...block, content: {} }), "indeterminate");
+  assert.equal(await check(tx, { notFound: true, checkedThroughBlock: tx.blockNumber + 10 }), "indeterminate");
+  assert.equal(await check(tx, null), "indeterminate");
+});
+
+test("a structured not-found refutes the payment only when the node checked through the cited block", async () => {
+  const missing = (checkedThroughBlock: number) => nativePaymentVerdict(ref, agreement, 2,
+    async (message) => message === "getTxByHash" ? { notFound: true, checkedThroughBlock } : block);
+  assert.deepEqual(await missing(tx.blockNumber), { verdict: "fail", reason: `the node has no such transaction through block ${tx.blockNumber}` });
+  assert.deepEqual(await missing(tx.blockNumber + 1), { verdict: "fail", reason: `the node has no such transaction through block ${tx.blockNumber + 1}` });
+  assert.deepEqual(await missing(tx.blockNumber - 1), { verdict: "indeterminate", reason: `the node has checked only through block ${tx.blockNumber - 1}` });
+  // Not a not-found answer without a safe block number.
+  for (const answer of [{ notFound: true }, { notFound: true, checkedThroughBlock: "9" }, { notFound: true, checkedThroughBlock: 1.5 }]) {
+    assert.equal(await check(answer as never), "indeterminate", JSON.stringify(answer));
+  }
+});
+
+test("an undecided payment keeps the node's cause", async () => {
+  const verdict = await nativePaymentVerdict(ref, agreement, 2, async () => { throw new VerificationUnavailable("the node's getTxByHash reply failed (timeout)"); });
+  assert.deepEqual(verdict, { verdict: "indeterminate", reason: "the node's getTxByHash reply failed (timeout)" });
+  assert.deepEqual(await nativePaymentVerdict(ref, agreement, 2), { verdict: "indeterminate", reason: "no node reader is installed" });
 });
 
 test("only a native send operation settles the agreement", async () => {
@@ -159,7 +190,7 @@ test("where the block lists its applied transactions, the transfer must be one o
   assert.equal(await applied({ gcrAppliedTxCount: 1 }), "pass");
 });
 
-test("node2 replies through the production reader: a confirmed transfer passes, a missing one is indeterminate", async () => {
+test("node2 replies through the production reader: a confirmed transfer passes, a missing one is decided by how far the node checked", async () => {
   const { readSettlementNode } = await import("../src/catalog/chain.js");
   const sent = captured("transaction-873");
   const missing = "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143";
@@ -179,8 +210,47 @@ test("node2 replies through the production reader: a confirmed transfer passes, 
     assert.equal(await verifyNativePayment({ txHash: sent.hash, blockNumber: sent.blockNumber }, agreed, 2, readSettlementNode), "pass");
     assert.deepEqual(requests[0], { type: "nodeCall", message: "getTxByHash", data: { hash: sent.hash }, sender: "", signature: "", extra: "" });
     assert.deepEqual(JSON.parse(raw("not-found")).extra, { reason: "not_found", checkedThroughBlock: 2594 });
-    assert.equal(await readSettlementNode("getTxByHash", { hash: missing }), null);
+    assert.deepEqual(await readSettlementNode("getTxByHash", { hash: missing }), { notFound: true, checkedThroughBlock: 2594 });
+    // The node had checked through block 2594: a transfer cited in a later block is not decided yet,
+    // one cited at or below it does not exist.
     assert.equal(await verifyNativePayment({ txHash: missing, blockNumber: 548169 }, agreed, 2, readSettlementNode), "indeterminate");
+    assert.equal(await verifyNativePayment({ txHash: missing, blockNumber: 2594 }, agreed, 2, readSettlementNode), "fail");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Daybreak P1-2: every non-answer used to read as null, so a node outage looked like a missing transfer.
+test("the production node reader returns only answers and throws, with the cause, on anything else", async () => {
+  const { readSettlementNode } = await import("../src/catalog/chain.js");
+  const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+  const originalFetch = globalThis.fetch;
+  const reply = async (respond: () => Response) => {
+    globalThis.fetch = async () => respond();
+    try { return { value: await readSettlementNode("getTxByHash", { hash: "ab".repeat(32) }) }; } catch (error) {
+      assert.ok(error instanceof VerificationUnavailable, String(error));
+      return { unavailable: (error as Error).message };
+    }
+  };
+  try {
+    assert.deepEqual(await reply(() => json({ result: 200, response: { hash: "ab".repeat(32) } })), { value: { hash: "ab".repeat(32) } });
+    assert.deepEqual(await reply(() => json({ result: 404, response: null, extra: { reason: "not_found", checkedThroughBlock: 7 } })),
+      { value: { notFound: true, checkedThroughBlock: 7 } });
+    for (const [name, respond, cause] of [
+      ["a result 200 without a response", () => json({ result: 200, response: null }), "the node's getTxByHash reply has no answer (result 200)"],
+      ["a result 500", () => json({ result: 500, response: "error" }), "the node's getTxByHash reply has no answer (result 500)"],
+      ["the pinned source's 400", () => json({ result: 400, response: "error" }), "the node's getTxByHash reply has no answer (result 400)"],
+      ["a 404 without a reason", () => json({ result: 404, response: null }), "the node's getTxByHash reply has no answer (result 404)"],
+      ["a 404 with another reason", () => json({ result: 404, response: null, extra: { reason: "pruned", checkedThroughBlock: 7 } }), "the node's getTxByHash reply has no answer (result 404)"],
+      ["a 404 without a block", () => json({ result: 404, response: null, extra: { reason: "not_found" } }), "the node's getTxByHash reply has no answer (result 404)"],
+      ["a non-numeric result", () => json({ result: "200", response: {} }), "the node's getTxByHash reply has no answer (result not a status)"],
+      ["HTTP 502", () => new Response("bad gateway", { status: 502 }), "the node's getTxByHash reply failed (HTTP 502)"],
+      ["not JSON", () => new Response("<html>"), "the node's getTxByHash reply is not JSON"],
+      ["a transport failure", () => { throw new TypeError("fetch failed"); }, "the node's getTxByHash reply failed (transport)"],
+      ["a timeout", () => { throw new DOMException("timed out", "TimeoutError"); }, "the node's getTxByHash reply failed (timeout)"],
+    ] as Array<[string, () => Response, string]>) {
+      assert.deepEqual(await reply(respond), { unavailable: cause }, name);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

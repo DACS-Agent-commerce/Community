@@ -304,7 +304,18 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    an auction without a reserve (any currency), is excluded. Neither a declared payload above
    the Standard's 128 KB storage limit (an extended pointer) nor a buyer-only payload is
    readable here. The agreed rail and price are checked for every session that has an
-   agreement. Copies are
+   agreement. What a pass cannot decide is not refuted either. Only a committed session reads
+   its agreement, evidence, the node's transfer and the payload, and it may deliver through an
+   extended pointer or a private ACL the listing leaves open (§9.6.1, DV-2). When one of those
+   reads gets no answer (a timeout, a node error, a node that has not checked through the cited
+   block), or the payload is a pointer or closed to this anonymous reader, and nothing refutes
+   the session, the seller is held: none of its sessions counts in that pass, on any listing,
+   whatever the outcome (`reputationHeld`, `held` on the seller API). A listing with only
+   failures never makes those reads, so holding that one session alone would publish the seller
+   below its real rate. Only a bundle the seller signed can hold it. An answer still refutes just
+   its own session: a record that is absent, does not hash, is denied to this reader or exceeds
+   the bounds (all states its owner controls, as deleting it is), or a transfer the node has no
+   record of through the cited block. Each pass re-derives every verdict; none is carried over. Copies are
    reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
    separate record and never voids this one (BB-6). A procurement listing is
    published by the session's buyer: the supplier's deal resolves it from that publisher's
@@ -379,7 +390,9 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   a method-specific verifier for the original proof/hash/signer/validator-epoch scope, and fails
   closed without one. No production verifier is installed. Identity-tier derivation still
   checks authority content hashes only. A result signer's signature and a matching authority
-  hash do not establish that authority proof.
+  hash do not establish that authority proof. A SettlementEvidence `attestationRef` decides no
+  verdict here, so it is bound by its content hash alone, as at the merge base: requiring the
+  verifier there refused every completion that carried one, while failures counted.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
   canonical hashing. The pinned serializer supports integer JSON numbers only:
@@ -402,10 +415,11 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   catalog installs no such reader, so every session on a buyer-only listing is indeterminate,
   whatever its outcome; the buyer-only acceptance tests inject a fixture reader. Encrypted
   payloads and declared payloads above the Standard's 128 KB storage limit exclude every session on the
-  listing in the same way. A seller's own per-session choices stay per session: an unreadable
-  payload, an external pointer whose size the listing did not declare, or a public listing
-  delivered through a restricted ACL leaves only that session indeterminate. None contributes
-  a completion or volume.
+  listing in the same way. The seller's own delivery choices the listing leaves open, an
+  external pointer whose size the listing did not declare or a public listing delivered through
+  a restricted ACL the anonymous reader cannot open, hold the seller for the pass, as does a
+  payload read with no answer (Discovery, item 3). An absent payload, or one over
+  the inline bounds, refutes that session only. None contributes a completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -510,6 +524,14 @@ sender, recipient and send argument must be the canonical `0x<64 lowercase hex>`
 payee. Another spelling of the same key is a different account. The stored RPC amount is OS,
 carried as a safe integer or an exact string; the send payload must contain a canonical OS
 string. Historical numeric DEM payloads remain indeterminate pending a historical fork adapter.
+Only the node's answer about the cited transaction refutes a payment: its failed status, other
+endpoints or amount, another block, a block that does not include it, or node2's structured
+not-found (`result` 404, `reason: "not_found"`) once `checkedThroughBlock` reaches the cited
+block. Every other reply is no answer and leaves the payment undecided, which holds the seller
+for the pass: a transport failure or timeout, an HTTP or `result` error (including the pinned
+source's bare 400), a `result` 200 without a transaction, a not-found from a node that has not
+reached the block, a reply about another transaction or block, a non-terminal status, and the
+indeterminate cases above.
 All other current payment rails and paid SDK legacy sessions remain indeterminate until their
 authoritative settlement adapters are available. Every session on such a listing, failed or
 completed, contributes no completion, denominator or volume.
