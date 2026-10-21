@@ -29,7 +29,7 @@ import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleC
 // barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
 // reach into the vendored build until the pin moves.
 import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
-import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
+import { readAnchor, readAnchorRecord, readAnchorResult, readArtifact, readPayloadRecord, readSettlementNode } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
@@ -44,6 +44,7 @@ import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
+  artifactAnchorTimeFor,
   clearListingRejection,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -60,23 +61,29 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
-import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
+import { categoryReputationHint, deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { agreementCategory, agreementPrice, buildCurrentEvidenceGraph, deploymentVerifiability, type EvidenceGraph, type EvidenceGraphDeps,
+  type ResolvedEvidence } from "./evidenceGraph.js";
+import { fullSignatureStanding } from "./bundleSignerPolicy.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies, reconcileUndecidedCopies } from "./currentReconciliation.js";
 import {
   boundedBundleBindings,
   bundleBindingOverflowKey,
+  EVERY_CANDIDATE_FAILED_POST_FETCH,
   resolveBundleSide,
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import { publisherListingAnchors, type ResolvePublisherListingAnchors } from "./publisherListings.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
   bundleCategory,
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
+  legacyFullSignatureStanding,
+  legacyListingSettlementIndeterminate,
   refsPassStrictPolicy,
   verifiedListingTerms,
   type ResolvedArtifact,
@@ -95,6 +102,26 @@ import type {
 
 const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
   ed25519Verify(b, s, publicKeyFromRaw(p));
+
+type SettlementTxIds = NonNullable<DealRecord["settlementTxIds"]>;
+
+/**
+ * DACS-4 SB-1 claims of a current bundle's successful payment evidence, keyed on
+ * (settlement-tx-id, jobId, phaseIndex). The phase index is recovered from the verified
+ * payment-evidence anchor, and the id is the one transfer the graph confirmed on the node, so
+ * every claim is stamped nodeVerified for the catalog-wide SB-2 ledger. Null means a successful
+ * payment has no verified, keyed transfer (`error`).
+ */
+function currentSettlementClaims(settlement: ResolvedEvidence[]): SettlementTxIds | null {
+  const claims: SettlementTxIds = [];
+  for (const evidence of settlement) {
+    if (evidence.raw.outcome !== "success" || typeof evidence.raw.phase !== "string" || !evidence.raw.phase.startsWith("pay-")) continue;
+    if (evidence.phaseIndex === undefined || evidence.verifiedSettlementId === undefined) return null;
+    claims.push({ id: evidence.verifiedSettlementId, observedAt: Number(evidence.raw.observedAt), phaseIndex: evidence.phaseIndex,
+      evidenceHash: evidence.contentHash, nodeVerified: true });
+  }
+  return claims;
+}
 
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
@@ -121,11 +148,26 @@ export function listingBindingRejection(
   return null;
 }
 
+export type { ResolvePublisherListingAnchors } from "./publisherListings.js";
+
+/** Work bound per publisher and discovery tier when resolving another registration's sessions. */
+export const MAX_PUBLISHER_LISTING_READS = 32;
+
+/** Consensus anchor time of exactly these bundle bytes, as the scanner recorded it. */
+const bundleAnchorTime = (locator: string, bundle: Record<string, unknown>): number | undefined => {
+  try {
+    return artifactAnchorTimeFor(locator, contentHash(bundle));
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Index one registration into a verified SellerRecord.
  *
  * `resolveIdentities` defaults to the narrow authenticated GCR call in gcr.ts;
- * tests may inject a deterministic resolver.
+ * tests may inject a deterministic resolver. `listingAnchorsFor` names other
+ * publishers' anchors, for sessions pinned to a listing this seller did not publish.
  */
 export async function indexRegistration(
   reg: Registration,
@@ -133,6 +175,7 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  listingAnchorsFor: ResolvePublisherListingAnchors = publisherListingAnchors(),
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -315,6 +358,38 @@ export async function indexRegistration(
   const verifiedBindings = (await Promise.all(rawBindings.map((binding) => verifyBundleBinding(binding))))
     .filter((binding): binding is BundleBinding => binding !== null);
   onOmitted?.("bindings", rawBindings.length - verifiedBindings.length);
+  // DACS-3 SE-8: a procurement session pins a listing its buyer published, so the agreement seller
+  // scored here does not hold it. Its publisher's own owner-bound current listings resolve it, apart
+  // from this seller's; the graph then checks the publisher's role (§8.5.2 check 8). Over the read
+  // bound, that discovery tier stays unresolved. Unsigned registrations have a separate
+  // bounded fallback, tried only when trusted candidates miss the session's pinned tuple.
+  const publisherListings = new Map<string, Promise<Map<string, { locator: string; raw: Record<string, unknown> }> | null>>();
+  const listingsPublishedBy = (claim: string, unsigned = false) => {
+    const publisher = canonicalDemosAgentClaim(claim);
+    if (publisher === null) return Promise.resolve(null);
+    const cacheKey = `${publisher}\n${unsigned ? "unsigned" : "trusted"}`;
+    let pending = publisherListings.get(cacheKey);
+    if (!pending) {
+      pending = (async () => {
+        const trusted = new Set(listingAnchorsFor(publisher));
+        const anchors = unsigned
+          ? [...new Set(listingAnchorsFor.unsigned?.(publisher) ?? [])].filter((anchor) => !trusted.has(anchor))
+          : [...trusted];
+        if (anchors.length > MAX_PUBLISHER_LISTING_READS) return null;
+        const found = new Map<string, { locator: string; raw: Record<string, unknown> }>();
+        for (const anchor of anchors) {
+          const anchored = await readAnchorRecord(anchor);
+          const verified = anchored ? await verifyStoredListing(anchored.data, anchor).catch(() => null) : null;
+          if (!anchored || verified?.profile !== "dacs-v0.1" ||
+              listingBindingRejection(verified.sellerClaim, anchored.owner, publisher) !== null) continue;
+          found.set(`${verified.scope.listingId}\n${verified.scope.listingVersion}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+        }
+        return found;
+      })();
+      publisherListings.set(cacheKey, pending);
+    }
+    return pending;
+  };
   const indexDeal = async (deal: RegisteredDeal): Promise<void> => {
     // Only bindings signed by this deal's role holders are discovery for it (BB-6).
     const roleHolder = (role: string) => role === "buyer" ? deal.owners.buyer : role === "seller" ? deal.owners.seller : null;
@@ -329,9 +404,15 @@ export async function indexRegistration(
       const id = String(ref.listingId ?? "");
       const version = Number(ref.version ?? ref.listingVersion ?? 0);
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
-      return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
+      const key = `${id}\n${version}\n${hash}`;
+      return listingArtifacts.get(key) ?? (await listingsPublishedBy(deal.owners.buyer))?.get(key)
+        ?? (await listingsPublishedBy(deal.owners.buyer, true))?.get(key) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    // No authenticated restricted reader is installed: the node denies this catalog's anonymous
+    // restricted reads, so buyer-only delivery is indeterminate for every outcome.
+    // No schema validator is installed either, so a deliverable naming a schemaUrl leaves its listing neutral.
+    const graphDeps: EvidenceGraphDeps = { read: readArtifact, readAnchorRecord: readPayloadRecord, resolveListing, readSettlementNode, bundleAnchorTime };
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, graphDeps);
     const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -344,6 +425,9 @@ export async function indexRegistration(
       if (sellerCurrentProbe && deal.sellerBundleRef) {
         graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
       }
+      // A copy this pass could not decide is no BB-5 candidate, but where it is the side's only standing copy the
+      // session is undecided (DACS-5 §10.5.1 at run time). The first such copy per role, in binding order, is kept.
+      const undecidedCopies = new Map<string, { graph: EvidenceGraph; binding: BundleBinding }>();
       const inspect = async (binding: BundleBinding) => {
         let pending = graphCache.get(binding.nativeAddress);
         if (!pending) {
@@ -356,30 +440,17 @@ export async function indexRegistration(
             Boolean(party && typeof party === "object" && !Array.isArray(party)))
           : [];
         const roleHolder = parties.find((party) => party.role === binding.role)?.primaryClaim;
-        if (
-          !graph.ok || graph.bundle.jobId !== binding.jobId ||
-          graph.bundle.anchoredByRole !== binding.role ||
-          typeof roleHolder !== "string" ||
-          canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
-        ) return null;
-        const signed = new Set(
-          (Array.isArray(graph.bundle.signatures) ? graph.bundle.signatures : [])
-            .map((signature) => signature && typeof signature === "object" && !Array.isArray(signature)
-              ? (signature as Record<string, unknown>).party : undefined)
-            .filter((party): party is string => typeof party === "string")
-            .map(canonicalDemosAgentClaim)
-            .filter((party): party is string => party !== null),
-        );
-        const required = parties.filter((party) =>
-          party.role === "buyer" || party.role === "seller" || party.role === "orchestrator")
-          .map((party) => party.primaryClaim)
-          .filter((claim): claim is string => typeof claim === "string")
-          .map(canonicalDemosAgentClaim)
-          .filter((claim): claim is string => claim !== null);
+        const binds = graph.bundle.jobId === binding.jobId && graph.bundle.anchoredByRole === binding.role &&
+          typeof roleHolder === "string" && canonicalDemosAgentClaim(roleHolder) === canonicalDemosAgentClaim(binding.signer);
+        if (!graph.ok && binds && graph.undecided?.bundleContentHash === binding.bundleContentHash && !undecidedCopies.has(binding.role)) {
+          undecidedCopies.set(binding.role, { graph, binding });
+        }
+        if (!graph.ok || !binds) return null;
         return {
           value: graph,
           bundleContentHash: graph.bundleContentHash,
-          fullSignatureStanding: required.length >= 2 && required.every((claim) => signed.has(claim)),
+          // Standing counts only signatures the graph verified, never the parties a bundle presents.
+          fullSignatureStanding: fullSignatureStanding(parties, graph.signedParties),
         };
       };
       const buyerResolution = await resolveBundleSide({
@@ -399,6 +470,43 @@ export async function indexRegistration(
         inspect,
       });
       if (buyerResolution.disposition !== "present" || sellerResolution.disposition !== "present") {
+        // A side stands when it resolved, or when every candidate failed its post-fetch checks and one of them
+        // only because this pass could not decide it. Any other indeterminate side excludes the session.
+        const side = (resolution: typeof buyerResolution, role: "buyer" | "seller") => resolution.disposition === "present"
+          ? { graph: resolution.inspected.value, binding: resolution.binding }
+          : resolution.reason === EVERY_CANDIDATE_FAILED_POST_FETCH ? undecidedCopies.get(role) : undefined;
+        const buyerSide = side(buyerResolution, "buyer"), sellerSide = side(sellerResolution, "seller");
+        const undecided = buyerSide && sellerSide ? reconcileUndecidedCopies(deal, reg.primaryClaim, buyerSide.graph, sellerSide.graph) : null;
+        if (buyerSide && sellerSide && undecided) {
+          const bundle = sellerSide.graph.bundle;
+          const listingRef = bundle.listingRef && typeof bundle.listingRef === "object" ? bundle.listingRef as Record<string, unknown> : null;
+          const listing = sellerSide.graph.listing ?? buyerSide.graph.listing ??
+            (listingRef ? (await resolveListing(listingRef).catch(() => null))?.raw : undefined);
+          const offering = listing?.offering as Record<string, unknown> | undefined;
+          // The gate excludes every outcome on a listing this deployment cannot verify. A copy that stopped before the
+          // graph reached it is held to it here, so how far a session got never decides (DACS-5 §10.5.1).
+          if (!listing || !(await deploymentVerifiability(listing, bundle, graphDeps))) {
+            dealCandidates.push({
+              ...deal,
+              buyerBundleRef: buyerSide.binding.nativeAddress,
+              sellerBundleRef: sellerSide.binding.nativeAddress,
+              signatureVerified: true,
+              refsVerified: false,
+              reputationEligible: false,
+              outcome: String(bundle.outcome),
+              anchoredByRole: "seller",
+              finalisedAt: typeof bundle.finalisedAt === "number" ? bundle.finalisedAt : undefined,
+              anchorTimestamp: artifactAnchorTime(sellerSide.binding.nativeAddress),
+              category: typeof offering?.category === "string" ? offering.category : undefined,
+              // The copies do not diverge, so either names the session's agreement. Neither resolved it and its listing
+              // this pass: the session is in no listing's hint (DACS-5 §10.5.4), only in the seller's ranges.
+              agreementCategory: agreementCategory(sellerSide.graph) ?? agreementCategory(buyerSide.graph),
+              undecided,
+              verifiedAt: now,
+            });
+            return;
+          }
+        }
         dealCandidates.push({
           ...deal,
           signatureVerified: false,
@@ -415,7 +523,7 @@ export async function indexRegistration(
       };
       const buyerGraph = buyerResolution.inspected.value;
       const sellerGraph = sellerResolution.inspected.value;
-      const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
+      const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, orchestratorFaultNeutral, selectedLocator } =
         reconcileCurrentCopies(resolvedDeal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
       const ratings = (authoritative?.ratings ?? []).filter((rating) =>
@@ -426,32 +534,31 @@ export async function indexRegistration(
         ratedAt: Number(rating.ratedAt),
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
-      const settlementTxIds = (authoritative?.artifacts ?? []).filter((artifact) => artifact.kind === "evidence")
-        .flatMap((artifact) => {
-          const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
-          const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
-          return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
-            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
-        });
-      const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
-        .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
-      const cancellationNeutral = isNeutralCancellation(
-        sellerOutcome, cancellation, authoritative?.listing?.terms, authoritative?.bundle.phaseSummary,
-      );
+      const settlement = currentSettlementClaims(authoritative?.settlement ?? []);
+      // ST-10: either verified copy can establish neutral cancellation. A refuted
+      // marker on one copy must not hide an established marker on the other.
+      const cancellationNeutral = [sellerOk ? sellerGraph : undefined, buyerOk ? buyerGraph : undefined]
+        .some((graph) => graph && isNeutralCancellation(sellerOutcome,
+          graph.bundle.cancellation as Record<string, unknown> | undefined,
+          graph.listing?.terms, graph.bundle.phaseSummary, graph.bundle.agreementRef));
       dealCandidates.push({
         ...resolvedDeal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
         rail: agreementRail(authoritative?.agreement) ?? "unknown",
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
-        reputationEligible: refsVerified,
-        cancellationNeutral,
+        fullSignatureStanding: (authoritative === sellerGraph ? sellerResolution : buyerResolution).inspected.fullSignatureStanding,
+        // SB-1: a settlement the deal cites without a canonical key is `error`, so the deal is not counted.
+        reputationEligible: refsVerified && settlement !== null,
+        cancellationNeutral, orchestratorFaultNeutral,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
-        ratings, settlementTxIds,
+        ratings, settlementTxIds: settlement ?? [],
         category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
+        // A session without an agreement is in no listing's hint (DACS-5 §10.5.4); it counts for the seller.
+        agreementCategory: agreementCategory(authoritative),
         verifiedAt: now,
       });
       return;
@@ -503,7 +610,9 @@ export async function indexRegistration(
     );
     const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
+    // §10.5.1: the pinned listing, never the outcome, decides what this profile cannot verify.
+    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent &&
+      !legacyListingSettlementIndeterminate(authoritative.verification, authoritative.resolvedArtifacts);
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {
@@ -518,8 +627,12 @@ export async function indexRegistration(
       authoritative.resolvedArtifacts,
       strictRefsVerified,
     );
-    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
+    const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary, bundle?.agreementRef);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
+    // The legacy profile has no payment adapter, so its TxRefs are never verified and it asserts no
+    // settlement claim: an unverified citation must never reach the catalog-wide SB-2 ledger, where it
+    // could reject another session's verified claim. A session on a listing that declares payment is
+    // indeterminate (above); one on a free listing counts on its signatures alone, as at the merge base.
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -530,11 +643,14 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      fullSignatureStanding: legacyFullSignatureStanding(authoritative.verification),
       reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
+      orchestratorFaultNeutral: false,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       category: bundleCategory(bundle, categoriesByListing),
+      agreementCategory: bundle?.agreementRef ? bundleCategory(bundle, categoriesByListing) : undefined,
       verifiedAt: now,
     });
   };
@@ -551,29 +667,15 @@ export async function indexRegistration(
   const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
-  const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
+  // DACS-5 §10.5.1 at run time: only sessions that paid or delivered make the reads that can give no verdict, so
+  // an undecided session must neither drop alone beside the seller's failures nor hold them all out. It is kept
+  // on record (DealRecord.undecided) and every rate it could change is published as a range (reputation.ts).
   const reputation = deriveSellerReputation(deals, 0, now);
-  const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
   const listingsWithHint = listings.map((l) => ({
     ...l,
-    reputationHint: (() => {
-      const categoryDeals = counted.filter(
-        (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
-      );
-      const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
-      return {
-        categoryScope: l.offering.category,
-        completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
-        averageSellerRating: deriveSellerReputation(categoryDeals, windowStart, windowEnd).averageSellerRating ?? null,
-        bundleCount: categoryDeals.length,
-        windowStart,
-        windowEnd,
-        computedAt: now,
-      };
-    })(),
+    reputationHint: categoryReputationHint(l.offering.category, deals, windowStart, windowEnd, now),
   }));
 
   // Owner badge: re-verify the stored signature each pass (freshness is a

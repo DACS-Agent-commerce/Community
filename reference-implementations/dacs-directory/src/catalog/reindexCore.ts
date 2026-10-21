@@ -9,6 +9,7 @@ import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registrat
 import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
+import { publisherListingAnchors } from "./publisherListings";
 import { readAnchorResult, type AnchorRead } from "./chain";
 import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
@@ -16,6 +17,7 @@ import {
   readChainTip,
   scanChain,
   scanConsensusAnchorBackfill,
+  type DiscoveredDeal,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
@@ -137,7 +139,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
-  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
+  // v10 replays it again so every owner's deal and binding is rebuilt under its own key, and
+  // v11 so stored deals take the seller their bundle's signed agreementRef attributes.
   const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
   // Overflow is recomputed per signer from the replayed bindings.
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
@@ -199,13 +202,14 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     state.programs ??= Object.create(null);
     for (const [key, address] of scan.programs) state.programs[key] = address;
-    // A later duplicate invalidates prior automatic attribution too.
-    for (const deal of Object.values(state.deals)) {
+    // A later duplicate invalidates prior name-based (legacy SDK) attribution too. A deal attributed
+    // through its bundle's signed agreementRef never depended on a program name.
+    for (const deal of Object.values(state.deals) as DiscoveredDeal[]) {
       const key = `0x${deal.owners.buyer.slice(-64)}\ndacs3:agreement:${deal.jobId}`;
       const bundleKey = `0x${deal.owners.buyer.slice(-64)}\ndacs5:bundle:${deal.jobId}`;
-      if (state.programs[key] === null || state.programs[bundleKey] === null) {
+      if (!deal.agreementLocator && (state.programs[key] === null || state.programs[bundleKey] === null)) {
         deal.owners.seller = "";
-        delete (deal as { sellerFromAgreement?: string }).sellerFromAgreement;
+        delete deal.sellerFromAgreement;
       }
       // A deal without an attributed seller has no seller copy.
       if (!deal.owners.seller) delete deal.sellerBundleRef;
@@ -343,6 +347,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    const activeDomains = new Set(domains.flatMap((domain) => {
+      try { return [normalizeSubmittedDomain(domain)]; }
+      catch { return []; }
+    }));
+    for (const domain of Object.keys(state.publisherListingDiscoveries)) {
+      if (!activeDomains.has(domain)) delete state.publisherListingDiscoveries[domain];
+    }
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
       for (const e of crawl.errors) {
@@ -354,6 +365,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
       for (const agent of crawl.agents) {
         await ingestWellKnownRevocations(agent);
+        const sourceProvenance = wellKnownWithdrawalProvenance(agent);
+        if (sourceProvenance) {
+          state.publisherListingDiscoveries[normalizeSubmittedDomain(agent.domain)] = {
+            publisherClaim: agent.seller,
+            listingAnchors: [...agent.listingAnchors],
+          };
+        }
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -393,6 +411,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }
     }
     const allRegs = [...regs, ...discovered.values()];
+    // Use submitted signed registrations before synthetic discovery mutates
+    // them, plus this pass's scanner and authenticated domain hints.
+    const listingAnchorsFor = publisherListingAnchors(loadRegistrations(), state);
 
     const sellers = [];
     for (const reg of allRegs) {
@@ -402,7 +423,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }).catch((error: unknown) => {
+      }, listingAnchorsFor).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
@@ -414,7 +435,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       record.wellKnownDomains = (reg as { wellKnownDomains?: string[] }).wellKnownDomains;
       log(
         `  listings=${record.listings.length} cci=${record.cci.length} deals=${record.deals.length} ` +
-          `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}`,
+          `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}` +
+          (record.reputation.undecidedSessions ? ` undecided=${record.reputation.undecidedSessions}` : ""),
       );
       sellers.push(record);
     }

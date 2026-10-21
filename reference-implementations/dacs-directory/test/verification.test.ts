@@ -11,10 +11,12 @@ import {
 } from "@kynesyslabs/dacs/crypto";
 
 import {
+  browserDealVerdict,
   bundleMatchesRegisteredAnchor,
   bundleMatchesRegisteredDeal,
   dedupeVerifiedDeals,
   hasRequiredBundleSignatures,
+  legacyFullSignatureStanding,
   registeredAnchorRole,
   refsPassStrictPolicy,
   verifyReferencedArtifactSignature,
@@ -309,24 +311,89 @@ test("unhashed anchor role must match the registered copy address", () => {
   assert.equal(registeredAnchorRole("stor-seller", "stor-buyer", undefined), null);
 });
 
-test("verified reputation deals are unique by signed job and bundle reference", () => {
+test("the browser deal verdict is strict only with matching parties, signatures, refs and a registered copy role", () => {
+  const verification = result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "valid" }]);
+  const registered = { owners: { buyer: "buyer", seller: "seller" }, buyerBundleRef: "stor-buyer", sellerBundleRef: "stor-seller" };
+  type Input = Parameters<typeof browserDealVerdict>[0];
+  const base: Input = { verification, bundleRef: "stor-buyer", buyerOwner: "buyer", expectedSeller: "seller", registered, signaturesOk: true, refsOk: true };
+  const verdict = (change: Partial<Input>) => browserDealVerdict({ ...base, ...change });
+  assert.deepEqual(verdict({}), { verdict: "limited", reason: "legacy payment verification is indeterminate: authoritative settlement adapter is unavailable" });
+  const unpaid = { ...verification, bundle: { ...verification.bundle!, outcome: "aborted-by-self" as const, settlementEvidence: [] } };
+  assert.equal(verdict({ verification: unpaid }).verdict, "strict-pass", "an unpaid abort needs no settlement adapter");
+  const cases: Array<[string, Partial<Input>, string, string | undefined]> = [
+    ["another buyer expected", { buyerOwner: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["another seller expected", { expectedSeller: "someone" }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["registered owners differ", { registered: { ...registered, owners: { buyer: "buyer", seller: "someone" } } }, "fail",
+      "bundle parties do not match the expected buyer/seller"],
+    ["registered owners missing", { registered: { ...registered, owners: null } }, "fail", "bundle parties do not match the expected buyer/seller"],
+    ["signatures missing", { signaturesOk: false }, "fail", "required buyer/seller signatures are missing or invalid"],
+    ["refs not strict", { refsOk: false }, "fail", "one or more referenced artifact signatures are missing or invalid"],
+    ["SDK verification failed", { verification: { ...verification, ok: false, reason: "sdk" } }, "fail", "sdk"],
+    ["no registered copy address", { registered: null }, "limited",
+      "the directory has no registered address-role binding for this bundle, so anchoredByRole cannot be verified"],
+    ["copy registered for the other role", { bundleRef: "stor-seller" }, "fail", "bundle anchoredByRole does not match its registered buyer/seller address"],
+  ];
+  for (const [name, change, expected, reason] of cases) assert.deepEqual(verdict(change), { verdict: expected, reason }, name);
+  // Without a registered binding only internal consistency is reported, and a failed check still fails.
+  assert.equal(verdict({ registered: null, signaturesOk: false }).verdict, "fail");
+  assert.equal(verdict({ registered: null, expectedSeller: undefined }).verdict, "limited");
+});
+
+test("verified reputation deals collapse to one authoritative copy per (buyer, jobId) session (§10.5.1, BB-6)", () => {
+  const ref = (character: string) => `stor-${character.repeat(40)}`;
+  const buyerKey = "a".repeat(64), otherKey = "b".repeat(64);
   const base: DealRecord = {
-    jobId: "j",
-    rail: "pay-dem",
-    buyerBundleRef: `stor-${"a".repeat(40)}`,
-    owners: { buyer: "buyer", seller: "seller" },
-    signatureVerified: true,
-    refsVerified: true,
-    verifiedAt: 1,
+    jobId: "j", rail: "pay-dem", buyerBundleRef: ref("a"), owners: { buyer: `did:demos:agent:${buyerKey}`, seller: "seller" },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "completed",
+    bundleContentHash: "1".repeat(64), fullSignatureStanding: true, finalisedAt: 10, verifiedAt: 1,
   };
-  const records = dedupeVerifiedDeals([
-    base,
-    { ...base },
-    { ...base, buyerBundleRef: `stor-${"b".repeat(40)}` },
-    { ...base, jobId: "other" },
-    { ...base, jobId: "unverified", refsVerified: false },
-  ]);
-  assert.deepEqual(records.map((deal) => deal.jobId), ["j", "unverified"]);
+  const listed = (deals: DealRecord[]) => dedupeVerifiedDeals(deals)
+    .map((deal) => `${deal.jobId} ${deal.buyerBundleRef.slice(-1)} ${deal.reputationEligible ? "eligible" : "excluded"}`);
+  // One record per bundle ref, and canonically equal copies of a jobId collapse to the first.
+  assert.deepEqual(listed([base, { ...base }, { ...base, jobId: "other" }, { ...base, buyerBundleRef: ref("b") }]), ["j a eligible"]);
+  // Divergent fully signed copies of one session void it; the buyer's 0x alias is the same party.
+  const sameBuyer = { ...base, buyerBundleRef: ref("b"), owners: { buyer: `0x${buyerKey}`, seller: "seller" }, bundleContentHash: "2".repeat(64) };
+  assert.deepEqual(listed([base, sameBuyer]), ["j a excluded", "j b excluded"]);
+  // A lone fully signed copy of the session takes precedence over a lesser-signed divergent one.
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, sameBuyer]), ["j a excluded", "j b eligible"]);
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, { ...sameBuyer, fullSignatureStanding: false }]), ["j a excluded", "j b excluded"]);
+  // A jobId is unique only per producer: another buyer's session on the same jobId is a separate
+  // record, whatever its standing, and can neither void nor supersede this one.
+  const otherBuyer = { ...base, buyerBundleRef: ref("c"), owners: { buyer: `did:demos:agent:${otherKey}`, seller: "seller" }, bundleContentHash: "3".repeat(64) };
+  assert.deepEqual(listed([base, otherBuyer]), ["j a eligible", "j c eligible"]);
+  assert.deepEqual(listed([{ ...base, fullSignatureStanding: false }, otherBuyer]), ["j a eligible", "j c eligible"]);
+  // Other jobIds and unverified records are untouched.
+  assert.deepEqual(listed([base, { ...base, jobId: "k", buyerBundleRef: ref("d") }, { ...base, jobId: "u", buyerBundleRef: ref("e"), refsVerified: false }]),
+    ["j a eligible", "k d eligible", "u e eligible"]);
+  const reputation = deriveSellerReputation(dedupeVerifiedDeals([base, sameBuyer]), 0, 20);
+  assert.equal(reputation.completed, 0);
+  assert.deepEqual(reputation.bundleRefs, []);
+});
+
+test("a sock-puppet buyer's session on the same jobId cannot erase a seller's genuine failure", () => {
+  const genuine: DealRecord = {
+    jobId: "J", rail: "pay-dem", buyerBundleRef: `stor-${"1".repeat(40)}`, owners: { buyer: `did:demos:agent:${"1".repeat(64)}`, seller: "S" },
+    signatureVerified: true, refsVerified: true, reputationEligible: true, sellerOutcome: "failed-perm",
+    bundleContentHash: "1".repeat(64), fullSignatureStanding: true, finalisedAt: 10, verifiedAt: 1,
+  };
+  const alone = deriveSellerReputation(dedupeVerifiedDeals([genuine]), 0, 20);
+  assert.deepEqual([alone.bundleCount, alone.completionRate], [1, 0]);
+  // S registers a second fully signed session on J with a buyer it controls.
+  const puppet: DealRecord = { ...genuine, buyerBundleRef: `stor-${"2".repeat(40)}`, owners: { buyer: `did:demos:agent:${"2".repeat(64)}`, seller: "S" },
+    sellerOutcome: "failed-counterparty", bundleContentHash: "2".repeat(64) };
+  const deals = dedupeVerifiedDeals([genuine, puppet]);
+  assert.equal(deals.find((deal) => deal.buyerBundleRef === genuine.buyerBundleRef)?.reputationEligible, true);
+  const withPuppet = deriveSellerReputation(deals, 0, 20);
+  // Merge-base result: the genuine failure still counts; the puppet session is its own record.
+  assert.deepEqual([withPuppet.bundleCount, withPuppet.completionRate, withPuppet.counterpartyFaultRate], [2, 0, 0.5]);
+});
+
+test("legacy full signature standing needs a valid signature from every bundle party", () => {
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "valid" }])), true);
+  assert.equal(legacyFullSignatureStanding(result("aborted-by-self", [{ party: "buyer", verdict: "valid" }])), false);
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "seller", verdict: "invalid" }])), false);
+  assert.equal(legacyFullSignatureStanding(result("completed", [{ party: "buyer", verdict: "valid" }, { party: "stranger", verdict: "valid" }])), false);
+  assert.equal(legacyFullSignatureStanding(null), false);
 });
 
 test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", () => {

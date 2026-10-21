@@ -21,13 +21,14 @@ Object.assign(globalThis, { React });
 const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
 const MINUTE = 60_000;
 
-// Only the fields the summary reads, as in home-hero-state.test.ts.
+// Only the fields the summary reads, as in home-hero-state.test.ts, plus each listing's
+// category, which saveCatalog's catalog-wide reputation pass reads.
 function catalog(generatedAt: number, sellers: Array<{ statuses: string[]; deals: boolean[] }>): Catalog {
   return {
     catalogVersion: "1",
     generatedAt,
     sellers: sellers.map(({ statuses, deals }) => ({
-      listings: statuses.map((status) => ({ status })),
+      listings: statuses.map((status) => ({ status, offering: { category: "services.test" } })),
       deals: deals.map((refsVerified) => ({ refsVerified })),
     })),
   } as unknown as Catalog;

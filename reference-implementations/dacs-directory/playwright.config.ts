@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -26,6 +29,9 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       NEXT_PUBLIC_DIRECTORY_URL: "http://localhost:3400",
+      // Browser fixtures start unindexed, independent of unit-test reindexes
+      // or a developer's catalog in the default data directory.
+      DACS_DIRECTORY_DATA: mkdtempSync(join(tmpdir(), "dacs-directory-e2e-")),
     },
   },
 });

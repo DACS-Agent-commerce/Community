@@ -211,7 +211,7 @@ const negotiationStep = (kind: string, selectionRule: unknown = "lowest-price") 
       : kind === "negotiate-sealed-envelope-procurement" ? { parameters: sealed(selectionRule, "procurement") } : {}),
 });
 
-test("PS-3: supported negotiation patterns enforce pricing compatibility; procurement remains unsupported", async () => {
+test("PS-3: each negotiation pattern accepts exactly the pricing kinds DACS-3 allows", async () => {
   const pricing: Record<string, Record<string, unknown>> = {
     fixed: { kind: "fixed", price: { amount: "1", currency: "USDC" } },
     negotiable: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
@@ -222,7 +222,7 @@ test("PS-3: supported negotiation patterns enforce pricing compatibility; procur
     "negotiate-fixed-price": ["fixed", "negotiable", "metered"],
     "negotiate-rfq": ["negotiable", "metered"],
     "negotiate-sealed-envelope": ["auction"],
-    "negotiate-sealed-envelope-procurement": [],
+    "negotiate-sealed-envelope-procurement": ["auction"],
   };
   const verdicts: Record<string, boolean> = {};
   const expected: Record<string, boolean> = {};
@@ -271,6 +271,7 @@ test("schema conformance: recognised listing members must have their DACS-1/3/4 
     "rate phase": { pipeline: [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate", parameters: { required: true } }] },
     "rail with version": { acceptedRails: [{ railId: "pay-x402", railVersion: 2, parameters: { network: "base" } }] },
     "sealed-envelope demand": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope", parameters: { ...sealed("lowest-price"), auctionMode: "demand" } }, ...tail] },
+    "sealed-envelope procurement": { pricing: auction, pipeline: [{ kind: "negotiate-sealed-envelope-procurement", parameters: sealed("lowest-price", "procurement") }, ...tail] },
     "rfq with fallback": { pricing: { kind: "negotiable", bandCenter: { amount: "1", currency: "USDC" }, minPct: 10, maxPct: 10 },
       pipeline: [{ kind: "negotiate-rfq", parameters: { ...RFQ, rfqInitiator: "seller", fixedPriceFallback: true } }, ...tail] },
     "notAfter after notBefore": { validity: { notBefore: 1, notAfter: 2 } },

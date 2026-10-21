@@ -10,8 +10,10 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson } from "./artifactLimits.js";
+import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
+import type { SettlementNotFound } from "./nativePayment.js";
+import { VerificationUnavailable } from "./verificationUnavailable.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 export const LIVE_STORAGE_SALT = "";
@@ -48,12 +50,21 @@ export interface AnchorRecord {
  * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * Its cause says why: `denied` (the node's structured PERMISSION_DENIED) and
+ * `too-large` (over the response or artifact bounds) describe the program as
+ * its owner keeps it; `timeout`, `transport` and `node-error` are no answer.
  */
+export type AnchorReadUnavailableCause = "timeout" | "transport" | "node-error" | "denied" | "too-large";
 export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
   | { status: "invalid" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; cause: AnchorReadUnavailableCause };
+
+const transportCause = (error: unknown): AnchorReadUnavailableCause =>
+  (error as { name?: unknown } | null)?.name === "TimeoutError" ? "timeout" : "transport";
+const bodyCause = (error: unknown): AnchorReadUnavailableCause =>
+  error instanceof StorageResponseTooLarge ? "too-large" : "node-error";
 
 export async function readAnchorResult(address: string): Promise<AnchorRead> {
   if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
@@ -63,37 +74,73 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
     });
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return { status: "unavailable", cause: transportCause(error) };
   }
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
   // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
   // proxy's or a wrong route's, leaves the read incomplete (RB-6).
-  if (res.status === 404) {
+  if (res.status === 404 || res.status === 403) {
+    const expected = res.status === 404 ? "NOT_FOUND" : "PERMISSION_DENIED";
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
-      return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" } : { status: "unavailable" };
+      if (!answer || answer.success !== false || answer.errorCode !== expected) return { status: "unavailable", cause: "node-error" };
+      return res.status === 404 ? { status: "absent" } : { status: "unavailable", cause: "denied" };
     } catch {
-      return { status: "unavailable" };
+      return { status: "unavailable", cause: "node-error" };
     }
   }
-  if (!res.ok) return { status: "unavailable" };
+  if (!res.ok) return { status: "unavailable", cause: "node-error" };
   let json: { success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown };
   try {
     json = (await storageResponseJson(res)) as typeof json;
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return { status: "unavailable", cause: bodyCause(error) };
   }
-  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
+  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable", cause: "node-error" };
   const data = json.data;
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
-  if (boundedJson(data) === null) return { status: "unavailable" };
+  if (boundedJson(data) === null) return { status: "unavailable", cause: "too-large" };
   return { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } };
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
   const read = await readAnchorResult(address);
   return read.status === "present" ? read.record : null;
+}
+
+/**
+ * The evidence graph's artifact reader. A record that is absent, invalid, denied to this
+ * reader or over the bounds is in the state its owner keeps it in, and cannot be verified
+ * as referenced: null, which refutes only the session citing it, as deleting it would.
+ * No answer at all throws VerificationUnavailable, so that session stays undecided.
+ */
+export async function readArtifact(address: string): Promise<Record<string, unknown> | null> {
+  const read = await readAnchorResult(address);
+  if (read.status === "present") return read.record.data;
+  if (read.status === "unavailable" && read.cause !== "denied" && read.cause !== "too-large") {
+    throw new VerificationUnavailable(`the storage read of ${address} had no answer (${read.cause})`, "no-answer");
+  }
+  return null;
+}
+
+/**
+ * The evidence graph's payload reader. A payload this anonymous reader is denied is a valid
+ * delivery too (DACS-4 §9.6.1 DV-2: a public listing may be delivered privately), so it throws
+ * VerificationUnavailable rather than refuting it. Its owner keeps it closed, so that is a
+ * lasting state, unlike a read with no answer. An inline payload over the bounds breaks
+ * §9.6.1's 128 KB limit and is null.
+ */
+export async function readPayloadRecord(address: string): Promise<AnchorRecord | null> {
+  const read = await readAnchorResult(address);
+  if (read.status === "present") return read.record;
+  if (read.status === "unavailable" && read.cause === "denied") {
+    throw new VerificationUnavailable(`the payload at ${address} is not readable anonymously`, "lasting");
+  }
+  if (read.status === "unavailable" && read.cause !== "too-large") {
+    throw new VerificationUnavailable(`the payload read of ${address} had no answer (${read.cause})`, "no-answer");
+  }
+  return null;
 }
 
 export async function readAnchor(address: string): Promise<Record<string, unknown> | null> {
@@ -119,8 +166,8 @@ export function isUnknownNodeCall(body: { result?: unknown; response?: unknown }
 
 
 type RpcCall =
-  | { status: "ok"; body: { result?: unknown; response?: unknown } }
-  | { status: "failed" }
+  | { status: "ok"; body: { result?: unknown; response?: unknown; extra?: unknown } }
+  | { status: "failed"; cause: string }
   | { status: "invalid-json" };
 
 /** One bounded JSON-RPC POST to the node, classified. */
@@ -134,12 +181,12 @@ async function rpcCall(headers: Record<string, string>, payload: unknown): Promi
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify(payload),
     });
-  } catch {
-    return { status: "failed" };
+  } catch (error) {
+    return { status: "failed", cause: transportCause(error) };
   }
-  if (!response.ok) return { status: "failed" };
+  if (!response.ok) return { status: "failed", cause: `HTTP ${response.status}` };
   try {
-    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown } | null;
+    const body = await storageResponseJson(response) as { result?: unknown; response?: unknown; extra?: unknown } | null;
     return body && typeof body === "object" ? { status: "ok", body } : { status: "invalid-json" };
   } catch {
     return { status: "invalid-json" };
@@ -250,4 +297,26 @@ export async function resolveOwnedAnchorByName(
     return { status: "indeterminate", reason: "ACL-filtered program-name lookup cannot establish absence" };
   }
   return { status: "absent" };
+}
+
+/**
+ * Unauthenticated, bounded settlement reads; never signs or submits a transaction. Resolves the
+ * node's response, or its structured not-found answer, which states how far it checked (node2:
+ * result 404, reason not_found, checkedThroughBlock). Any other reply, including a result 200
+ * without a response and the pinned source's bare error, is no answer: VerificationUnavailable.
+ */
+export async function readSettlementNode(message: "getTxByHash" | "getBlockByNumber", data: Record<string, unknown>): Promise<unknown> {
+  const result = await rpcCall({ "content-type": "application/json" }, {
+    method: "nodeCall", params: [{ type: "nodeCall", message, data, sender: "", signature: "", extra: "" }],
+  });
+  if (result.status !== "ok") {
+    throw new VerificationUnavailable(`the node's ${message} reply ${result.status === "failed" ? `failed (${result.cause})` : "is not JSON"}`, "no-answer");
+  }
+  const { result: code, response, extra } = result.body;
+  if (code === 200 && response !== null && response !== undefined) return response;
+  const detail = extra && typeof extra === "object" && !Array.isArray(extra) ? extra as Record<string, unknown> : null;
+  if (code === 404 && response === null && detail?.reason === "not_found" && Number.isSafeInteger(detail.checkedThroughBlock)) {
+    return { notFound: true, checkedThroughBlock: Number(detail.checkedThroughBlock) } satisfies SettlementNotFound;
+  }
+  throw new VerificationUnavailable(`the node's ${message} reply has no answer (result ${Number.isSafeInteger(code) ? code : "not a status"})`, "no-answer");
 }

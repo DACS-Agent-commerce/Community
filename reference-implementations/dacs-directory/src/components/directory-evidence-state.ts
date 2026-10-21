@@ -1,4 +1,5 @@
 import { safePublicEndpoint } from "../catalog/publicEndpoint.js";
+import { completionRateRangeText } from "../catalog/rateRange.js";
 import { effectiveReachabilityStatus } from "../catalog/reachabilityStatus.js";
 import type { IdentityTier, ListingSummary, SellerRecord } from "../catalog/types.js";
 
@@ -44,6 +45,7 @@ export function directoryEvidenceState(
       : { kind: "legacy" as const, label: "legacy SDK listing" as const };
   const completed = seller.reputation.completed;
   const total = seller.reputation.totalAgreements;
+  const undecided = seller.reputation.undecidedSessions ?? 0;
   const reachabilityStatus = listing.reachabilityHint
     ? effectiveReachabilityStatus(listing.reachabilityHint, now)
     : undefined;
@@ -77,13 +79,17 @@ export function directoryEvidenceState(
         }),
     reachability: Object.freeze(reachability),
     identityTier: seller.identityTier ?? "self-declared",
+    // Sessions this pass could not decide are in neither count (DACS-5 §10.5.1 at run time): say how many and what
+    // the completion rate can be, so a partial record never reads as complete or as "no history yet".
     deals: Object.freeze({
       completed,
       total,
-      label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}`,
-      explanation: total === 0
-        ? "No verified two-sided bundle history yet"
-        : "Both parties' signed copies must verify and agree before a bundle counts",
+      label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}${undecided ? ` · ${undecided} undecided` : ""}`,
+      explanation: undecided
+        ? `${undecided} session${undecided === 1 ? " this pass could not decide counts" : "s this pass could not decide count"} neither as completed nor as failed, so ${completionRateRangeText(seller.reputation.completionRateRange)}`
+        : total === 0
+          ? "No verified two-sided bundle history yet"
+          : "Both parties' signed copies must verify and agree before a bundle counts",
     }),
   });
 }

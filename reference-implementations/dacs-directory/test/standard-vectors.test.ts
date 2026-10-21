@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { canonicalDemosAgentClaim } from "../src/catalog/claimRef.js";
 import { canonicalSignatureBytes, importLegacySignatureValue, type LegacySignatureEncoding } from "../src/catalog/signatureValue.js";
+import { resolveBundleSide, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
+import {
+  agreementListingConformance,
+  agreementMatchesListing,
+  COMMITTED_AT_INDETERMINATE,
+  faultAttributionOk,
+} from "../src/catalog/evidenceGraph.js";
+import { admitSettlement, settlementTxId } from "../src/catalog/settlementKey.js";
+import { verifyListing } from "../src/catalog/listingVerification.js";
+import { deriveSellerReputation } from "../src/catalog/reputation.js";
+import type { EvidenceGraph } from "../src/catalog/evidenceGraph.js";
+import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
 
 function fixture(name: string, hash: string) {
   const bytes = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
@@ -38,4 +52,299 @@ test("pinned Demos agent claim fixture exercises canonical claim resolution", ()
     assert.equal(claim !== null, vector.expected.accepted, vector.id);
     assert.equal(claim, vector.expected.canonical, vector.id);
   }
+});
+
+// Upstream DACS-Standard conformance vectors (SPEC_PIN) run through adapters onto the Directory's own
+// decision functions. A vector set is often a projection of the full artifacts; each adapter maps the
+// projection onto the Directory's input shape and nothing else. A case the Directory does not decide
+// is listed with its reason, and a deliberate deviation is pinned with the Directory's own verdict.
+type Obj = Record<string, unknown>;
+const fixtureUrl = (name: string) => new URL(`./fixtures/dacs-standard/${name}`, import.meta.url);
+const load = <T>(name: string) => JSON.parse(readFileSync(fixtureUrl(name), "utf8")) as T;
+const pinned = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
+const VENDORED = [
+  "metered-pricing-v0.3.json", "phase-kind-divergence-v0.3.json",
+  "unresolved-vs-absent-v0.3.json", "bundle-absence-evidence-v0.3.json",
+  "signature-value-encoding-v0.1.json", "revocation-binding-v0.3.json", "sb2-settlement-uniqueness-v0.1.json",
+  "agreement-listing-v0.1.json", "mixed-version-reconciliation-v0.3.json", "fault-bundle-perspective-pair-v0.3.json",
+  "payee-destination-binding-v0.1.json", "demos-agent-claim-reference.json", "listing-preserve-unknown-v0.1.json",
+];
+
+test("every vendored Standard file is the byte-identical copy SPEC_PIN records", () => {
+  for (const name of VENDORED) {
+    const digest = createHash("sha256").update(readFileSync(fixtureUrl(name))).digest("hex");
+    assert.match(pinned, new RegExp(`${name.replace(/[.]/g, "\\.")}\\s+${digest}`), name);
+  }
+});
+
+test("SB-1/SB-2 sb2-settlement-uniqueness-v0.1: canonical keys, collapse, error and the (jobId, phaseIndex) ledger", () => {
+  interface Vector { name: string; decision: string; effect: string; consumed: Record<string, { jobId: string; phaseIndex: number }> | null; record: Obj }
+  const set = load<{ vectors: Vector[] }>("sb2-settlement-uniqueness-v0.1.json");
+  // The projection names the rail; the ChainTxRef discriminator is `kind`, and demos-native is `demos`.
+  const asChainTxRef = (ref: Obj | undefined) => ref && { ...ref, kind: ref.rail === "demos-native" ? "demos" : ref.rail };
+  // The Directory keeps its own in-memory ledger per derivation, so it is never unreadable.
+  const notDecided = new Set(["ledger-unreadable-indeterminate"]);
+  assert.equal(set.vectors.length, 20);
+  for (const vector of set.vectors) {
+    if (notDecided.has(vector.name)) continue;
+    const id = settlementTxId(asChainTxRef(vector.record.settlementRef as Obj | undefined));
+    // phaseIndex is the bundle entry's index, which the bundle shape holds to a safe integer ≥ 0.
+    const phaseIndex = vector.record.phaseIndex;
+    if (!id || !Number.isSafeInteger(phaseIndex) || Number(phaseIndex) < 0) {
+      assert.equal(vector.decision, "error", vector.name);
+      continue;
+    }
+    const ledger = new Map(Object.entries(vector.consumed ?? {}));
+    const effect = admitSettlement(ledger, { id, jobId: String(vector.record.jobId), phaseIndex: Number(phaseIndex) });
+    assert.equal(effect, vector.effect, vector.name);
+  }
+});
+
+test("DACS-3 §8.5.2 agreement-listing-v0.1 through agreementListingConformance", () => {
+  interface Vector { name: string; expected: "accept" | "reject" | "indeterminate"; committedAt: number | null; agreement: Obj; listing: Obj }
+  const set = load<{ vectors: Vector[] }>("agreement-listing-v0.1.json");
+  const PUBLISHER = `did:demos:agent:${"5".repeat(64)}`;
+  // The upstream amounts run as published ("95.00", "100.00"): CORE CD-1 makes the verifier canonicalise them.
+  const PATTERN_STEP: Record<string, Obj> = {
+    // The projection names the pattern only; an RFQ step admits its fixed-price fallback (PS-3).
+    rfq: { kind: "negotiate-rfq", parameters: { maxTurns: 4, timeoutSec: 60, fixedPriceFallback: true } },
+    "fixed-price": { kind: "negotiate-fixed-price" },
+  };
+  const adapt = (vector: Vector) => {
+    const projected = vector.listing;
+    const pricing = projected.pricing as Obj;
+    const spec: Obj = { kind: (projected.offering as { deliverable: Obj }).deliverable.deliverableType };
+    const schemaUrl = (projected.offering as { deliverable: Obj }).deliverable.schemaUrl;
+    if (schemaUrl !== undefined) spec.schemaUrl = schemaUrl;
+    const rails = projected.acceptedRails as string[];
+    const listing: Obj = {
+      listingId: projected.listingId, listingVersion: projected.version,
+      pricing: pricing.kind === "fixed" ? { kind: "fixed", price: { amount: pricing.amount, currency: pricing.currency } }
+        : pricing,
+      pipeline: [PATTERN_STEP[String(projected.pattern)], { kind: "commit-agreement" },
+        ...(projected.hasPayPhase ? [{ kind: rails[0], parameters: { rail: rails[0] } }] : []), { kind: "deliver-attested-payload" }],
+      acceptedRails: rails.map((railId) => ({ railId })), offering: { deliverable: spec }, terms: projected.terms, validity: projected.validity,
+    };
+    const terms = vector.agreement.terms as Obj;
+    const deliverable = terms.deliverable as Obj;
+    const agreement: Obj = {
+      agreementVersion: "1", derivedFromPattern: vector.agreement.derivedFromPattern,
+      parties: [{ role: "buyer", primaryClaim: `did:demos:agent:${"6".repeat(64)}` }, { role: "seller", primaryClaim: PUBLISHER }],
+      terms: { ...terms, deliverable: {
+        ...deliverable,
+        // The projection hashes the spec opaquely: an unchanged hash is the listed spec's DeliverableRef hash.
+        hash: deliverable.hash === (projected.offering as { deliverable: Obj }).deliverable.hash ? contentHash(spec) : deliverable.hash,
+      } },
+    };
+    // The agreement pins the listing by (listingId, version, contentHash); the graph rejects any other pin.
+    const pin = vector.agreement.listingRef as Obj;
+    const pinOk = pin.listingId === projected.listingId && pin.version === projected.version && pin.contentHash === projected.contentHash;
+    return { listing, agreement, pinOk };
+  };
+  // DACS-Standard text vs vector: §8.5.2 rounds bounds to the CD-1 digits of bandCenter ("100" has none),
+  // so 100 × 1.025 rounds to 103 and "103.00" is in band. The Directory follows the text.
+  const deviations: Record<string, string> = { "fractional-pct-out": "accept" };
+  assert.equal(set.vectors.length, 30);
+  for (const vector of set.vectors) {
+    const { listing, agreement, pinOk } = adapt(vector);
+    const result = pinOk ? agreementListingConformance(agreement, listing, PUBLISHER, vector.committedAt) : "listing-binding";
+    const verdict = result === null ? "accept" : result === COMMITTED_AT_INDETERMINATE ? "indeterminate" : "reject";
+    assert.equal(verdict, deviations[vector.name] ?? vector.expected, `${vector.name}: ${result}`);
+  }
+  // CD-1: every spelling of one value decides alike, and anything that is not a plain decimal fails closed.
+  const valid = adapt(set.vectors.find((vector) => vector.name === "valid-in-band-rfq")!);
+  const priced = (amount: string) => agreementListingConformance({ ...valid.agreement, terms: { ...(valid.agreement.terms as Obj),
+    price: { currency: "USDC", amount } } }, valid.listing, PUBLISHER, 1780000000000);
+  for (const amount of ["95", "95.0", "95.00", "095.000"]) assert.equal(priced(amount), null, amount);
+  for (const amount of ["+95", "9.5e1", "95,00", " 95", "95.", ".95", "-95", "0.00"]) assert.equal(priced(amount), "terms", amount);
+  // §8.5.2 rounds a band bound to the digits of bandCenter's CD-1 form, never to the digits it is spelled with.
+  const band = adapt(set.vectors.find((vector) => vector.name === "fractional-pct-out")!);
+  const centred = (amount: string) => agreementListingConformance(band.agreement, { ...band.listing,
+    pricing: { ...(band.listing.pricing as Obj), bandCenter: { currency: "USDC", amount } } }, PUBLISHER, 1780000000000);
+  assert.deepEqual(["100", "100.0", "100.00", "0100"].map(centred), [null, null, null, null]);
+});
+
+test("DACS-5 §10.4.3 mixed-version-reconciliation-v0.3 and fault-bundle-perspective-pair-v0.3", () => {
+  interface Vector { name: string; expected: "pass" | "fail"; copies: { buyer?: Obj; seller?: Obj }; want?: Obj }
+  const sets = [load<{ vectors: Vector[] }>("mixed-version-reconciliation-v0.3.json"), load<{ vectors: Vector[] }>("fault-bundle-perspective-pair-v0.3.json")];
+  const decide = (copies: Vector["copies"]) => {
+    const present = [copies.buyer, copies.seller].filter((copy): copy is Obj => Boolean(copy));
+    // Each copy first passes the §10.4.1 permissible-set check the graph applies; a pair then must not diverge.
+    if (!present.every((copy) => faultAttributionOk(copy, copy.parties as Obj[]))) return "fail";
+    return copies.buyer && copies.seller && currentBundleCopiesDiverge(copies.buyer, copies.seller) ? "fail" : "pass";
+  };
+  for (const set of sets) for (const vector of set.vectors) {
+    assert.equal(decide(vector.copies), vector.expected, vector.name);
+    const { buyer, seller } = vector.copies;
+    if (!buyer || !seller) continue;
+    const parties = buyer.parties as Obj[];
+    const claim = (role: string) => String(parties.find((p) => p.role === role)!.primaryClaim);
+    const deal = { jobId: String(buyer.jobId), rail: "fixture", owners: { buyer: claim("buyer"), seller: claim("seller") }, buyerBundleRef: "stor-b", sellerBundleRef: "stor-s" };
+    const graph = (bundle: Obj): EvidenceGraph => ({ profile: "dacs-v0.1", ok: faultAttributionOk(bundle, bundle.parties as Obj[]), bundle, refsVerified: true,
+      signaturesVerified: true, signedParties: [], artifacts: [], settlement: [], ratings: [], flaggedAmendments: [], bundleContentHash: "a".repeat(64) });
+    const result = reconcileCurrentCopies(deal, claim("seller"), graph(buyer), graph(seller));
+    const want = vector.want ?? {};
+    if (want.authoritativeCopyType !== undefined) assert.equal(result.divergent ? null : result.authoritative.bundle.faultBundleVersion === "1" ? "FaultAttestationBundle" : "AttestationBundle", want.authoritativeCopyType, vector.name);
+    if (want.scoredRole !== undefined) assert.equal(want.scoredRole, "seller", vector.name);
+    if (want.scoredOutcome !== undefined) assert.equal(result.sellerOutcome, want.scoredOutcome, vector.name);
+    if (want.reputationEffect !== undefined) assert.equal(result.refsVerified ? "include" : "exclude", want.reputationEffect, vector.name);
+    if (want.faultedParty !== undefined && !result.divergent && result.refsVerified) assert.equal(result.authoritative.bundle.faultedParty, want.faultedParty, vector.name);
+    // Only an authoritative FaultAttestationBundle that faults the orchestrator is neutral.
+    assert.equal(result.orchestratorFaultNeutral, vector.name === "mixed-orchestrator-nondivergent", vector.name);
+    const rep = deriveSellerReputation([{ ...deal, sellerOutcome: result.sellerOutcome, orchestratorFaultNeutral: result.orchestratorFaultNeutral,
+      signatureVerified: true, refsVerified: true, reputationEligible: true, finalisedAt: 10, verifiedAt: 10 }], 0, 100);
+    if (vector.name === "mixed-orchestrator-nondivergent") {
+      assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, null, null, null]);
+    }
+    // A FAB-authoritative seller fault stays in both denominators.
+    if (vector.name === "mixed-nondivergent-fab-authoritative") {
+      assert.deepEqual([rep.bundleCount, rep.completionRate, rep.counterpartyFaultRate, rep.counterpartyAdjustedCompletionRate], [1, 0, 0, 0]);
+    }
+  }
+});
+
+test("DACS-5 §10.4.3 divergence classes for failure and substrate outcomes, three-party faults and both mixed orientations", () => {
+  const two = [{ role: "buyer", primaryClaim: "did:demos:buyer" }, { role: "seller", primaryClaim: "did:demos:seller" }];
+  const three = [...two, { role: "orchestrator", primaryClaim: "did:demos:orchestrator" }];
+  const phaseSummary = [{ index: 0, kind: "deliver-storage-program", outcome: "ok" }];
+  const legacy = (anchoredByRole: string, outcome: string, parties = two): Obj => ({ bundleVersion: "1", anchoredByRole, outcome, parties, phaseSummary });
+  const fab = (anchoredByRole: string, outcome: string, faultedParty: string, parties = two): Obj =>
+    ({ faultBundleVersion: "1", anchoredByRole, outcome, faultedParty, parties, phaseSummary });
+  // [name, buyer copy, seller copy, diverges]
+  const cases: Array<[string, Obj, Obj, boolean]> = [
+    ["FAB failure pair faulting the seller", fab("buyer", "failed-counterparty", "seller"), fab("seller", "failed-perm", "seller"), false],
+    ["FAB substrate pair", fab("buyer", "failed-substrate", "none"), fab("seller", "failed-substrate", "none"), false],
+    ["legacy buyer substrate vs FAB seller substrate", legacy("buyer", "failed-substrate"), fab("seller", "failed-substrate", "none"), false],
+    ["FAB buyer substrate vs legacy seller substrate", fab("buyer", "failed-substrate", "none"), legacy("seller", "failed-substrate"), false],
+    ["FAB buyer abort faulting the seller vs legacy seller self-abort", fab("buyer", "aborted-by-other", "seller"), legacy("seller", "aborted-by-self"), false],
+    ["FAB buyer failure faulting the seller vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "seller"), legacy("seller", "failed-perm"), false],
+    ["legacy failure pair", legacy("buyer", "failed-counterparty"), legacy("seller", "failed-perm"), false],
+    ["three-party FAB pair faulting the orchestrator and the buyer", fab("buyer", "failed-counterparty", "orchestrator", three),
+      fab("seller", "failed-counterparty", "buyer", three), true],
+    ["FAB failure vs FAB abort, same fault", fab("buyer", "failed-counterparty", "seller"), fab("seller", "aborted-by-self", "seller"), true],
+    ["FAB buyer self-abort vs legacy seller self-abort", fab("buyer", "aborted-by-self", "buyer"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer completed vs legacy seller self-abort", fab("buyer", "completed", "none"), legacy("seller", "aborted-by-self"), true],
+    ["FAB buyer faulting the orchestrator vs legacy seller failed-perm", fab("buyer", "failed-counterparty", "orchestrator", three),
+      legacy("seller", "failed-perm", three), true],
+    ["legacy buyer failed-perm vs FAB seller faulting the orchestrator", legacy("buyer", "failed-perm", three),
+      fab("seller", "failed-counterparty", "orchestrator", three), true],
+    ["legacy buyer completed vs FAB seller substrate", legacy("buyer", "completed"), fab("seller", "failed-substrate", "none"), true],
+    ["FAB buyer substrate vs legacy seller completed", fab("buyer", "failed-substrate", "none"), legacy("seller", "completed"), true],
+    ["FAB completed vs FAB substrate", fab("buyer", "completed", "none"), fab("seller", "failed-substrate", "none"), true],
+  ];
+  for (const [name, buyer, seller, diverges] of cases) assert.equal(currentBundleCopiesDiverge(buyer, seller), diverges, name);
+});
+
+test("DACS-3 §8.5 payee-destination-binding-v0.1: artifact type and PB-1 payout coverage", () => {
+  interface Vector { name: string; op: string; expected: string; readerMode?: string; commitPhase?: string; listing?: Obj; agreement?: Obj; want?: Obj }
+  const set = load<{ vectors: Vector[] }>("payee-destination-binding-v0.1.json");
+  // The Directory reads current artifacts after the fact: it decides the artifact type against the pinned
+  // commitment phase and PB-1 coverage. It is not a legacy reader, verifies signatures over its own
+  // did:demos:agent claims (not these cci-lei keys), and never runs the payer's PB-2/PB-3 pre-pay gate.
+  const decided = new Set([
+    "agreement-current-reader-accepts-legacy-no-pb", "agreement-current-reader-accepts-payee-bound",
+    "agreement-legacy-payoutbindings-reject", "agreement-both-discriminators-reject", "agreement-neither-discriminator-reject",
+    "agreement-payee-bound-omitted-payoutbindings-reject", "agreement-commit-agreement-with-payee-bound-rejects",
+    "agreement-commit-payee-bound-with-legacy-rejects", "pb1-agreement-bound-destination-matches", "pb1-missing-payoutbinding-permanent",
+    "pb1-duplicate-payoutbinding-permanent", "pb1-wrong-rail-payoutbinding-permanent", "pb1-extra-payoutbinding-permanent",
+    "pb1-repeated-pay-phases-distinct-bindings",
+  ]);
+  let run = 0;
+  for (const vector of set.vectors) {
+    if (!decided.has(vector.name)) continue;
+    run++;
+    const pipeline = vector.listing!.pipeline as Obj[];
+    // The commitment phase the vector names is the one its listing pins.
+    const listing = { ...vector.listing, pipeline: pipeline.map((step) =>
+      step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? { kind: vector.commitPhase ?? step.kind } : step) };
+    assert.equal(agreementMatchesListing(vector.agreement!, listing) ? "pass" : "fail", vector.expected, vector.name);
+  }
+  assert.equal(run, decided.size);
+});
+
+test("SIG-5 listing-preserve-unknown-v0.1 through verifyListing", async () => {
+  interface Vector { name: string; fixture: string; transform: { kind: "none" | "set" | "remove"; path?: string; value?: unknown }; expected: "pass" | "fail" }
+  const set = load<{ publicKeys: Record<string, string>; fixtures: Record<string, { listing: Obj }>; vectors: Vector[] }>("listing-preserve-unknown-v0.1.json");
+  const keys: ResolvePrimaryClaimKey = async (claim, algorithm) => set.publicKeys[claim] && algorithm === "ed25519"
+    ? { canonicalClaim: claim, algorithm, publicKey: Uint8Array.from(Buffer.from(set.publicKeys[claim], "base64url")) } : null;
+  assert.equal(set.vectors.length, 4);
+  for (const vector of set.vectors) {
+    const listing = structuredClone(set.fixtures[vector.fixture].listing);
+    if (vector.transform.kind !== "none") {
+      const path = vector.transform.path!.split(".");
+      const parent = path.slice(0, -1).reduce((value, key) => value[key] as Obj, listing);
+      if (vector.transform.kind === "set") parent[path.at(-1)!] = vector.transform.value;
+      else delete parent[path.at(-1)!];
+    }
+    // An unknown phase kind is refused even under a valid signature (§11.1.2), as is any altered signed field.
+    assert.equal(await verifyListing(listing, keys) ? "pass" : "fail", vector.expected, vector.name);
+  }
+});
+
+test("did:demos:agent ClaimReference profile fixture (DACS-Standard #296 at 725fa78)", () => {
+  const set = load<{ cases: Array<{ id: string; input: string; expected: { accepted: boolean; canonical: string | null } }> }>("demos-agent-claim-reference.json");
+  assert.equal(set.cases.length, 4);
+  for (const entry of set.cases) assert.equal(canonicalDemosAgentClaim(entry.input), entry.expected.canonical, entry.id);
+});
+
+test("BB-8 absence vectors distinguish missing discovery, unqualified reads and divergent content", async () => {
+  const seller = `did:demos:agent:${"6".repeat(64)}`;
+  const deviations = new Set(["binding-resolves-authoritative-absent-one-sided", "binding-qualified-absence-allows-one-sided"]);
+  let count = 0;
+  for (const name of ["unresolved-vs-absent-v0.3.json", "bundle-absence-evidence-v0.3.json"]) {
+    const set = load<{ vectors: Array<{ name: string; expected: string; binding: Obj; reads?: Record<string, Obj>; variants?: Obj[] }> }>(name);
+    assert.equal(set.vectors.length, 4);
+    for (const vector of set.vectors) {
+      const evaluate = async (reads: Record<string, Obj>) => {
+        const content = (read: Obj | undefined): Obj | undefined => read?.response === "content" ? read.bundle as Obj
+          : (read?.observations as Obj[] | undefined)?.find((view) => view.response === "content")?.bundle as Obj | undefined;
+        const buyer = content(reads.buyer);
+        const sellerCopy = content(reads.seller);
+        if (buyer && sellerCopy) return currentBundleCopiesDiverge(
+          { ...buyer, phaseSummary: [] }, { ...sellerCopy, phaseSummary: [] },
+        ) ? "fail" : "pass";
+        const binding = { bindingVersion: "1" as const, jobId: "vector-job", role: "seller" as const,
+          logicalAddress: logicalBundleAddress("vector-job", "seller"), nativeAddress: `stor-${"0".repeat(40)}`,
+          bundleContentHash: "a".repeat(64), signer: seller,
+          signature: { algorithm: "ed25519" as const, signer: seller, value: "" } };
+        // Only project discovered bindings; missing/unauthenticated/policy-qualified absence all
+        // stay unresolved on Demos, whose mapping has no absence-evidence policy (SPEC_PIN).
+        const resolution = await resolveBundleSide({ jobId: "vector-job", role: "seller", expectedSigner: seller,
+          bindings: vector.binding.resolved === false ? [] : [binding], inspect: async () => null });
+        return resolution.disposition;
+      };
+      const expected = deviations.has(vector.name) ? "indeterminate" : vector.expected;
+      assert.equal(await evaluate(vector.reads ?? {}), expected, vector.name);
+      for (const variant of vector.variants ?? []) {
+        assert.equal(await evaluate({ seller: variant.missingAddressRead as Obj }), "indeterminate", `${vector.name}/${variant.name}`);
+      }
+      count++;
+    }
+  }
+  assert.equal(count, 8);
+  assert.equal(deviations.size, 2);
+});
+
+
+test("metered-pricing-v0.3 agreement-validation vectors use exact arithmetic and metered-only quantities", () => {
+  const set = load<{ vectors: Array<{ name: string; surface: string; pricing: Obj; terms: Obj; expected: string }> }>("metered-pricing-v0.3.json");
+  const publisher = `did:demos:agent:${"5".repeat(64)}`;
+  const spec = { kind: "attested-payload", payloadFormat: "application/json" };
+  let decided = 0;
+  for (const vector of set.vectors) {
+    if (vector.surface !== "agreement-validation") continue; // quantity derivation is handler-side.
+    decided++;
+    const listing = { listingId: "metered", listingVersion: 1, pricing: vector.pricing,
+      pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-attested-payload" }], offering: { deliverable: spec } };
+    const agreement = { agreementVersion: "1", derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: `did:demos:agent:${"6".repeat(64)}` }, { role: "seller", primaryClaim: publisher }],
+      terms: { ...vector.terms, deliverable: { deliverableType: spec.kind, hash: contentHash(spec) }, deadline: 1 } };
+    const result = agreementListingConformance(agreement, listing, publisher, null);
+    assert.equal(result === null ? "accept" : result === COMMITTED_AT_INDETERMINATE ? "indeterminate" : "reject", vector.expected, `${vector.name}: ${result}`);
+  }
+  assert.equal(decided, 19);
+});
+
+test("phase-kind-divergence-v0.3 rejects contradictory shared-index invocations", () => {
+  const set = load<{ vectors: Array<{ name: string; copies: { buyer: Obj; seller: Obj }; expected: string }> }>("phase-kind-divergence-v0.3.json");
+  for (const vector of set.vectors) assert.equal(currentBundleCopiesDiverge(vector.copies.buyer, vector.copies.seller) ? "reject" : "accept", vector.expected, vector.name);
 });

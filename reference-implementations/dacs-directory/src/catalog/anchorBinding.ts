@@ -1,0 +1,149 @@
+/**
+ * Logical→native bindings for DACS-4 SR-2 anchors.
+ *
+ * Demos folds write inputs (deployer, StorageProgram name, nonce, salt) into a
+ * native address, so the name is an opaque write input and never a resolution
+ * key; the implementation publishes a logical→native binding instead
+ * (DEMOS-MAPPING §A.2, DACS-1 §6.3.4). The pinned Standard defines that object
+ * only for listings, revocations (RB-2) and bundles (BB-1..BB-8). Payment
+ * evidence (PC-2) and storage deliverables (§9.6.1) use this BundleBinding-shaped
+ * profile object, signed under a SIG-4 extension domain until the Standard
+ * registers one. Like a BundleBinding it is self-authenticating, so any carrier
+ * may serve it verbatim. The evidence graph never needs one: the signed pipeline
+ * gives each anchor its address, and a carried binding must agree with it.
+ */
+import { boundedJson } from "./artifactLimits.js";
+import { contentHash } from "./canonical.js";
+import {
+  canonicalSigningIdentity,
+  resolveDemosPrimaryClaimKey,
+  resolvePrimaryClaimKey,
+  sameResolvedPrimaryClaim,
+  verifyResolvedPrimaryClaimSignature,
+  type ResolvePrimaryClaimKey,
+} from "./primaryClaimKey.js";
+import { canonicalSignatureBytes } from "./signatureValue.js";
+
+export const ANCHOR_BINDING_DOMAIN = "dacs-x-anchor-binding:v1:";
+
+export interface AnchorBinding {
+  anchorBindingVersion: "1";
+  jobId: string;
+  /** `dacs4:payment:{jobId}:{railId}:{phaseIndex}[:resolved]` or `dacs4:deliverable:{jobId}`. */
+  logicalAddress: string;
+  nativeAddress: string;
+  /** The AttestationRef contentHash of payment evidence; the DV-1 cleartext hash of a deliverable. */
+  contentHash: string;
+  anchorTx?: string;
+  signer: string;
+  signature: { algorithm: "ed25519"; signer: string; value: string };
+}
+
+const NATIVE_ADDRESS = /^stor-[0-9a-f]{40}$/;
+const HASH = /^[0-9a-f]{64}$/;
+const PAYMENT_ADDRESS = /^dacs4:payment:([^:]+):([^:]+):(0|[1-9]\d*)(?::resolved)?$/;
+
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+
+/** CORE CF-4: percent-encode exactly the reserved delimiters `: ? & = %` of a variable segment, in uppercase hex. */
+export const cf4Segment = (segment: string): string =>
+  segment.replace(/[:?&=%]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+
+/** PC-2 logical address. `railId` is a CF-4 variable segment; jobId (a ULID) is not encoded. */
+export function paymentLogicalAddress(jobId: string, railId: string, phaseIndex: number, resolved = false): string {
+  return `dacs4:payment:${jobId}:${cf4Segment(railId)}:${phaseIndex}${resolved ? ":resolved" : ""}`;
+}
+
+export function parsePaymentLogicalAddress(address: string): { jobId: string; encodedRail: string; phaseIndex: number } | null {
+  const match = address.match(PAYMENT_ADDRESS);
+  const phaseIndex = match ? Number(match[3]) : NaN;
+  return match && Number.isSafeInteger(phaseIndex) ? { jobId: match[1], encodedRail: match[2], phaseIndex } : null;
+}
+
+/** §9.6.1 step 3 logical address of a storage deliverable. */
+export const deliverableLogicalAddress = (jobId: string): string => `dacs4:deliverable:${jobId}`;
+
+/**
+ * The BB-4 equivalent plus structural ingress: `signature.signer` equals
+ * `signer` and verifies over the domain-separated canonical form. Unknown
+ * members stay in the signed scope. Total over untrusted JSON.
+ */
+export async function verifyAnchorBinding(
+  value: unknown,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<AnchorBinding | null> {
+  const raw = record(value);
+  const signature = record(raw?.signature);
+  // contentHash omits `signatures` as well as `signature`, so such a member would ride along unsigned.
+  if (
+    !raw || boundedJson(raw, 16_384) === null || raw.signatures !== undefined ||
+    raw.anchorBindingVersion !== "1" || typeof raw.jobId !== "string" ||
+    raw.jobId.length < 1 || raw.jobId.length > 160 ||
+    typeof raw.logicalAddress !== "string" || !raw.logicalAddress.startsWith("dacs4:") || raw.logicalAddress.length > 512 ||
+    typeof raw.nativeAddress !== "string" || !NATIVE_ADDRESS.test(raw.nativeAddress) ||
+    typeof raw.contentHash !== "string" || !HASH.test(raw.contentHash) ||
+    (raw.anchorTx !== undefined && (typeof raw.anchorTx !== "string" || raw.anchorTx.length > 256)) ||
+    typeof raw.signer !== "string" || !signature || signature.algorithm !== "ed25519" ||
+    typeof signature.signer !== "string" || typeof signature.value !== "string"
+  ) return null;
+
+  const signer = await resolvePrimaryClaimKey(raw.signer, signature.algorithm, resolveKey);
+  const signatureSigner = await resolvePrimaryClaimKey(signature.signer, signature.algorithm, resolveKey);
+  if (!signer || !signatureSigner || !sameResolvedPrimaryClaim(signer, signatureSigner)) return null;
+  const sig = canonicalSignatureBytes(signature.value);
+  if (!sig) return null;
+
+  const scope = { ...raw };
+  delete scope.signature;
+  let hash: string;
+  try {
+    hash = contentHash(scope);
+  } catch {
+    return null;
+  }
+  return verifyResolvedPrimaryClaimSignature(Buffer.from(ANCHOR_BINDING_DOMAIN + hash, "utf8"), sig, signer)
+    ? raw as unknown as AnchorBinding
+    : null;
+}
+
+/**
+ * A bundle's carried member, judged whole: every entry must be an authenticated
+ * binding of one of this job's logical addresses, or the member is refused (null).
+ * Judging only the entries an anchor looks up would refuse a completion for what
+ * a failure, which has no anchor, carries unread.
+ */
+export async function verifyAnchorBindings(
+  carried: readonly unknown[],
+  jobId: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<AnchorBinding[] | null> {
+  const verified: AnchorBinding[] = [];
+  for (const candidate of carried) {
+    const binding = await verifyAnchorBinding(candidate, resolveKey);
+    if (!binding || binding.jobId !== jobId || (binding.logicalAddress !== deliverableLogicalAddress(jobId) &&
+        parsePaymentLogicalAddress(binding.logicalAddress)?.jobId !== jobId)) return null;
+    verified.push(binding);
+  }
+  return verified;
+}
+
+/**
+ * What the anchored record's own signer bound one native anchor to, among
+ * verified bindings; anyone else's are inert. undefined when that signer bound
+ * nothing there; null when it bound another content hash there or two logical
+ * addresses, which contradicts the record it signed.
+ */
+export function boundLogicalAddress(
+  verified: readonly AnchorBinding[],
+  anchor: { nativeAddress: string; contentHash: string; signer: string },
+): string | null | undefined {
+  const signer = canonicalSigningIdentity(anchor.signer);
+  const own = verified.filter((binding) => binding.nativeAddress === anchor.nativeAddress &&
+    canonicalSigningIdentity(binding.signer) === signer);
+  if (own.length === 0) return undefined;
+  const addresses = new Set(own.map((binding) => binding.logicalAddress));
+  return addresses.size === 1 && own.every((binding) => binding.contentHash === anchor.contentHash) ? [...addresses][0] : null;
+}

@@ -10,6 +10,7 @@ import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 import { artifactProfiles } from "@/src/catalog/contracts";
+import { rateFloor } from "@/src/catalog/rateRange";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -69,11 +70,14 @@ export async function GET(req: NextRequest) {
     }
     if (minCompletionRate !== null) {
       const min = Number(minCompletionRate);
-      if (!Number.isFinite(min) || min < 0 || min > 1 || l.reputationHint?.completionRate == null || l.reputationHint.completionRate < min) return false;
+      // A rate undecided sessions could change is null; its range's low end credits none of them (rateRange.ts).
+      const floor = rateFloor(l.reputationHint?.completionRate, l.reputationHint?.completionRateRange);
+      if (!Number.isFinite(min) || min < 0 || min > 1 || floor === null || floor < min) return false;
     }
     if (minRating !== null) {
       const min = Number(minRating);
-      if (!Number.isFinite(min) || min < 0 || min > 5 || l.reputationHint?.averageSellerRating == null || l.reputationHint.averageSellerRating < min) return false;
+      const floor = rateFloor(l.reputationHint?.averageSellerRating, l.reputationHint?.averageSellerRatingRange);
+      if (!Number.isFinite(min) || min < 0 || min > 5 || floor === null || floor < min) return false;
     }
     if (tags.length && !tags.every((t) => l.offering.tags.includes(t))) return false;
     if (query) {

@@ -34,16 +34,53 @@ export function phaseSummariesDiverge(left: unknown, right: unknown): boolean {
   return false;
 }
 
+/** Callers pass verified copies: a current FaultAttestationBundle, or an AttestationBundle (current or SDK profile). */
+const bundleType = (bundle: Record<string, unknown>) => bundle.faultBundleVersion === "1" ? "fault" : "legacy";
+
+/** DACS-5 §10.4.3 outcome class: completed, failed-substrate, abort, or failure. */
+function outcomeClass(outcome: unknown): string {
+  return outcome === "aborted-by-self" || outcome === "aborted-by-other" ? "abort"
+    : outcome === "failed-perm" || outcome === "failed-counterparty" ? "failure" : String(outcome);
+}
+
+/**
+ * The §10.4.1 permissible-set mapping of a legacy copy's role-relative outcome to the parties it
+ * may fault: none for completed or failed-substrate, the anchoring role for its own fault, and
+ * every other session role for a counterparty fault (a singleton in a two-party session).
+ */
+function impliedFaultSet(legacy: Record<string, unknown>): Set<string> {
+  const anchored = String(legacy.anchoredByRole);
+  const roles = records(legacy.parties).map((party) => String(party.role));
+  const outcome = legacy.outcome;
+  if (outcome === "completed" || outcome === "failed-substrate") return new Set(["none"]);
+  if (outcome === "failed-perm" || outcome === "aborted-by-self") return new Set([anchored]);
+  if (outcome === "failed-counterparty" || outcome === "aborted-by-other") return new Set(roles.filter((role) => role !== anchored));
+  return new Set();
+}
+
+/**
+ * DACS-5 §10.4.3 "canonically diverge", applied by version: a FaultAttestationBundle pair compares
+ * the absolute faultedParty and outcome class; a legacy pair compares outcomes after the
+ * perspective flip; a mixed pair checks the fault bundle's faultedParty against the legacy copy's
+ * implied-fault set and the outcome classes. The shared-index phaseSummary limb applies to all.
+ */
 export function currentBundleCopiesDiverge(
   buyerBundle: Record<string, unknown>,
   sellerBundle: Record<string, unknown>,
 ): boolean {
-  const buyerType = buyerBundle.faultBundleVersion === "1" ? "fault" : buyerBundle.bundleVersion === "1" ? "legacy" : "unknown";
-  const sellerType = sellerBundle.faultBundleVersion === "1" ? "fault" : sellerBundle.bundleVersion === "1" ? "legacy" : "unknown";
-  return buyerType !== sellerType ||
-    (buyerType === "fault" && buyerBundle.faultedParty !== sellerBundle.faultedParty) ||
-    flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
-    phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary);
+  if (phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary)) return true;
+  const buyerType = bundleType(buyerBundle);
+  const sellerType = bundleType(sellerBundle);
+  if (buyerType === "fault" && sellerType === "fault") {
+    return buyerBundle.faultedParty !== sellerBundle.faultedParty ||
+      outcomeClass(buyerBundle.outcome) !== outcomeClass(sellerBundle.outcome);
+  }
+  if (buyerType === "legacy" && sellerType === "legacy") {
+    return flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome);
+  }
+  const [fault, legacy] = buyerType === "fault" ? [buyerBundle, sellerBundle] : [sellerBundle, buyerBundle];
+  return !impliedFaultSet(legacy).has(String(fault.faultedParty)) ||
+    outcomeClass(fault.outcome) !== outcomeClass(legacy.outcome);
 }
 
 function sellerRelativeOutcome(graph: EvidenceGraph, sellerClaim: string): string {
@@ -65,6 +102,35 @@ const roleOf = (graph: EvidenceGraph | null, claim: string) => {
   return parties.find((party) => String(party.primaryClaim).toLowerCase() === claim.toLowerCase())?.role;
 };
 
+/**
+ * DACS-5 §10.5.1 at run time: a session this pass could not decide. Each copy is bound to this job, its anchoring
+ * role and its parties as reconcileCurrentCopies requires, and either verified or stopped at a check that gave no
+ * verdict (EvidenceGraph.undecided), at least one stopped. Their copies must not diverge, which would exclude the
+ * session whatever is decided. The seller copy standing means the seller signed it (bundleSignerPolicy requires the
+ * anchoring role), so a counterparty cannot leave the seller's session undecided alone. Null otherwise.
+ */
+export function reconcileUndecidedCopies(
+  deal: RegisteredDeal,
+  sellerClaim: string,
+  buyerGraph: EvidenceGraph,
+  sellerGraph: EvidenceGraph,
+): { kind: "no-answer" | "lasting"; reason: string; sellerOutcomes: string[]; ratingsAtMost: number } | null {
+  const stands = (graph: EvidenceGraph, expectedRole: "buyer" | "seller") => (graph.ok || graph.undecided !== undefined) &&
+    graph.bundle.jobId === deal.jobId && graph.bundle.anchoredByRole === expectedRole &&
+    roleOf(graph, deal.owners.buyer) === "buyer" && roleOf(graph, sellerClaim) === "seller";
+  if (!stands(buyerGraph, "buyer") || !stands(sellerGraph, "seller")) return null;
+  const stopped = [sellerGraph.undecided, buyerGraph.undecided].filter((undecided) => undecided !== undefined);
+  if (stopped.length === 0 || currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph.bundle)) return null;
+  // A lasting state in either copy keeps the session undecided on every later pass.
+  const cause = stopped.find((undecided) => undecided.kind === "lasting") ?? stopped[0];
+  // DACS-5 keeps one rating per rater, session and role, and the seller's own does not count: a copy that cites
+  // any rating can add one per other party.
+  const citesRating = [buyerGraph, sellerGraph].some((graph) => Array.isArray(graph.bundle.ratingRefs) && graph.bundle.ratingRefs.length > 0);
+  return { kind: cause.kind, reason: cause.reason,
+    sellerOutcomes: [...new Set([sellerRelativeOutcome(sellerGraph, sellerClaim), sellerRelativeOutcome(buyerGraph, sellerClaim)])],
+    ratingsAtMost: citesRating ? records(sellerGraph.bundle.parties).filter((party) => party.role !== "seller").length : 0 };
+}
+
 /** Pure two-copy selection used by the indexer and by byte-stable fixtures. */
 export function reconcileCurrentCopies(
   deal: RegisteredDeal,
@@ -81,7 +147,12 @@ export function reconcileCurrentCopies(
   const divergent = Boolean(
     buyerOk && sellerOk && currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph!.bundle),
   );
-  const authoritative = sellerOk ? sellerGraph! : buyerGraph;
+  // The scored party's own copy is authoritative, except that in a non-divergent mixed-version pair
+  // the FaultAttestationBundle copy is (§10.4.3(c), §10.5.1).
+  const mixed = buyerOk && sellerOk && !divergent && bundleType(buyerGraph.bundle) !== bundleType(sellerGraph!.bundle);
+  const authoritative = mixed
+    ? bundleType(buyerGraph.bundle) === "fault" ? buyerGraph : sellerGraph!
+    : sellerOk ? sellerGraph! : buyerGraph;
   const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
   const sellerOutcome = sellerRelativeOutcome(authoritative, sellerClaim);
   const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
@@ -92,6 +163,7 @@ export function reconcileCurrentCopies(
     divergent,
     refsVerified,
     sellerOutcome,
+    orchestratorFaultNeutral: authoritative.bundle.faultBundleVersion === "1" && authoritative.bundle.faultedParty === "orchestrator",
     selectedLocator,
   };
 }

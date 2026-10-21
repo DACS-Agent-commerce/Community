@@ -157,6 +157,9 @@ export interface InspectedBundle<T> {
   fullSignatureStanding: boolean;
 }
 
+/** The side's every fetched candidate failed a BB-5 post-fetch check: none was accepted, so none can void the side. */
+export const EVERY_CANDIDATE_FAILED_POST_FETCH = "every BundleBinding failed BB-5 post-fetch checks";
+
 export type BundleSideResolution<T> =
   | { disposition: "present"; binding: BundleBinding; inspected: InspectedBundle<T> }
   | { disposition: "indeterminate"; reason: string };
@@ -201,7 +204,7 @@ export async function resolveBundleSide<T>(options: {
     }
   }
   if (accepted.length === 0) {
-    return { disposition: "indeterminate", reason: "every BundleBinding failed BB-5 post-fetch checks" };
+    return { disposition: "indeterminate", reason: EVERY_CANDIDATE_FAILED_POST_FETCH };
   }
 
   // Canonically equal copies collapse. Prefer a fully-signed representative

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
+import { rateFloor } from "@/src/catalog/rateRange";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
 import { directoryEvidenceState } from "./directory-evidence-state";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "./labels";
@@ -74,7 +75,8 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     return services.filter(({ listing, seller }) => {
       if (rail && !(listing.offering.rails ?? []).includes(rail)) return false;
       if (category && !categoryMatches(listing.offering.category, category)) return false;
-      if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
+      // An undecided session never earns a good record: the rate, or else its range's low end (rateRange.ts).
+      if (goodRecord && !((rateFloor(seller.reputation.completionRate, seller.reputation.completionRateRange) ?? -1) >= 0.9)) return false;
       if (identityTier && sellerTier(seller) !== identityTier) return false;
       if (!needle) return true;
       return [

@@ -6,10 +6,13 @@ import {
   deriveStorageAddress,
   LIVE_STORAGE_SALT,
   readAnchorResult,
+  readArtifact,
+  readPayloadRecord,
   resolveOwnedAnchorByName,
   UNKNOWN_NODE_CALL,
   isUnknownNodeCall,
 } from "../src/catalog/chain.js";
+import { VerificationUnavailable } from "../src/catalog/verificationUnavailable.js";
 
 const owner = `0x${"12".repeat(32)}`;
 const programName = "dacs1-ZGFjczE";
@@ -229,35 +232,44 @@ test("a storage read separates a definitive answer from a transport failure (RB-
   const at = "stor-4444444444444444444444444444444444444444";
   const body = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
   const nodeError = (status: number, errorCode: string) => body({ success: false, error: "storage program read failed", errorCode }, status);
-  const cases: Array<[string, () => Response | Promise<Response>, string]> = [
+  // An unavailable read keeps its cause: `denied` and `too-large` are the program as its owner keeps it,
+  // the others are no answer at all.
+  const deep = (levels: number): unknown => levels === 0 ? 1 : { next: deep(levels - 1) };
+  const cases: Array<[string, () => Response | Promise<Response>, string, string?]> = [
     ["object data", () => body({ success: true, owner, programName, data: { marker: 1 } }), "present"],
     // The node's own answers are definitive.
     ["not found", () => nodeError(404, "NOT_FOUND"), "absent"],
-    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "unavailable"],
+    ["not public", () => nodeError(403, "PERMISSION_DENIED"), "unavailable", "denied"],
     // A 4xx without the node's matching errorCode is a proxy, a route or a mismatch: incomplete (RB-6).
-    ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable"],
-    ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable"],
-    ["a body-less 403", () => new Response(null, { status: 403 }), "unavailable"],
-    ["a 404 naming another error", () => nodeError(404, "PERMISSION_DENIED"), "unavailable"],
-    ["a 403 naming another error", () => nodeError(403, "NOT_FOUND"), "unavailable"],
-    ["a 404 reporting success", () => body({ success: true, errorCode: "NOT_FOUND" }, 404), "unavailable"],
-    ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable"],
-    ["invalid request", () => new Response(null, { status: 400 }), "unavailable"],
-    ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable"],
+    ["a body-less 404", () => new Response(null, { status: 404 }), "unavailable", "node-error"],
+    ["a proxy's 404", () => body({ error: "Not Found" }, 404), "unavailable", "node-error"],
+    ["a body-less 403", () => new Response(null, { status: 403 }), "unavailable", "node-error"],
+    ["a 404 naming another error", () => nodeError(404, "PERMISSION_DENIED"), "unavailable", "node-error"],
+    ["a 403 naming another error", () => nodeError(403, "NOT_FOUND"), "unavailable", "node-error"],
+    ["a 404 reporting success", () => body({ success: true, errorCode: "NOT_FOUND" }, 404), "unavailable", "node-error"],
+    ["a 403 reporting success", () => body({ success: true, errorCode: "PERMISSION_DENIED" }, 403), "unavailable", "node-error"],
+    ["unauthenticated", () => new Response(null, { status: 401 }), "unavailable", "node-error"],
+    ["invalid request", () => new Response(null, { status: 400 }), "unavailable", "node-error"],
+    ["the node's invalid request", () => nodeError(400, "INVALID_REQUEST"), "unavailable", "node-error"],
     ["non-object data", () => body({ success: true, owner, programName, data: "text" }), "invalid"],
-    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable"],
-    ["node failure", () => new Response(null, { status: 503 }), "unavailable"],
-    ["failed HTTP with plausible success JSON", () => body({ success: true, owner, programName, data: {} }, 503), "unavailable"],
-    ["rate limited", () => new Response(null, { status: 429 }), "unavailable"],
-    ["unsuccessful body", () => body({ success: false }), "unavailable"],
-    ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable"],
-    ["network error", () => { throw new TypeError("fetch failed"); }, "unavailable"],
+    ["oversized response", () => new Response("x".repeat(1024 * 1024 + 1)), "unavailable", "too-large"],
+    ["data over the artifact bound", () => body({ success: true, owner, programName, data: { text: "x".repeat(256 * 1024) } }), "unavailable", "too-large"],
+    ["data over the depth bound", () => body({ success: true, owner, programName, data: deep(130) }), "unavailable", "too-large"],
+    ["node failure", () => new Response(null, { status: 503 }), "unavailable", "node-error"],
+    ["failed HTTP with plausible success JSON", () => body({ success: true, owner, programName, data: {} }, 503), "unavailable", "node-error"],
+    ["rate limited", () => new Response(null, { status: 429 }), "unavailable", "node-error"],
+    ["unsuccessful body", () => body({ success: false }), "unavailable", "node-error"],
+    ["truncated JSON", () => new Response("{\"success\":tr"), "unavailable", "node-error"],
+    ["network error", () => { throw new TypeError("fetch failed"); }, "unavailable", "transport"],
+    ["timeout", () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }, "unavailable", "timeout"],
   ];
   const originalFetch = globalThis.fetch;
   try {
-    for (const [name, respond, expected] of cases) {
+    for (const [name, respond, expected, cause] of cases) {
       globalThis.fetch = async () => respond();
-      assert.equal((await readAnchorResult(at)).status, expected, name);
+      const read = await readAnchorResult(at);
+      assert.equal(read.status, expected, name);
+      assert.equal(read.status === "unavailable" ? read.cause : undefined, cause, name);
     }
     assert.equal((await readAnchorResult("stor-../../admin")).status, "absent");
   } finally {
@@ -265,6 +277,46 @@ test("a storage read separates a definitive answer from a transport failure (RB-
   }
 });
 
+
+// DACS-5 §10.5.1: the evidence graph refutes a session only on an answer. A record its owner keeps
+// unreadable here (denied, over the bounds) refutes only the session citing it, as deleting it would;
+// no answer leaves that session undecided (VerificationUnavailable "no-answer"). A payload closed to
+// this anonymous reader is undecided too, since DV-2 lets a public listing be delivered privately, but
+// its owner keeps it closed, so it is a lasting state that never holds the seller (sweep 13 F1).
+test("the graph's artifact and payload readers refute only on an answer", async () => {
+  const at = `stor-${"5".repeat(40)}`;
+  const body = (value: unknown, status = 200) => Response.json(value, { status });
+  const data = { marker: 1 };
+  type Outcome = "data" | "null" | "no-answer" | "lasting";
+  const replies: Array<[string, () => Response, Outcome, Outcome]> = [
+    ["present", () => body({ success: true, owner, programName, data, acl: { mode: "public" } }), "data", "data"],
+    ["absent", () => body({ success: false, errorCode: "NOT_FOUND" }, 404), "null", "null"],
+    ["invalid", () => body({ success: true, owner, programName, data: "text" }), "null", "null"],
+    ["denied", () => body({ success: false, errorCode: "PERMISSION_DENIED" }, 403), "null", "lasting"],
+    ["too large", () => body({ success: true, owner, programName, data: { text: "x".repeat(256 * 1024) } }), "null", "null"],
+    ["a node error", () => new Response(null, { status: 503 }), "no-answer", "no-answer"],
+    ["a transport failure", () => { throw new TypeError("fetch failed"); }, "no-answer", "no-answer"],
+  ];
+  const outcome = async (read: () => Promise<unknown>): Promise<Outcome> => {
+    try { const value = await read(); return value === null ? "null" : "data"; } catch (error) {
+      assert.ok(error instanceof VerificationUnavailable, String(error));
+      return error.kind;
+    }
+  };
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [name, respond, artifact, payload] of replies) {
+      globalThis.fetch = async () => respond();
+      assert.equal(await outcome(() => readArtifact(at)), artifact, `artifact: ${name}`);
+      assert.equal(await outcome(() => readPayloadRecord(at)), payload, `payload: ${name}`);
+    }
+    globalThis.fetch = async () => body({ success: true, owner, programName, data, acl: { mode: "public" } });
+    assert.deepEqual(await readArtifact(at), data);
+    assert.deepEqual((await readPayloadRecord(at))?.acl, { mode: "public" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("storage reads retain node ACL separately from payload assertions", async () => {
   const originalFetch = globalThis.fetch;

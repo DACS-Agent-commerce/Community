@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
-import { deriveSellerReputation } from "./reputation.js";
+import { deriveSellerReputation, reconcileCatalogReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -470,7 +470,11 @@ export const loadCatalog = (): Catalog => {
   }
   return catalog;
 };
-export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
+export const saveCatalog = (catalog: Catalog): void => {
+  // Every publication, including index-now, shares one settlement ledger.
+  reconcileCatalogReputation(catalog.sellers, catalog.generatedAt);
+  setJson("catalog", catalog);
+};
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
 export const loadScanState = () => normalizeScanState(getJson("scan-state", { lastSeenTxId: 0, listings: {}, deals: {} }));
@@ -825,6 +829,10 @@ export const loadRetryableArtifacts = db.transaction((now: number = Date.now()):
 });
 export const artifactAnchorTime = (locator: string): number | undefined =>
   (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ?").get(locator) as { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
+/** Consensus anchor time of exactly this content at this locator; a row observed with other content says nothing. */
+export const artifactAnchorTimeFor = (locator: string, contentHash: string): number | undefined =>
+  (db.prepare("SELECT anchor_time FROM artifacts WHERE locator = ? AND content_hash = ?").get(locator, contentHash) as
+    { anchor_time: number | null } | undefined)?.anchor_time ?? undefined;
 /** Canonical storage owner recorded when the locator was last read, if any. */
 export const artifactOwner = (locator: string): string | null => {
   const owner = (db.prepare("SELECT owner FROM artifacts WHERE locator = ?").get(locator) as { owner: string | null } | undefined)?.owner;

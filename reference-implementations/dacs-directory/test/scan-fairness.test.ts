@@ -383,12 +383,15 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
   test(`deals are keyed by their owner: another owner's ${route} with the same jobId leaves the deal in place`, async () => {
     const jobId = "shared-job";
     const signedRoute = !route.startsWith("unsigned");
-    // The signed route uses current-format bundles; the unsigned route uses name-only programs.
-    const currentBundle = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer" });
+    // The signed route uses current-format bundles that sign their agreementRef; the unsigned route uses name-only programs.
+    const currentBundle = (at: string, agreement: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer",
+      agreementRef: { anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") } });
+    const firstAgreement = await agreementFor(jobId, 0, 1);
+    const secondAgreement = await agreementFor(jobId, 2, 3);
     resetIndex([later], 7);
     chain({
-      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle : '{"any":1}', owner: ownerOf(buyer) },
-      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+      [locator(40)]: { name: `dacs5:bundle:${jobId}`, data: signedRoute ? currentBundle(locator(41), firstAgreement) : '{"any":1}', owner: ownerOf(buyer) },
+      [locator(41)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(firstAgreement), owner: ownerOf(buyer) },
     }, [locator(40), locator(41)]);
     transactions.unshift(memo(10));
     await reindex();
@@ -399,11 +402,11 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
     // The established writes are outside the next pass's replay overlap.
     const writer = signedRoute ? otherBuyer : outsider;
     storage[locator(42)] = signedRoute
-      ? { data: currentBundle, owner: ownerOf(writer) }
+      ? { data: currentBundle(locator(43), secondAgreement), owner: ownerOf(writer) }
       : { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(writer) };
     const second = [locator(42)];
     if (signedRoute) {
-      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 2, 3)), owner: ownerOf(otherBuyer) };
+      storage[locator(43)] = { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(secondAgreement), owner: ownerOf(otherBuyer) };
       second.push(locator(43));
     }
     transactions = [...second.map((at, index) => memo(20 + index, at)).reverse(), ...transactions];
@@ -427,6 +430,100 @@ for (const route of ["unsigned bundle-named program", "bundle and agreement sign
   });
 }
 
+test("a discovered current-profile deal is attributed through the agreementRef its bundle signs, never a program name (§10.4.2)", async () => {
+  const jobId = "01M4BD45XYXPF95E24JYPKNM2Y";
+  const agreement = await agreementFor(jobId, 0, 1);
+  const agreementRef = (at: string) => ({ anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(agreement, "agreement") });
+  const bundle = (ref: Obj) => JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer", agreementRef: ref });
+  const sellerCopy = JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "seller" });
+  const scannedDeal = async () => [...(await scanChain(null, { maxTxs: 100, sinceTxId: 0 })).deals.values()].find((deal) => deal.jobId === jobId);
+  // Conforming producers percent-encode the colons, which is how node2 stores these names.
+  chain({
+    [locator(980)]: { name: `dacs5%3Abundle%3A${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3%3Aagreement%3A${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(982)]: { name: "opaque-seller-copy", data: sellerCopy, owner: ownerOf(seller) },
+  }, [locator(980), locator(981), locator(982)]);
+  let deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, seller);
+  assert.equal(deal?.sellerBundleRef, locator(982));
+  assert.equal(deal?.agreementLocator, locator(981));
+
+  // A reference whose hash does not match attributes nothing, and a conventionally named
+  // agreement for the same job is not consulted in its place.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle({ ...agreementRef(locator(981)), contentHash: "0".repeat(64) }), owner: ownerOf(buyer) },
+    [locator(981)]: { name: "opaque", data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  deal = await scannedDeal();
+  assert.equal(deal?.owners.seller, "");
+
+  // A reference to a locator that holds nothing attributes nothing, and the scan still completes.
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(984))), owner: ownerOf(buyer) },
+  }, [locator(980)]);
+  deal = await scannedDeal();
+  assert.deepEqual([deal?.buyerBundleRef, deal?.owners.seller, deal?.agreementLocator], [locator(980), "", undefined]);
+
+  // Two programs sharing the conventional name do not void a deal its signed reference attributes.
+  resetIndex([later], 36);
+  chain({
+    [locator(980)]: { name: `dacs5:bundle:${jobId}`, data: bundle(agreementRef(locator(981))), owner: ownerOf(buyer) },
+    [locator(981)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+    [locator(983)]: { name: `dacs3:agreement:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+  }, [locator(980), locator(981), locator(983)]);
+  transactions.unshift(memo(10));
+  await reindex();
+  assert.equal(store.loadScanState().programs[`${ownerOf(buyer)}\ndacs3:agreement:${jobId}`], null);
+  assert.equal(store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`]?.owners.seller, seller);
+});
+
+test("discovery attributes no seller from an unsigned, mismatched or foreign agreement, on either path", async () => {
+  const jobId = "attribution-negatives";
+  const good = await agreementFor(jobId, 0, 1);
+  const refTo = (at: string, raw: Obj) => ({ anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, "agreement") });
+  const scanned = async (programs: Record<string, StoredProgram>, owner = buyer) => {
+    chain(programs, Object.keys(programs));
+    return [...(await scanChain(null, { maxTxs: 100, sinceTxId: 0 })).deals.values()]
+      .find((deal) => deal.jobId === jobId && deal.owners.buyer === owner);
+  };
+  // Current profile: the bundle names its agreement by the locator and hash it signs.
+  const viaRef = async (agreement: Obj, owner = buyer, ref: Obj = refTo(locator(991), agreement)) => (await scanned({
+    [locator(990)]: { name: "opaque-bundle", data: JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer", agreementRef: ref }), owner: ownerOf(owner) },
+    [locator(991)]: { name: "opaque-agreement", data: JSON.stringify(agreement), owner: ownerOf(owner) },
+  }, owner))?.owners.seller;
+  // Legacy SDK profile: the agreement is the buyer's program named for the job.
+  const viaName = async (agreement: Obj, owner = buyer, extra: Record<string, StoredProgram> = {}) => (await scanned({
+    [locator(992)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(owner) },
+    [locator(993)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(agreement), owner: ownerOf(owner) }, ...extra,
+  }, owner));
+  const { signatures: _, ...unsigned } = good as Obj & { signatures: unknown };
+  const buyerOnly = { ...good, signatures: [(good.signatures as Obj[])[0]] };
+  const otherJob = await agreementFor("another-job", 0, 1);
+  const otherPair = await agreementFor(jobId, 2, 3);
+  assert.equal(await viaRef(good), seller);
+  assert.equal((await viaName(good))?.owners.seller, seller);
+  assert.deepEqual({
+    "ref: unsigned": await viaRef(unsigned),
+    "ref: signed by the buyer alone": await viaRef(buyerOnly),
+    "ref: another job's agreement": await viaRef(otherJob),
+    "ref: another buyer's agreement": await viaRef(otherPair),
+    "ref: cited from another buyer's bundle": await viaRef(good, otherBuyer),
+    "ref: a hash that is not the agreement's": await viaRef(good, buyer, { ...refTo(locator(991), good), contentHash: "0".repeat(64) }),
+    "ref: not a current reference": await viaRef(good, buyer, { locator: locator(991) }),
+    "name: unsigned": (await viaName(unsigned))?.owners.seller,
+    "name: another job's agreement": (await viaName(otherJob))?.owners.seller,
+    "name: another buyer's agreement": (await viaName(otherPair))?.owners.seller,
+  }, {
+    "ref: unsigned": "", "ref: signed by the buyer alone": "", "ref: another job's agreement": "",
+    "ref: another buyer's agreement": "", "ref: cited from another buyer's bundle": "",
+    "ref: a hash that is not the agreement's": "", "ref: not a current reference": "",
+    "name: unsigned": "", "name: another job's agreement": "", "name: another buyer's agreement": "",
+  });
+  // Two legacy bundles under one owner and name are indeterminate: no deal is discovered at all.
+  assert.equal(await viaName(good, buyer, { [locator(994)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":2}', owner: ownerOf(buyer) } }), undefined);
+});
+
 test("two buyers' attributed deals with the same jobId both reach the seller's record", async () => {
   const jobId = "two-buyers";
   resetIndex([later], 19);
@@ -440,11 +537,13 @@ test("two buyers' attributed deals with the same jobId both reach the seller's r
   const deals = store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals ?? [];
   assert.deepEqual(deals.map((deal) => `${deal.owners.buyer} ${deal.buyerBundleRef}`).sort(),
     [`${buyer} ${locator(70)}`, `${otherBuyer} ${locator(72)}`].sort());
-  // Verified-deal deduplication keeps one record per buyer and jobId, and per bundle ref.
+  // Both are listed and both stay separate sessions: a jobId is unique only per producer, so §10.5.1
+  // reconciles per (buyer, jobId) and neither buyer's session voids the other's (BB-6).
   const verifiedDeal = (who: string, at: number) => ({ jobId, rail: "pay-dem", buyerBundleRef: locator(at),
-    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, verifiedAt: 1 });
-  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(buyer, 74), verifiedDeal(outsider, 70)])
-    .map((deal) => deal.buyerBundleRef), [locator(70), locator(72)]);
+    owners: { buyer: who, seller }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+    bundleContentHash: at.toString(16).padStart(64, "0"), fullSignatureStanding: true, verifiedAt: 1 });
+  assert.deepEqual(dedupeVerifiedDeals([verifiedDeal(buyer, 70), verifiedDeal(otherBuyer, 72), verifiedDeal(outsider, 70)])
+    .map((deal) => [deal.buyerBundleRef, deal.reputationEligible]), [[locator(70), true], [locator(72), true]]);
 });
 
 test("v9 scan state is completed by a full deal-history replay before it is marked migrated", async () => {
@@ -471,7 +570,7 @@ test("v9 scan state is completed by a full deal-history replay before it is mark
   await reindex();
   unavailable.clear();
   assert.equal(lastRun().from_tx, 0, "a replay from genesis");
-  assert.equal(store.loadScanState().schemaVersion, 10);
+  assert.equal(store.loadScanState().schemaVersion, 11);
   assert.deepEqual(entries(), [buyer, otherBuyer].sort());
   assert.deepEqual(store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.deals.map((d) => d.buyerBundleRef), [locator(45)]);
   // Once migrated, passes are incremental and the result is unchanged.
@@ -480,6 +579,34 @@ test("v9 scan state is completed by a full deal-history replay before it is mark
   assert.deepEqual(entries(), [buyer, otherBuyer].sort());
   const saved = JSON.parse(String(sql("SELECT value_json FROM kv_state WHERE key='scan-state'")[0].value_json)) as ScanState;
   assert.deepEqual(Object.keys(saved.deals).sort(), [`${ownerOf(buyer)}\n${jobId}`, `${ownerOf(otherBuyer)}\n${jobId}`].sort());
+});
+
+// Cold review P2: this branch attributes a current-profile deal through the agreementRef its bundle signs.
+// Merge-base (v10) scan state holds such deals as the base scanned them, without a seller when no program
+// name named the agreement, and history before the cursor is never scanned again unless the version changes.
+test("v10 scan state is replayed once so stored deals take the signed agreementRef attribution", async () => {
+  const jobId = "replayed-attribution";
+  const agreement = await agreementFor(jobId, 0, 1);
+  resetIndex([later], 38);
+  chain({
+    [locator(940)]: { name: "opaque-bundle", data: JSON.stringify({ bundleVersion: "1", jobId, parties: [], anchoredByRole: "buyer",
+      agreementRef: { anchor: { kind: "storage-program", locator: locator(941) }, contentHash: artifactHash(agreement, "agreement") } }), owner: ownerOf(buyer) },
+    [locator(941)]: { name: "opaque-agreement", data: JSON.stringify(agreement), owner: ownerOf(buyer) },
+  }, [locator(940), locator(941)]);
+  transactions.unshift(memo(30));
+  // As the merge base stored it: the agreement's program name did not name the job, so no seller.
+  const key = `${ownerOf(buyer)}\n${jobId}`;
+  store.saveScanState({ ...emptyState(), schemaVersion: 10, lastSeenTxId: 30,
+    deals: { [key]: { jobId, rail: "pay-dem", buyerBundleRef: locator(940), owners: { buyer, seller: "" } } } });
+  await reindex();
+  assert.equal(lastRun().from_tx, 0, "a replay from genesis");
+  assert.equal(store.loadScanState().schemaVersion, 11);
+  assert.equal(store.loadScanState().deals[key]?.owners.seller, seller);
+  assert.equal((store.loadScanState().deals[key] as { agreementLocator?: string } | undefined)?.agreementLocator, locator(941));
+  // Once migrated, passes are incremental and the attribution stays.
+  await reindex();
+  assert.equal(lastRun().from_tx, 28);
+  assert.equal(store.loadScanState().deals[key]?.owners.seller, seller);
 });
 
 test("a discovered deal keeps its seller copy when a later window has none", async () => {
@@ -684,7 +811,7 @@ test("deal-owner lookup by bundleRef never reports a scanned ref the catalog has
   const binding = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } } as BundleBinding;
   assert.ok(await verifyBundleBinding(binding));
-  store.saveScanState({ ...emptyState(), schemaVersion: 10, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
+  store.saveScanState({ ...emptyState(), schemaVersion: 11, deals: { [`${ownerOf(buyer)}\n${jobId}`]: scanned }, bundleBindings: { [jobId]: [binding] } });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: seller, listings: [],
     deals: [{ ...scanned, buyerBundleRef: locator(951), signatureVerified: true, refsVerified: true, verifiedAt: 1 }] }] } as never);
   const lookup = ownersLookup(jobId);

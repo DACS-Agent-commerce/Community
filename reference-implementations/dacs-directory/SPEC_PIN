@@ -2,7 +2,9 @@
 # github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
 4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
 # Additional primary-claim profile: did:demos:agent:<64 lowercase hex>, Ed25519,
-# from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7.
+# from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7. Its keys are Ed25519,
+# so artifacts signed with ecdsa-secp256k1 or sr1-aggregate cannot be verified under this
+# profile and are not published or counted.
 # This is a source pin, not a declaration of complete DACS conformance.
 #
 # Implemented and tested in this split:
@@ -17,7 +19,7 @@
 # - canonical.ts guards its wrappers against lone UTF-16 surrogates in keys/values;
 #   SDK NFC behavior and valid pairs are pinned by test/canonical-rules.test.ts.
 #   Other SDK canonicalizer callers have not all adopted this guard.
-# - Isolated matchesVetRequirement helper: required AND, OR within oneOf groups,
+# - matchesVetRequirement: required AND, OR within oneOf groups,
 #   AND across groups, exact verified primary, per-scheme claim normalization,
 #   verificationRequired decision gate, unconditional freshness, and unknown
 #   parameters unmatched. It requires an explicit session recipe roster and
@@ -35,24 +37,252 @@
 #   an identifier-existence result alone never establishes presenter control.
 #   validUntil or exact-recipe defaultMaxAgeSec sets the authority window; wrapper
 #   expiry/maxAge can only narrow it. See test/vet-claim-rules.test.ts.
-# - Isolated recipe policy and historical snapshot resolvers:
+# - Recipe policy and historical snapshot resolvers:
 #   test/recipe-policy.test.ts and test/recipe-snapshot.test.ts.
-# - Isolated authenticateAuthorityAttestation adapter boundary: missing, rejecting
+# - authenticateAuthorityAttestation adapter boundary: missing, rejecting
 #   or throwing adapters fail closed; adapters must authenticate original proof/hash
 #   scope, signer and validator epoch. test/authority-attestation.test.ts uses a
 #   signed fixture adapter; it is not a production method-specific verifier.
+# - Session Vet admission in the current evidence graph. It resolves historical
+#   IdentityBundle bytes, authenticates the session challenge, selects the session's
+#   DACS_RECIPE_SNAPSHOTS roster and matches the listing requirement through
+#   matchesVetRequirement. The counterparty's presentedBy needs a verified primary claim
+#   under a roster recipe and EvidenceGraphDeps.verifyPrimaryClaimControl (DACS-2 §7.12).
+#   Production installs neither a historical challenge resolver nor a control adapter,
+#   so those sessions remain indeterminate. Fixture adapters drive
+#   test/indexer-binding-rules.test.ts, test/current-indexer.test.ts and
+#   test/evidence-graph-rules.test.ts; the profile limits are recorded below.
+# - Native pay-dem inclusion and exact amount, operator-provisioned rail snapshots and
+#   SB-1 settlement keys: test/native-payment.test.ts and test/indexer-binding-rules.test.ts.
+#   One catalog-wide SB-2 ledger across sellers, applied on every catalog save, holding only
+#   claims whose transfer the node confirmed: test/reputation-rules.test.ts and
+#   test/legacy-deal-rules.test.ts.
+# - DV-1..3 storage delivery from readable cleartext and node ACL metadata, read at the
+#   evidence's signed deliverableAnchor (and through its AnchorBinding when the bundle carries one).
+# - DACS-3 §8.5.2 agreement/listing conformance: currency, price, rail, deliverable,
+#   pattern, role direction and commitment artifact (checks 5-6 are recorded below).
+# - Buyer-published sealed-envelope procurement. The supplier's deal resolves the
+#   listing from the publishing buyer's owner-bound anchors and credits the agreement
+#   seller; check 8 rejects a procurement published by the agreement seller.
+#   test/current-indexer.test.ts.
 #
-# Pending production integration (these helpers do not constrain current session
-# admission or identity tiers): historical IdentityBundle/challenge authentication,
-# session recipeRegistryVersion snapshot selection, required-claim matching and
-# method-specific authority-proof authentication. Current authority evidence is
-# hash-checked; the standalone adapter is not wired into graph/tier derivation.
+# Recorded deviations (vectors: test/standard-vectors.test.ts; local guards: test/evidence-graph-rules.test.ts,
+# test/indexer-binding-rules.test.ts, test/legacy-deal-rules.test.ts and test/native-payment.test.ts):
+#   §8.5.2 checks 5-6 need the CommitmentRecord's anchored committedAt, which a bundle does not
+#     reference: a session whose listing sets deadlineSecAfterCommit or validity.notAfter is
+#     indeterminate and never counted.
+#   CD-1: every verifier-side reading of a PriceTerm.amount canonicalises it first (canonicalDecimal.ts
+#     cd1Amount): agreement, paymentAmount and refundAmount shapes, §8.5.2 equality and band bounds
+#     (rounded to bandCenter's canonical digits), fixed-price over negotiable, the §9.7 settled amount,
+#     AMEND-3, DEM to OS and published volume. agreement-listing-v0.1 runs as published ("95.00",
+#     "100.00"). A sign, exponent, other separator, whitespace or bare point is refused. Only a metered
+#     agreement's terms.price must itself be canonical: MTR-4 "in CD-1 canonical form", which
+#     metered-pricing-v0.3 `non-canonical-recomputed-total` pins as reject, unlike agreement-listing-v0.1
+#     for the other kinds (upstream inconsistency). Hashes and signatures stay over the stored bytes.
+#     Listing verification still refuses a non-canonical listed amount, as at f13f233, which excludes
+#     every session on that listing whatever its outcome.
+#   agreement-listing-v0.1 `fractional-pct-out` expects reject; the §8.5.2 text (round to the CD-1
+#     digits of bandCenter) accepts it, and the Directory follows the text.
+#   SB-1: pinned evm/x402 refs omit logIndex; Solana refs omit instructionIndex. These refs are
+#     error and never counted. AP2, htlc-* and liquidity-tank refs have no SB-1 key format and are
+#     likewise uncounted (HTLC-5 session binding is not an SB-1 key). Legacy SDK TxRefs are never
+#     keyed: that profile has no payment adapter, so its citations never enter the SB-2 ledger, and a
+#     legacy session on a listing that declares payment is indeterminate (below).
+#   Authoritative bundle absence: the Demos mapping declares no absence-evidence policy. Both
+#     absence sets below run; their policy-qualified one-sided pass/include cases deliberately
+#     remain indeterminate/excluded. No Directory endpoint authenticates those projected proofs.
+#   Vet admission resolves historical IdentityBundle bytes and checks the presentation/hash. This
+#     profile can read a signed BundleParty extension `identityBundle` (inline) or
+#     `identityBundleRef` (storage-program locator and IdentityBundle hash), or use
+#     EvidenceGraphDeps.resolveIdentityBundle. Publication self-bindings cannot supply session identity.
+#     IdentityBundle hashes omit presentation per DACS-1. Session Vet additionally requires a trusted
+#     resolveSessionChallenge adapter authenticating verifier issuance, job/party/nonce, challenge
+#     lifetime, authenticated consumedAt and consumedByPresentationHash: sha256Hex(canonicalize(identity))
+#     of the complete first attempted IdentityBundle including presentation/signatures, even on failure (CORE SN-1..4).
+#     A signed-scope bundle hash is insufficient; historical adapters must supply the complete digest.
+#     IdentityBundle.presentedAt is schema-checked but informational.
+#     No production historical-challenge resolver is installed: those sessions remain indeterminate.
+#     Listing publication continues to accept a nonce-free signed self-binding.
+#   Required credential matching uses the signed composite generatedAt (unix ms) as the historical
+#     Vet instant, bounded by finalisedAt; it does not expire old sessions against the wall clock.
+#     Session recipeRegistryVersion selects an operator-authenticated DACS_RECIPE_SNAPSHOTS roster.
+#     Unknown snapshots and results outside that roster remain indeterminate. Unversioned requirements
+#     select the latest recipe in the roster. validUntil governs; without it the roster supplies defaultMaxAgeSec for the exact
+#     scheme/recipeVersion. Every required result, including one with validUntil, also needs an
+#     live exact-version recipe policy, an allowed method and a trusted authenticated signer.
+#     RAV-2: the catalog does not disclose per-result availability yet. Non-live vet results
+#     remain indeterminate. This applies to every included VerifyResult, optional ones too:
+#     each needs a valid live recipe policy.
+#     Wrapper expiry and listing maxAge only narrow that authority window.
+#     No scheme-specific requirement-parameter interpreter is configured: non-empty parameters
+#     are unmatched, as DACS-1 requires for unrecognised parameters, rather than inferred from data.
+#   DV-1..3: storage delivery resolves object cleartext and node ACL metadata. The DV-1 hash covers
+#     the complete NFC/JCS payload, including any signature/signatures fields (the pinned SDK's
+#     contentHash strips them; the Standard's lifecycle walkthrough does not). Unreadable payloads,
+#     encrypt-to-buyer payloads (no buyer decryption capability), and external pointer payloads
+#     (no external cleartext resolver) remain indeterminate and never count as completion/volume.
+#     §9.6.1 step 2 (schema conformance): the Standard pins no bytes for deliverable.schemaUrl, so only
+#     an operator-installed authenticated validator (EvidenceGraphDeps.validateDeliverableSchema) can
+#     check it; the catalog installs none, and every session on such a listing is indeterminate for
+#     every outcome. With one installed, a hash-bound payload it rejects refutes its completion.
+#     The buyer's read right is node ac8f45f checkReadPermission for the buyer's canonical 0x address,
+#     with exact string comparison as on the node. Public admits anyone not blacklisted; owner mode
+#     admits only the owner; restricted admits the owner first, then anyone not blacklisted who is in
+#     allowed or in a group with read permission. An ACL that validateACLStructure would not store
+#     fails closed. A buyer-only ACL's only allowed entry is the buyer, with no reader group (DV-3).
+#   Rail admission uses explicitly provisioned DACS_RAIL_SNAPSHOTS (PA-1 operator trust).
+#     Snapshots pin registryVersion and railVersion, handler, asset, network, parameters and availability.
+#     Operators must authenticate the registry index/definitions before provisioning; no snapshot is
+#     bundled or inferred from a listing or RPC. Unknown versions remain indeterminate. Only a live
+#     demos-native:DEM definition with native-dem/DEM/9 and network demos can use the native adapter.
+#   Native pay-dem: success cites exactly one native transfer (§9.5.9; SB-1 "a single native transfer
+#     is one settlement") and additionally requires blockNumber and getTxByHash/getBlockByNumber
+#     reads establishing confirmed inclusion, native-send endpoints and the exact DEM price in OS.
+#     Where a block states attrs.gcrAppliedTxs (node2; absent from ac8f45f), the transfer must be
+#     listed there, and an unreadable list is indeterminate. A not-found below the cited block refutes
+#     the payment when the node's last checked block is later, by its own timestamp, than the citing
+#     bundle's recorded consensus anchor: inclusion cannot follow the bundle that asserts it.
+#     The node credits and debits the exact address string (handleNativeOperations, GCRBalanceRoutines
+#     findOneBy({ pubkey })) and its TO check accepts hex in any case. The transaction's from and to
+#     must therefore be canonical 0x<64 lowercase hex> strings, and the send argument must name the
+#     recipient. A send to the buyer's account or from the seller's pays no seller and is refuted.
+#     PB-1/PB-2: a payee-bound pay-dem phase pays its payout binding, which tier 1 (intrinsic for pay-dem)
+#     makes the seller's primary-claim address; tier 3 is legal only where no stronger tier applies, so
+#     an agreement binding any other address is refused for every committed session (only the seller,
+#     a co-signer, can make one). Profile limit: the payer is the agreement buyer's primary claim, and
+#     under a legacy agreement, which binds no destination (§9.5.1), the payee is the seller's.
+#     DACS-4 PaymentPhaseInput lets the payingKey be any key in the buyer's bundle claims, and this
+#     Directory resolves no IdentityBundle for payment. A transfer outside that limit that passes every
+#     other check is lasting-undecided in a copy the seller signed, and refuted in a copy only its
+#     counterparty signed (an abort), so a counterparty cannot leave the seller's session undecided
+#     with it (test/indexer-binding-rules.test.ts "cold review P1-1").
+#     Stored RPC amounts are numeric/string OS; the original send payload must carry canonical string OS.
+#     Numeric legacy DEM payloads need historical fork semantics: only their amount stays open, after
+#     every other check. Such a session, like one whose reads get no answer, is undecided and published
+#     as a range (§10.5.1 at run time, below). The node source calls terminal inclusion "confirmed".
+#   Attested-payload and entitlement success remain indeterminate until authoritative attestation
+#     and grant adapters can establish their agreement-bound proofs; signatures alone do not count.
+#   All non-native current rails and paid SDK legacy sessions remain indeterminate without authoritative
+#     adapters; they never contribute completion or volume. AP2 and x402 success is indeterminate: this profile has no authenticated provider-receipt
+#     resolver. A signed receipt pointer/hash alone cannot establish provider or HTTP settlement.
+#     No x402 source revision is pinned: only the DACS-4 X402-1 reference shape is mirrored
+#     (protocolVersion "1" or "2"), and no x402 verdict is ever positive here.
+#   DACS-5 §10.5.1 (exclusion neither helps nor harms): what this deployment cannot verify is decided
+#     from the pinned listing, the session's signed profile and the installed adapters, never from the
+#     outcome (evidenceGraph.ts deploymentVerifiability; bundlePolicy.ts legacyListingSettlementIndeterminate).
+#     Every session on such a listing is excluded from numerator and denominator, pre-commit failures
+#     and aborts included: a non-pay-dem payment phase; pay-dem without a node reader, or with any
+#     choice an agreement could make (DACS-3 §8.5.2 checks 1 and 3: every accepted rail, at the listed
+#     price) that the committed session's own rail admission refuses: a rail the pay-dem phase does not
+#     pay (x402 accepted beside DEM), no live native DEM definition under the bundle's
+#     railRegistryVersion, or a price not in DEM (including an auction with no reserve, whose currency
+#     is open); a repeated pay-dem phase, whatever the bundle's anchorBindings member holds; a non-storage or encrypt-to-buyer delivery, a declared expectedSizeBytes above the
+#     Standard's 128 KB storage limit (§9.6.1 extended pointer), buyer-only delivery
+#     without an authenticated restricted reader (none is installed), a deliverable schemaUrl without an
+#     authenticated schema validator (none is installed), or no payload reader;
+#     vet-credentials without a challenge resolver, the session's recipe registry snapshot or (with
+#     identity requirements) a control adapter; identity requirements without a vet-credentials phase,
+#     which refute every committed session; listing commitment-time bounds; negotiate-fixed-price,
+#     or an RFQ step enabling the fixed-price fallback, on a negotiable listing. The agreed rail and
+#     price are checked for every session with an agreement.
+#     A legacy session is excluded whenever its pinned listing declares a payment rail, delivery, price
+#     or settle phase.
+#   DACS-5 §10.5.1 at run time (evidenceGraph.ts EvidenceGraph.undecided; currentReconciliation.ts
+#     reconcileUndecidedCopies; indexer.ts DealRecord.undecided; reputation.ts; rateRange.ts): a pass that
+#     cannot decide a session never refutes it. Readers resolve null only for an answer and throw
+#     VerificationUnavailable with its kind (verificationUnavailable.ts; chain.ts readArtifact,
+#     readPayloadRecord, readSettlementNode). A copy whose bundle signatures verified, that nothing
+#     refutes and whose listing passes the gate above (the indexer applies it to a copy that stopped
+#     before the graph did; one whose listing it cannot resolve this pass stays undecided) is undecided
+#     when a check gives no verdict: kind
+#     "no-answer" (timeout, transport, node error, a node not yet through the cited block nor past the
+#     bundle's anchor, a reply about another transaction or block) or "lasting", a state of the session's
+#     own record that no later pass decides (an extended pointer, §9.6.1; a payload denied to the
+#     anonymous reader, DV-2 over-provision; access metadata the node does not state; a numeric legacy
+#     send payload; a stated gcrAppliedTxs list without the transfer; in a seller-signed copy, a payer
+#     or legacy payee outside the profile limit above). The session is undecided when its
+#     seller copy (seller-signed, bundleSignerPolicy) and buyer copy each verified or are undecided, at
+#     least one undecided, and they do not diverge. Only sessions that paid or delivered make those reads,
+#     so dropping one alone would bias the rates against the seller (guard (iv)'s per-jobId exclusion
+#     assumes exclusion independent of outcome), and holding all of the seller's sessions would let one
+#     hide its failures. Profile deviation from derive(): an undecided session is in no count, and every
+#     rate, and averageSellerRating, it could change is published as null with its range (low end: each
+#     undecided session that could fail counted as failed, every other one refuted, and only with a
+#     decided session in the denominator; high end: each that could complete counted), on the seller
+#     API, the listing ReputationHint (Directory extension members undecidedSessions,
+#     completionRateRange, averageSellerRatingRange), the seller page and the discovery card.
+#     minCompletionRate, minRating and the good-record filter use the figure or else the low end, which no
+#     undecided session can raise or create. No clock or earlier verdict is carried between passes. An
+#     answer refutes its own session only: absent, unhashed, denied (non-payload) or over-bound records,
+#     all states their owner controls, a transfer node2's structured not-found has no record of through
+#     the cited block, and a cited block after the citing bundle's consensus anchor
+#     (test/indexer-binding-rules.test.ts "§10.5.1 at run time", "sweep 13 F1" and "daybreak P1-2";
+#     test/reputation-rules.test.ts range cases; test/chain-storage.test.ts; test/native-payment.test.ts).
+#   DACS-5 §10.5.4 category scope (reputation.ts categoryReputationHint; evidenceGraph.ts agreementCategory):
+#     a listing's ReputationHint counts the sessions whose agreement this pass resolved, by the
+#     offering.category of the listing that agreement pins (DealRecord.agreementCategory). A pre-commit
+#     failure or abort, and a session (decided or undecided) whose agreement or listing went unread, is
+#     in no hint, "not treated as matching any category", and counts in the seller's figures only. A
+#     deal saved without agreementCategory, as earlier releases saved it, is in no hint until re-verified.
+#     (test/indexer-binding-rules.test.ts "sweep 16 F1, F2"; test/reputation-rules.test.ts.)
+#   BB-6 / §10.5.1 reconciliation is per (buyer, seller, jobId): a jobId is unique only per producer, so
+#     another buyer's session on the same jobId is a separate record and never voids or supersedes one.
+#     The SB-2 ledger keys claims on that session too: one settlement id counts under one (jobId,
+#     phaseIndex) of one session, and ties after observedAt and evidence hash break on jobId, then session.
+#     Only a claim stamped nodeVerified (its transfer passed the native adapter) can hold or reject an
+#     id; a deal citing any other settlement, as an earlier release persisted, is not admitted.
+#   DACS-5 §10.3.1 terminal mapping is checked by class: a non-abort failure outcome needs a failed
+#     terminal phase with an errorClass, substrate is failed-substrate both ways, and permanent,
+#     transient, counterparty and settlement-atomicity are failed-perm or failed-counterparty. The
+#     phase-to-party direction is not checked per copy: §10.4.3 keeps phaseSummary identical in both
+#     copies while §10.4.1 makes the faulted party's copy read failed-perm and the other's
+#     failed-counterparty, so one copy of every converged pair reads failed-perm beside counterparty
+#     (or failed-counterparty beside permanent). Such a copy counts only with a non-divergent partner;
+#     two copies that both read failed-perm, or disagree on errorClass, diverge and are excluded
+#     (test/current-indexer.test.ts). Aborts carry no class.
+#   Current publisher rail IDs are demos-native:DEM and x402:default. Historical signed phase-name
+#     aliases remain readable for evidence, but public discovery excludes those current offers;
+#     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
+#   Anonymous restricted-program reads on node ac8f45f are denied and no authenticated restricted
+#     reader is installed, so buyer-only is indeterminate for every outcome. Buyer-only ACL-success
+#     tests inject a fixture restricted reader.
+#   Revocation candidates: discovered markers returning NOT_FOUND, PERMISSION_DENIED or a transport
+#     failure stay pending/indeterminate. Persistent 1–60 second exponential backoff bounds retries.
+#     Only successfully read invalid content can reject a candidate; verified revocation is retained.
+#   Per-claim PresentationSignature.signature retains the SDK auto-detected legacy encoding;
+#     strict SIG-6 value-envelope decoding is enforced separately.
+#   DEMOS-MAPPING §A.2 write-input mapping defines no binding object for PC-2 payment evidence or
+#     §9.6.1 storage deliverables, while SB-1 keys a settlement on the phaseIndex of its PC-2 address.
+#     Where the signed pipeline has one pay-dem phase, PC-2 leaves the record one address, so the index
+#     is that phase's; a payload is read at the deliverableAnchor its evidence signer signed (§9.6.1
+#     step 5). This is the Directory's own profile reading of SB-1 and §9.6.1, not an anchor recovery
+#     the pinned Standard defines; it holds until the Standard pins a payment and deliverable binding
+#     (follow-up). A repeated pay-dem phase leaves no listed index, so every session on that listing is
+#     indeterminate whatever its outcome. A bundle may also carry a BundleBinding-shaped AnchorBinding
+#     (src/catalog/anchorBinding.ts; SIG-4 domain "dacs-x-anchor-binding:v1:") in its `anchorBindings`
+#     member. It is a cross-check, never a source, and never needed: every entry must authenticate and
+#     bind an address of this job, for every outcome, or the session is uncounted; a binding the
+#     anchored record's own signer published for that anchor must name the listed address and the
+#     record's content hash; anyone else's binding is inert. A failure before payment binds nothing,
+#     so no member (absent, empty or full) shows how its completion would have been bound, and the
+#     member never decides admission by outcome (test/indexer-binding-rules.test.ts, the §10.5.1
+#     anchorBindings matrix). StorageProgram names are never read.
+#     A binding carrying a `signatures` member is refused: the SDK contentHash omits that member too.
+#     The rail segment is CF-4 encoded: exactly `: ? & = %`, uppercase hex.
+#     Well-known, catalog and chain-scan carriage of AnchorBindings is not implemented.
+#     Neither the pinned Standard nor the pinned SDK emits `anchorBindings`. The pinned SDK
+#     (runSessionCore.ts) anchors a one-party bundle, which the shape check refuses; the merge base
+#     never counted it either.
+#
+# Pending production integration (split 4/5): method-specific authority-proof
+# authentication. The session graph authenticates VerifyResult authority evidence only
+# through EvidenceGraphDeps.verifyAttestation and fails closed without it; no production
+# verifier is installed. A SettlementEvidence attestationRef decides no verdict here and is
+# bound by its content hash alone, as at the merge base (test/indexer-binding-rules.test.ts
+# "cold review P1"). Identity-tier derivation still checks authority content hashes
+# only, and the adapter is not wired into tiers.
 # Tier policy still accepts operator_gated/closed_data/bilateral without disclosing
-# per-result availability. The isolated new helpers use a live-only profile.
-# Native-payment inclusion/finality and exact event/instruction settlement keys,
-# authenticated rail snapshots, delivery cleartext/ACL/grant verification and full
-# agreement/listing conformance are pending; graph reference verification alone
-# does not establish these properties. No DACS_RAIL_SNAPSHOTS adapter exists here.
+# per-result availability. Session admission uses a live-only profile.
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
@@ -63,24 +293,74 @@
 # - SDK canonicalization accepts only integer numbers. Fractional publication is
 #   unsupported; listing publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
-#   normative revocation binding. Procurement listings remain unsupported.
+#   normative revocation binding.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
 # - scan.ts requires structured errorCode NOT_FOUND on HTTP 404 before
 #   classifying STORAGE_NOT_FOUND. Proxy/bare/wrong-route 404s stay retryable
 #   STORAGE_RPC_UNAVAILABLE (test/scan-addresses.test.ts); structured permission
 #   denial is terminal until replay, never authoritative BB-8 absence evidence.
 # - Node ac8f45f02fc9c25082ce9b83595c2e3916b49c5a is a source/API reference only;
-#   no remote deployment revision is attested by an RPC URL or successful read.
+#   no remote deployment revision is attested by an RPC URL or successful read. node2
+#   (https://node2.demos.sh) runs newer code: a missing transaction replies result 404 with
+#   reason not_found, and blocks carry attrs.gcrAppliedTxs. Its 2026-10-17 captures in
+#   test/fixtures/native-payment predate a chain reset; the -873 and not-found captures are
+#   from 2026-10-20.
 #
-# Vendored conformance inputs (byte hashes and local decisions are checked by
-# test/standard-vectors.test.ts, test/listing-vectors.test.ts and
-# test/revocation-vectors.test.ts):
-# conformance/vectors/security/signature-value-encoding-v0.1.json
-# sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
-# conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
-# sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-# conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
-# conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+# Skipped vector sets at this pin:
+#   private-deliverables-v0.1: projected cci/40-byte buyer addresses and encryption/entitlement
+#     gates do not map directly to this agent profile; signed local graph cases pin DV-1..3.
+#   verifyresult-acceptance-v0.1: recipe-registry steward signatures and cci claims are outside
+#     the deployment-policy recipe adapter; local vet/recipe tests pin the supported profile.
+#   fab-bundle-extended-pointer-v0.3: no external extended-pointer resolver.
+#   settlement-finalization-propagation-v0.3 and receipt-rederivation-v0.3: handler-side
+#     finalization/receipt emission, not this read-only catalog consumer.
+#   commitment-anchor-authority-v0.3: no CommitmentRecord locator is exposed by current bundles.
+#   channel-message-replay-v0.1 (DACS-3 §8.3.3, CH-6), sealed-envelope-deadline-v0.1 and
+#     sealed-envelope-multicommit-v0.1 (§8.4.3 SE-2..4, SE-9): negotiation-channel and bid handling;
+#     this catalog reads no channel messages, bids or CommitmentRecords.
+#   rail-availability-selection-v0.1 (DACS-4 §9.4.4 RAV-R*): steward-signed availability for rail
+#     selection; the catalog takes rail definitions and availability only from operator-authenticated
+#     snapshots (PA-1) and admits only live ones.
+#   feeschedule-reconciliation-v0.1 (DACS-3 §8.5.3, DACS-4 §9.7.2): no FeeSchedule reader; FS-3
+#     makes reconciliation non-gating for settlement and the catalog publishes no fee result.
+#   sb3-eip3009-nonce-v0.1 and x402-receipt-hash-v0.1: EVM and x402 rails have no adapter here,
+#     so every session on such a listing is indeterminate.
+#   vp-replay-v0.1 (DACS §7.3.2): holder-bound credential presentations under raw ed25519 issuer and
+#     subject keys, outside the did:demos:agent IdentityBundle profile. Session-nonce replay is pinned
+#     by the fixture-resolver graph tests (SN-1..4); production installs no historical challenge resolver.
+#   bundle-binding-v0.1 and outsider-binding-flooding-v0.3 use did:demos:buyer/seller signed claims
+#     outside the supported did:demos:agent profile. Changing claims would alter signed bytes;
+#     local bundle-binding tests cover BB-4..8 without rewriting these upstream fixtures.
+#
+# Partially run vector sets at this pin (test/standard-vectors.test.ts):
+#   payee-destination-binding-v0.1: 14 of 28. Run: 8 current-reader agreement-artifact-gate cases and
+#     6 PB-1 coverage cases, decided against the pinned commitment phase. Skipped: 4 legacy-reader
+#     cases (this consumer is not a legacy agreement reader); 2 agreement-signature-domain cases and
+#     agreement-stripped-payee-bound-cannot-downgrade, which rest on the vector's cci-lei signatures
+#     outside the did:demos:agent profile; 7 pre-pay-destination-gate cases (PB-1 abort, PB-2 tiers,
+#     PB-3/SB-3), a payer-side gate this read-only catalog never runs.
+#   metered-pricing-v0.3: 19 of 22. Run: every agreement-validation case. Skipped: the 3
+#     quantity-derivation cases, which are handler-side.
+#   sb2-settlement-uniqueness-v0.1: 19 of 20. Skipped: ledger-unreadable-indeterminate; the
+#     Directory recomputes its ledger in memory on every derivation, so it is never unreadable.
+#
+# Vendored conformance inputs, byte-identical under test/fixtures/dacs-standard/ at the
+# pin above, except the Demos agent claim fixture, which is from DACS-Standard #296 at 725fa78.
+# Byte hashes and local decisions are checked by test/standard-vectors.test.ts,
+# test/sig6.test.ts, test/listing-vectors.test.ts and test/revocation-vectors.test.ts:
+#   conformance/vectors/security/signature-value-encoding-v0.1.json bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+#   conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+#   conformance/vectors/security/sb2-settlement-uniqueness-v0.1.json 31c9455dc0147f27cf7a7d47cb17ffc019016bf63aa366b9dbadd720f8b16b81
+#   conformance/vectors/security/agreement-listing-v0.1.json 857ebf0ea4b885b92b0d6ad509a37cf5076218881c510ef2f2d05d734d94503b
+#   conformance/vectors/security/mixed-version-reconciliation-v0.3.json 41c1bc7eee95ac3bf625eaea4db88929e2eb6cb20c6bade9c3192dc3337a9e0b
+#   conformance/vectors/security/fault-bundle-perspective-pair-v0.3.json f56586a27afa851202a121576814eb0a68bddc4bdc9ce675740ba085870ed285
+#   conformance/vectors/security/payee-destination-binding-v0.1.json cd83d95982d6529ac3f776d48df8d92c86b80806a88e96a62d80674563aaa779
+#   conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+#   conformance/fixtures/identity/demos-agent-claim-reference.json 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
+#   conformance/vectors/security/unresolved-vs-absent-v0.3.json 8a543319798cb60073631a9a2431f45e866f89db8b136a76b679780718a15b91
+#   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
+#   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
+#   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert
 # end-to-end catalog status for every vector. In particular, unauthenticated
@@ -97,8 +377,3 @@
 # raw signatures use canonical unpadded Base64URL (64 bytes / 86 characters).
 # Hash the exact served index bytes; the signature is external in the agent card.
 # See README and test/withdrawal-publisher-signature.test.ts.
-# Other upstream vector sets are unimplemented adapters/unexecuted here,
-# including sb2-settlement-uniqueness, agreement-listing,
-# mixed-version-reconciliation, fault-bundle-perspective-pair,
-# payee-destination-binding, unresolved-vs-absent,
-# bundle-absence-evidence, metered-pricing and phase-kind-divergence.

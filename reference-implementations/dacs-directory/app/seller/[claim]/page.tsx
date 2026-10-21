@@ -6,6 +6,7 @@ import CopyText from "@/src/components/CopyText";
 import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
 import { activeOffer } from "@/src/catalog/discovery";
+import { completionRateRangeText } from "@/src/catalog/rateRange";
 import { loadCatalog } from "@/src/catalog/store";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +36,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
   const activeListingCount = seller.listings.filter(activeOffer).length;
   const hasFixtureListings = seller.listings.some((listing) => listing.anchor.kind === "fixture");
   const t = tierMeta(seller.identityTier ?? "self-declared");
+  const undecided = seller.reputation.undecidedSessions ?? 0;
 
   return (
     <>
@@ -94,8 +96,15 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         They show account linkage, not a fresh DACS-2 identity-verification result.
       </p>
 
+      {!!undecided && (
+        <p className="note" role="status">
+          {undecided} session{undecided === 1 ? " this pass could not decide counts" : "s this pass could not decide count"} neither
+          as completed nor as failed (the node or storage gave no answer, or the delivery is one this Directory cannot
+          read), so {completionRateRangeText(seller.reputation.completionRateRange)}.
+        </p>
+      )}
       <div className="stat-row">
-        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">strict bundles completed</div></div>
+        <div className="stat"><div className="n">{`${seller.reputation.completed}/${seller.reputation.totalAgreements}`}</div><div className="l">strict bundles completed</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
         <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
       </div>
@@ -177,8 +186,8 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
                   <td><span className="badge rail">{d.rail}</span></td>
                   <td>{d.outcome === "completed" ? "✓" : (d.outcome ?? "—")}</td>
                   <td>
-                    <span className={`badge ${d.refsVerified ? "ok" : "err"}`}>
-                      {d.refsVerified ? "sig + refs verified" : d.signatureVerified ? "sig only" : "unverified"}
+                    <span className={`badge ${d.refsVerified ? "ok" : d.undecided ? "" : "err"}`} title={d.undecided?.reason}>
+                      {d.refsVerified ? "sig + refs verified" : d.undecided ? "undecided this pass" : d.signatureVerified ? "sig only" : "unverified"}
                     </span>
                   </td>
                   <td>

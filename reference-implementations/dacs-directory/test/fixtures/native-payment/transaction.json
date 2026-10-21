@@ -1,0 +1,77 @@
+{
+  "result": 200,
+  "response": {
+    "content": {
+      "type": "native",
+      "from": "0x35e048d2590cf9533d52d7d7a001176c57ef9a7fd997f3c96b02025a4d20d9e7",
+      "to": "0xccfcc6d005da1d6b74bc3e0abb3749618e6275ad8fb9343425a84d6b02082644",
+      "from_ed25519_address": "0x35e048d2590cf9533d52d7d7a001176c57ef9a7fd997f3c96b02025a4d20d9e7",
+      "amount": 1000000000,
+      "nonce": "5",
+      "timestamp": "1792184069777",
+      "transaction_fee": {
+        "network_fee": 1000000000,
+        "rpc_fee": 1000000000,
+        "additional_fee": 0,
+        "rpc_address": null
+      },
+      "data": [
+        "native",
+        {
+          "nativeOperation": "send",
+          "args": [
+            "0xccfcc6d005da1d6b74bc3e0abb3749618e6275ad8fb9343425a84d6b02082644",
+            "1000000000"
+          ]
+        }
+      ],
+      "gcr_edits": [
+        {
+          "type": "balance",
+          "operation": "remove",
+          "isRollback": false,
+          "account": "0x35e048d2590cf9533d52d7d7a001176c57ef9a7fd997f3c96b02025a4d20d9e7",
+          "txhash": "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143",
+          "amount": "1000000000"
+        },
+        {
+          "type": "balance",
+          "operation": "add",
+          "isRollback": false,
+          "account": "0xccfcc6d005da1d6b74bc3e0abb3749618e6275ad8fb9343425a84d6b02082644",
+          "txhash": "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143",
+          "amount": "1000000000"
+        },
+        {
+          "type": "balance",
+          "account": "0x35e048d2590cf9533d52d7d7a001176c57ef9a7fd997f3c96b02025a4d20d9e7",
+          "operation": "remove",
+          "amount": "1000000000",
+          "txhash": "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143",
+          "isRollback": false
+        },
+        {
+          "type": "nonce",
+          "operation": "add",
+          "account": "0x35e048d2590cf9533d52d7d7a001176c57ef9a7fd997f3c96b02025a4d20d9e7",
+          "amount": 1,
+          "txhash": "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143",
+          "isRollback": false
+        }
+      ]
+    },
+    "signature": {
+      "type": "ed25519",
+      "data": "0xfde6f1f2127c3eceb48a85022c1165f9857449ffd03cb018f6389016a2fe3adb16c53622d55c3c4e5e3d08a99f09564b6b954ffe9d8b563613d988581e153009"
+    },
+    "ed25519_signature": null,
+    "hash": "39783f8d22e49f7a7c2975b045f832b07c328c69a9a6c92d752ae415beb3f143",
+    "status": "confirmed",
+    "blockNumber": 548169,
+    "attrs": {
+      "reference_block": 548167
+    }
+  },
+  "require_reply": false,
+  "extra": null
+}

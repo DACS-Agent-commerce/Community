@@ -124,8 +124,9 @@ vendor directory.
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
+| `DACS_RAIL_SNAPSHOTS` | For positive payment verdicts | Operator-authenticated PA-1 registry snapshots (`registryVersion`, `rails` with exact `railId`, `railVersion`, `phaseHandler`, `railType`, `asset`, `network`, `parameters`, `availability`); absent/unknown versions remain indeterminate. Provision only after authenticating the registry index and definitions. Only live native DEM definitions have a settlement adapter. |
 | `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers; session admission does not use this policy |
-| `DACS_RECIPE_SNAPSHOTS` | Helper only | JSON array of historical `{registryVersion, recipes}` snapshots for the standalone resolver. Production session admission does not consult this variable; operator authentication and graph integration are pending. |
+| `DACS_RECIPE_SNAPSHOTS` | For session vetting | Operator-authenticated JSON array of historical `{registryVersion, recipes}` snapshots; `recipes` uses the same policy shape. Session pins select exact snapshots; unversioned requirements select the latest recipe in that snapshot. Missing snapshots remain indeterminate. Vet admission also needs the presenter-control and challenge adapters described below. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 
@@ -235,8 +236,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    registration.
 2. **Chain scanning** (passive): the reindex pass walks the node's transaction history
    (`nodeCall getTransactions`, plain fetch), spots storage-program writes, classifies
-   anchored DACS artifacts by their self-describing program names, and attributes deals
-   to sellers via the buyer-anchored agreement. Agents nobody registered appear as
+   current-profile DACS artifacts by their signed content, and attributes a deal to its
+   seller through the agreement its buyer bundle references by locator and content hash.
+   Program names are never resolution keys, except on the legacy SDK compatibility path
+   (`dacs5:bundle:<jobId>`, `dacs3:agreement:<jobId>`). Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
    Revocation markers are recognised by their signed content, never by program name.
@@ -268,8 +271,105 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    The optional DACS-1 well-known bundle-binding index is hash-bound and SSRF-bounded.
    Resolved bundles recursively validate listings,
    agreements, settlement evidence and amendment chains, composite/VerifyResult vet
-   records, and ratings. Legacy SDK artifacts remain on an explicitly-labelled
-   compatibility path.
+   records, and ratings. The signed listing fixes every phase kind and index; completed
+   sessions include every listed settle phase, with one evidence record per invocation.
+   A successful payment states its amount, rail-specific finality and observation time,
+   and transactions. Its amount and currency must equal the agreed price; the optional
+   PriceTerm `unit` constrains it only when both terms state one. A Demos StorageProgram
+   name is an opaque write input and is never read. A payment's SB-1 phase index comes from
+   its PC-2 anchor address, which on Demos needs a published logical→native binding
+   (DEMOS-MAPPING §A.2) that the pinned Standard does not define for payment anchors. When the
+   signed pipeline has one `pay-dem` phase, PC-2 leaves the record exactly one address, so the
+   index is that phase's; a storage payload is read at the `deliverableAnchor` its evidence
+   signer put in the evidence (DACS-4 §9.6.1). This is the Directory's own profile reading,
+   not an anchor recovery the pinned Standard defines. A listing that repeats `pay-dem` gives no such
+   index, so every session on it is indeterminate, whatever its outcome. A bundle may also carry
+   this Directory's own AnchorBinding extension in a signed `anchorBindings` member, in which the
+   evidence's signer binds a record's native address and content hash to its logical address.
+   It is a cross-check, never a source: every entry must authenticate and bind an address of this
+   job, for every outcome, and a binding the anchor's own signer published must name the address
+   the listing gives that anchor. Neither the pinned Standard nor the pinned SDK emits it, and no
+   session needs it. A failure before payment binds nothing, so no member, absent, empty or full,
+   could show how its completion would have been bound; letting the member decide admission would
+   count such failures and drop the completions. What the Directory cannot
+   verify is decided from the pinned listing, the session's signed profile and the installed
+   adapters, never from how far the session got (DACS-5 §10.5.1): every session on such a
+   listing, pre-commit failures and aborts included, is left out of both the numerator and
+   the denominator, so an unverifiable listing yields no rate instead of a 0% one. That
+   covers every rail and currency the listing leaves to a session (a band or auction price
+   finer than the rail's base unit is refused once agreed, which the seller co-signs); a choice made only at payment time that
+   this profile cannot tie to a party leaves that session undecided instead (below). A listing
+   whose buyer requirement asks anything has to vet it: on one with no `vet-credentials` phase
+   every committed session is refuted, so every session on it is excluded. An agreement may pick any rail the
+   listing accepts, in the currency of the price it lists. On a `pay-dem` listing, each
+   accepted rail at the listed price runs the same admission a committed session's agreed
+   rail and price run: the pay-dem phase pays it, and it has an installed live DEM definition
+   and a DEM price. So a listing that also accepts another rail (such as `x402:default`), or
+   an auction without a reserve (any currency), is excluded. Neither a declared payload above
+   the Standard's 128 KB storage limit (an extended pointer) nor a buyer-only payload is
+   readable here. The agreed rail and price are checked for every session that has an
+   agreement. A deliverable that names a `schemaUrl` excludes every session on its listing, since
+   the Standard pins no schema bytes and the catalog installs no authenticated schema validator
+   (`validateDeliverableSchema`); with one installed, a payload it rejects refutes its
+   completion. What a pass cannot decide is not refuted either. Only a committed session reads
+   its agreement, evidence, the node's transfer and the payload, so a listing with only failures
+   never makes those reads. When one of them gives no verdict and nothing refutes the session,
+   the session is **undecided**: no answer (a timeout, a transport or node error, a node that has
+   not reached the citing bundle's anchor), or a lasting state of its own record that no later
+   pass decides (an extended pointer (§9.6.1), a payload the anonymous reader is denied (DV-2
+   over-provision), access metadata the node does not state, a numeric legacy send payload, a
+   block whose applied list leaves the transfer out, or in a copy the seller signed a transfer from
+   a key this profile cannot tie to the buyer or, under a legacy agreement, to an address it cannot
+   tie to the seller). Dropping it alone would publish the seller
+   below its real rate beside its failures, and holding every session of the seller would let
+   one undecidable session hide them. So an undecided session counts neither as completed nor as
+   failed. It is kept on the seller's record (`undecided` on the deal: kind, reason, the outcomes
+   its copies claim), counted in `undecidedSessions`, and every figure it could change is
+   published as `null` with its range: `completionRateRange`, `counterpartyAdjustedCompletionRateRange`,
+   `counterpartyFaultRateRange` and `averageSellerRatingRange` on the seller API, `completionRateRange`
+   and `averageSellerRatingRange` on each listing's `reputationHint`, the count and the range on the
+   seller page and discovery cards. The low end counts every undecided session that could fail
+   as failed and every other one as refuted, and needs a decided session; the high end counts
+   every one that could complete as completed. `minCompletionRate`, `minRating` and the "good
+   record" filter use the figure, or else the low end, which no undecided session can raise or
+   create, so leaving sessions undecided can neither hide a failure nor earn a listing a place;
+   the high end is only shown. A session is undecided only when its seller copy, which the seller
+   signed, and its buyer copy each verified or stopped at such a check, nothing refuted either and
+   they do not diverge, so a counterparty cannot leave the seller's session undecided alone. An
+   answer still refutes just its own session: a record that is absent, does not hash, is denied
+   to this reader or exceeds the bounds (all states its owner controls, as deleting it is), a
+   transfer the node has no record of through the cited block, or a cited block after the block
+   that consensus-anchored the citing bundle. Each pass re-derives every verdict from the chain;
+   no clock or earlier verdict is carried over, so an undecided session counts as soon as a pass
+   decides it. Volume counts decided completions only. Copies are
+   reconciled per `(buyer, seller, jobId)` session; another buyer's session on the same jobId is a
+   separate record and never voids this one (BB-6). A procurement listing is
+   published by the session's buyer: the supplier's deal resolves it from that publisher's
+   own owner-bound listing anchors (at most 32 reads per publisher in each discovery
+   tier), never as one of the supplier's offers, and the graph checks the publisher's role. Batch indexing and
+   immediate refresh share owner-signed registrations, chain discoveries and persisted
+   authenticated well-known discovery hints independently of visible catalog rows.
+   If these sources miss the pinned listing tuple, unsigned registration candidates
+   provide a separate fallback of at most 32 reads, with the same owner, signature
+   and tuple checks. Unsigned candidates cannot consume the trusted sources' budget.
+   Hints survive transient crawl failures. A successful domain crawl with a publisher
+   signature or an operator pin replaces that domain's hints; an unsigned, unpinned crawl
+   leaves the earlier hints in place. Domain removal or chain replacement clears them. Every use
+   rechecks the current listing owner, signature and pinned tuple. Settlements
+   are keyed per SB-1 (`demos:{txHash}`, `evm:{chainId}:{txHash}:{logIndex}`,
+   `solana:{cluster}:{signature}:{instructionIndex}`); a reference that cannot be keyed
+   leaves the deal listed but uncounted. One catalog-wide SB-2 ledger admits claims before
+   computing any seller or category totals; it keys each claim on the session as well, so two
+   sessions sharing a jobId cannot both count one payment. Only a claim whose transfer this
+   Directory confirmed on the node (`nodeVerified`) can hold or reject an id there; a deal citing
+   any other settlement, such as one an earlier release persisted, is not admitted until it is
+   verified again. A failure outcome must end in a failed phase whose `errorClass` has its class
+   (DACS-5 §10.3.1): `substrate` is `failed-substrate`, and the other four classes are
+   `failed-perm` or `failed-counterparty`. Those two spellings flip with the anchoring role across
+   the two copies of one phaseSummary (§10.4.3), so only the class is checked; an abort carries
+   none. Legacy SDK artifacts remain on an explicitly-labelled compatibility path. It has no
+   payment adapter, so a legacy session asserts no settlement claim: on a listing that declares
+   payment it is indeterminate, and on one that declares none it counts on its signatures alone.
 
 ## Architecture note: the web app is chain-fetch-only
 
@@ -282,6 +382,13 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
+- **In the shipped default no paid session counts.** Without an operator's
+  `DACS_RAIL_SNAPSHOTS`, every session on a `pay-dem` listing is indeterminate, and so is every
+  legacy session on a listing that declares payment, which earlier releases counted. A two-party
+  Standard bundle needs no Directory extension. A listing that repeats `pay-dem` is indeterminate
+  for every outcome, with or without `anchorBindings`. The pinned SDK anchors a one-party
+  buyer copy: the current graph refuses it at its shape check, and the legacy path needs both
+  copies, as at the merge base. Such sellers are published with no rate, not a 0% one.
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
   yet (CORS), so chain reads go through the server. Cryptography is client-side, but
   chain inclusion still depends on the server/RPC path until Demos exposes a
@@ -297,25 +404,59 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** Identity-tier derivation checks
-  configured recipe version/method/availability/max-age and result signer policy.
-  The new recipe snapshot resolver and required-claim matcher are standalone helpers;
-  production session admission does not yet apply them. Their live-only policy does
-  not change the existing tier path's availability handling.
-- **Authority proof integration is pending.** Current graph and identity-tier paths
-  check authority content hashes. The standalone `authenticateAuthorityAttestation`
-  helper can delegate original proof/hash/signer/validator-epoch authentication to
-  a method-specific verifier, but it has no production caller. A result signer's
-  signature and a matching authority hash do not establish that authority proof.
+  configured recipe version/method/availability/max-age and result signer policy from
+  `DACS_RECIPE_POLICIES`; missing policy fails closed. Required session vetting selects the
+  exact `DACS_RECIPE_SNAPSHOTS` registry pin: the scheme/version must be live, permit the result method,
+  and trust its authenticated signer, including results with an explicit expiry. Every
+  included result, even an optional one, needs a valid live policy. Missing, invalid and
+  non-live recipes remain indeterminate until the catalog can disclose each result's availability.
+  This live-only session policy does not change the tier path's availability handling.
+- **Authority proof integration is pending (split 4/5).** The session evidence graph
+  authenticates VerifyResult authority evidence only through `EvidenceGraphDeps.verifyAttestation`,
+  a method-specific verifier for the original proof/hash/signer/validator-epoch scope, and fails
+  closed without one. No production verifier is installed. Identity-tier derivation still
+  checks authority content hashes only. A result signer's signature and a matching authority
+  hash do not establish that authority proof. A SettlementEvidence `attestationRef` decides no
+  verdict here, so it is bound by its content hash alone, as at the merge base: requiring the
+  verifier there refused every completion that carried one, while failures counted.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
   canonical hashing. The pinned serializer supports integer JSON numbers only:
   publication rejects fractional negotiation percentages with HTTP 400, and readers
   reject fractional signed inputs too. This is a narrower profile than the Standard.
+- **Storage delivery is verified from readable cleartext and node access metadata.**
+  Successful `deliver-storage-program` evidence must name a payload anchor and cleartext hash.
+  The hash covers the complete canonical payload, including any `signature` or `signatures`
+  fields. The payload must match that hash. If the delivery signer carried an AnchorBinding for
+  that anchor, it must bind it to the job's `dacs4:deliverable` address. The buyer must be able to read the
+  payload under the pinned node's read rule (ac8f45f `checkReadPermission`), applied to the
+  buyer's canonical `0x<64 lowercase hex>` address. Like the node, the Directory compares
+  address strings exactly, so an entry in another case is another address. A public program
+  admits everyone not blacklisted; an owner-mode program admits only its owner. A restricted
+  program admits its owner (even when blacklisted), then anyone not blacklisted who is in
+  `allowed` or in a group with `read` permission. An ACL the node's validator would never
+  store fails closed. `buyer-only` requires a
+  restricted ACL whose only `allowed` entry is the agreement-bound buyer and no reader group, read through an authenticated
+  restricted reader. The pinned node denies anonymous reads of restricted programs and the
+  catalog installs no such reader, so every session on a buyer-only listing is indeterminate,
+  whatever its outcome; the buyer-only acceptance tests inject a fixture reader. Encrypted
+  payloads and declared payloads above the Standard's 128 KB storage limit exclude every session on the
+  listing in the same way, and so does a deliverable `schemaUrl` while no authenticated schema
+  validator is installed (none is). The seller's own delivery choices the listing leaves open, an
+  external pointer whose size the listing did not declare or a public listing delivered through
+  a restricted ACL the anonymous reader cannot open, leave that session undecided, and so does a
+  payload read with no answer: it counts neither as completed nor as failed, and the seller's rates
+  are published as ranges (Discovery, item 3). An absent payload, or one over the inline bounds,
+  refutes that session only. None contributes a completion or volume.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
   used until that resolver is configured; it fails closed to `indeterminate` rather
   than being relabelled as verified.
+- **DACS-3 §8.5.2 checks 5 and 6 need the commitment's anchored `committedAt`**, and a
+  bundle does not reference the CommitmentRecord. A session whose listing sets
+  `terms.deadlineSecAfterCommit` or `validity.notAfter` is therefore `indeterminate` and
+  never counted; `SPEC_PIN` lists this and the other recorded deviations.
 - **Listing versions are allocated from observed catalog state**, without a mutable
   in-process lock. Publishers must serialize writes for one `seller + listingId` until
   the substrate or SDK provides an atomic version allocator; concurrent publishers can
@@ -325,26 +466,49 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
 
 This is a partial implementation of DACS-1 listing publication, well-known
 files and catalog discovery, with current-artifact graph readers and a labelled
-legacy SDK path. It does not claim complete DACS conformance. Session historical
-identity/challenge/recipe admission, authority-proof authentication, native-payment
-finality, rail snapshots, delivery cleartext/ACL verification and full agreement
-conformance remain pending integration. Catalog computations are advisory and
-independently reproducible from their refs; reference verification alone does not
-establish payment or delivery.
-Procurement listings remain outside this reader profile until reconciliation supports
-the publisher as buyer and attributes supplier history to the agreement seller.
+legacy SDK path. It does not claim complete DACS conformance. The current graph
+admits session Vet through historical identity, challenge and recipe-snapshot checks
+with deployment adapters. It verifies native DEM payment inclusion against
+operator-provisioned rail snapshots, storage delivery cleartext and ACLs, and DACS-3
+§8.5.2 agreement conformance, including buyer-published procurement. `SPEC_PIN` records
+the profile limits and deviations. Authority-proof authentication remains pending
+integration (split 4/5). Catalog computations are advisory and independently
+reproducible from their refs; reference verification alone does not establish payment
+or delivery.
+
+Every catalog save applies one settlement ledger across all sellers, including scheduled
+indexing and immediate refreshes. A deal's `reputationEligible` records its verified evidence
+eligibility; `settlementRejected` records its current catalog admission separately. Rejected
+deals contribute no metrics or listing hints, and later saves reconsider them if the winning
+claim disappears or changes. Run a full reindex when upgrading an existing catalog so its
+cached evidence eligibility is refreshed.
+
+A listing's `reputationHint` is the DACS-5 §10.5.4 category-scoped derivation: it counts the
+sessions whose agreement the pass resolved, by the category of the listing that agreement pins
+(`agreementCategory` on the deal). A failure or abort before commitment has no agreement, so it
+counts in the seller's figures and in no hint, and so does a session whose agreement or listing
+went unread. A deal saved without `agreementCategory` is in no hint until a pass verifies it again.
+
+Prices are read in their CORE CD-1 canonical form wherever they are compared: agreement,
+payment and refund amounts, band bounds (rounded to the digits of the band centre's
+canonical form), the DEM amount in OS and published volume, so `"2.0"` settles a listed `"2"`.
+Anything but a plain decimal is refused. Only a metered agreement's price must itself be
+canonical (MTR-4, as the pinned `metered-pricing-v0.3` vectors require).
 
 **Upstream source contracts.** The Directory records these source revisions:
 
 - **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation (v0.4,
   `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
   with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
-  SIG-6 encoding and Demos agent claim resolution. `test/listing-vectors.test.ts` and
-  `test/revocation-vectors.test.ts` check the two listing/withdrawal fixture hashes and
-  exercise the Directory's decisions. The revocation adapter explicitly excludes
-  remote-catalog freshness, which this producer does not consume. Other upstream
-  vector adapters remain pending. The `did:demos:agent` primary-claim profile is the
-  deliberate addition; it comes from
+  every vendored file's hash, SIG-6 encoding and Demos agent claim resolution, and runs
+  the other vendored sets through adapters onto the Directory's own decisions. Three sets
+  run in part: `payee-destination-binding` (14 of 28), `metered-pricing` (19 of 22) and
+  `sb2-settlement-uniqueness` (19 of 20); `SPEC_PIN` names the skipped cases and why.
+  `test/listing-vectors.test.ts` and `test/revocation-vectors.test.ts` check the two
+  listing/withdrawal fixture hashes and exercise the Directory's decisions. The
+  revocation adapter explicitly excludes remote-catalog freshness, which this producer
+  does not consume. `SPEC_PIN` lists the skipped vector sets and recorded deviations.
+  The `did:demos:agent` primary-claim profile is the deliberate addition; it comes from
   DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
 - **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
   Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
@@ -389,6 +553,62 @@ Current publishers use the registry IDs `demos-native:DEM` and `x402:default`, p
 names as rail IDs remain readable as evidence, but are excluded from public discovery; publish
 a new signed listing version to make those offers executable.
 
+Native DEM success requires public transaction and block reads confirming inclusion, the payer
+and payee, and the exact agreed amount (1 DEM = 10^9 OS). A successful `pay-dem` record cites
+exactly one native transfer (DACS-4 §9.5.9), so its `paymentAmount`, the transfer the node
+confirms and its SB-1 key describe one payment. Where a block lists the transactions whose GCR
+edits it applied (`attrs.gcrAppliedTxs`, served by node2 but absent from the pinned node source),
+a transfer the list does not name (a lasting state), or a list that cannot be read (no answer), is indeterminate. The node credits and debits the
+exact address string it stores (ac8f45f `handleNativeOperations`), so the transaction's
+sender and recipient must be canonical `0x<64 lowercase hex>` strings and its send argument
+must name the recipient. Another spelling of the same key is a different account. The payer is
+the agreement buyer's primary claim and the payee the seller's. A payee-bound agreement fixes
+its payout address (PB-1), and for `pay-dem` that can only be the seller's own address: PB-2 tier
+1 makes it the destination, tier 3 is legal only where no stronger tier applies, and a payer MUST
+refuse to pay any other. An agreement naming another is therefore refused for every committed
+session; only the seller, which co-signs it, can make one. DACS-4 lets the buyer pay from any key
+in its bundle claims, which this Directory does not resolve, and a legacy agreement binds no
+destination (§9.5.1). A transfer from another key than the buyer's, or under a legacy agreement
+to another address than the seller's, that passes every other check is the session's lasting
+state where the seller signed the copy, so the session is undecided; in a copy only its
+counterparty signed (an abort) such a transfer is refuted, so the counterparty cannot leave the
+seller's session undecided with it. The stored RPC amount is OS,
+carried as a safe integer or an exact string; the send payload must contain a canonical OS
+string. A historical numeric DEM payload leaves only its amount open pending a historical fork
+adapter: every other check runs first, and a transfer that passes them is the transaction's
+lasting state, so the session stays undecided (Discovery, item 3).
+Only the node's answer about the cited transaction refutes a payment: its failed status, a send
+to the buyer's account or from the seller's, another payee than a payee-bound agreement fixes,
+another amount, another block, a block that does not include it, or node2's structured
+not-found (`result` 404, `reason: "not_found"`) once `checkedThroughBlock` reaches the cited
+block. A not-found below the cited block also refutes it when the last block the node checked is
+already later than the block that consensus-anchored the citing bundle (by that block's own
+timestamp against the bundle's recorded anchor time): a bundle cannot cite a transfer made after
+it was anchored, and nothing bounds the `blockNumber` it cites. Every other reply is no answer and
+leaves the payment undecided, until a pass gets an answer: a transport failure or
+timeout, an HTTP or `result` error (including the pinned source's bare 400), a `result` 200 without
+a transaction, a not-found from a node that has not reached the bundle's anchor, a reply about
+another transaction or block, and a non-terminal status.
+All other current payment rails and paid SDK legacy sessions remain indeterminate until their
+authoritative settlement adapters are available. Every session on such a listing, failed or
+completed, contributes no completion, denominator or volume.
+Historical Vet admission also requires an authenticated challenge resolver. The graph checks the
+verifier-issued nonce against its job, party, issuance window, authenticated first consumption
+time (`consumedAt`) and `consumedByPresentationHash`, `sha256Hex(canonicalize(identity))` of the complete
+first attempted IdentityBundle including `presentation` and its signatures, even when that attempt
+failed. The signed bundle scope hash omits `presentation` and cannot identify an attempt. The signed
+`presentedAt` timestamp is informational. The counterparty's presented primary claim also needs its
+own verified claim under a roster recipe and a trusted, method-specific
+`EvidenceGraphDeps.verifyPrimaryClaimControl` adapter that authenticates holder linkage and
+session-bound control (DACS-2 §7.12); an identifier-existence result alone is not control proof.
+Missing, rejecting or throwing adapters fail closed. This deployment installs neither the challenge
+resolver nor a control adapter, so every session on a listing with a Vet phase, whatever its
+outcome, is indeterminate and left out of completion, denominators and volume. Listing
+publication uses its signed self-binding.
+Attested-payload and entitlement deliveries likewise remain indeterminate, for every session on
+the listing, until authoritative attestation and grant adapters are installed. Storage delivery
+verifies payload bytes and ACLs.
+
 Well-known indexes can introduce offers after the Directory independently verifies
 each listing's signature, publisher, chain owner and content hash. Source provenance
 authorizes unresolved withdrawal holds. Use a seller publisher signature, or configure `DACS_WITHDRAWAL_SOURCE_PINS` as a
@@ -424,7 +644,9 @@ revalidation of that source; an older index cannot silently replace it.
 Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
 fallback) are readable for listing discovery. Their deal evidence remains unverified
 and excluded from completion, ratings and volume until semantic agreement, settlement
-and delivery verification adapters support that combination.
+and delivery verification adapters support that combination. A negotiable listing whose
+RFQ step enables the fallback leaves every session free to choose it, so all of its
+sessions are excluded, RFQ agreements and pre-commit failures included (DACS-5 §10.5.1).
 
 Authenticated revocation bindings survive newer active index advertisements and
 process restarts. An unread marker continues to withhold the offer until a successful
