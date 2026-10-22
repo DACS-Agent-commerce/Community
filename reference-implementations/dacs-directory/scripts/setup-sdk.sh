@@ -24,15 +24,16 @@ git_with_sdk_auth() {
 }
 
 # The DACS Standard revision the pinned SDK declares (package.json
-# dacs.standardRevision); the Directory conforms to the same revision.
+# dacs.standardRevision); the Directory implements the profile in SPEC_PIN.
 STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
-SDK_PATCH_SHA256="776c15d1f4b39e94754c65f40393a87ffca43c2072403360b773b84cbf347005"
+SDK_PATCH_SHA256="d3e3086b05ec391f5bd4f4177d6a36713757b2435ac8a0c0b3d3fab64202c0d4"
 SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
 SDK_MANIFEST="vendor/dacs-sdk/dist/.dacs-sdk-manifest"
 # scripts/sdk-dist-digest.mjs over the dist that SDK_REV builds to (`npm ci`
-# then `npm run build`; the build is reproducible). A packaged or freshly built
+# then `npm run build` and sdk-compat-output.mjs on the pinned Node release).
+# A packaged or freshly built
 # dist is accepted only with exactly these bytes.
-SDK_DIST_SHA256="2e4a9d1b23b2bcb1dedc4209da3c6295a7ae1b86a2bf2d80a15fa1a04e1e0f19"
+SDK_DIST_SHA256="a623355351e4ef690ebaa9fe229dfb40f73bb0edbc01015da874337252c92bee"
 
 require_standard_revision() {
   local declared
@@ -89,6 +90,7 @@ else
     git apply ../../scripts/dacs-sdk-compat.patch
     trap 'git apply --reverse ../../scripts/dacs-sdk-compat.patch' EXIT
     npm ci --no-audit --no-fund && npm run build
+    node ../../scripts/sdk-compat-output.mjs .
   )
   require_pinned_dist --manifest "$SDK_MANIFEST"
   printf '%s' "$SDK_REV" > "$SDK_REV_MARKER"

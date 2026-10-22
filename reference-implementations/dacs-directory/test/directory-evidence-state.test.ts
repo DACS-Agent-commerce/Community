@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directoryEvidenceState, UNMEASURED_REACHABILITY_LABEL } from "../src/components/directory-evidence-state.js";
+import { catalogAuthenticationLabel, directoryEvidenceState, UNMEASURED_REACHABILITY_LABEL } from "../src/components/directory-evidence-state.js";
 import type { ListingSummary, SellerRecord } from "../src/catalog/types.js";
 
 const listing = (overrides: Partial<ListingSummary> = {}): ListingSummary => ({
@@ -100,4 +100,11 @@ test("keeps fixture and legacy listing evidence visibly distinct", () => {
     directoryEvidenceState(listing({ artifactProfile: "legacy-sdk-v0.1" }), seller()).listing,
     { kind: "legacy", label: "legacy SDK listing" },
   );
+});
+
+
+test("catalog authentication labels reflect current, legacy and fixture evidence", () => {
+  assert.equal(catalogAuthenticationLabel("dacs-v0.1"), "Structure, signature, identity presentation, owner binding, and chain anchor authenticated");
+  assert.equal(catalogAuthenticationLabel("legacy-sdk-v0.1"), "Legacy structure, signature, owner binding, and chain anchor authenticated");
+  assert.equal(catalogAuthenticationLabel("fixture-listing"), "Fixture machine contract and content hash match; no chain anchor claimed");
 });

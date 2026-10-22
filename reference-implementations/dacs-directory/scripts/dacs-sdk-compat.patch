@@ -1,17 +1,97 @@
---- a/src/artifacts/validators.ts
-+++ b/src/artifacts/validators.ts
-@@ -720,7 +720,7 @@
-     (v.acceptanceModel === undefined || v.acceptanceModel === "auto-accept") &&
-     (v.cancellationPolicy === undefined ||
-       isOneOf(["none", "pre-commit", "with-fee"], v.cancellationPolicy)) &&
--    (v.retentionYears === undefined || isPositiveSafeInt(v.retentionYears)) &&
-+    (v.retentionYears === undefined || isSafeUint(v.retentionYears)) &&
-     (v.transcriptDisclosurePolicy === undefined ||
-       isOneOf(
-         [
+diff --git a/src/agent/verifyBundleCore.ts b/src/agent/verifyBundleCore.ts
+index 9a0d7dff..d4fc303c 100644
 --- a/src/agent/verifyBundleCore.ts
 +++ b/src/agent/verifyBundleCore.ts
-@@ -900,10 +900,13 @@
+@@ -1,6 +1,6 @@
+ import { types as nodeTypes } from "node:util";
+
+-import { contentHash, stripSignature } from "../canonical/index.js";
++import { canonicalize, sha256Hex, contentHash, stripSignature } from "../canonical/index.js";
+ import {
+   snapshotCanonicalJson,
+   snapshotCanonicalJsonRead,
+@@ -629,6 +629,22 @@ function snapshotDependencyRecord(
+   }
+ }
+
++/** Frozen SDK-MVP hashing: normalize member names before stable sorting. */
++function legacyContentHash(value: unknown): string {
++  const serialize = (child: unknown): string => {
++    if (Array.isArray(child)) return `[${child.map(serialize).join(",")}]`;
++    if (child !== null && typeof child === "object") {
++      const entries = Object.entries(child).filter(([, item]) => item !== undefined)
++        .map(([key, item]) => [key.normalize("NFC"), item] as const)
++        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
++      return `{${entries.map(([key, item]) => `${canonicalize(key)}:${serialize(item)}`).join(",")}}`;
++    }
++    if (typeof child === "number" && !Number.isSafeInteger(child)) throw new Error("legacy canonical form requires safe integers");
++    return canonicalize(child);
++  };
++  return sha256Hex(serialize(value));
++}
++
+ /** Shape/hash-check one resolved artifact before attempting authentication. */
+ function checkArtifact(
+   kind: string,
+@@ -636,11 +652,12 @@ function checkArtifact(
+   expectedHash: string,
+   validateScope: (v: Record<string, unknown>) => boolean,
+   resolved: Record<string, unknown> | null,
++  hash = contentHash,
+ ): RefCheck {
+   if (!resolved) return { kind, id, verdict: "missing" };
+   const scope = stripSignature(resolved) as Record<string, unknown>;
+   if (!validateScope(scope)) return { kind, id, verdict: "invalid-shape" };
+-  if (contentHash(scope) !== expectedHash)
++  if (hash(scope) !== expectedHash)
+     return { kind, id, verdict: "hash-mismatch" };
+   return { kind, id, verdict: "ok" };
+ }
+@@ -827,7 +844,7 @@ async function authenticateComponentReference(
+ }
+
+ /** Authenticate the SDK's explicitly isolated pre-ComponentSignature format. */
+-async function authenticateLegacyHexReference(
++async function authenticateLegacyListingReference(
+   artifact: Record<string, unknown>,
+   separator: DomainSeparator,
+   signer: string | null,
+@@ -836,11 +853,14 @@ async function authenticateLegacyHexReference(
+   if (!Object.prototype.hasOwnProperty.call(artifact, "signature")) {
+     return { verdict: "missing" };
+   }
+-  if (
+-    typeof artifact.signature !== "string" ||
+-    !/^[0-9a-f]{128}$/.test(artifact.signature)
+-  ) {
+-    return { verdict: "malformed", reason: "invalid-legacy-hex-signature" };
++  const signature = typeof artifact.signature === "string"
++    ? { algorithm: "ed25519", signer, value: artifact.signature }
++    : artifact.signature as { algorithm?: unknown; signer?: unknown; value?: unknown } | null;
++  const encoded = legacySignatureValue(signature?.value);
++  if (!signature || signature.algorithm !== "ed25519" || encoded === null ||
++      typeof signature.signer !== "string" || !signer ||
++      !sameCanonicalClaimIdentity(signature.signer, signer)) {
++    return { verdict: "malformed", reason: "invalid-legacy-listing-signature" };
+   }
+   if (!signer) {
+     return { verdict: "unresolved", reason: "legacy-signer-unresolved" };
+@@ -859,12 +879,12 @@ async function authenticateLegacyHexReference(
+   }
+   const message = signedBytes(
+     separator,
+-    contentHash(stripSignature(artifact)),
++    legacyContentHash(stripSignature(artifact)),
+   );
+   try {
+     const valid = await deps.verify(
+       Uint8Array.from(message),
+-      Uint8Array.from(Buffer.from(artifact.signature, "hex")),
++      Uint8Array.from(Buffer.from(encoded, "base64url")),
+       Uint8Array.from(key),
+     );
+     return valid
+@@ -900,10 +920,13 @@ function isAgreementSignatureShape(value: unknown): value is AgreementSignature
  async function authenticateAgreementReference(
    artifact: Record<string, unknown>,
    deps: VerifyBundleDeps,
@@ -27,7 +107,7 @@
      return { verdict: "malformed", reason: "invalid-agreement-scope" };
    }
    if (!Object.prototype.hasOwnProperty.call(artifact, "signatures")) {
-@@ -915,11 +918,18 @@
+@@ -915,11 +938,18 @@ async function authenticateAgreementReference(
    if (artifact.signatures.length === 0) {
      return { verdict: "missing", reason: "agreement-signatures-empty" };
    }
@@ -42,28 +122,34 @@
 +  if (!rawSignatures.every(isAgreementSignatureShape)) {
      return { verdict: "malformed", reason: "malformed-agreement-signature" };
    }
- 
+
 -  const signatures = artifact.signatures as AgreementSignature[];
 +  const signatures = rawSignatures as AgreementSignature[];
    const required = [claims.buyer, claims.seller];
    const seen = new Set<string>();
    const authenticatedSigners: string[] = [];
-@@ -1004,6 +1014,57 @@
-     }
-   }
+@@ -958,7 +988,7 @@ async function authenticateAgreementReference(
+   )
+     ? ARTIFACT_SEPARATORS.PayeeBoundAgreementDocument
+     : ARTIFACT_SEPARATORS.AgreementDocument;
+-  const message = signedBytes(separator, contentHash(scope));
++  const message = signedBytes(separator, legacy ? legacyContentHash(scope) : contentHash(scope));
+   for (const signature of signatures) {
+     if (signature.algorithm !== "ed25519") {
+       return {
+@@ -1006,6 +1036,56 @@ async function authenticateAgreementReference(
    return { verdict: "valid", signers: authenticatedSigners };
-+}
-+
+ }
+
 +/** Decode only the frozen historical SDK profile's signature spellings. */
 +function legacySignatureValue(value: unknown): string | null {
 +  if (typeof value !== "string") return null;
-+  if (/^(?:0x)?[0-9a-fA-F]{128}$/.test(value)) return Buffer.from(value.replace(/^0x/, ""), "hex").toString("base64url");
-+  if (isCanonicalBase64Url(value) && Buffer.from(value, "base64url").length === 64) return value;
-+  if (/^[A-Za-z0-9+/]{86}==$/.test(value)) {
-+    const bytes = Buffer.from(value, "base64");
-+    if (bytes.length === 64 && bytes.toString("base64") === value) return bytes.toString("base64url");
-+  }
-+  return null;
++  const hex = value.replace(/^(0x)+/i, "");
++  if (/^[0-9a-fA-F]{128}$/.test(hex)) return Buffer.from(hex, "hex").toString("base64url");
++  try {
++    const bytes = Buffer.from(value, "base64url");
++    return bytes.length === 64 ? bytes.toString("base64url") : null;
++  } catch { return null; }
 +}
 +
 +/** Historical SDK-MVP evidence has no current semantic-verifier contract. */
@@ -98,15 +184,34 @@
 +    try {
 +      const key = await deps.resolvePublicKey(signer);
 +      if (!key || key.length !== 32) return { verdict: "unresolved" };
-+      if (!await deps.verify(signedBytes(ARTIFACT_SEPARATORS.SettlementEvidence, contentHash(stripSignature(artifact))), bytes, key)) return { verdict: "invalid" };
++      if (!await deps.verify(signedBytes(ARTIFACT_SEPARATORS.SettlementEvidence, legacyContentHash(stripSignature(artifact))), bytes, key)) return { verdict: "invalid" };
 +    } catch { return { verdict: "unresolved" }; }
 +    signers.push(signer);
 +  }
 +  return { verdict: "valid", signers };
- }
- 
++}
++
  function bundlePartySignerClaims(
-@@ -1581,10 +1642,7 @@
+   bundle: ReadableAttestationBundle,
+ ): ReadonlySet<string> | null {
+@@ -1410,7 +1490,7 @@ export async function verifyBundleCore(
+       : isFaultBundle(bundle as unknown as Record<string, unknown>)
+         ? ARTIFACT_SEPARATORS.FaultAttestationBundle
+         : ARTIFACT_SEPARATORS.AttestationBundle,
+-    contentHash(scope),
++    isNormativeGraph ? contentHash(scope) : legacyContentHash(scope),
+   );
+
+   const sigs = Array.isArray(raw["signatures"])
+@@ -1563,6 +1643,7 @@ export async function verifyBundleCore(
+       ref.contentHash,
+       validateScope,
+       value,
++      isLegacyMvpAttestationRef(ref) ? legacyContentHash : contentHash,
+     );
+     return {
+       check:
+@@ -1581,10 +1662,7 @@ export async function verifyBundleCore(
          ? isLegacyMvpAgreementDocument
          : isAgreementScope,
        isLegacyMvpAttestationRef(bundle.agreementRef)
@@ -118,7 +223,7 @@
          : (artifact) => authenticateAgreementReference(artifact, deps),
      );
      if (
-@@ -1726,7 +1784,9 @@
+@@ -1726,7 +1804,9 @@ export async function verifyBundleCore(
      ) {
        evidence.check.verdict = "invalid-binding";
      }
@@ -129,3 +234,45 @@
        let decision: unknown;
        let authorizedSigner: string | null = null;
        try {
+@@ -1962,6 +2042,7 @@ export async function verifyBundleCore(
+         ? isNormativeListingScope
+         : isLegacyMvpListingScope,
+       listing,
++      listingUsesNormativeScope ? contentHash : legacyContentHash,
+     );
+     if (listingCheck.verdict === "ok" && listing && listingUsesNormativeScope) {
+       const listingScope = stripSignature(listing) as {
+@@ -1991,9 +2072,8 @@ export async function verifyBundleCore(
+           : null;
+       listingCheck = attachSignatureCheck(
+         listingCheck,
+-        isLegacyMvpListing(listingScope) &&
+-          typeof listing.signature === "string"
+-          ? await authenticateLegacyHexReference(
++        isLegacyMvpListing(listingScope)
++          ? await authenticateLegacyListingReference(
+               listing,
+               ARTIFACT_SEPARATORS.Listing,
+               publisher,
+diff --git a/src/artifacts/validators.ts b/src/artifacts/validators.ts
+index 7743f4e9..41099dd9 100644
+--- a/src/artifacts/validators.ts
++++ b/src/artifacts/validators.ts
+@@ -720,7 +720,7 @@ export function isListingTerms(v: unknown): v is ListingTerms {
+     (v.acceptanceModel === undefined || v.acceptanceModel === "auto-accept") &&
+     (v.cancellationPolicy === undefined ||
+       isOneOf(["none", "pre-commit", "with-fee"], v.cancellationPolicy)) &&
+-    (v.retentionYears === undefined || isPositiveSafeInt(v.retentionYears)) &&
++    (v.retentionYears === undefined || isSafeUint(v.retentionYears)) &&
+     (v.transcriptDisclosurePolicy === undefined ||
+       isOneOf(
+         [
+@@ -939,7 +939,7 @@ export function isListingEnvelope(v: unknown): v is ListingEnvelope {
+     return false;
+   }
+   try {
+-    return Buffer.byteLength(canonicalize(v), "utf8") <= 16_384; // LR-2 size cap.
++    return Buffer.byteLength(canonicalize(stripSignature(v)), "utf8") <= 16_384; // LR-2 size cap.
+   } catch {
+     return false;
+   }

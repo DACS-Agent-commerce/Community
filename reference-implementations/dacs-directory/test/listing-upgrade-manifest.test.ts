@@ -21,7 +21,7 @@ test("replacement manifest maps every occupied old Listing to a fresh ID, starti
 
 test("the complete catalog replacement check runs with fresh IDs and unassessed buyer readiness", async () => {
   const { checkListingUpgrades } = await import("../scripts/check-live-listing-upgrade.js");
-  const { vector, sign, dids } = await import("./fixtures/current-evidence.js");
+  const { vector, sign, dids, seeds } = await import("./fixtures/current-evidence.js");
   const { contentHash } = await import("@kynesyslabs/dacs/canonical");
   const fixture = await vector("upgrade-check", 700);
   const entries = manifest();
@@ -40,7 +40,7 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
     anchors.set(old[index].locator, { ...fixture.listing, listingId: old[index].listingId,
       listingVersion: old[index].listingVersion, offering: { ...offering, deliverable: { kind: "attested-payload", verificationMethod: old[index].verificationMethod } } });
     summaries.push({ listingId: entry.replacementListingId, version: 1, contentHash: contentHash(replacement),
-      anchor: { locator: entry.replacementLocator }, catalogObservedAt: Date.now(), transactionReadiness: { disposition: "unassessed" } });
+      anchor: { locator: entry.replacementLocator }, status: "active", catalogObservedAt: Date.now(), transactionReadiness: { disposition: "unassessed" } });
   }
   const originalFetch = globalThis.fetch;
   const previous = { origin: process.env.NEXT_PUBLIC_DIRECTORY_URL, manifest: process.env.DACS_LISTING_UPGRADE_REPLACEMENTS };
@@ -61,6 +61,22 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
     await checkListingUpgrades((message) => { output.push(message); });
     assert.equal(output.filter((line) => line.includes("authenticated and discoverable")).length, 3);
     assert.equal(output.filter((line) => line.includes("reader remains unassessed")).length, 3);
+    summaries[0].status = "revoked";
+    await assert.rejects(checkListingUpgrades(() => {}), /required-binding-missing/);
+    const markerScope = { listingId: entries[0].replacementListingId, listingVersion: 1,
+      listingContentHash: summaries[0].contentHash, revokedAt: 1 };
+    const { ed25519Sign, privateKeyFromSeed } = await import("@kynesyslabs/dacs/crypto");
+    const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: dids[1],
+      value: Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(markerScope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url") } };
+    const markerAt = `stor-${"f".repeat(40)}`;
+    anchors.set(markerAt, marker);
+    summaries[0].revocation = { sellerPrimaryClaim: dids[1], listingId: entries[0].replacementListingId,
+      listingVersion: 1, listingContentHash: summaries[0].contentHash,
+      logicalAddress: `dacs1-revoked:${encodeURIComponent(dids[1])}:${entries[0].replacementListingId}:v1`,
+      markerAnchor: { kind: "storage-program", locator: markerAt }, markerContentHash: contentHash(marker) };
+    await assert.rejects(checkListingUpgrades(() => {}), /verified-revocation-marker/);
+    summaries[0].status = "active";
+    delete summaries[0].revocation;
     hideReplacement = true;
     await assert.rejects(checkListingUpgrades(() => {}), /not exposed by the reindexed catalog/);
   } finally {

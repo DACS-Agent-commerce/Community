@@ -1,3 +1,4 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -129,4 +130,35 @@ test("catalog deployment reports the pinned clean build without a warning", asyn
     assert.equal(result.build, PINNED_DEMOS_NODE_BUILDS[0]);
     assert.equal(result.warning, null);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("deployment observations reject oversized node bodies and malformed chain hashes", async () => {
+  const report = nodeReporting({ commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false }, PINNED_DEMOS_CHAIN_IDENTITY);
+  await assert.rejects(observeWith(async () => new Response("x".repeat(1_048_577))));
+  for (const chain of ["untrusted-node-message", "a".repeat(63), "a".repeat(65)]) {
+    await assert.rejects(observeWith(nodeReporting({ commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false }, chain)), /no stable chain identity/);
+  }
+  assert.equal((await observeWith(report)).pin.ok, true);
+});
+
+test("the deployment CLI observes the node without opening catalog storage", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync, writeFileSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  const scratch = mkdtempSync(join(tmpdir(), "deployment-readonly-"));
+  try {
+    const preload = join(scratch, "node-report.mjs");
+    writeFileSync(preload, `globalThis.fetch = ${nodeReporting.toString()}(${JSON.stringify({ commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false })}, ${JSON.stringify(PINNED_DEMOS_CHAIN_IDENTITY)});`);
+    const data = join(scratch, "catalog");
+    const run = spawnSync(process.execPath, [...process.execArgv, "--import", pathToFileURL(preload).href,
+      fileURLToPath(new URL("../scripts/check-node-deployment.ts", import.meta.url))], {
+      env: { ...process.env, DACS_DIRECTORY_DATA: data }, encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(JSON.parse(run.stdout).pinned, true);
+    assert.equal(existsSync(data), false, "the read-only check must not create or migrate the catalog");
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 });

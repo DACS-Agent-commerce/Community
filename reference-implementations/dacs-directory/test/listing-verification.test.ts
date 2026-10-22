@@ -536,21 +536,17 @@ const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown
   return scope;
 };
 
-test("the pinned SDK profile caps the complete canonical Listing more strictly than LR-2", async () => {
+test("LR-2 caps the canonical Listing without its signature", async () => {
   const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
-    padding: "x".repeat(bytes - canonicalBytes(signedCurrentListing({ padding: "" }))),
+    padding: "x".repeat(bytes - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))),
   });
   const atCap = sized(16_384);
-  assert.equal(canonicalBytes(atCap), 16_384);
+  assert.equal(canonicalBytes(stripEnvelope(atCap)), 16_384);
+  assert.ok(canonicalBytes(atCap) > 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
-  // A scope at the cap is oversized once its signature envelope is included.
-  const unsignedAtCap = signedCurrentListing({ padding: "x".repeat(16_384 - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))) });
-  assert.equal(canonicalBytes(stripEnvelope(unsignedAtCap)), 16_384);
-  const refused = await verifyListingResult(unsignedAtCap);
-  assert.deepEqual(refused, { ok: false, code: "NORMATIVE_LISTING_INVALID" });
-  assert.match(LISTING_REJECTION_MESSAGES.NORMATIVE_LISTING_INVALID, /SDK's stricter 16,384-byte limit.*with its signature/);
+  assert.match(LISTING_REJECTION_MESSAGES.NORMATIVE_LISTING_INVALID, /16,384-byte.*signature omitted/);
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);

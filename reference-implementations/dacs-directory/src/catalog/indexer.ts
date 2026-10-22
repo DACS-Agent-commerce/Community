@@ -18,6 +18,8 @@ import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "./canonical.js";
+import { legacyListingHash } from "./legacyListingHash.js";
+import { usesCurrentBundleProfile } from "./bundleProfile.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { cciProofLinks } from "./cciProofLinks.js";
 import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
@@ -405,14 +407,14 @@ export async function indexRegistration(
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
-    const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
+    const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
       : await graphFor(deal.sellerBundleRef);
     // Profile selection is based on the signed format discriminator, not on
     // whether verification succeeds. A malformed current bundle must fail in
     // the current verifier instead of being retried by the legacy verifier.
-    if (jobBindings.length > 0 || buyerIsCurrent || sellerCurrentProbe?.bundle.bundleVersion === "1" || sellerCurrentProbe?.bundle.faultBundleVersion === "1") {
+    if (jobBindings.length > 0 || buyerIsCurrent || usesCurrentBundleProfile(sellerCurrentProbe?.bundle ?? null)) {
       const graphCache = new Map<string, Promise<EvidenceGraph>>();
       if (sellerCurrentProbe && deal.sellerBundleRef) {
         graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
@@ -602,7 +604,7 @@ export async function indexRegistration(
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
-      bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      bundleContentHash: bundle && signedBundleScope ? legacyListingHash(signedBundleScope) : undefined,
       reputationEligible,
       cancellationNeutral,
       faultedParty: undefined,

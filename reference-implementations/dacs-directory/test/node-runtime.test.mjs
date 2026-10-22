@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -158,4 +159,31 @@ test("start:railway stops before the indexer and server when the check fails", (
   assert.match(output, /^\[deployment config\] Node .* is running, but \.nvmrc pins 0\.0\.0; /);
   assert.doesNotMatch(output, /\[indexer\]|next/);
   assert.ok(!existsSync(join(dir, "data")), "start-railway.sh must fail before it prepares the data directory");
+});
+
+test("Railway distinguishes a deployment mismatch from a failed node observation", (t) => {
+  for (const code of [1, 2]) {
+    const dir = mkdtempSync(join(tmpdir(), "node-deployment-boot-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, "scripts"));
+    mkdirSync(join(dir, "bin"));
+    mkdirSync(join(dir, "node_modules/.bin"), { recursive: true });
+    for (const name of ["check-node-runtime.mjs", "start-railway.sh"]) copyFileSync(join(appDir, "scripts", name), join(dir, "scripts", name));
+    writeFileSync(join(dir, ".nvmrc"), `${process.versions.node}\n`);
+    const npm = join(dir, "bin/npm");
+    writeFileSync(npm, `#!/usr/bin/env bash\nif [ "$2" = check:node-deployment ]; then exit ${code}; fi\nexit 0\n`);
+    const next = join(dir, "node_modules/.bin/next");
+    writeFileSync(next, "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(npm, 0o755); chmodSync(next, 0o755);
+    const out = join(dir, "out.log");
+    const fd = openSync(out, "w");
+    const run = spawnSync("bash", [join(dir, "scripts/start-railway.sh")], {
+      cwd: dir, env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, DACS_INDEX_INTERVAL_SECONDS: "1", DACS_DIRECTORY_DATA: join(dir, "data") },
+      stdio: ["ignore", fd, fd], timeout: 10_000,
+    });
+    closeSync(fd);
+    assert.equal(run.status, 0);
+    const output = readFileSync(out, "utf8");
+    assert.match(output, code === 1 ? /differs from the deployment pins/ : /could not observe the Demos deployment \(exit 2\)/);
+  }
 });

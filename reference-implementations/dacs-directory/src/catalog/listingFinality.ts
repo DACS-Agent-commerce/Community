@@ -3,7 +3,7 @@ import { demosSignedTransactionProofHash } from "../sdkDemosWriteEvidence.js";
 
 import { readAnchorRecord } from "./chain.js";
 import { nodeBuildRejection, pinnedChainIdentity, reportedNodeBuild } from "./nodeDeployment.js";
-import { storageWriteCandidate } from "./scan.js";
+import { storageResponseJson } from "./artifactLimits.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const PAGE_SIZE = 100;
@@ -31,7 +31,7 @@ async function nodeCall(message: string, data: Record<string, unknown>, signal?:
     }),
   });
   if (!response.ok) throw new Error(`${message} transport failed`);
-  const body = await response.json() as { result?: number; response?: unknown };
+  const body = await storageResponseJson(response) as { result?: number; response?: unknown };
   if (body.result !== 200) throw new Error(`${message} returned ${String(body.result)}`);
   return body.response;
 }
@@ -45,7 +45,7 @@ async function chainIdentity(signal?: AbortSignal): Promise<string> {
   const genesis = record(await nodeCall("getBlockByNumber", { blockNumber: 0 }, signal).catch(() => null));
   const genesisHash = typeof genesis?.hash === "string" ? genesis.hash.trim().toLowerCase() : "";
   const genesisNumber = genesis?.number ?? genesis?.id;
-  if (genesisHash && (genesisNumber === undefined || genesisNumber === 0)) return genesisHash;
+  if (/^[0-9a-f]{64}$/.test(genesisHash) && (genesisNumber === undefined || genesisNumber === 0)) return genesisHash;
   const first = record(await nodeCall("getBlockByNumber", { blockNumber: 1 }, signal));
   const firstContent = parsedRecord(first?.content);
   const previousHash = typeof firstContent?.previousHash === "string"
@@ -53,7 +53,7 @@ async function chainIdentity(signal?: AbortSignal): Promise<string> {
     : "";
   if (
     !first || first.status !== "confirmed" || first.number !== 1 ||
-    typeof first.hash !== "string" || !first.hash.trim() || !previousHash
+    typeof first.hash !== "string" || !/^[0-9a-f]{64}$/i.test(first.hash.trim()) || !/^[0-9a-f]{64}$/.test(previousHash)
   ) {
     throw new Error("Demos genesis block has no stable chain identity");
   }
@@ -80,6 +80,7 @@ async function writeByHash(
   const tx = record(await nodeCall("getTxByHash", { hash: txRef }).catch(() => null));
   const content = parsedRecord(tx?.content);
   if (!tx || !content) return null;
+  const { storageWriteCandidate } = await import("./scan.js");
   const candidate = storageWriteCandidate({ ...tx, type: tx.type ?? content.type, to: tx.to ?? content.to, content });
   return candidate?.locator === anchorAddress &&
     candidate.contentHash === listingContentHash &&
@@ -96,6 +97,7 @@ async function findCanonicalWrite(
   if (expectedTxRef) {
     return writeByHash(anchorAddress, listingContentHash, expectedTxRef);
   }
+  const { storageWriteCandidate } = await import("./scan.js");
   let cursor: number | "latest" = "latest";
   let scanned = 0;
   while (scanned < MAX_TRANSACTIONS) {

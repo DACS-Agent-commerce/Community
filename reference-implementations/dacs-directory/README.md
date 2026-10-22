@@ -126,12 +126,13 @@ checks a clean checkout of that commit), the SDK's `package.json` declares the p
 (`scripts/sdk-dist-digest.mjs`; the SDK build is reproducible, and a source build is held to
 the same digest and records its per-file `dist/.dacs-sdk-manifest`); otherwise it refuses to
 continue. The reproducible source build applies `scripts/dacs-sdk-compat.patch`, checked against
-`SDK_PATCH_SHA256`, and restores the clean SDK source after building. The pinned SDK enforces
-a 16,384-byte cap on the complete canonical Listing, including its signature. This is a
-stricter SDK profile than DACS-1 §6.3.4 and CORE §B.2, whose canonical-form cap omits
-`signature`: a Listing within the Standard's cap can still exceed the SDK cap and be
-excluded by this Directory. The patch authenticates historical SDK agreement/evidence
-signatures only in their explicit compatibility profile.
+`SDK_PATCH_SHA256`, and restores the clean SDK source after building. The compatibility modules use the
+pinned Node release's TypeScript transformer (`scripts/sdk-compat-output.mjs`) after
+TypeScript checks and builds the SDK; their source/declaration maps are omitted.
+The patch applies the DACS-1 §6.3.4 / CORE §B.2 LR-2 cap of 16,384 canonical bytes
+with `signature` omitted. It also authenticates historical SDK Listing, agreement
+and evidence signatures and preserves the historical member-name hash profile
+only for explicit legacy references.
 The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
 profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
 integer. Catalog admission alone does not promise SDK transaction readiness.
@@ -428,9 +429,9 @@ base64url-patched Buffer).
   signature and a matching authority hash do not establish that authority proof.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
-  canonical hashing. The pinned serializer supports integer JSON numbers only:
-  publication rejects fractional negotiation percentages with HTTP 400, and readers
-  reject fractional signed inputs too. This is a narrower profile than the Standard.
+  canonical hashing. Current Listing readers support fractional negotiation
+  percentages. Publication still rejects fractional negotiation percentages with HTTP
+  400, and the frozen legacy hash profile accepts integer JSON numbers only.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or

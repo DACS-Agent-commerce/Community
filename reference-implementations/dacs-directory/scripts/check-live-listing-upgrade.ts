@@ -90,7 +90,7 @@ export async function checkListingUpgrades(write = (message: string) => { proces
     ) throw new Error(`${replacement.replacementListingId} replacement is not exposed by the reindexed catalog`);
 
     const validation = await validateListingArtifact(replacementRaw, listingUpgradeReaderDeps({
-      catalogObservedAt: Number(summary.catalogObservedAt),
+      catalog: { status: summary.status, catalogObservedAt: summary.catalogObservedAt, revocation: summary.revocation },
       readMarker: async (marker) => anchor(marker.locator),
       supportedPayloadMethods: replacement.supportedPayloadMethods,
       signer: authenticated.value.signer,

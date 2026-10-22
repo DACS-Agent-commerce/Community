@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 // DACS-1 listing validation (§6.3.4 steps 1-3, LR-2) and the indexer's publication gate, one case per
@@ -541,15 +541,15 @@ test("current listing envelopes require canonical SIG-6 bytes", async () => {
 });
 
 
-test("the stricter SDK complete-envelope size profile caps Listings at exactly 16,384 bytes", async () => {
+test("LR-2 caps the unsigned canonical Listing at exactly 16,384 bytes", async () => {
   const { canonicalize } = await import("../src/catalog/canonical.js");
   const { isListing } = await import("@kynesyslabs/dacs/artifacts");
   for (const size of [16_300, 16_384, 16_385]) {
-    const overhead = Buffer.byteLength(canonicalize(listing(scope => { scope.extension = ""; })), "utf8");
+    const overhead = Buffer.byteLength(canonicalize(stripSignature(listing(scope => { scope.extension = ""; }))), "utf8");
     const signed = listing(scope => { scope.extension = "x".repeat(size - overhead); });
-    assert.equal(Buffer.byteLength(canonicalize(signed), "utf8"), size);
-    assert.equal(isListing(signed), size <= 16_384, `SDK complete Listing ${size}`);
-    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `Directory complete Listing ${size}`);
+    assert.equal(Buffer.byteLength(canonicalize(stripSignature(signed)), "utf8"), size);
+    assert.equal(isListing(signed), size <= 16_384, `SDK unsigned Listing ${size}`);
+    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `Directory unsigned Listing ${size}`);
     signed.extension += "x";
     assert.equal(await verifyListing(signed), null, "extension bytes remain signed");
   }

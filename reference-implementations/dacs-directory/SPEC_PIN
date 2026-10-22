@@ -69,8 +69,8 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   canonical Base64URL, historical 64-byte hex (no 0x prefix), or padded Base64.
 #   CORE SIG-6 does not prescribe these per-claim strings; the pinned vector uses
 #   padded Base64. Catalog admission does not establish SDK transaction readiness.
-# - SDK canonicalization accepts only integer numbers. Fractional publication is
-#   unsupported; listing publication rejects fractional negotiation percentages.
+# - Current Listing readers support fractional negotiation percentages. Publication
+#   rejects them, and the frozen legacy hash profile requires integer JSON numbers.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
@@ -86,10 +86,11 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # test/revocation-vectors.test.ts):
 # SDK compatibility patch: scripts/dacs-sdk-compat.patch; its SHA-256 and the
 # rebuilt distribution SHA-256 are pinned in scripts/setup-sdk.sh.
-# The pinned SDK limits the full canonical Listing envelope to 16,384 bytes.
-# This is stricter than DACS-1 §6.3.4 + CORE §B.2, whose cap omits signature.
-# The Directory retains this SDK profile; a Standard-sized unsigned Listing
-# can be excluded because its signature pushes the envelope over the SDK cap.
+# The compatibility patch applies DACS-1 §6.3.4 + CORE §B.2 LR-2:
+# at most 16,384 canonical Listing bytes with signature omitted. Explicit legacy
+# graph references retain their historical signature decoders and NFC member-name
+# hashing. scripts/sdk-compat-output.mjs emits the two patched modules with the
+# pinned Node transformer after the SDK TypeScript build.
 # Directory compatibility retains zero retentionYears; §6.3.4 declares a number
 # without a positive-only rule, while the unpatched SDK requires a positive integer.
 # conformance/vectors/security/signature-value-encoding-v0.1.json

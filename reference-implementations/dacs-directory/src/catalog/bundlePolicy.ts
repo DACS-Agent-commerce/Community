@@ -1,4 +1,5 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { legacyListingHash } from "./legacyListingHash.js";
+import { stripSignature } from "@kynesyslabs/dacs/canonical";
 import {
   isLegacyMvpAttestationBundle,
 } from "@kynesyslabs/dacs/artifacts";
@@ -200,7 +201,7 @@ export async function verifyReferencedArtifactSignature(
       ? [raw.signature] : [];
   if (entries.length === 0) return false;
   const validSigners = new Set<string>();
-  const message = Buffer.from(separator + contentHash(scope), "utf8");
+  const message = Buffer.from(separator + legacyListingHash(scope), "utf8");
   for (const entry of entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
     const s = entry as Record<string, unknown>;
@@ -254,7 +255,7 @@ export async function refsPassStrictPolicy(
         (artifact.raw.buyer !== bundleBuyers[0].primaryClaim ||
          artifact.raw.seller !== bundleSellers[0].primaryClaim)) return false;
     try {
-      if (contentHash(stripSignature(artifact.raw)) !== want.contentHash) return false;
+      if (legacyListingHash(stripSignature(artifact.raw)) !== want.contentHash) return false;
     } catch {
       return false;
     }
@@ -287,7 +288,7 @@ export function verifiedListingTerms(
       : null;
   if (version === null) return undefined;
   try {
-    if (listingId !== ref.listingId || version !== ref.version || contentHash(scope) !== ref.contentHash) return undefined;
+    if (listingId !== ref.listingId || version !== ref.version || legacyListingHash(scope) !== ref.contentHash) return undefined;
   } catch {
     return undefined;
   }

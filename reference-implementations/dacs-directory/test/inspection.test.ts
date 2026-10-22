@@ -1,3 +1,4 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";

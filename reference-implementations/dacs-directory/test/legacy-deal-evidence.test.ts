@@ -5,14 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { isCompositeVerificationRecord } from "@kynesyslabs/dacs/artifacts";
+import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
+import { verifyListing } from "../src/catalog/listingVerification.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { RegisteredDeal } from "../src/catalog/types.js";
 
-// The legacy SDK-MVP two-copy reader (indexer `verifyCopy`). The routing read
-// sends every `bundleVersion: "1"` copy to the current verifier, so this reader
-// sees a legacy bundle only when that first read failed and a later read in the
-// same pass succeeded. Each guard on that path must still fail closed.
+// Explicit legacy references select the legacy two-copy reader, on healthy
+// reads as well as retries. Current artifacts never fall back on failure.
 process.env.DACS_DIRECTORY_DATA = mkdtempSync(join(tmpdir(), "dacs-directory-legacy-deals-"));
 process.env.DEMOS_RPC = "https://node.test";
 const store = await import("../src/catalog/store.js");
@@ -375,5 +375,44 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
     const { GET } = await import("../app/api/dacs/status/route.js");
     const status = await (await GET(new NextRequest("https://directory.test/api/dacs/status"))).json();
     assert.equal(status.legacyVetUnsupportedDeals, 1, "two copies contribute one diagnostic deal");
+  }
+});
+
+
+test("healthy and initially unavailable legacy copies select the same verifier", async () => {
+  for (const retry of [false, true]) {
+    const registered = legacyDeal(`legacy-routing-${retry}`, [{ role: "buyer" }, { role: "seller" }]);
+    if (!retry) flaky.clear();
+    assert.equal((await indexed(registered)).reputation.bundleCount, 1, `retry=${retry}`);
+  }
+});
+
+test("legacy Listing signatures keep every historical encoding in bundle verification", async () => {
+  const bytes = Buffer.from(listing.signature, "hex");
+  for (const signature of [bytes.toString("hex"), bytes.toString("base64url"), `0x${bytes.toString("hex")}`,
+    { algorithm: "ed25519", signer: seller, value: bytes.toString("hex") }]) {
+    const registered = legacyDeal("legacy-encoding", [{ role: "buyer" }, { role: "seller" }]);
+    storage[locator(1)] = { ...listing, signature };
+    assert.ok(await verifyListing(storage[locator(1)]));
+    assert.equal((await indexed(registered)).reputation.bundleCount, 1, JSON.stringify(signature));
+  }
+});
+
+test("legacy Listing member-name hashing agrees in admission, references and signatures", async () => {
+  for (const tamper of [false, true]) {
+    const registered = legacyDeal("legacy-nfc", [{ role: "buyer" }, { role: "seller" }]);
+    const scope = { ...listingScope, "e\u0301": "historical member" };
+    const hash = legacyListingHash(scope);
+    assert.notEqual(hash, contentHash(scope));
+    storage[locator(1)] = { ...scope, signature: signWith(1, `dacs-listing:v1:${hash}`, "hex") };
+    assert.equal((await verifyListing(storage[locator(1)]))?.contentHash, hash);
+    for (const at of [registered.buyerBundleRef, registered.sellerBundleRef!]) {
+      const body = { ...storage[at] }; delete body.signatures; delete body.anchoredByRole;
+      body.listingRef = { listingId: "svc", version: 1, contentHash: hash };
+      storage[at] = { ...body, anchoredByRole: storage[at].anchoredByRole,
+        signatures: [0, 1].map(index => partySignature(index, "dacs-bundle:v1:", body)) };
+    }
+    if (tamper) storage[locator(1)]["e\u0301"] = "modified";
+    assert.equal((await indexed(registered)).reputation.bundleCount, tamper ? 0 : 1);
   }
 });
