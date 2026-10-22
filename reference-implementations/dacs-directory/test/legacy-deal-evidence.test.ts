@@ -3,9 +3,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isLegacyMvpSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import type { RegisteredDeal } from "../src/catalog/types.js";
+import type { RegisteredDeal, SellerRecord } from "../src/catalog/types.js";
 
 // The legacy SDK-MVP two-copy reader (indexer `verifyCopy`). The routing read
 // sends every `bundleVersion: "1"` copy to the current verifier, so this reader
@@ -32,7 +33,6 @@ const listingScope: Obj = {
   agentId: seller, serviceId: "svc", name: "Service", description: "Legacy service", claimRequirements: [],
   supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: signWith(1, `dacs-listing:v1:${contentHash(listingScope)}`, "hex") };
 
 let storage: Record<string, Obj> = {};
 let reads = new Map<string, number>();
@@ -49,13 +49,16 @@ globalThis.fetch = async (input) => {
 };
 
 interface Copy { role: "buyer" | "seller" | "orchestrator"; signers?: number[]; change?: (body: Obj) => void }
+interface LegacyDealOptions { listing?: Obj; agreement?: Obj }
 
 /** A complete legacy graph: Listing, two-party agreement and one copy per role. */
-function legacyDeal(jobId: string, copies: [Copy, Copy]): RegisteredDeal {
+function legacyDeal(jobId: string, copies: [Copy, Copy], options: LegacyDealOptions = {}): RegisteredDeal {
+  const signedListingScope = { ...listingScope, ...options.listing };
   const agreementScope: Obj = {
     jobId, pattern: "fixed-price", buyer, seller, listingRef: locator(1),
     price: { amount: "1", asset: "DEM", decimals: 18, rail: "pay-dem" },
     delivery: { phase: "deliver-attested-payload", format: "application/json" }, expiresAt: "2099-01-01T00:00:00.000Z",
+    ...options.agreement,
   };
   const agreement = { ...agreementScope, signatures: [0, 1].map((index) => partySignature(index, "dacs-agreement:v1:", agreementScope)) };
   storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))] = agreement;
@@ -63,7 +66,7 @@ function legacyDeal(jobId: string, copies: [Copy, Copy]): RegisteredDeal {
   for (const [index, copy] of copies.entries()) {
     const body: Obj = {
       bundleVersion: "1", jobId, outcome: "completed",
-      listingRef: { listingId: "svc", version: 1, contentHash: contentHash(listingScope) },
+      listingRef: { listingId: "svc", version: 1, contentHash: contentHash(signedListingScope) },
       agreementRef: { kind: "dacs-3-agreement", id: `agreement-${jobId}`, contentHash: contentHash(agreementScope) },
       parties: [
         { role: "buyer", primaryClaim: buyer, bundleHash: "b".repeat(64) },
@@ -79,14 +82,15 @@ function legacyDeal(jobId: string, copies: [Copy, Copy]): RegisteredDeal {
       anchoredByRole: copy.role,
     };
   }
-  storage[locator(1)] = listing;
+  storage[locator(1)] = { ...signedListingScope,
+    signature: signWith(1, `dacs-listing:v1:${contentHash(signedListingScope)}`, "hex") };
   flaky = new Set([buyerAt, sellerAt]);
   return { jobId, rail: "pay-dem", buyerBundleRef: buyerAt, sellerBundleRef: sellerAt, owners: { buyer, seller } };
 }
 
-async function indexed(deal: RegisteredDeal, primaryClaim = seller) {
+async function indexed(deal: RegisteredDeal, primaryClaim = seller, listingAnchors: string[] = []) {
   reads = new Map();
-  const record = await indexRegistration({ primaryClaim, displayName: "Seller", listingAnchors: [], deals: [deal] },
+  const record = await indexRegistration({ primaryClaim, displayName: "Seller", listingAnchors, deals: [deal] },
     undefined, async () => { throw new Error("identity unavailable"); });
   storage = {};
   return record;
@@ -108,6 +112,88 @@ test("a fully signed legacy two-copy deal retains authenticated agreement verifi
   assert.equal(deal.refsVerified, true);
   assert.equal(deal.reputationEligible, true);
   assert.equal(record.reputation.bundleCount, 1);
+});
+
+/** Check projection separately from authentication, at both catalog count surfaces. */
+function assertLegacyObservation(record: SellerRecord, registered: RegisteredDeal, count: 0 | 1) {
+  assert.equal(record.deals.length, 1);
+  const [deal] = record.deals;
+  assert.equal(deal.outcome, "completed");
+  assert.equal(deal.signatureVerified, true);
+  assert.equal(deal.refsVerified, true, "payment projection must not replace reference authentication");
+  assert.equal(deal.anchoredByRole, "seller");
+  assert.equal(deal.reputationEligible, count === 1);
+  assert.deepEqual(deal.settlementTxIds, [], "historical records supply no PC-2 settlement claim");
+  assert.equal(record.reputation.completed, count);
+  assert.equal(record.reputation.totalAgreements, count);
+  assert.equal(record.reputation.bundleCount, count);
+  assert.equal(record.reputation.bundleRefs?.length, count);
+  assert.equal(record.listings.length, 1, "the signed legacy listing is registered and verified");
+  assert.equal(record.listings[0].listingId, "svc");
+  assert.equal(record.listings[0].artifactProfile, "legacy-sdk-v0.1");
+  assert.equal(deal.category, record.listings[0].offering.category);
+  assert.equal(record.listings[0].reputationHint?.bundleCount, count);
+  for (const at of [registered.buyerBundleRef, registered.sellerBundleRef!]) {
+    assert.ok((reads.get(at) ?? 0) >= 2, "the failed routing read is followed by a legacy verification read");
+  }
+}
+
+test("legacy payment projection retains the signed phase summary and listing pipeline", async (t) => {
+  const pipeline = [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }];
+  const cases: Array<{ name: string; kind: string; outcome?: string; listing?: Obj; count: 0 | 1 }> = [
+    { name: "no-payment control", kind: "commit-agreement", count: 1 },
+    { name: "ok settle without evidence", kind: "settle", count: 0 },
+    { name: "ok payment handler without evidence", kind: "pay-dem", count: 0 },
+    { name: "ok payment identified only by the listing pipeline", kind: "commit-agreement", listing: { pipeline }, count: 0 },
+    { name: "failed payment does not need a successful claim", kind: "commit-agreement", outcome: "fail", listing: { pipeline }, count: 1 },
+  ];
+  for (const [index, entry] of cases.entries()) {
+    await t.test(entry.name, async () => {
+      const change = (body: Obj) => { body.phaseSummary = [{ index: 1, kind: entry.kind, outcome: entry.outcome ?? "ok" }]; };
+      const registered = legacyDeal(`legacy-payment-context-${index}`, [{ role: "buyer", change }, { role: "seller", change }],
+        { listing: entry.listing });
+      const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(registered.jobId))];
+      assert.equal(agreement.pipeline, undefined, "the agreement cannot supply the listing's payment phase");
+      assertLegacyObservation(await indexed(registered, seller, [locator(1)]), registered, entry.count);
+    });
+  }
+});
+
+test("authenticated historical success evidence reaches legacy payment projection", async (t) => {
+  for (const outcome of ["success", "failure"] as const) {
+    await t.test(outcome, async () => {
+      const jobId = `legacy-payment-evidence-${outcome}`;
+      const evidence: Obj = {
+        evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 1, outcome,
+        paymentTxRefs: outcome === "success" ? [{ kind: "demos", rail: "pay-dem", txHash: "a".repeat(64) }] : [],
+        observedAt: 1_700_000_000_000,
+        ...(outcome === "success" ? {
+          paymentAmount: { amount: "1", currency: "DEM" },
+          settlementFinality: { model: "bft-final", finalityObservedAt: 1_700_000_000_000 },
+        } : {}),
+      };
+      assert.equal(isLegacyMvpSettlementEvidence(evidence), true, "the historical success/failure shape is admitted");
+      const change = (body: Obj) => {
+        // A non-payment summary cannot independently trigger the missing-claim guard.
+        body.settlementEvidence = [{ kind: "dacs-4-evidence", id: `evidence-${jobId}`, contentHash: contentHash(evidence) }];
+      };
+      const registered = legacyDeal(jobId, [{ role: "buyer", change }, { role: "seller", change }]);
+      storage[deriveAnchorAddress(buyer, legacySessionAnchorName.evidence(jobId))] = { ...evidence,
+        signature: { algorithm: "ed25519", signer: buyer,
+          value: signWith(0, `dacs-evidence:v1:${contentHash(evidence)}`, "base64url") } };
+      assertLegacyObservation(await indexed(registered, seller, [locator(1)]), registered, outcome === "success" ? 0 : 1);
+    });
+  }
+});
+
+test("legacy payment projection ignores success annotations on non-evidence artifacts", async (t) => {
+  for (const kind of ["listing", "agreement"] as const) {
+    await t.test(kind, async () => {
+      const registered = legacyDeal(`legacy-non-evidence-${kind}`, [{ role: "buyer" }, { role: "seller" }],
+        { [kind]: { outcome: "success" } });
+      assertLegacyObservation(await indexed(registered, seller, [locator(1)]), registered, 1);
+    });
+  }
 });
 
 test("each legacy two-copy guard withholds reputation", async () => {
