@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 // First: the store must open in a fresh directory, never the checkout's data/.
 import "./fixtures/isolated-data-dir.js";
-import { isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
+import { isChainTxRef, isSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 import { paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { buildCurrentEvidenceGraph, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
@@ -33,6 +33,25 @@ const rails: Array<[string, string, string]> = [
   ["pay-dem", "demos-native:DEM", "demos"], ["pay-evm-erc20", "evm-erc20:8453:USDC", "evm"],
   ["pay-solana-spl", "solana-spl:mainnet:USDC", "solana"], ["pay-x402", "x402:default", "x402"],
 ];
+
+test("SB-1 current Demos TxRefs refuse a prefix or suffix around a valid hash", () => {
+  assert.equal(settlementTxId(arms.demos), `demos:${hash}`);
+  for (const txHash of [`x${hash}`, `${hash}x`]) {
+    const currentRef = { kind: "demos", txHash };
+    assert.equal(isChainTxRef(currentRef), true, "the SDK admits the current arm structurally");
+    assert.equal(settlementTxId(currentRef), null, txHash);
+  }
+});
+
+test("SB-1 current Solana TxRefs refuse an invalid Base58 digit in a full-length signature", () => {
+  assert.equal(settlementTxId(arms.solana), `solana:mainnet:${signature64}:0`);
+  // Keeping the decoded magnitude isolates alphabet validation from the 64-byte size check.
+  const signature = `${signature64.slice(0, -1)}0`;
+  assert.equal(signature.length, signature64.length);
+  const currentRef = { ...arms.solana, signature };
+  assert.equal(isChainTxRef(currentRef), true, "the SDK admits a nonempty signature structurally");
+  assert.equal(settlementTxId(currentRef), null);
+});
 
 test("SB-1/SB-2 stored settlement ids: exact type, anchoring and decimal indices, as the pinned SDK validates them", () => {
   const canonical = [`demos:${hash}`, `evm:8453:${hash}:3`, `solana:mainnet:${signature64}:2`];
@@ -133,6 +152,21 @@ test("SB-2 groups an admissible deal only against other admissible deals", () =>
   }
   // The control: an eligible competitor under another session does void the shared settlement.
   assert.equal(deriveSellerReputation([valid, other({})], 0, 200).bundleCount, 0);
+});
+
+test("SB-2 missing or null cached owners retain non-throwing, idempotent session grouping", () => {
+  for (const state of ["missing", "null"] as const) {
+    const cached = deal("a");
+    if (state === "missing") delete (cached as { owners?: DealRecord["owners"] }).owners;
+    else (cached as unknown as { owners: null }).owners = null;
+    const copies = [cached, { ...cached }];
+    assert.deepEqual(countableDeals(copies, 0, 200), { deals: [cached], useAnchorTimestamps: true }, state);
+    const projected = projectTestnetCatalog(catalogOf([seller(copies)])).sellers[0];
+    assert.deepEqual(projected.deals, copies, `${state}: cached evidence is retained`);
+    assert.equal(projected.reputation.bundleCount, 1, state);
+    assert.deepEqual(projected.reputation.bundleRefs?.map((entry) => entry.id), ["a"], state);
+    assert.equal(projected.listings[0].reputationHint!.bundleCount, 1, state);
+  }
 });
 
 test("DACS-5 window membership is inclusive on both edges for either timestamp basis and ignores string timestamps", () => {
@@ -250,6 +284,20 @@ test("SB-1 binds each claim to the phase its own PC-2 index names", async () => 
   // A non-record summary entry ahead of the named phase does not stand in for it.
   assert.equal(settlementClaims([at(2)], context("demos-native:DEM", "pay-dem", [null, phase(2, "ok")], pipeline)).projected, true);
   assert.equal(settlementClaims([at(2)], context("demos-native:DEM", "pay-dem", [null, "x", phase(1, "ok")], pipeline)).projected, false);
+});
+
+test("SB-1 projects a correctly bound payment at multi-digit PC-2 phase index 12", async () => {
+  const { fixture, context, address } = await projectionFixture(8900);
+  assert.equal(isSettlementEvidence(fixture.evidence), true);
+  const pipeline = Array.from({ length: 13 }, (_, index) => index === 12
+    ? { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } } : {});
+  const phaseSummary = [{ index: 12, kind: "pay-dem", outcome: "ok" }];
+  assert.deepEqual(settlementClaims([{ raw: fixture.evidence, logicalAddress: address(12) }],
+    context("demos-native:DEM", "pay-dem", phaseSummary, pipeline)), {
+    settlementTxIds: [{ id: `demos:${(fixture.evidence.paymentTxRefs as Array<{ txHash: string }>)[0].txHash}`,
+      observedAt: 100, phaseIndex: 12 }],
+    projected: true,
+  });
 });
 
 /** One evidence-only anchor adapter over the shared fixture maps. */
@@ -418,6 +466,21 @@ test("the public projection keeps a missing deals member empty and the eligibili
   assert.equal(rebuilt.reputation.bundleCount, 1);
 });
 
+test("missing or null cached listings stay empty while real deals and counts are retained", () => {
+  for (const state of ["missing", "null"] as const) {
+    const record = seller(hintDeals);
+    if (state === "missing") delete (record as { listings?: ListingSummary[] }).listings;
+    else (record as unknown as { listings: null }).listings = null;
+    for (const project of [rebuildCatalogObservations, projectTestnetCatalog]) {
+      const projected = project(catalogOf([record])).sellers[0];
+      assert.deepEqual(projected.listings, [], `${state}: ${project.name}`);
+      assert.deepEqual(projected.deals, hintDeals, `${state}: ${project.name}`);
+      assert.equal(projected.reputation.bundleCount, 3, `${state}: ${project.name}`);
+      assert.deepEqual(projected.reputation.bundleRefs?.map((entry) => entry.id), ["a", "b", "c"]);
+    }
+  }
+});
+
 // ---- End to end: additive fields on non-evidence artifacts ----
 
 async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Record<string, unknown> = {}) {
@@ -435,6 +498,37 @@ async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: 
     globalThis.fetch = originalFetch;
   }
 }
+
+test("SB-1 a valid and an unprojectable current Demos TxRef make the indexed deal non-countable", async () => {
+  const jobId = "01KTY8ZJ14CW7KSECW3FS6PQPK";
+  for (const mixed of [false, true]) {
+    const paymentTxRefs = mixed ? [arms.demos, { kind: "demos", txHash: "short" }] : [arms.demos];
+    const fixture = await vector(jobId, 9000, paymentTxRefs);
+    assert.equal(isSettlementEvidence(fixture.evidence), true, "both current refs are SDK-valid");
+    const expectedIds = [{ id: `demos:${hash}`, observedAt: 100, phaseIndex: 2 }];
+    assert.deepEqual(settlementClaims([{
+      raw: fixture.evidence, logicalAddress: evidenceAddresses.get(fixture.locators.evidence),
+    }], {
+      jobId, railId: "demos-native:DEM", railRegistryVersion: 1,
+      phaseSummary: fixture.buyerBundle.phaseSummary, pipeline: fixture.listing.pipeline,
+    }), { settlementTxIds: expectedIds, projected: !mixed });
+    const record = await indexFixture(fixture, {
+      deals: [registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller)],
+      bundleBindings: [
+        await bindingFor(jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+        await bindingFor(jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+      ],
+    });
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].signatureVerified, true);
+    assert.equal(record.deals[0].refsVerified, true, "graph verification succeeds for both variants");
+    assert.deepEqual(record.deals[0].settlementTxIds, expectedIds);
+    assert.equal(record.deals[0].reputationEligible, !mixed);
+    assert.equal(countableDeals(record.deals, 0, Date.now()).deals.length, mixed ? 0 : 1);
+    assert.equal(record.reputation.bundleCount, mixed ? 0 : 1);
+    assert.equal(record.listings[0].reputationHint!.bundleCount, mixed ? 0 : 1);
+  }
+});
 
 test("an additive outcome field on a rating does not turn it into settlement evidence", async () => {
   const jobId = "01KTY8ZJ13CW7KSECW3FS6PQPK";
