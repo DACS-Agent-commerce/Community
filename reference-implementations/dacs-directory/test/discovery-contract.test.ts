@@ -93,16 +93,25 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
   const definition = readFileSync(new URL("../docs/TP-1.md", import.meta.url), "utf8");
   assert.match(definition, /DACS-Standard\/tree\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/);
   const deviations = JSON.parse(/```json\n([\s\S]+?)\n```/.exec(definition)![1]) as Array<Record<string, unknown>>;
+  // DACS-Standard d45c0a29 conformance/implementation-manifest.schema.json $defs.ruleRef.
+  const ruleRef = /^(?:[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?-?[0-9]+|(?:CORE|DACS-[1-5])-(?:[0-9]+|[A-Z])(?:\.[0-9]+)*)$/;
   for (const deviation of deviations) {
     assert.deepEqual(Object.keys(deviation).sort(), ["capabilityRefs", "description", "effect", "id", "ruleRefs", "status"]);
     assert.equal(deviation.status, "open");
     assert.equal(deviation.effect, "nonconforming");
+    assert.ok(Array.isArray(deviation.ruleRefs) && deviation.ruleRefs.length > 0);
+    for (const reference of deviation.ruleRefs) {
+      assert.equal(typeof reference, "string");
+      assert.match(reference, ruleRef);
+    }
   }
   assert.deepEqual(deviations.flatMap((deviation) => deviation.ruleRefs), ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4", "SB-3", "SB-1", "SB-2", "SB-1"]);
   // The collision rule names the tuple the code groups by (current-indexer
   // "SB-2 counts one session's identical records once…" pins the behaviour).
   assert.match(definition, /more than one distinct `\(session, phaseIndex\)`/);
   assert.doesNotMatch(definition, /\(jobId, phaseIndex\)/);
+  assert.match(definition, /does not establish that the summary covers the full signed pipeline/);
+  assert.match(definition, /can suppress another session's observed counts/);
   // Rule 2 lists exactly the manifest's filters.
   assert.match(definition, /`category`, `tag`, `credential`, `primaryClaim`, `identityTier`,\s+`rail`, `priceMax`, `q`, `profile`, `limit` and `cursor`/);
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);

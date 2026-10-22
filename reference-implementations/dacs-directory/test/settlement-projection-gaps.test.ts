@@ -88,6 +88,43 @@ test("SB-1 spells a valid 88-character Solana signature and SB-2 admits it, but 
   assert.equal(isCanonicalSettlementTxId(`solana:mainnet:1${signature88}:0`), false);
 });
 
+test("SB-1 refuses oversized SDK-readable Solana signatures before Base58 decoding", () => {
+  const oversized = "z".repeat(4096);
+  const ref = { kind: "solana-instruction", cluster: "mainnet", signature: oversized, instructionIndex: 0 };
+  assert.equal(isChainTxRef(ref), true, "the SDK admits the oversized signature structurally");
+  const originalIterator = String.prototype[Symbol.iterator];
+  let oversizedIterations = 0;
+  let allowedIterations = 0;
+  String.prototype[Symbol.iterator] = function () {
+    if (this.valueOf() === oversized) oversizedIterations++;
+    if (this.valueOf() === signature88) allowedIterations++;
+    return originalIterator.call(this);
+  };
+  try {
+    assert.equal(settlementTxId(ref), null);
+    assert.equal(isCanonicalSettlementTxId(`solana:mainnet:${oversized}:0`), false);
+    assert.equal(oversizedIterations, 0, "oversized input must never enter the decoder");
+    assert.equal(settlementTxId({ ...ref, signature: signature88 }), `solana:mainnet:${signature88}:0`);
+    assert.ok(allowedIterations > 0, "the instrumentation observes decoding of an allowed signature");
+  } finally {
+    String.prototype[Symbol.iterator] = originalIterator;
+  }
+});
+
+test("TP-1 requires evidence for recorded ok payment phases without claiming full execution verification", () => {
+  const context = {
+    jobId: "01J8ME0SXKQ4T9V2RC5HJ6WX7D", railId: "demos-native:DEM", railRegistryVersion: 1,
+    pipeline: [{ kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }],
+  };
+  const commit = { index: 0, kind: "commit-agreement", outcome: "ok" };
+  assert.deepEqual(settlementClaims([], { ...context, phaseSummary: [commit, { index: 1, kind: "pay-dem", outcome: "ok" }] }),
+    { settlementTxIds: [], projected: false }, "a recorded successful payment needs evidence");
+  for (const phaseSummary of [[], [commit], [commit, { index: 1, kind: "pay-dem", outcome: "fail" }]]) {
+    assert.deepEqual(settlementClaims([], { ...context, phaseSummary }), { settlementTxIds: [], projected: true },
+      "summary completeness and execution success are outside the current observation profile");
+  }
+});
+
 const deal = (jobId: string, values: Partial<DealRecord> = {}): DealRecord => ({
   jobId, rail: "pay-dem", buyerBundleRef: locator(300), sellerBundleRef: locator(301),
   owners: { buyer: dids[0], seller: dids[1] }, signatureVerified: true, refsVerified: true, reputationEligible: true,

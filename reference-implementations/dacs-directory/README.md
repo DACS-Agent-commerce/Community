@@ -529,10 +529,15 @@ headers without wallet authentication, as required by the pinned middleware cont
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
 and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
 and withholds new publication until a complete search contract is available.
-`npm run check:node -- <exact program name>` is a read-only probe (no
-transactions) that reports the storage not-found answer and both search paths, and fails
+`npm run check:node -- <exact program name> [known SDK logical address]` is a read-only probe (no
+transactions) that reports the storage not-found answer, both search paths, metadata
+shape and the node's self-reported build, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one
-matching public program. Its output is dated runtime evidence, not a pin. Run it when the
+matching public program with object or null metadata. For a known SDK-written
+anchor, pass its logical address too: the probe requires matching
+`metadata.logicalAddress`, `programName === logicalToStorageProgramName(logicalAddress)`
+and a reported build. This checks the read contract without authenticating the
+metadata writer or attesting a deployment. Its output is dated runtime evidence, not a pin. Run it when the
 `DEMOS_RPC` deployment changes.
 
 ## License

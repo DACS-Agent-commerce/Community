@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { isCompositeVerificationRecord, isLegacyMvpSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
+import { isCompositeVerificationRecord, isLegacyMvpListing, isLegacyMvpSettlementEvidence } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { RegisteredDeal, SellerRecord } from "../src/catalog/types.js";
@@ -184,6 +184,18 @@ test("authenticated historical success evidence reaches legacy payment projectio
         signature: { algorithm: "ed25519", signer: buyer,
           value: signWith(0, `dacs-evidence:v1:${contentHash(evidence)}`, "base64url") } };
       assertLegacyObservation(await indexed(registered, seller, [locator(1)]), registered, outcome === "success" ? 0 : 1);
+    });
+  }
+});
+
+test("legacy additive pipeline kinds preserve authenticated non-payment history", async (t) => {
+  const phases = [{ kind: null }, {}, { kind: 7 }, { kind: false }, { kind: {} }];
+  for (const [index, phase] of phases.entries()) {
+    await t.test(JSON.stringify(phase), async () => {
+      const registered = legacyDeal(`legacy-additive-pipeline-${index}`, [{ role: "buyer" }, { role: "seller" }],
+        { listing: { pipeline: [phase] } });
+      assert.equal(isLegacyMvpListing(storage[locator(1)]), true, "the signed historical shape remains SDK-readable");
+      assertLegacyObservation(await indexed(registered, seller, [locator(1)]), registered, 1);
     });
   }
 });

@@ -54,8 +54,8 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # hash-checked; the standalone adapter is not wired into graph/tier derivation.
 # Tier policy still accepts operator_gated/closed_data/bilateral without disclosing
 # per-result availability. The isolated new helpers use a live-only profile.
-# Native-payment inclusion/finality and exact event/instruction settlement keys,
-# authenticated rail snapshots, delivery cleartext/ACL/grant verification and full
+# Native-payment inclusion/finality, authenticated rail snapshots,
+# delivery cleartext/ACL/grant verification and full
 # agreement/listing conformance are pending; graph reference verification alone
 # does not establish these properties. No DACS_RAIL_SNAPSHOTS adapter exists here.
 #
@@ -95,6 +95,14 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
 # conformance/vectors/security/listing-preserve-unknown-v0.1.json 987d3661c2c4ce9da3f4e7c57c55c7cda154743c99d1d3ef4ae164e8a5ae77e9
 # conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
+# Exact SB-1 event/instruction keys are projected as observations only, without
+# independent ledger/finality verification (docs/TP-1.md).
+# conformance/vectors/security/settlement-event-identity-v0.6.json
+# sha256 397b44a02f0c7b4ae629e8c15155d665df1b8c706ccdc516b38c706dba4d1ed4
+# test/settlement-event-identity.test.ts runs all five current-arm pass identity
+# projections; it does not execute the ledger/legacy replay verifier vectors.
+# test/current-indexer.test.ts checks the current SB-2 collision-authority v0.8
+# inputs and the Directory's authority-free exclusions, not a rail verifier.
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert
 # end-to-end catalog status for every vector. In particular, unauthenticated
@@ -112,7 +120,7 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # Hash the exact served index bytes; the signature is external in the agent card.
 # See README and test/withdrawal-publisher-signature.test.ts.
 # Other upstream vector sets are unimplemented adapters/unexecuted here,
-# including sb2-settlement-uniqueness, agreement-listing,
+# including the historical sb2-settlement-uniqueness set, agreement-listing,
 # mixed-version-reconciliation, fault-bundle-perspective-pair,
 # payee-destination-binding, unresolved-vs-absent,
 # bundle-absence-evidence, metered-pricing and phase-kind-divergence.

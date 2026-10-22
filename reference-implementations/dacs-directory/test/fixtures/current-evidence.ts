@@ -10,7 +10,8 @@ export const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32,
 export const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 export const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 export const maps = new Map<string, Obj>();
-export const evidenceAddresses = new Map<string, string>();
+// Node metadata is untrusted JSON, including non-string logicalAddress values.
+export const evidenceAddresses = new Map<string, unknown>();
 export const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };

@@ -2,11 +2,13 @@
  * Read-only probe of the node RPC contract the Directory depends on (README "Node deployment
  * contract"). It sends no transactions: one storage GET for an address no program occupies, and the
  * exact-name program search over both the deployed nodeCall and the pinned revision's gcr_routine,
- * followed by a fresh storage read of a known public program.
+ * followed by a fresh storage read of a known public program and the node's reported build.
  * Each search observation is dated runtime evidence, not a pin.
  */
 import { storageResponseJson } from "./artifactLimits.js";
 import { isUnknownNodeCall } from "./chain.js";
+import { logicalToStorageProgramName } from "@kynesyslabs/dacs/canonical";
+import { reportedNodeBuild } from "./nodeDeployment.js";
 
 export interface NodeContractReport {
   rpc: string;
@@ -17,6 +19,12 @@ export interface NodeContractReport {
   gcrRoutineSearch: "supported" | "failed";
   /** Both searches answered and named the same programs for the exact name. */
   searchesAgree: boolean | null;
+  /** Fresh storage replies expose metadata as an object or null. */
+  storageMetadata: boolean;
+  /** The caller's known SDK logical address agrees with metadata and the program name. */
+  anchorMetadataMatches: boolean | null;
+  /** Self-reported build observed during this probe; not a deployment attestation. */
+  build: string | null;
   ok: boolean;
 }
 
@@ -44,7 +52,7 @@ const addresses = (body: unknown, programName: string): string[] | null => {
   return found.sort();
 };
 
-export async function probeNodeContract(rpc: string, programName: string): Promise<NodeContractReport> {
+export async function probeNodeContract(rpc: string, programName: string, expectedLogicalAddress?: string): Promise<NodeContractReport> {
   const base = rpc.replace(/\/$/, "");
   let storageNotFound = false;
   try {
@@ -68,20 +76,40 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
   // program must still be publicly readable with the same exact name now.
   const candidate = viaGcr?.[0];
   let knownProgramReadable = false;
+  let storageMetadata = false;
+  let anchorMetadataMatches: boolean | null = expectedLogicalAddress === undefined ? null : false;
   if (candidate) {
     try {
       const response = await fetch(`${base}/storage-program/${candidate}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
-      const body = await storageResponseJson(response) as { success?: unknown; programName?: unknown; owner?: unknown; data?: unknown } | null;
+      const body = await storageResponseJson(response) as { success?: unknown; programName?: unknown; owner?: unknown; data?: unknown; metadata?: unknown } | null;
       knownProgramReadable = response.ok && body?.success === true && body.programName === programName &&
         typeof body.owner === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(body.owner) &&
         body.data !== null && typeof body.data === "object" && !Array.isArray(body.data);
+      const metadata = body?.metadata;
+      const metadataObject = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+        ? metadata as Record<string, unknown> : null;
+      storageMetadata = response.ok && body?.success === true && (metadata === null || metadataObject !== null);
+      if (expectedLogicalAddress !== undefined) {
+        const logicalAddress = metadataObject?.logicalAddress;
+        // The pinned SDK DemosAdapter writes this name/address relation. This
+        // observes the node's contract; it does not authenticate the writer.
+        anchorMetadataMatches = typeof logicalAddress === "string" && logicalAddress.length > 0 &&
+          logicalAddress.trim() === logicalAddress && logicalAddress === expectedLogicalAddress &&
+          body?.programName === logicalToStorageProgramName(logicalAddress);
+      }
     } catch { /* A missing, private or malformed known program cannot certify this deployment. */ }
   }
+  const network = await post(base, { "content-type": "application/json" }, {
+    method: "nodeCall",
+    params: [{ type: "nodeCall", message: "getNetworkInfo", sender: null, receiver: null, timestamp: null, data: {}, extra: "" }],
+  }) as { result?: unknown; response?: unknown } | null;
+  const build = network?.result === 200 ? reportedNodeBuild(network.response) : null;
   return {
     rpc: base, observedAt: new Date().toISOString(), storageNotFound, nodeCallSearch,
-    gcrRoutineSearch: viaGcr ? "supported" : "failed", searchesAgree,
+    gcrRoutineSearch: viaGcr ? "supported" : "failed", searchesAgree, storageMetadata, anchorMetadataMatches, build,
     // Resume lookup falls back only on the recognized unknown-message reply.
-    ok: storageNotFound && knownProgramReadable && viaGcr !== null &&
+    ok: storageNotFound && knownProgramReadable && storageMetadata && viaGcr !== null &&
+      (expectedLogicalAddress === undefined || (anchorMetadataMatches === true && build !== null)) &&
       ((nodeCallSearch === "supported" && searchesAgree === true) || nodeCallSearch === "unknown-message"),
   };
 }

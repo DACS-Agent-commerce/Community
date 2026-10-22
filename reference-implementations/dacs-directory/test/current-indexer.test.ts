@@ -1460,6 +1460,7 @@ test("SB-1 recovers the PC-2 tuple from the storage metadata of SDK-valid eviden
   assert.equal(accepted.reputation.bundleCount, 1);
   assert.equal(accepted.deals[0].settlementTxIds?.[0].phaseIndex, 2);
   for (const address of [
+    null, 7, false, [], {}, { toString: null, valueOf: null },
     undefined, canonical.replace(jobId, "01KTY8ZJ01CW7KSECW3FS6PQPK"),
     canonical.replace(jobId, jobId.toLowerCase()), canonical.replace(jobId, "job-1"),
     canonical.replace("demos-native%3ADEM", "x402%3Adefault"),
@@ -1471,13 +1472,19 @@ test("SB-1 recovers the PC-2 tuple from the storage metadata of SDK-valid eviden
     if (address === undefined) evidenceAddresses.delete(fixture.locators.evidence);
     else evidenceAddresses.set(fixture.locators.evidence, address);
     const result = await indexFixture(fixture, extra);
-    assert.equal(result.deals[0].refsVerified, true, String(address));
-    assert.equal(result.deals[0].reputationEligible, false, String(address));
-    assert.deepEqual(result.deals[0].settlementTxIds, [], String(address));
-    assert.equal(result.reputation.bundleCount, 0, String(address));
-    assert.deepEqual(result.reputation.bundleRefs, [], String(address));
-    assert.deepEqual(result.reputation.observedTransactionalVolume, [], String(address));
-    assert.equal(result.listings[0].reputationHint!.bundleCount, 0, String(address));
+    const label = JSON.stringify(address) ?? "undefined";
+    assert.equal(result.deals[0].signatureVerified, true, label);
+    assert.equal(result.deals[0].refsVerified, true, label);
+    assert.equal(result.deals[0].reputationEligible, false, label);
+    assert.deepEqual(result.deals[0].settlementTxIds, [], label);
+    assert.equal(result.reputation.bundleCount, 0, label);
+    assert.deepEqual(result.reputation.bundleRefs, [], label);
+    assert.deepEqual(result.reputation.observedTransactionalVolume, [], label);
+    assert.equal(result.listings[0].reputationHint!.bundleCount, 0, label);
+    assert.deepEqual(settlementClaims([{ raw: fixture.evidence, logicalAddress: address }], {
+      jobId, railId: "demos-native:DEM", railRegistryVersion: 1,
+      phaseSummary: fixture.sellerBundle.phaseSummary, pipeline: fixture.listing.pipeline,
+    }), { settlementTxIds: [], projected: false }, label);
   }
 });
 

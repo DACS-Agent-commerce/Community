@@ -111,8 +111,10 @@ reputation and in listing hints:
 - Every phase the bundle's phase summary marks `ok` whose kind is a payment
   kind (`pay-*` or `settle`), or whose signed pipeline phase is a `pay-*`
   handler, needs at least one such success payment evidence record at that
-  index. A completed bundle that leaves its payment evidence out does not
-  count, on any rail.
+  index. This does not establish that the summary covers the full signed pipeline:
+  a missing summary entry, an empty summary or a payment marked failed does not
+  itself trigger this payment-claim requirement. Observed `completed` outcomes
+  therefore do not verify complete pipeline execution.
   Registry rail IDs and phase handlers are distinct: the pinned Standard table
   determines the handler, and the signed listing pipeline must bind that handler
   and rail at the same index. The Directory projects 8 of the 13 §9.4.2 rows:
@@ -152,5 +154,8 @@ reputation and in listing hints:
   cannot share another session's settlement. This Directory
   verifies no settlement-side binding authority, so the group is indeterminate
   and none of its records count, whatever their `observedAt` or arrival order.
+  Any otherwise admissible competing claim can suppress another session's observed counts;
+  these observations do not authenticate settlement ownership or distinguish
+  which claimant actually paid. They must not be used as a party-fault verdict.
 - A session presented as two or more different bundles counts nowhere, as
   DACS-5 §10.4.3(d) excludes a divergent jobId from every metric.

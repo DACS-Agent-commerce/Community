@@ -203,8 +203,8 @@ export function settlementClaims(evidence: Array<{ raw: Record<string, unknown>;
       return id === null ? [] : [{ id, observedAt: Number(record.observedAt), phaseIndex }];
     });
   });
-  // Leaving the payment evidence out must never count where presenting it
-  // would not: each signed `ok` payment phase needs its own bound claim.
+  // Each payment phase the signed summary records as `ok` needs a bound claim.
+  // This does not establish that the summary covers the full signed pipeline.
   const claimedPhases = new Set(settlementTxIds.map((tx) => tx.phaseIndex));
   const unclaimedPayPhase = Array.isArray(context.phaseSummary) && context.phaseSummary.some((phase) =>
     isRecord(phase) && phase.outcome === "ok" && !claimedPhases.has(phase.index as number) &&
