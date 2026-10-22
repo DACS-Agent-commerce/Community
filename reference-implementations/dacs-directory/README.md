@@ -44,7 +44,8 @@ The default node (`DEMOS_RPC`, `https://demosnode.discus.sh/`) serves the pinned
 identical to `node2.demos.sh`'s (same hash and `previousHash`), the chain `node2.demos.sh` was rebuilt onto on 2026-10-20.
 The pinned node build (`DEMOS_NODE_BUILDS`) has not been checked against the default host, so with default settings
 `npm run check:node-deployment` can still exit 1 and `npm run index` can still refuse without changing the catalog.
-Run the check, review the build it prints and set `DEMOS_NODE_BUILDS` to it before indexing.
+Run the check against the configured endpoint. Keep unreviewed dirty builds refused; use a deployment
+with reviewable source and verify its build and chain before changing the pins.
 The Railway start script runs the same check once at boot and logs the refusal.
 
 `setup` checks out the reviewed dacs-sdk revision pinned in
