@@ -7,15 +7,14 @@ import { NextRequest } from "next/server";
 
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
-import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
+import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-legacy-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
-const { POST } = await import("../app/api/dacs/build-listing/route.js");
+const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
+const POST = createBuildListingPost(signedRailSnapshot);
 
-const restoreRailSnapshot = modelSignedRailSnapshot();
 test.after(() => {
-  restoreRailSnapshot();
   rmSync(dataDir, { recursive: true, force: true });
 });
 

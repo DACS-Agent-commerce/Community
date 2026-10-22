@@ -11,6 +11,7 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
+import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -23,6 +24,9 @@ export async function GET(req: NextRequest) {
   }
   const catalog = loadCatalog();
   const scan = loadScanState();
+  const nodeDeployment = await catalogNodeDeployment().catch(() => ({
+    ok: false as const, reason: "could not read the Demos node's chain",
+  }));
 
   let chainLatestTx: number | null = null;
   try {
@@ -52,6 +56,7 @@ export async function GET(req: NextRequest) {
   const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
+    nodeDeployment,
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,

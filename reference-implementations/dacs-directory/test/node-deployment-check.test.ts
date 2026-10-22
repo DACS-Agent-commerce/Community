@@ -75,3 +75,23 @@ test("node build commits must match the whole string even with an explicit pin",
   }
   assert.equal(reportedNodeBuild({ nodeVersion: { commit, dirty: true } }), `${commit}+dirty@`);
 });
+
+
+test("catalog refreshes admit build drift on the pinned chain and return a warning", async () => {
+  const { catalogNodeDeployment } = await import("../src/catalog/listingFinality.js");
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const version of [
+      { commit: "f".repeat(40), dirty: false },
+      { commit: "f".repeat(40), dirty: true, builtAt: "2026-10-20T11:09:32Z" },
+      {},
+    ]) {
+      globalThis.fetch = nodeReporting(version, PINNED_DEMOS_CHAIN_IDENTITY);
+      const result = await catalogNodeDeployment();
+      assert.equal(result.ok, true);
+      assert.ok(result.ok && result.warning);
+    }
+    globalThis.fetch = nodeReporting({}, "a".repeat(64));
+    assert.equal((await catalogNodeDeployment()).ok, false);
+  } finally { globalThis.fetch = originalFetch; }
+});

@@ -13,7 +13,13 @@ test("registration documents pointer submission without offering wallet publicat
   const html = renderToStaticMarkup(React.createElement(Register));
   assert.match(html, /<h1>Submit listing pointers<\/h1>/);
   assert.match(html, /POST \/api\/dacs\/register/);
-  assert.match(html, /href="\/api\/dacs"/);
+  assert.match(html, /href="#registration-api"/);
+  assert.match(html, /id="registration-api"/);
+  assert.match(html, /prepare-registration/);
+  assert.match(html, /unsigned updates return 403/);
+  assert.match(html, /ownerSignature.signature/);
+  assert.match(html, /wellknown-files/);
+  assert.match(html, /register-domain/);
   assert.match(html, /browser publisher is unavailable/);
   assert.doesNotMatch(html, /<button|<form|Connect wallet|Sign exact artifact/);
 });

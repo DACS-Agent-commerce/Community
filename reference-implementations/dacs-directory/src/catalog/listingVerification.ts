@@ -1,4 +1,5 @@
 import { contentHash, stripSignature } from "./canonical.js";
+import { legacyListingHash } from "./legacyListingHash.js";
 import {
   ARTIFACT_SEPARATORS,
   isListing,
@@ -293,7 +294,7 @@ async function verifyListingArtifact(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return invalid("LISTING_SIGNATURE_INVALID");
-  const hash = contentHash(scope);
+  const hash = legacyListingHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,

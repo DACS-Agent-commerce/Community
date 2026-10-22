@@ -17,17 +17,16 @@ import { deriveStorageAddress, LIVE_STORAGE_SALT } from "../src/catalog/chain.js
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { authenticateReadableListingArtifact } from "../vendor/dacs-sdk/dist/agent/discover.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
-import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
+import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
-const { POST } = await import("../app/api/dacs/build-listing/route.js");
+const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
+const POST = createBuildListingPost(signedRailSnapshot);
 
 // The shipped PA-1 table is unsigned, so the route refuses every rail before
 // these steps (rail-registry.test.ts); here a signed snapshot is modelled.
-const restoreRailSnapshot = modelSignedRailSnapshot();
 test.after(() => {
-  restoreRailSnapshot();
   rmSync(dataDir, { recursive: true, force: true });
 });
 

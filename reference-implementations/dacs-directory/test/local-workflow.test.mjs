@@ -79,7 +79,13 @@ function sdkFixture(f) {
   git("add", "README.md");
   git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "fixture");
   mkdirSync(join(f.cwd, "scripts"));
-  writeFileSync(join(f.cwd, "scripts/setup-sdk.sh"), `SDK_REV="${git("rev-parse", "HEAD").trim()}"\n`);
+  writeFileSync(join(f.cwd, "scripts/setup-sdk.sh"), `SDK_REV="${git("rev-parse", "HEAD").trim()}"
+[ "\$DACS_SKIP_APP_INSTALL" = 1 ] || exit 97
+node -e 'require("node:fs").appendFileSync(process.env.WORKFLOW_LOG, JSON.stringify({tool:"setup"})+"\\n")'
+git -C vendor/dacs-sdk fetch --depth 1 origin "\$SDK_REV"
+git -C vendor/dacs-sdk checkout --detach "\$SDK_REV"
+(cd vendor/dacs-sdk && npm ci --no-audit --no-fund && npm run build)
+`);
   f.env.WORKFLOW_SDK_SOURCE = source;
   return source;
 }
@@ -192,6 +198,7 @@ test("documented SDK install accepts private clean clones and ignores Git path o
     const run = f.run(`${install}\nresult=$?\n[ "$GIT_OBJECT_DIRECTORY" = "$WORKFLOW_SDK_SOURCE/.git/objects" ] || exit 99\nexit "$result"`);
     assert.equal(run.status, 0, run.stderr);
     const commands = f.commands();
+    assert.equal(commands.filter((command) => command.tool === "setup").length, 1, "documented install delegates SDK patch and digest checks to the CI installer");
     assert.equal(commands.filter((command) => command.tool === "git").length, existing ? 2 : 3);
     for (const command of commands.filter((command) => command.tool === "git")) {
       assert.deepEqual(command.gitPaths, {}, "Git mutations use checkout-local paths");

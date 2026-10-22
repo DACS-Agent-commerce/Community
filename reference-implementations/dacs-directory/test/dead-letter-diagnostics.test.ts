@@ -129,8 +129,10 @@ test("listing binding rejections are persistent, public-safe, filterable, and re
     locator: target,
     listingId: "seller-service",
     listingVersion: 3,
+    publicNotice: false,
     code: "OWNER_CLAIM_BINDING",
     message: "The listing anchor owner does not match the registration claim.",
+    guidance: "Correct the registration's storage pointer to an anchor owned by the seller.",
     occurrences: 2,
     firstSeenAt: diagnostics.listingRejectionDiagnostics.items[0].firstSeenAt,
     lastSeenAt: diagnostics.listingRejectionDiagnostics.items[0].lastSeenAt,
@@ -289,4 +291,26 @@ test("age pruning is batched, spares active dead-letters, and resets firstSeenAt
   // Documented rediscovery semantics: pruned history restarts.
   store.recordArtifactFailure(locator("8"), "listing", "STORAGE_UNREADABLE", "fresh", 1);
   assert.equal(store.failureHistorySize(), 1);
+});
+
+
+test("status exposes build drift while the configured node serves the pinned chain", async () => {
+  const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    if (call.message === "getNetworkInfo") return Response.json({ result: 200, response: { nodeVersion: { commit: "f".repeat(40), dirty: true, builtAt: "test" } } });
+    if (call.message === "getBlockByNumber") return call.data.blockNumber === 0
+      ? Response.json({ result: 400, response: "error" })
+      : Response.json({ result: 200, response: { number: 1, status: "confirmed", hash: "a".repeat(64), content: { previousHash: PINNED_DEMOS_CHAIN_IDENTITY } } });
+    return Response.json({ result: 200, response: [{ id: 3 }] });
+  };
+  try {
+    const response = await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.nodeDeployment.ok, true);
+    assert.equal(body.nodeDeployment.chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+    assert.match(body.nodeDeployment.warning, /is not pinned/);
+  } finally { globalThis.fetch = originalFetch; }
 });

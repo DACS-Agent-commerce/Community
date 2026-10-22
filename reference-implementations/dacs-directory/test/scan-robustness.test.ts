@@ -370,28 +370,28 @@ test("a node outside the pinned deployment fails the pass before the catalog or 
     reindexAll({
       log: () => {},
       resolveIdentities: offline,
-      nodeDeployment: async () => ({ ok: false, reason: "Demos node build 61b8e75+dirty@x is not pinned" }),
+      nodeDeployment: async () => ({ ok: false, reason: "Demos node serves another chain, not the pinned chain" }),
     }),
-    /catalog not updated: Demos node build 61b8e75\+dirty@x is not pinned/,
+    /catalog not updated: Demos node serves another chain, not the pinned chain/,
   );
   assert.equal(store.loadCatalog().generatedAt, 13);
   assert.deepEqual(store.loadScanState(), before);
   assert.equal(runs(), runsBefore + 1);
-  assertFailedRun(/^catalog not updated: Demos node build 61b8e75\+dirty@x is not pinned$/);
+  assertFailedRun(/^catalog not updated: Demos node serves another chain, not the pinned chain$/);
   // A preflight that cannot read the node fails the pass the same way.
   await assert.rejects(
     reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: async () => { throw new Error("getNetworkInfo transport failed"); } }),
-    /^Error: catalog not updated: could not read the Demos node's build and chain: getNetworkInfo transport failed$/,
+    /^Error: catalog not updated: could not read the Demos node's chain: getNetworkInfo transport failed$/,
   );
   assert.equal(store.loadCatalog().generatedAt, 13);
   assert.deepEqual(store.loadScanState(), before);
-  assertFailedRun(/could not read the Demos node's build and chain/);
-  // Without an injected preflight the pass asks the node itself; this stub reports no build.
-  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }), /catalog not updated: Demos node reports no build identity/);
+  assertFailedRun(/could not read the Demos node's chain/);
+  // Without an injected preflight the pass asks the node itself; this stub has no chain identity.
+  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }), /catalog not updated: could not read the Demos node's chain/);
   assert.equal(store.loadCatalog().generatedAt, 13);
   assert.deepEqual(store.loadScanState(), before);
   assert.equal(runs(), runsBefore + 3);
-  assertFailedRun(/reports no build identity/);
+  assertFailedRun(/could not read the Demos node's chain/);
 });
 
 test("a SQLite failure during seller indexing fails the pass and records its status", async () => {

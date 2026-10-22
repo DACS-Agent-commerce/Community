@@ -14,7 +14,7 @@ import {
   railAuthorityPermitsPublication,
 } from "../src/catalog/listingOptions.js";
 import { resolveListingRails } from "../src/sdkListingValidation.js";
-import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
+import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-rail-registry-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
@@ -102,23 +102,20 @@ test("/register refuses an unverified rail before any signature; a signed-snapsh
       assert.equal(refusal.tx, undefined, option.railId);
       assert.equal(rpcCalls, 0, option.railId);
 
-      const restore = modelSignedRailSnapshot();
+      const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
+      const signedPost = createBuildListingPost(signedRailSnapshot);
       let preview: {
         listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
         railResolution: { disposition: string; reason: string; authorityBasis: string };
       };
-      try {
-        const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
-        const response = await POST(request({
-          ...base,
-          identityPresentedAt: identity.identityPresentedAt,
-          identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
-        }));
-        assert.equal(response.status, 200, option.railId);
-        preview = await response.json() as typeof preview;
-      } finally {
-        restore();
-      }
+      const identity = await (await signedPost(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+      const response = await signedPost(request({
+        ...base,
+        identityPresentedAt: identity.identityPresentedAt,
+        identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
+      }));
+      assert.equal(response.status, 200, option.railId);
+      preview = await response.json() as typeof preview;
       assert.deepEqual(preview.listing.acceptedRails, [{ railId: option.railId }]);
       assert.deepEqual(preview.listing.pipeline.find((phase) => phase.kind === option.phaseKind)?.parameters, { rail: option.railId });
       assert.equal(preview.railResolution.disposition, "verified", option.railId);
@@ -149,7 +146,12 @@ test("the catalog projection keeps every registry rail ID for the §6.3.6 rail f
 });
 
 test("the publisher never asserts a PA-1 signature it did not verify, and publishes only on LP-6 verified", () => {
-  for (const definition of PUBLISHER_IN_CODE_RAIL_DEFINITIONS) assert.equal(definition.signatureValid, false, definition.railId);
+  assert.equal(Object.isFrozen(PUBLISHER_IN_CODE_RAIL_DEFINITIONS), true);
+  for (const definition of PUBLISHER_IN_CODE_RAIL_DEFINITIONS) {
+    assert.equal(Object.isFrozen(definition), true);
+    assert.throws(() => Object.assign(definition, { signatureValid: true }), TypeError);
+    assert.equal(definition.signatureValid, false, definition.railId);
+  }
   assert.equal(railAuthorityPermitsPublication({ disposition: "verified" }), true);
   for (const result of [
     { disposition: "indeterminate", reason: "pa1-definition-unverifiable" },

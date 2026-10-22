@@ -4,19 +4,16 @@
  *
  * Required:
  *   NEXT_PUBLIC_DIRECTORY_URL=https://...
- *   DACS_LISTING_UPGRADE_REPLACEMENTS='[{"listingId":"...","replacementLocator":"stor-...","replacementVersion":4,"supportedPayloadMethods":["self-signed"]}, ...]'
+ *   DACS_LISTING_UPGRADE_REPLACEMENTS='[{"sourceListingId":"...","replacementListingId":"...","replacementLocator":"stor-...","replacementVersion":1,"supportedPayloadMethods":["self-signed"]}, ...]'
  */
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import invalidLiveListings from "../test/fixtures/live-invalid-verification-methods.json";
 import { validateListingArtifact } from "../src/sdkListingValidation.js";
 import { verifyListingResult } from "../src/catalog/listingVerification.js";
 import { listingUpgradeReaderDeps, listingUpgradeRefusal } from "../src/catalog/listingUpgradeAcceptance.js";
 
-type Replacement = {
-  listingId: string;
-  replacementLocator: string;
-  replacementVersion: number;
-  supportedPayloadMethods: string[];
-};
+import { parseListingUpgradeManifest } from "../src/catalog/listingUpgradeManifest.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -28,37 +25,6 @@ function httpsOrigin(name: string): string {
     throw new Error(`${name} must be an HTTPS origin`);
   }
   return url.origin;
-}
-
-function replacements(): Replacement[] {
-  const raw = process.env.DACS_LISTING_UPGRADE_REPLACEMENTS;
-  if (!raw) throw new Error("DACS_LISTING_UPGRADE_REPLACEMENTS is required");
-  const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed) || parsed.length !== invalidLiveListings.length) {
-    throw new Error(`replacement manifest must contain exactly ${invalidLiveListings.length} entries`);
-  }
-  const allowedKeys = new Set(["listingId", "replacementLocator", "replacementVersion", "supportedPayloadMethods"]);
-  for (const item of parsed) {
-    if (
-      !item || typeof item !== "object" || Array.isArray(item) ||
-      Object.keys(item).some((key) => !allowedKeys.has(key)) ||
-      typeof item.listingId !== "string" ||
-      typeof item.replacementLocator !== "string" || !/^stor-[0-9a-f]{40}$/.test(item.replacementLocator) ||
-      !Number.isSafeInteger(item.replacementVersion) || Number(item.replacementVersion) < 1 ||
-      !Array.isArray(item.supportedPayloadMethods) || !item.supportedPayloadMethods.every((kind: unknown) => typeof kind === "string")
-    ) throw new Error("replacement manifest contains an invalid entry");
-  }
-  const typed = parsed as Replacement[];
-  for (const old of invalidLiveListings) {
-    const replacement = typed.find((candidate) => candidate.listingId === old.listingId);
-    if (!replacement) {
-      throw new Error(`replacement manifest is missing ${old.listingId}`);
-    }
-    if (replacement.replacementVersion <= old.listingVersion) {
-      throw new Error(`${old.listingId} replacement version must be newer than v${old.listingVersion}`);
-    }
-  }
-  return typed;
 }
 
 async function json(url: string): Promise<Record<string, unknown>> {
@@ -77,9 +43,9 @@ async function anchor(locator: string): Promise<Record<string, unknown>> {
   return body.data as Record<string, unknown>;
 }
 
-async function main() {
+export async function checkListingUpgrades(write = (message: string) => { process.stdout.write(message); }) {
   const directory = httpsOrigin("NEXT_PUBLIC_DIRECTORY_URL");
-  const manifest = replacements();
+  const manifest = parseListingUpgradeManifest(JSON.parse(process.env.DACS_LISTING_UPGRADE_REPLACEMENTS ?? "null"));
 
   for (const old of invalidLiveListings) {
     const raw = await anchor(old.locator);
@@ -92,36 +58,36 @@ async function main() {
     const listingDiagnostics = indexer?.listingRejectionDiagnostics as Record<string, unknown> | undefined;
     const items = Array.isArray(listingDiagnostics?.items) ? listingDiagnostics.items : [];
     if (!items.some((item) => item && typeof item === "object" && !Array.isArray(item) &&
-      item.code === "VERIFICATION_METHOD_INVALID" && item.listingId === old.listingId && item.listingVersion === old.listingVersion)) {
+      item.code === "VERIFICATION_METHOD_INVALID" && item.locator === old.locator)) {
       throw new Error(`${old.listingId} is missing its expected public rejection diagnostic`);
     }
 
-    const replacement = manifest.find((candidate) => candidate.listingId === old.listingId)!;
+    const replacement = manifest.find((candidate) => candidate.sourceListingId === old.listingId)!;
     const replacementRaw = await anchor(replacement.replacementLocator);
     const authenticated = await verifyListingResult(replacementRaw);
     if (!authenticated.ok || authenticated.value.profile !== "dacs-v0.1") {
-      throw new Error(`${replacement.listingId}@${replacement.replacementVersion} failed catalog authentication`);
+      throw new Error(`${replacement.replacementListingId}@${replacement.replacementVersion} failed catalog authentication`);
     }
     const listing = authenticated.value.listing;
     const oldSeller = (raw.seller as Record<string, unknown> | undefined)?.identity as Record<string, unknown> | undefined;
     if (
-      listing.listingId !== replacement.listingId ||
+      listing.listingId !== replacement.replacementListingId ||
       listing.listingVersion !== replacement.replacementVersion ||
       listing.seller.identity.presentedBy !== oldSeller?.presentedBy
     ) {
-      throw new Error(`${replacement.listingId} replacement tuple does not match its manifest and prior seller`);
+      throw new Error(`${replacement.replacementListingId} replacement tuple does not match its manifest and prior seller`);
     }
 
     const catalog = await json(`${directory}/api/dacs/listings?primaryClaim=${encodeURIComponent(authenticated.value.sellerClaim)}&limit=100`);
     const summaries = Array.isArray(catalog.listings) ? catalog.listings : [];
     const summary = summaries.find((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate) &&
-      candidate.listingId === replacement.listingId && candidate.version === replacement.replacementVersion) as Record<string, unknown> | undefined;
+      candidate.listingId === replacement.replacementListingId && candidate.version === replacement.replacementVersion) as Record<string, unknown> | undefined;
     if (
       !summary ||
       (summary.anchor as Record<string, unknown> | undefined)?.locator !== replacement.replacementLocator ||
       summary.contentHash !== authenticated.value.contentHash ||
       (summary.transactionReadiness as Record<string, unknown> | undefined)?.disposition !== "unassessed"
-    ) throw new Error(`${replacement.listingId} replacement is not exposed by the reindexed catalog`);
+    ) throw new Error(`${replacement.replacementListingId} replacement is not exposed by the reindexed catalog`);
 
     const validation = await validateListingArtifact(replacementRaw, listingUpgradeReaderDeps({
       catalogObservedAt: Number(summary.catalogObservedAt),
@@ -130,14 +96,17 @@ async function main() {
       signer: authenticated.value.signer,
     }));
     const refusal = listingUpgradeRefusal(validation);
-    if (refusal) throw new Error(`${replacement.listingId} ${refusal}`);
+    if (refusal && !(validation.disposition === "indeterminate" && validation.reason === "pa1-definition-unverifiable")) {
+      throw new Error(`${replacement.replacementListingId} ${refusal}`);
+    }
+    if (refusal) write(`reader remains unassessed: ${refusal}\n`);
 
-    process.stdout.write(`ok ${old.listingId}@${old.listingVersion} rejected -> v${replacement.replacementVersion} SDK-verified and discoverable\n`);
+    write(`ok ${old.listingId}@${old.listingVersion} rejected -> ${replacement.replacementListingId}@${replacement.replacementVersion} authenticated and discoverable\n`);
   }
-  process.stdout.write("ok every replacement is independently SDK-verified and discoverable\n");
+  write("ok every replacement is catalogued; buyer readiness is reported separately\n");
 }
 
-main().catch((error) => {
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) checkListingUpgrades().catch((error) => {
   process.stderr.write(`[listing upgrade acceptance] ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

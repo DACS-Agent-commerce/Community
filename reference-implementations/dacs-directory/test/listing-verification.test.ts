@@ -640,3 +640,21 @@ test("legacy listing schema, signature decoding, and signed-scope tampering keep
   assert.deepEqual(await verifyListingResult({ ...fixture.data, description: "tampered after signing" }),
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
 });
+
+
+test("legacy Listing hashing preserves draft NFC member-name semantics without changing current Listings", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  const { signature: _, ...original } = fixture.data;
+  const scope = { ...original, agentId: claim, metadata: { ["e\u0301"]: "bound value" } };
+  // Independent historical preimage: SDK 44d8ff2 normalized member names before sorting.
+  const normalized = { ...scope, metadata: { "é": "bound value" } };
+  const historicalHash = contentHash(normalized);
+  assert.notEqual(historicalHash, contentHash(scope));
+  const listing = { ...scope, signature: signMessage(`dacs-listing:v1:${historicalHash}`) };
+  const verified = await verifyListing(listing);
+  assert.equal(verified?.profile, "legacy-sdk-v0.1");
+  assert.equal(verified?.contentHash, historicalHash);
+  assert.equal(await verifyListing({ ...listing, metadata: { ["e\u0301"]: "tampered" } }), null);
+  const current = signedCurrentListing({ metadata: { ["e\u0301"]: "current value" } });
+  assert.equal((await verifyListing(current))?.contentHash, contentHash(current));
+});

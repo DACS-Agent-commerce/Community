@@ -44,6 +44,7 @@ globalThis.fetch = async (input, init) => {
     if (path.slice("/storage-program/".length) !== anchor) return new Response(null, { status: 404 });
     return Response.json({ success: true, owner: `0x${seller.slice(-64)}`, programName: "opaque", data: listing });
   }
+  if (node.down) return new Response("unavailable", { status: 503 });
   const call = (JSON.parse(String(init?.body)) as { params?: Array<{ message?: string; data?: { blockNumber?: number } }> }).params?.[0];
   calls.push(String(call?.message));
   if (call?.message === "getNetworkInfo") {
@@ -68,19 +69,14 @@ const indexNow = () => POST(new NextRequest("https://directory.example/api/dacs/
   body: JSON.stringify({ claim: seller }),
 }));
 
-test("index-now writes nothing to the catalog unless the node is the pinned deployment", async () => {
+test("index-now requires the pinned chain and treats build drift as a warning", async () => {
   store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
   store.saveCatalog({ catalogVersion: "1", generatedAt: 7, sellers: [] });
   const dirty = { ...cleanBuild, dirty: true };
   const cases: Array<[string, typeof node, number, RegExp]> = [
-    // node2 today: the pinned commit with uncommitted changes.
-    ["dirty build", { nodeVersion: dirty, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409,
-      /^catalog not updated: Demos node build 61b8e75\w+\+dirty@2026-10-14T16:45:24Z is not pinned$/],
-    ["another commit", { nodeVersion: { ...cleanBuild, commit: "f".repeat(40) }, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /is not pinned$/],
-    ["no build identity", { chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /reports no build identity$/],
     ["another chain", { nodeVersion: cleanBuild, chain: "aa".repeat(32) }, 409, /not the pinned chain$/],
     ["unreadable node", { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY, down: true }, 503,
-      /could not read the Demos node's build and chain; catalog not updated/],
+      /could not read the Demos node's chain; catalog not updated/],
   ];
   for (const [name, reply, status, error] of cases) {
     node = reply;
@@ -91,22 +87,18 @@ test("index-now writes nothing to the catalog unless the node is the pinned depl
     const body = await response.json() as { ok?: boolean; error?: string };
     assert.equal(body.ok, undefined, name);
     assert.match(String(body.error), error, name);
-    assert.ok(calls.includes("getNetworkInfo"), name);
+    if (!reply.down) assert.ok(calls.includes("getBlockByNumber"), name);
     assert.equal(storageReads, 0, `${name}: the registration was not indexed`);
     assert.deepEqual(store.loadCatalog(), { catalogVersion: "1", generatedAt: 7, sellers: [] }, name);
   }
 
-  // An operator who pins that exact dirty build indexes the seller.
-  process.env.DEMOS_NODE_BUILDS = `${cleanBuild.commit}+dirty@${cleanBuild.builtAt}`;
-  try {
-    node = { nodeVersion: dirty, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-    const pinned = await indexNow();
-    assert.equal(pinned.status, 200);
-    assert.deepEqual(await pinned.json(), { ok: true, listings: 1, verifiedDeals: 0 });
-    const catalog = store.loadCatalog();
-    assert.notEqual(catalog.generatedAt, 7);
-    assert.deepEqual(catalog.sellers.map((s) => [s.primaryClaim, s.listings.map((l) => l.status)]), [[seller, ["active"]]]);
-  } finally {
-    delete process.env.DEMOS_NODE_BUILDS;
+  for (const nodeVersion of [dirty, { ...cleanBuild, commit: "f".repeat(40) }, undefined, cleanBuild]) {
+    node = { nodeVersion, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+    const response = await indexNow();
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.listings, 1);
+    assert.equal(Boolean(body.nodeBuildWarning), nodeVersion !== cleanBuild);
+    assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
   }
 });

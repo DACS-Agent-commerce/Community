@@ -146,6 +146,24 @@ export async function pinnedNodeDeployment(): Promise<
   return { ok: true, build: reportedNodeBuild(networkInfo) ?? "", chainIdentity: servedChain };
 }
 
+/** Catalog refreshes require the configured chain; self-reported build drift is diagnostic. */
+export async function catalogNodeDeployment(): Promise<
+  | { ok: true; build: string | null; chainIdentity: string; warning: string | null }
+  | { ok: false; reason: string }
+> {
+  const servedChain = await chainIdentity();
+  if (servedChain !== pinnedChainIdentity()) {
+    return { ok: false, reason: `Demos node serves chain ${servedChain}, not the pinned chain` };
+  }
+  const networkInfo = await nodeCall("getNetworkInfo", {}).catch(() => null);
+  return {
+    ok: true,
+    build: reportedNodeBuild(networkInfo),
+    chainIdentity: servedChain,
+    warning: nodeBuildRejection(networkInfo),
+  };
+}
+
 /**
  * What the configured node reports, in the form DEMOS_NODE_BUILDS and
  * DEMOS_CHAIN_IDENTITY take, with the pin's verdict. For operators deciding

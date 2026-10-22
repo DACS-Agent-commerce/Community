@@ -14,12 +14,15 @@ interface Status {
   indexer?: {
     listingRejectionDiagnostics?: {
       total: number;
+      publicTotal: number;
       items: Array<{
         locator: string;
         listingId?: string;
         listingVersion?: number;
         code: string;
         message: string;
+        guidance: string;
+        publicNotice: boolean;
       }>;
     };
   };
@@ -75,15 +78,16 @@ export default function CatalogStatus() {
         <span className="sync-dot" />
         {label} · indexed {ago(status.generatedAt)}
       </span>
-      {rejected && rejected.total > 0 && (
+      {rejected && rejected.publicTotal > 0 && (
         <details className="listing-rejection-notice">
-          <summary>{rejected.total.toLocaleString()} listing candidate{rejected.total === 1 ? "" : "s"} need seller attention</summary>
-          <p>These candidates are excluded from discovery. Versions are immutable, so a corrected Listing needs a new Listing ID, published from a current SDK seller runtime; then let the Directory reindex it.</p>
+          <summary>{rejected.publicTotal.toLocaleString()} owner-submitted listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
+          <p>These diagnostics describe the latest indexing pass for owner-signed registrations. Check the registration's storage pointers and declared content hashes, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
           <ul>
-            {rejected.items.map((item) => (
+            {rejected.items.filter((item) => item.publicNotice).map((item) => (
               <li key={`${item.locator}:${item.code}`}>
                 <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
                 <span>{item.message}</span>
+                <span>{item.guidance}</span>
                 <code>{item.code}</code>
               </li>
             ))}
