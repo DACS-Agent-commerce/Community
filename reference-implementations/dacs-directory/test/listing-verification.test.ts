@@ -535,8 +535,8 @@ const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown
   return scope;
 };
 
-test("LR-2 caps canonical unsigned Listing scope at 16,384 bytes, independently of raw JSON", async () => {
-  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(stripEnvelope(listing)), "utf8");
+test("LR-2 caps the complete canonical Listing at 16,384 bytes, independently of raw JSON", async () => {
+  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
     padding: "x".repeat(bytes - canonicalBytes(signedCurrentListing({ padding: "" }))),
   });
@@ -544,10 +544,10 @@ test("LR-2 caps canonical unsigned Listing scope at 16,384 bytes, independently 
   assert.equal(canonicalBytes(atCap), 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
-  // The envelope is omitted from canonical signed scope, including at the cap.
+  // A scope at the cap is oversized once its signature envelope is included.
   const unsignedAtCap = signedCurrentListing({ padding: "x".repeat(16_384 - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))) });
   assert.equal(canonicalBytes(stripEnvelope(unsignedAtCap)), 16_384);
-  assert.ok(await verifyListing(unsignedAtCap));
+  assert.equal(await verifyListing(unsignedAtCap), null);
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);
@@ -639,6 +639,39 @@ test("legacy listing schema, signature decoding, and signed-scope tampering keep
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
   assert.deepEqual(await verifyListingResult({ ...fixture.data, description: "tampered after signing" }),
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+});
+
+test("neither legacy signature envelope bypasses the schema gate on authentically signed bytes", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  const { signature: _signature, ...original } = fixture.data;
+  for (const supportedDelivery of [original.supportedDelivery, 7]) {
+    const scope = { ...original, agentId: claim, supportedDelivery };
+    const value = signMessage(`dacs-listing:v1:${contentHash(scope)}`);
+    for (const signature of [Buffer.from(value, "base64url").toString("hex"),
+      { algorithm: "ed25519", signer: claim, value }]) {
+      const result = await verifyListingResult({ ...scope, signature });
+      if (supportedDelivery === 7) {
+        assert.deepEqual(result, { ok: false, code: "LEGACY_LISTING_INVALID" });
+      } else {
+        assert.equal(result.ok, true);
+        assert.equal(result.ok && result.value.signer, claim);
+      }
+    }
+  }
+});
+
+test("a resolver unavailable on the second signature lookup retains the signature rejection code", async () => {
+  const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
+  for (const throws of [false, true]) {
+    let calls = 0;
+    const result = await verifyListingResult(signedCurrentListing(), async (ref, algorithm) => {
+      if (++calls === 1) return resolveDemosPrimaryClaimKey(ref, algorithm);
+      if (throws) throw new Error("key temporarily unavailable");
+      return null;
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result, { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
 });
 
 

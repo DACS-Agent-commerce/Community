@@ -26,13 +26,13 @@ git_with_sdk_auth() {
 # The DACS Standard revision the pinned SDK declares (package.json
 # dacs.standardRevision); the Directory conforms to the same revision.
 STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
-SDK_PATCH_SHA256="d2e7e15f5fbf180bb67dfb8ce7927d9f3c75f395202cf4e2f9017a301810380b"
+SDK_PATCH_SHA256="776c15d1f4b39e94754c65f40393a87ffca43c2072403360b773b84cbf347005"
 SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
 SDK_MANIFEST="vendor/dacs-sdk/dist/.dacs-sdk-manifest"
 # scripts/sdk-dist-digest.mjs over the dist that SDK_REV builds to (`npm ci`
 # then `npm run build`; the build is reproducible). A packaged or freshly built
 # dist is accepted only with exactly these bytes.
-SDK_DIST_SHA256="300b104565a14c291a94bd3cb8830fbda2f9e40d054848717c41ebcec51e2778"
+SDK_DIST_SHA256="2e4a9d1b23b2bcb1dedc4209da3c6295a7ae1b86a2bf2d80a15fa1a04e1e0f19"
 
 require_standard_revision() {
   local declared

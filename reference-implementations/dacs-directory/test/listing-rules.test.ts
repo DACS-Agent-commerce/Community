@@ -541,17 +541,22 @@ test("current listing envelopes require canonical SIG-6 bytes", async () => {
 });
 
 
-test("LR-2 caps the complete canonical unsigned scope at exactly 16,384 bytes", async () => {
-  const { canonicalize, stripSignature } = await import("../src/catalog/canonical.js");
+test("LR-2 caps the complete canonical Listing at exactly 16,384 bytes with SDK parity", async () => {
+  const { canonicalize } = await import("../src/catalog/canonical.js");
+  const { isListing } = await import("@kynesyslabs/dacs/artifacts");
   for (const size of [16_300, 16_384, 16_385]) {
-    const signed = listing(scope => {
-      scope.extension = "";
-      scope.extension = "x".repeat(size - Buffer.byteLength(canonicalize(scope), "utf8"));
-    });
-    assert.equal(Buffer.byteLength(canonicalize(stripSignature(signed)), "utf8"), size);
-    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `unsigned scope ${size}`);
-    (signed as Obj).extension += "x";
+    const overhead = Buffer.byteLength(canonicalize(listing(scope => { scope.extension = ""; })), "utf8");
+    const signed = listing(scope => { scope.extension = "x".repeat(size - overhead); });
+    assert.equal(Buffer.byteLength(canonicalize(signed), "utf8"), size);
+    assert.equal(isListing(signed), size <= 16_384, `SDK complete Listing ${size}`);
+    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `Directory complete Listing ${size}`);
+    signed.extension += "x";
     assert.equal(await verifyListing(signed), null, "extension bytes remain signed");
+  }
+  for (const retentionYears of [undefined, -1, 0, 1]) {
+    const signed = listing(scope => { scope.terms = retentionYears === undefined ? {} : { retentionYears }; });
+    assert.equal(isListing(signed), retentionYears !== -1);
+    assert.equal(Boolean(await verifyListing(signed)), retentionYears !== -1);
   }
 });
 

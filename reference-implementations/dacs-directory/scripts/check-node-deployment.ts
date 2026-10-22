@@ -2,7 +2,8 @@
  * Read-only deployment check: `npm run check:node-deployment`.
  * Reports the chain and build the configured node (DEMOS_RPC) serves, in the form
  * DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS take, and exits 1 when they are not
- * pinned, because indexing, `/api/dacs/index-now` and `build-listing` refuse such a node.
+ * pinned. Publication/inclusion require both pins; catalog refresh requires the
+ * chain pin and reports build drift as a warning.
  * It sends no transactions and changes no pin: the operator reviews the reported
  * chain and build before setting the variables.
  */
@@ -24,7 +25,7 @@ console.log(JSON.stringify({
 }, null, 2));
 if (!observed.pin.ok) {
   console.error(
-    `\nThe indexer would refuse this node (${observed.pin.reason}). After reviewing the chain and build above, set\n` +
+    `\nPublication/inclusion observations require the pinned chain and build (${observed.pin.reason}).\nCatalog refresh requires the chain pin; build drift alone is a warning. After reviewing both, set\n` +
     `  DEMOS_CHAIN_IDENTITY=${observed.chainIdentity}\n` +
     (observed.build ? `  DEMOS_NODE_BUILDS=${observed.build}\n` : "") +
     "or point DEMOS_RPC at a node that serves the pinned deployment.",

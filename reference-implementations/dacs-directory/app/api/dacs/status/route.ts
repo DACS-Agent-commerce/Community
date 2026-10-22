@@ -66,6 +66,9 @@ export async function GET(req: NextRequest) {
   const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
+    legacyVetUnsupportedDeals: catalog.sellers.reduce((count, seller) => count + (seller.deals ?? []).filter(
+      (deal) => deal.verificationLimitation === "legacy-vet-unsupported",
+    ).length, 0),
     nodeDeployment,
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,

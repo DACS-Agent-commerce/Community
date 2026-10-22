@@ -16,7 +16,7 @@ fi
 
 # Say at boot, not only in later refusals, when the node is not the pinned
 # deployment. Not fatal: the web app still serves the last verified catalog.
-npm run check:node-deployment || echo "[indexer] the configured Demos node is not the pinned deployment; catalog refreshes are refused until DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS are reviewed and set"
+npm run check:node-deployment || echo "[indexer] the configured Demos node is not the pinned deployment; publication/inclusion observations require reviewed DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS; catalog refresh requires the chain pin and continues with a warning for build drift alone"
 
 reindex_forever() {
   while true; do

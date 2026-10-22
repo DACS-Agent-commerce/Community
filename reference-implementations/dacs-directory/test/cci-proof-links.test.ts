@@ -2,6 +2,7 @@ import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { indexRegistration } from "../src/catalog/indexer.js";
+import { cciProofLinks } from "../src/catalog/cciProofLinks.js";
 
 test("CCI badges prefer original HTTP proof links to commitments across RPC envelopes", async () => {
   const claim = `did:demos:agent:${"a".repeat(64)}`;
@@ -17,4 +18,15 @@ test("CCI badges prefer original HTTP proof links to commitments across RPC enve
       ["both", "https://discord.com/channels/1/2/3"], ["explicit", "https://example.com/proof"], ["hash-only", undefined], ["unsafe", undefined],
     ]);
   }
+});
+
+test("proof URL projection accepts HTTP and strips unsafe or non-string proof fields", () => {
+  const claim = `did:demos:agent:${"a".repeat(64)}`;
+  const links = cciProofLinks(claim, { web2: { discord: [
+    { username: "plain-http", proof: "http://example.com/proof" },
+    { username: "array-proof", proof: ["https://example.com/array"] },
+    { username: "array-explicit", proofUrl: ["https://example.com/array"] },
+    { username: "unsafe-explicit", proofUrl: "javascript:alert(1)" },
+  ] } });
+  assert.deepEqual([...links.values()], ["http://example.com/proof"]);
 });

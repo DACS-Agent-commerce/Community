@@ -41,9 +41,6 @@ export interface AnchorRecord {
   programName?: string;
   storageAddress?: string;
   metadata?: Record<string, unknown>;
-  createdByTx?: string;
-  lastModifiedByTx?: string;
-  interactionTxs?: string[];
   /** Node-enforced access metadata; payload fields cannot substitute for this. */
   acl?: unknown;
 }
@@ -88,7 +85,7 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   if (!res.ok) return { status: "unavailable" };
   let json: {
     success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown;
-    storageAddress?: string; metadata?: Record<string, unknown>; createdByTx?: string; lastModifiedByTx?: string; interactionTxs?: string[];
+    storageAddress?: string; metadata?: Record<string, unknown>;
   };
   try {
     json = (await storageResponseJson(res)) as typeof json;
@@ -108,9 +105,6 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
       acl: json.acl,
       storageAddress: json.storageAddress,
       metadata: json.metadata,
-      createdByTx: json.createdByTx,
-      lastModifiedByTx: json.lastModifiedByTx,
-      interactionTxs: json.interactionTxs,
     },
   };
 }
@@ -249,9 +243,6 @@ export async function resolveOwnedAnchorByName(
         programName?: string;
         storageAddress?: string;
         metadata?: Record<string, unknown>;
-        createdByTx?: string;
-        lastModifiedByTx?: string;
-        interactionTxs?: string[];
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
@@ -263,9 +254,6 @@ export async function resolveOwnedAnchorByName(
           programName: body.programName,
           storageAddress: body.storageAddress,
           metadata: body.metadata,
-          createdByTx: body.createdByTx,
-          lastModifiedByTx: body.lastModifiedByTx,
-          interactionTxs: body.interactionTxs,
         };
       }
     } catch { /* classified below */ }

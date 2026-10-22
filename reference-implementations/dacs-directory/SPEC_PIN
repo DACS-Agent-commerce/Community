@@ -26,7 +26,7 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   Every required/oneOf member must declare a boolean verificationRequired;
 #   VerifyResult shape is checked even when verificationRequired is false.
 #   BundleRequirement requires requirementVersion "1". Result and policy methods
-#   must belong to the pinned eight-kind DACS-2 VerificationMethod registry.
+#   must belong to the pinned nine-kind DACS-2 VerificationMethod registry.
 #   Unversioned requirements select the latest version in the supplied roster.
 #   Primary selection authenticates the exact result without overriding explicit
 #   listing recipe pins. Every presentedBy requires a trusted method-specific
@@ -41,6 +41,11 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   or throwing adapters fail closed; adapters must authenticate original proof/hash
 #   scope, signer and validator epoch. test/authority-attestation.test.ts uses a
 #   signed fixture adapter; it is not a production method-specific verifier.
+#
+# Legacy SDK-MVP bundles with nonempty vetRecords remain indeterminate: there
+# is no session-bound composite-verification adapter. They never count toward
+# reputation; DealRecord.verificationLimitation and status.legacyVetUnsupportedDeals
+# disclose the exclusion (test/legacy-deal-evidence.test.ts).
 #
 # Pending production integration (these helpers do not constrain current session
 # admission or identity tiers): historical IdentityBundle/challenge authentication,
@@ -60,6 +65,10 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   Historical current hex listings require exact operator-controlled native/hash/
 #   tuple/seller import pins (DACS_HISTORICAL_LISTING_IMPORTS; README). Other graph
 #   envelopes retain legacy decoding. BundleBinding verification is strict.
+#   Per-claim presentation signatures use the Directory compatibility profile:
+#   canonical Base64URL, historical 64-byte hex (optional 0x), or padded Base64.
+#   CORE SIG-6 does not prescribe these per-claim strings; the pinned vector uses
+#   padded Base64. Catalog admission does not establish SDK transaction readiness.
 # - SDK canonicalization accepts only integer numbers. Fractional publication is
 #   unsupported; listing publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
@@ -77,6 +86,9 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # test/revocation-vectors.test.ts):
 # SDK compatibility patch: scripts/dacs-sdk-compat.patch; its SHA-256 and the
 # rebuilt distribution SHA-256 are pinned in scripts/setup-sdk.sh.
+# Current Listing size uses the full canonical envelope (DACS-1 §6.3.4).
+# Directory compatibility retains zero retentionYears; §6.3.4 declares a number
+# without a positive-only rule, while the unpatched SDK requires a positive integer.
 # conformance/vectors/security/signature-value-encoding-v0.1.json
 # sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)

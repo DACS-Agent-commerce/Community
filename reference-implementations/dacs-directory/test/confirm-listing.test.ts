@@ -658,6 +658,7 @@ test("node observation requests preserve the normalized RPC transport contract",
       assert.equal(new Headers(init.headers).get("content-type"), "application/json");
       assert.equal(init.cache, "no-store");
       assert.equal(JSON.parse(String(init.body)).method, "nodeCall");
+      assert.equal(JSON.parse(String(init.body)).params[0].type, "nodeCall");
     }
     return chainFetch(input, init);
   };
@@ -843,4 +844,44 @@ test("pending observation reasons remain useful for native, history and non-Erro
     return chainFetch(input, init);
   };
   assert.deepEqual(await observeListingAnchorInclusion(observationInput), { status: "pending", reason: "inclusion observation failed" });
+}));
+
+test("history skips different content at the same locator and normalizes JSON-string signatures", async () => withChain(async () => {
+  stubChain({ historyPages: { latest: [historyWrite(12, "ff".repeat(32), { data: { ...listing, terms: { different: true } } }), transaction] } });
+  const result = await observeListingAnchorInclusion(observationInput);
+  assert.equal(result.status, "included");
+  if (result.status === "included") {
+    assert.equal(result.observation.transactionRef, transactionHash);
+    assert.equal(result.observation.signedTransactionHash, demosSignedTransactionProofHash(byHashRow(transaction)));
+    assert.equal(result.authenticated, false);
+  }
+  assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }]);
+}));
+
+test("history cursor selection ignores malformed IDs and terminates at zero or one", async () => withChain(async () => {
+  for (const id of [0, 1]) {
+    stubChain({ historyPages: { latest: [transfer(id)] } });
+    assert.deepEqual(await observeListingAnchorInclusion(observationInput), { status: "pending", reason: "canonical transaction is not included" });
+    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }]);
+  }
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  const starts: unknown[] = [];
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params[0];
+      if (call.message === "getTransactions") {
+        starts.push(call.data.start);
+        return Response.json({ result: 200, response: starts.length === 1
+          ? [-1, 1.5, "2", Number.MAX_SAFE_INTEGER + 1, undefined, 11].map(id => historyRow({ ...transfer(12), id }))
+          : [historyRow(transaction)] });
+      }
+    }
+    return chainFetch(input, init);
+  };
+  assert.equal((await observeListingAnchorInclusion(observationInput)).status, "included");
+  assert.deepEqual(starts, ["latest", 10]);
+  stubChain({ historyPages: { latest: [transfer(undefined)] } });
+  assert.deepEqual(await observeListingAnchorInclusion(observationInput), { status: "pending", reason: "transaction history page has no valid cursor" });
+  assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }]);
 }));
