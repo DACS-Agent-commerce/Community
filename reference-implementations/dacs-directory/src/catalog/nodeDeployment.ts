@@ -15,7 +15,7 @@
  */
 export const PINNED_DEMOS_CHAIN_IDENTITY = "d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc";
 
-/** demos-node-software 0.9.8, the clean commit this release was checked against. */
+/** Reviewed clean source pin for demos-node-software 0.9.8, not an attestation of any live deployment. */
 export const PINNED_DEMOS_NODE_BUILDS = ["61b8e75aa8db5e408c49e1c3a89db4d673f45578"];
 
 export function pinnedChainIdentity(configured = process.env.DEMOS_CHAIN_IDENTITY): string {

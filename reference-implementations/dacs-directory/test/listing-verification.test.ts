@@ -535,8 +535,8 @@ const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown
   return scope;
 };
 
-test("LR-2 caps canonical unsigned Listing scope at 16,384 bytes, independently of raw JSON", async () => {
-  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(stripEnvelope(listing)), "utf8");
+test("LR-2 caps the complete canonical Listing at 16,384 bytes, independently of raw JSON", async () => {
+  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
     padding: "x".repeat(bytes - canonicalBytes(signedCurrentListing({ padding: "" }))),
   });
@@ -544,10 +544,10 @@ test("LR-2 caps canonical unsigned Listing scope at 16,384 bytes, independently 
   assert.equal(canonicalBytes(atCap), 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
-  // The envelope is omitted from canonical signed scope, including at the cap.
+  // A scope at the cap is oversized once its signature envelope is included.
   const unsignedAtCap = signedCurrentListing({ padding: "x".repeat(16_384 - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))) });
   assert.equal(canonicalBytes(stripEnvelope(unsignedAtCap)), 16_384);
-  assert.ok(await verifyListing(unsignedAtCap));
+  assert.equal(await verifyListing(unsignedAtCap), null);
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);

@@ -590,6 +590,8 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
+      verificationLimitation: !strictRefsVerified && authoritative.signaturesOk && bundle?.vetRecords.length
+        ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"

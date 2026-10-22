@@ -3,6 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { NextRequest } from "next/server";
+import { isCompositeVerificationRecord } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { RegisteredDeal } from "../src/catalog/types.js";
@@ -106,6 +108,7 @@ test("a fully signed legacy two-copy deal retains authenticated agreement verifi
   assert.equal(deal.finalisedAt, 1_700_000_000_000);
   assert.equal(deal.sellerOutcome, "completed");
   assert.equal(deal.refsVerified, true);
+  assert.equal(deal.verificationLimitation, undefined);
   assert.equal(deal.reputationEligible, true);
   assert.equal(record.reputation.bundleCount, 1);
 });
@@ -326,13 +329,15 @@ test("historical hex agreement signatures retain their authenticated read profil
 });
 
 test("legacy vet references read the buyer's historical verifyrecord separately from agreement and evidence", async () => {
-  for (const mode of ["valid", "missing", "wrong-document", "tampered"] as const) {
+  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered"] as const) {
     const jobId = `legacy-vet-${mode}`;
     const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
     const vetScope: Obj = { recordVersion: "1", jobId, evaluatedParty: seller,
+      bundleHash: "a".repeat(64), requirementHash: "b".repeat(64), generatedAt: 1700000000000,
       freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass" };
     const vet = { ...vetScope, signature: { algorithm: "ed25519", signer: outsider,
       value: signWith(2, `dacs-composite:v1:${contentHash(vetScope)}`, "base64url") } };
+    assert.equal(isCompositeVerificationRecord(vet), true, "the unsupported control passes the pinned shape gate");
     const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 1,
       outcome: "failure", paymentTxRefs: [], observedAt: 1700000000000 };
     const evidence = { ...evidenceScope, signature: { algorithm: "ed25519", signer: buyer,
@@ -343,7 +348,9 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
     const agreementAt = deriveAnchorAddress(buyer, `dacs3:agreement:${jobId}`);
     assert.equal(new Set([vetAt, evidenceAt, agreementAt]).size, 3);
     storage[evidenceAt] = evidence;
-    if (mode !== "missing") storage[vetAt] = mode === "wrong-document" ? evidence
+    const wrongAt = deriveAnchorAddress(buyer, `dacs2:verifyresult:${jobId}`);
+    if (mode === "wrong-name") storage[wrongAt] = vet;
+    else if (mode !== "missing") storage[vetAt] = mode === "wrong-document" ? evidence
       : mode === "tampered" ? { ...vet, overallDecision: "fail" } : vet;
     for (const at of [deal.buyerBundleRef, deal.sellerBundleRef!]) {
       const body = { ...storage[at] }; delete body.signatures; delete body.anchoredByRole;
@@ -353,15 +360,20 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
         signatures: [0, 1].map(index => partySignature(index, "dacs-bundle:v1:", body)) };
     }
     const record = await indexed(deal);
-    assert.ok((reads.get(vetAt) ?? 0) > 0, `${mode}: buyer-owned dacs2:verifyrecord requested`);
-    const allowed = mode === "valid";
+    assert.equal(reads.get(vetAt), 2, `${mode}: each copy reads buyer-owned dacs2:verifyrecord`);
+    assert.equal(reads.get(wrongAt) ?? 0, 0, "no alternate name can substitute for the historical producer name");
+    assert.equal(reads.get(agreementAt), 2, "agreement dispatch remains separate");
+    assert.equal(reads.get(evidenceAt), 2, "evidence dispatch remains separate");
     assert.equal(record.deals[0].signatureVerified, true, mode);
-    assert.equal(record.deals[0].refsVerified, allowed, mode);
-    assert.equal(record.deals[0].reputationEligible, allowed, mode);
-    assert.equal(record.reputation.bundleCount, allowed ? 1 : 0, mode);
-    if (allowed) {
-      assert.ok((reads.get(agreementAt) ?? 0) > 0);
-      assert.ok((reads.get(evidenceAt) ?? 0) > 0);
-    }
+    // This release has no authenticated session recipe/composite adapter. A
+    // shaped and signed record alone cannot establish a completed vet graph.
+    assert.equal(record.deals[0].refsVerified, false, mode);
+    assert.equal(record.deals[0].reputationEligible, false, mode);
+    assert.equal(record.deals[0].verificationLimitation, "legacy-vet-unsupported", mode);
+    assert.equal(record.reputation.bundleCount, 0, mode);
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [record] });
+    const { GET } = await import("../app/api/dacs/status/route.js");
+    const status = await (await GET(new NextRequest("https://directory.test/api/dacs/status"))).json();
+    assert.equal(status.legacyVetUnsupportedDeals, 1, "two copies contribute one diagnostic deal");
   }
 });

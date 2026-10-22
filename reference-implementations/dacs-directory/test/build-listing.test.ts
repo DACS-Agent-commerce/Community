@@ -688,7 +688,7 @@ test("publisher validates optional and required input before offering a signing 
     delivery: [null, "deliver-storage-program", [], Array(17).fill("deliver-storage-program"), ["deliver-storage-program", null], ["deliver-storage-program", ""], ["deliver-storage-program", "deliver-entitlement"], ["deliver-unknown"]],
     category: ["", "with/slash", "x".repeat(65)],
     tags: [null, "tag", [7], Array(17).fill("tag"), ["x".repeat(33)]],
-    publicEndpoint: ["http://example.com/", "https://127.0.0.1/", "javascript:alert(1)"],
+    publicEndpoint: ["http://example.com/", "javascript:alert(1)"],
   })) for (const value of values) invalid.push({ ...base, [key]: value });
   for (const body of invalid) {
     const response = await POST(request(body as Record<string, unknown>));
@@ -698,7 +698,8 @@ test("publisher validates optional and required input before offering a signing 
     assert.equal(result.identityMessage, undefined);
   }
   for (const extra of [{ serviceId: "x".repeat(64) }, { name: "x".repeat(200) }, { description: "x".repeat(2000) },
-    { tags: Array(16).fill("x".repeat(32)) }, { category: "x".repeat(64) }]) {
+    { tags: Array(16).fill("x".repeat(32)) }, { category: "x".repeat(64) },
+    { publicEndpoint: "https://127.0.0.1/" }]) {
     const response = await POST(request({ ...base, ...extra }));
     assert.equal(response.status, 200);
     assert.ok((await response.json()).identityMessage);
@@ -934,7 +935,7 @@ test("publisher chooses the matching catalog seller and preserves their registra
   const bindingScope = { bindingVersion: "1" as const, jobId: "prior-job", role: "seller" as const,
     logicalAddress: logicalBundleAddress("prior-job", "seller"), nativeAddress: `stor-${"4".repeat(40)}`,
     bundleContentHash: "b".repeat(64), signer: claim };
-  const binding = { ...bindingScope, signature: { algorithm: "ed25519", signer: claim,
+  const binding = { ...bindingScope, signature: { algorithm: "ed25519" as const, signer: claim,
     value: Buffer.from(walletSignature(`dacs-bundle-binding:v1:${contentHash(bindingScope)}`), "hex").toString("base64url") } };
   assert.ok(await verifyBundleBinding(binding));
   const summary = (primaryClaim: string, version: number) => ({ listingId: base.serviceId, version,

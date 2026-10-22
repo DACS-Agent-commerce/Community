@@ -9,15 +9,6 @@
      (v.transcriptDisclosurePolicy === undefined ||
        isOneOf(
          [
-@@ -939,7 +939,7 @@
-     return false;
-   }
-   try {
--    return Buffer.byteLength(canonicalize(v), "utf8") <= 16_384; // LR-2 size cap.
-+    return Buffer.byteLength(canonicalize(stripSignature(v)), "utf8") <= 16_384; // LR-2 size cap.
-   } catch {
-     return false;
-   }
 --- a/src/agent/verifyBundleCore.ts
 +++ b/src/agent/verifyBundleCore.ts
 @@ -900,10 +900,13 @@

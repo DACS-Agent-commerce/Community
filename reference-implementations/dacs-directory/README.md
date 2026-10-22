@@ -127,8 +127,11 @@ checks a clean checkout of that commit), the SDK's `package.json` declares the p
 the same digest and records its per-file `dist/.dacs-sdk-manifest`); otherwise it refuses to
 continue. The reproducible source build applies `scripts/dacs-sdk-compat.patch`, checked against
 `SDK_PATCH_SHA256`, and restores the clean SDK source after building. The patch keeps
-zero-retention terms and the unsigned 16 KiB canonical scope readable and authenticates
-historical SDK agreement/evidence signatures in their explicit compatibility profile.
+a 16 KiB cap on the complete canonical Listing, including its signature, and authenticates
+historical SDK agreement/evidence signatures only in their explicit compatibility profile.
+The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
+profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
+integer. Catalog admission alone does not promise SDK transaction readiness.
 Changing either the revision or patch requires rebuilding and updating `SDK_DIST_SHA256`.
 
 Source checkouts and the source-based Railway upload are the supported distribution paths.
@@ -407,6 +410,12 @@ base64url-patched Buffer).
   The new recipe snapshot resolver and required-claim matcher are standalone helpers;
   production session admission does not yet apply them. Their live-only policy does
   not change the existing tier path's availability handling.
+- **Legacy composite vet verification is unsupported.** SDK-MVP deals with nonempty
+  `vetRecords` retain their bundle-signature verdict but have `refsVerified:false` and
+  cannot contribute to reputation. `verificationLimitation: "legacy-vet-unsupported"`
+  identifies each excluded deal; `/api/dacs/status` reports the cached count as
+  `legacyVetUnsupportedDeals`. An authenticated session-bound composite verifier is
+  required before these deals can count.
 - **Authority proof integration is pending.** Current graph and identity-tier paths
   check authority content hashes. The standalone `authenticateAuthorityAttestation`
   helper can delegate original proof/hash/signer/validator-epoch authentication to
