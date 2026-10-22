@@ -19,12 +19,12 @@ const parsedRecord = (value: unknown): Record<string, unknown> | null => {
   try { return record(JSON.parse(value)); } catch { return null; }
 };
 
-async function nodeCall(message: string, data: Record<string, unknown>): Promise<unknown> {
+async function nodeCall(message: string, data: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(`${RPC}/`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     cache: "no-store",
-    signal: AbortSignal.timeout(15_000),
+    signal: signal ?? AbortSignal.timeout(15_000),
     body: JSON.stringify({
       method: "nodeCall",
       params: [{ type: "nodeCall", message, sender: null, receiver: null, timestamp: null, data, extra: "" }],
@@ -41,12 +41,12 @@ async function nodeCall(message: string, data: Record<string, unknown>): Promise
  * (node2 0.9.8 among them) answer block zero with `result: 400` / `"error"`,
  * so a failed or hashless genesis read falls back to block one's predecessor.
  */
-async function chainIdentity(): Promise<string> {
-  const genesis = record(await nodeCall("getBlockByNumber", { blockNumber: 0 }).catch(() => null));
+async function chainIdentity(signal?: AbortSignal): Promise<string> {
+  const genesis = record(await nodeCall("getBlockByNumber", { blockNumber: 0 }, signal).catch(() => null));
   const genesisHash = typeof genesis?.hash === "string" ? genesis.hash.trim().toLowerCase() : "";
   const genesisNumber = genesis?.number ?? genesis?.id;
   if (genesisHash && (genesisNumber === undefined || genesisNumber === 0)) return genesisHash;
-  const first = record(await nodeCall("getBlockByNumber", { blockNumber: 1 }));
+  const first = record(await nodeCall("getBlockByNumber", { blockNumber: 1 }, signal));
   const firstContent = parsedRecord(first?.content);
   const previousHash = typeof firstContent?.previousHash === "string"
     ? firstContent.previousHash.trim().toLowerCase()
@@ -147,15 +147,15 @@ export async function pinnedNodeDeployment(): Promise<
 }
 
 /** Catalog refreshes require the configured chain; self-reported build drift is diagnostic. */
-export async function catalogNodeDeployment(): Promise<
+export async function catalogNodeDeployment(signal?: AbortSignal): Promise<
   | { ok: true; build: string | null; chainIdentity: string; warning: string | null }
   | { ok: false; reason: string }
 > {
-  const servedChain = await chainIdentity();
+  const servedChain = await chainIdentity(signal);
   if (servedChain !== pinnedChainIdentity()) {
     return { ok: false, reason: `Demos node serves chain ${servedChain}, not the pinned chain` };
   }
-  const networkInfo = await nodeCall("getNetworkInfo", {}).catch(() => null);
+  const networkInfo = await nodeCall("getNetworkInfo", {}, signal).catch(() => null);
   return {
     ok: true,
     build: reportedNodeBuild(networkInfo),

@@ -11,6 +11,7 @@ interface Status {
   syncedToTx: number;
   chainLatestTx: number | null;
   txsBehind: number | null;
+  nodeDeployment?: { ok: boolean; reason?: string };
   indexer?: {
     listingRejectionDiagnostics?: {
       total: number;
@@ -53,12 +54,15 @@ export default function CatalogStatus() {
     return () => clearInterval(t);
   }, []);
 
-  if (!status || status.generatedAt === 0) return null;
+  if (!status) return null;
+
+  const blocked = status.nodeDeployment?.ok === false;
+  if (status.generatedAt === 0 && !blocked) return null;
 
   const behind = status.txsBehind;
   const inSync = behind !== null && behind === 0;
-  const cls = behind === null ? "" : inSync ? "ok" : "warn";
-  const label = behind === null
+  const cls = blocked ? "warn" : behind === null ? "" : inSync ? "ok" : "warn";
+  const label = blocked ? "Indexing blocked: chain check failed" : behind === null
       ? `synced to tx ${status.syncedToTx.toLocaleString()}`
       : inSync
         ? "in sync with chain"
@@ -71,12 +75,12 @@ export default function CatalogStatus() {
         className={`sync-chip ${cls}`}
         role="status"
         aria-live="polite"
-        title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
+        title={blocked ? status.nodeDeployment?.reason : `Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
           status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
         } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
       >
         <span className="sync-dot" />
-        {label} · indexed {ago(status.generatedAt)}
+        {label} · {status.generatedAt > 0 ? `indexed ${ago(status.generatedAt)}` : "awaiting initial index"}
       </span>
       {rejected && rejected.publicTotal > 0 && (
         <details className="listing-rejection-notice">

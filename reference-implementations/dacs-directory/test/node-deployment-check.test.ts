@@ -95,3 +95,25 @@ test("catalog refreshes admit build drift on the pinned chain and return a warni
     assert.equal((await catalogNodeDeployment()).ok, false);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("a status deadline also cancels the fallback chain read", async () => {
+  const { catalogNodeDeployment } = await import("../src/catalog/listingFinality.js");
+  const originalFetch = globalThis.fetch;
+  const budget = new AbortController();
+  const calls: number[] = [];
+  globalThis.fetch = async (_input, init) => {
+    assert.equal(init?.signal, budget.signal);
+    const call = JSON.parse(String(init?.body)).params[0];
+    calls.push(call.data.blockNumber);
+    budget.signal.throwIfAborted();
+    return new Promise((_resolve, reject) => {
+      budget.signal.addEventListener("abort", () => reject(budget.signal.reason), { once: true });
+    });
+  };
+  try {
+    const pending = catalogNodeDeployment(budget.signal);
+    budget.abort(new Error("status deadline reached"));
+    await assert.rejects(pending, /status deadline reached/);
+    assert.deepEqual(calls, [0, 1]);
+  } finally { globalThis.fetch = originalFetch; }
+});

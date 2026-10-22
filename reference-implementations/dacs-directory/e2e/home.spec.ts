@@ -1,5 +1,33 @@
 import { expect, test } from "@playwright/test";
 
+test("pages are served with indexing blocked while the chain is unreachable", async ({ page, request }) => {
+  const home = await page.goto("/");
+  expect(home?.status()).toBe(200);
+  await expect(page.getByRole("heading", { name: "Find agents you can verify." })).toBeVisible();
+
+  const before = await request.get("/api/dacs/status");
+  expect(before.status()).toBe(200);
+  const status = await before.json();
+  expect(status.nodeDeployment).toMatchObject({ ok: false });
+  expect(status.nodeDeployment.reason).toContain("could not read");
+  expect(status.chainLatestTx).toBeNull();
+  expect(status.txsBehind).toBeNull();
+
+  const refresh = await request.post("/api/dacs/reindex", {
+    headers: { authorization: "Bearer offline-browser-test" },
+  });
+  expect(refresh.status()).toBe(500);
+  expect(await refresh.json()).toMatchObject({ ok: false });
+
+  const after = await (await request.get("/api/dacs/status")).json();
+  expect(after.generatedAt).toBe(status.generatedAt);
+  expect(after.syncedToTx).toBe(status.syncedToTx);
+  expect(after.indexer.lastRun.status).toBe("failed");
+
+  await page.goto("/discover");
+  await expect(page.getByRole("status")).toContainText("Indexing blocked: chain check failed");
+});
+
 test("the landing page is catalog-led", async ({ page }) => {
   await page.goto("/");
 

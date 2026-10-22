@@ -24,31 +24,35 @@ export async function GET(req: NextRequest) {
   }
   const catalog = loadCatalog();
   const scan = loadScanState();
-  const nodeDeployment = await catalogNodeDeployment().catch(() => ({
+  // Serving status has one short budget, independent of indexing preflights.
+  const signal = AbortSignal.timeout(3_000);
+  const nodeDeployment = await catalogNodeDeployment(signal).catch(() => ({
     ok: false as const, reason: "could not read the Demos node's chain",
   }));
 
   let chainLatestTx: number | null = null;
-  try {
-    const res = await fetch(RPC + "/", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: AbortSignal.timeout(10_000),
-      cache: "no-store",
-      body: JSON.stringify({
-        method: "nodeCall",
-        params: [{
-          type: "nodeCall", message: "getTransactions",
-          sender: null, receiver: null, timestamp: null,
-          data: { start: "latest", limit: 1 }, extra: "",
-        }],
-      }),
-    });
-    const json = (await res.json()) as { result?: number; response?: Array<{ id?: number }> };
-    const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
-    if (typeof id === "number") chainLatestTx = id;
-  } catch {
-    /* node unreachable — report lag as unknown */
+  if (nodeDeployment.ok) {
+    try {
+      const res = await fetch(RPC + "/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal,
+        cache: "no-store",
+        body: JSON.stringify({
+          method: "nodeCall",
+          params: [{
+            type: "nodeCall", message: "getTransactions",
+            sender: null, receiver: null, timestamp: null,
+            data: { start: "latest", limit: 1 }, extra: "",
+          }],
+        }),
+      });
+      const json = (await res.json()) as { result?: number; response?: Array<{ id?: number }> };
+      const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
+      if (typeof id === "number") chainLatestTx = id;
+    } catch {
+      /* node unreachable — report lag as unknown */
+    }
   }
 
   const resetThreshold = chainResetThreshold();

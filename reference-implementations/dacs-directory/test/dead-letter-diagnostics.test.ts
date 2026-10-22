@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { pinnedChainIdentity } from "../src/catalog/nodeDeployment.js";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import {
@@ -200,9 +201,15 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   const target = locator("5");
   store.recordArtifactFailure(target, "unknown", "STORAGE_UNREADABLE", "raw RPC secret", 1);
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    result: 200, response: [{ id: 123 }],
-  }), { status: 200, headers: { "content-type": "application/json" } });
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    return Response.json({
+      result: 200,
+      response: call.message === "getBlockByNumber"
+        ? { number: 0, hash: pinnedChainIdentity() }
+        : call.message === "getNetworkInfo" ? {} : [{ id: 123 }],
+    });
+  };
   try {
     const response = await statusRoute.GET(new NextRequest(
       `https://directory.example/api/dacs/status?locator=${target}&deadLetterLimit=1`,
