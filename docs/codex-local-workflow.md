@@ -88,14 +88,10 @@ stops at that check:
   [ -z "$(git -C "$sdk" status --porcelain)" ] \
     || die "$sdk has local changes; inspect them, do not overwrite them"
 
-  git -C "$sdk" fetch --depth 1 origin "$sdk_rev"
-  git -C "$sdk" checkout --detach "$sdk_rev"
-  [ "$(git -C "$sdk" rev-parse HEAD)" = "$sdk_rev" ] || die "$sdk is not at $sdk_rev"
-
-  (cd "$sdk" && npm ci --no-audit --no-fund && npm run build)
-  # scripts/setup-sdk.sh accepts a packaged dist only with this marker, and
-  # only when its bytes also hash to the pinned SDK_DIST_SHA256.
-  printf '%s' "$sdk_rev" > "$sdk/dist/.dacs-sdk-revision"
+  # The same installer as CI checks the source/Standard pins, applies the
+  # digest-pinned compatibility patch, rebuilds into an empty dist, and verifies
+  # SDK_DIST_SHA256 before writing the revision marker.
+  DACS_SKIP_APP_INSTALL=1 bash scripts/setup-sdk.sh
   npm ci --no-audit --no-fund
 )
 ```
@@ -113,7 +109,7 @@ must still match the exact SDK commit pinned by this repository.
 
 These are the same check commands as the Directory CI's typecheck, test,
 origin-validation, and production-build steps. CI's `npm run setup` and the
-installation above both use `npm ci` for the SDK and app. Use the same
+installation above both use `scripts/setup-sdk.sh` for the SDK patch and distribution digest checks, and `npm ci` for the SDK and app. Use the same
 placeholder origin as the `env:` block of
 `.github/workflows/dacs-directory-ci.yml` (today only
 `NEXT_PUBLIC_DIRECTORY_URL`). That origin is a reserved documentation name, so,

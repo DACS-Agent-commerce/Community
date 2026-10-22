@@ -9,7 +9,7 @@ import {
   sdkListingSignatureVerifier,
 } from "../src/catalog/sdkReaderVerifiers.js";
 import { validateListingArtifact } from "../src/sdkListingValidation.js";
-import { modelSignedRailSnapshot } from "./signed-rail-snapshot.js";
+import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const seed = Uint8Array.from(Buffer.alloc(32, 31));
 const privateKey = privateKeyFromSeed(seed);
@@ -60,7 +60,8 @@ const listing = {
 const hexValue = Buffer.from(listing.signature.value, "base64url").toString("hex");
 
 /** Exactly what `npm run check:listing-upgrade` passes to the SDK reader. */
-const readerDeps = () => listingUpgradeReaderDeps({
+const readerDeps = (inCodeDefinitions?: typeof signedRailSnapshot) => listingUpgradeReaderDeps({
+  inCodeDefinitions,
   nowMs: () => 2,
   catalogObservedAt: 2,
   readMarker: async () => null,
@@ -99,20 +100,16 @@ test("acceptance verifiers verify SIG-6 values against the signer key, never by 
 });
 
 test("with a signed PA-1 snapshot the acceptance reader verifies SIG-6 and rejects the same bytes as hex", async () => {
-  const restore = modelSignedRailSnapshot();
-  try {
-    assert.equal((await validateListingArtifact(listing, readerDeps())).disposition, "verified");
-    const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
-    const rejected = await validateListingArtifact(hexListing, readerDeps());
-    assert.equal(rejected.disposition, "rejected");
-    // Seller control is bound to the authenticated signer the script passes.
-    const otherSigner = listingUpgradeReaderDeps({
-      nowMs: () => 2, catalogObservedAt: 2, readMarker: async () => null, supportedPayloadMethods: [], signer: otherClaim,
-    });
-    assert.notEqual((await validateListingArtifact(listing, otherSigner)).disposition, "verified");
-  } finally {
-    restore();
-  }
+  assert.equal((await validateListingArtifact(listing, readerDeps(signedRailSnapshot))).disposition, "verified");
+  const hexListing = { ...listing, signature: { ...listing.signature, value: hexValue } };
+  const rejected = await validateListingArtifact(hexListing, readerDeps(signedRailSnapshot));
+  assert.equal(rejected.disposition, "rejected");
+  // Seller control is bound to the authenticated signer the script passes.
+  const otherSigner = listingUpgradeReaderDeps({
+    inCodeDefinitions: signedRailSnapshot, nowMs: () => 2, catalogObservedAt: 2, readMarker: async () => null, supportedPayloadMethods: [], signer: otherClaim,
+  });
+  assert.notEqual((await validateListingArtifact(listing, otherSigner)).disposition, "verified");
+
 });
 
 test("the identity presentation verifier accepts only per-claim presentations", async () => {

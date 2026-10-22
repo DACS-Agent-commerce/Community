@@ -38,9 +38,7 @@ for (const vector of vectors.vectors) test(`upstream SIG-5: ${vector.name}`, asy
   assert.equal(await signatureBinds(listing, resolveKey), vector.want.signature === "valid");
   const result = await verifyListingResult(listing, resolveKey);
   if (vector.expected === "pass") {
-    // SPEC_PIN's v0.4 fixture predates DACS-4 §9.6.3 DPA-1, which the pinned SDK reader applies:
-    // its attested-payload deliverable names no verification method. SIG-5 itself holds above.
-    assert.deepEqual(result, { ok: false, code: "VERIFICATION_METHOD_INVALID" });
+    assert.equal(result.ok, true, vector.name);
   } else {
     assert.equal(result.ok, false);
   }

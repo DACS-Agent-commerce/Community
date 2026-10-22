@@ -17,7 +17,7 @@ export interface ListingDiagnosticCoordinates {
   listingVersion: number;
 }
 
-/** Recover only bounded, public-safe coordinates from an otherwise rejected artifact. */
+/** Project bounded coordinates only after the caller authenticates the artifact and its seller. */
 export function listingDiagnosticCoordinates(
   raw: Record<string, unknown>,
 ): ListingDiagnosticCoordinates | undefined {
@@ -43,4 +43,15 @@ export const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = 
   IDENTITY_PRESENTATION_INVALID: "The listing seller identity presentation could not be authenticated.",
   LEGACY_LISTING_INVALID: "The artifact does not satisfy the SDK's explicit legacy Listing read profile.",
   DECLARED_CONTENT_HASH_MISMATCH: "The discovery channel's declared listing content hash does not match the verified artifact.",
+};
+
+export const LISTING_REJECTION_GUIDANCE: Record<ListingRejectionCode, string> = {
+  SELLER_CLAIM_BINDING: "Use pointers belonging to the registration's seller. This rejection does not change another seller's listing.",
+  OWNER_CLAIM_BINDING: "Correct the registration's storage pointer to an anchor owned by the seller.",
+  DECLARED_CONTENT_HASH_MISMATCH: "Correct the declared hash in the discovery channel, such as the hosted listings index, then reindex.",
+  NORMATIVE_LISTING_INVALID: "This historical candidate remains rejected. Corrected replacement terms need a new Listing ID; no action is required for an archived offer.",
+  VERIFICATION_METHOD_INVALID: "This historical candidate remains rejected. A replacement needs a structured verification method and a new Listing ID; no action is required for an archived offer.",
+  LISTING_SIGNATURE_INVALID: "Check the original anchor and signature encoding. This diagnostic does not identify an authenticated listing.",
+  IDENTITY_PRESENTATION_INVALID: "Check the original identity presentation. This diagnostic does not identify an authenticated seller.",
+  LEGACY_LISTING_INVALID: "Check the storage pointer and original artifact format. This diagnostic does not identify an authenticated listing.",
 };

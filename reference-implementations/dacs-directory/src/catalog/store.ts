@@ -15,6 +15,7 @@ import { projectTestnetCatalog } from "./testnetMetrics.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import {
   LISTING_REJECTION_MESSAGES,
+  LISTING_REJECTION_GUIDANCE,
   type ListingDiagnosticCoordinates,
   type ListingRejectionCode,
 } from "./listingAdmission.js";
@@ -173,6 +174,11 @@ db.transaction(() => {
   }
   if (!listingRejectionColumns.has("listing_version")) {
     db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
+  }
+  if (!listingRejectionColumns.has("public_notice")) {
+    // Earlier coordinates were not authenticated; never promote them to notices.
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN public_notice INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE listing_rejections SET listing_id = NULL, listing_version = NULL");
   }
 }).immediate();
 
@@ -869,15 +875,17 @@ export function recordListingRejection(
   registrationClaim: string,
   code: ListingRejectionCode,
   coordinates?: ListingDiagnosticCoordinates,
+  publicNotice = false,
 ): void {
   const now = Date.now();
   db.prepare(`INSERT INTO listing_rejections(
-      locator,registration_claim,reason_code,listing_id,listing_version,occurrences,first_seen_at,last_seen_at
-    ) VALUES (?,?,?,?,?,1,?,?)
+      locator,registration_claim,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,?,?,?,1,?,?)
     ON CONFLICT(locator,registration_claim) DO UPDATE SET
       reason_code=excluded.reason_code,
-      listing_id=COALESCE(excluded.listing_id,listing_rejections.listing_id),
-      listing_version=COALESCE(excluded.listing_version,listing_rejections.listing_version),
+      listing_id=excluded.listing_id,
+      listing_version=excluded.listing_version,
+      public_notice=excluded.public_notice,
       occurrences=listing_rejections.occurrences+1,
       last_seen_at=excluded.last_seen_at`)
     .run(
@@ -886,6 +894,7 @@ export function recordListingRejection(
       code,
       coordinates?.listingId ?? null,
       coordinates?.listingVersion ?? null,
+      publicNotice && coordinates ? 1 : 0,
       now,
       now,
     );
@@ -895,6 +904,18 @@ export function clearListingRejection(locator: string, registrationClaim: string
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
 }
+
+/** Replace each seller's diagnostics on every indexing pass, including empty passes. */
+export function clearRegistrationListingRejections(registrationClaim: string): void {
+  db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
+}
+
+export const pruneListingRejections = db.transaction((claims: string[]): void => {
+  const keep = new Set(claims.map((claim) => claim.toLowerCase()));
+  for (const row of db.prepare("SELECT DISTINCT registration_claim FROM listing_rejections").all() as Array<{ registration_claim: string }>) {
+    if (!keep.has(row.registration_claim)) clearRegistrationListingRejections(row.registration_claim);
+  }
+});
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
@@ -956,8 +977,10 @@ export interface PublicListingRejectionDiagnostic {
   locator: string;
   listingId?: string;
   listingVersion?: number;
+  publicNotice: boolean;
   code: ListingRejectionCode;
   message: string;
+  guidance: string;
   occurrences: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -998,6 +1021,7 @@ export interface IndexerDiagnostics {
   listingRejectionDiagnostics: {
     scope: "listing-admission";
     total: number;
+    publicTotal: number;
     byCode: Record<string, number>;
     query: { locator: string | null; limit: number };
     returned: number;
@@ -1016,6 +1040,7 @@ interface ListingRejectionRow {
   locator: string;
   listing_id: string | null;
   listing_version: number | null;
+  public_notice: number;
   reason_code: ListingRejectionCode;
   occurrences: number;
   first_seen_at: number;
@@ -1080,19 +1105,22 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
   ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
   const listingWhere = locator ? " WHERE locator = ?" : "";
-  const listingStatement = db.prepare(`SELECT locator,reason_code,listing_id,listing_version,occurrences,first_seen_at,last_seen_at
+  const publicTotal = (db.prepare("SELECT COUNT(*) count FROM listing_rejections WHERE public_notice = 1").get() as { count: number }).count;
+  const listingStatement = db.prepare(`SELECT locator,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
     FROM listing_rejections${listingWhere}
-    ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
+    ORDER BY public_notice DESC, last_seen_at DESC, locator ASC LIMIT ?`);
   const listingRows = (locator
     ? listingStatement.all(locator, limit + 1)
     : listingStatement.all(limit + 1)) as ListingRejectionRow[];
   const listingHasMore = listingRows.length > limit;
   const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
     locator: row.locator,
+    publicNotice: row.public_notice === 1,
     ...(row.listing_id ? { listingId: row.listing_id } : {}),
     ...(row.listing_version !== null ? { listingVersion: row.listing_version } : {}),
     code: row.reason_code,
     message: LISTING_REJECTION_MESSAGES[row.reason_code],
+    guidance: LISTING_REJECTION_GUIDANCE[row.reason_code],
     occurrences: row.occurrences,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
@@ -1108,6 +1136,7 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     listingRejectionDiagnostics: {
       scope: "listing-admission",
       total: listingRejectionTotal,
+      publicTotal,
       byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
       query: { locator: locator ?? null, limit },
       returned: listingItems.length,

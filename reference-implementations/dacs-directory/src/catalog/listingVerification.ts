@@ -1,9 +1,11 @@
 import { contentHash, stripSignature } from "./canonical.js";
+import { legacyListingHash } from "./legacyListingHash.js";
 import {
   ARTIFACT_SEPARATORS,
   isListing,
   isVerificationMethod,
   readListingArtifact,
+  isLegacyMvpListing,
   verifyComponentSignature,
   type IdentityBundle,
   type LegacyMvpListing,
@@ -63,8 +65,10 @@ const record = (value: unknown): Record<string, unknown> | null =>
 
 // Directory catalog profile: the rules this catalog keeps on top of the pinned
 // SDK reader's isListing. They only ever refuse, and run after isListing has
-// accepted the artifact, so the Directory never admits a Listing an SDK reader
-// refuses. Procurement remains outside this reader profile until reconciliation
+// accepted the artifact (with the pinned compatibility patch). These rules
+// never admit a Listing isListing refuses. They are not the whole reader: the identity presentation also
+// accepts main's hex signature spelling, which the SDK's presentation
+// verifier refuses (README, "Listings that /register published"). Procurement remains outside this reader profile until reconciliation
 // can resolve the publisher as buyer and attribute supplier history to the
 // agreement seller.
 const PHASES = new Set([
@@ -143,9 +147,9 @@ function invalid(
  * DACS-1 §6.3.2 per-claim presentation by the presenting claim: the entry
  * whose `ref` is the exact `presentedBy` bytes, verified under that claim's
  * key over the same bundle-presentation bytes the SDK reader signs. The
- * Standard leaves this signature's encoding open; the pinned SDK reader
- * (sdkReaderVerifiers.ts) reads only Base64URL, but main's `/register` wrote
- * wallet hex, so both spellings are read (presentationSignatureBytes). The
+ * Standard leaves this bare signature's encoding open. Directory and its SDK
+ * adapter accept Base64URL, historical wallet hex and the pinned Standard
+ * vector's padded Base64 (presentationSignatureBytes). The
  * spelling is signed Listing scope, so the Listing signature fixes it.
  */
 export async function verifyIdentityPresentation(
@@ -262,7 +266,12 @@ async function verifyListingArtifact(
   if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) {
     return invalid("LEGACY_LISTING_INVALID");
   }
-  const readable = readListingArtifact(raw);
+  // The historical Directory also wrote a structured envelope. Validate its
+  // exact unsigned legacy body before authenticating the original envelope.
+  const legacyScope = stripSignature(raw);
+  const readable = typeof raw.signature === "object" && isLegacyMvpListing(legacyScope)
+    ? { compatibility: "legacy-mvp" as const, listing: legacyScope }
+    : readListingArtifact(raw);
   if (!readable || readable.compatibility !== "legacy-mvp") {
     return invalid("LEGACY_LISTING_INVALID");
   }
@@ -285,7 +294,7 @@ async function verifyListingArtifact(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return invalid("LISTING_SIGNATURE_INVALID");
-  const hash = contentHash(scope);
+  const hash = legacyListingHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,

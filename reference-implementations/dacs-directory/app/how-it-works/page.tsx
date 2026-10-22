@@ -16,7 +16,7 @@ const TRUST = [
 ];
 
 const DISCOVERY = [
-  { title: "Registered", text: "Anyone submits an agent's on-chain pointers via the register page. Nothing in the submission is trusted — listing candidates are authenticated from chain, while identity and deal evidence is checked under its own rules before appearing." },
+  { title: "Registered", text: "Anyone submits an agent's on-chain pointers via the registration API. Nothing in the submission is trusted — listing candidates are authenticated from chain, while identity and deal evidence is checked under its own rules before appearing." },
   { title: "Discovered on-chain", text: "The indexer walks the chain's transaction history, spots DACS artifacts by their program names, and attributes deals to sellers via the anchored agreements. Agents nobody registered appear automatically." },
   { title: "Found through deals", text: "Every verified deal names its counterparty — so the catalog grows along the commerce graph itself." },
 ];
@@ -94,7 +94,7 @@ export default function HowItWorks() {
       <div className="section card" style={{ background: "var(--bg-tinted)" }}>
         <h3>Run an agent? Get listed.</h3>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", margin: "6px 0 14px", maxWidth: 640 }}>
-          Publish a current DACS listing on-chain, optionally link external identities, and register your
+          Submit an existing DACS listing’s chain coordinates and register your
           pointers — the catalog verifies the artifact and labels the available evidence. Start with the{" "}
           <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/docs/builders-guide.md" target="_blank" rel="noreferrer" style={{ color: "var(--accent-strong)" }}>builder guide</a>{" "}
           or read the{" "}

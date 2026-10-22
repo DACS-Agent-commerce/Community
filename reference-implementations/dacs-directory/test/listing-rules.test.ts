@@ -70,6 +70,7 @@ const all = (names: Record<string, unknown>, value: boolean) => Object.fromEntri
 test("DACS-1 §6.3.2: identity, offering, pricing, pipeline and validity rules accept their boundaries", async () => {
   const accepted: Record<string, (scope: Obj) => void> = {
     "the base listing": () => {},
+    "zero retention": set("terms", { retentionYears: 0 }),
     "a 128-character listingId of every allowed character": set("listingId", "aZ09._~-".repeat(16)),
     "a 200-character displayName": set("seller.displayName", "d".repeat(200)),
     "a public HTTPS endpoint": set("seller.publicEndpoint", "https://agent.example/a2a"),
@@ -185,7 +186,6 @@ test("DACS-1 validation step 1: schema boundaries of the recognised members", as
     // The pinned SDK reader requires these to be positive.
     "an entitlement of 0 seconds": deliverable({ kind: "entitlement", durationSec: 0, renewable: false }),
     "a deadline of 0": set("terms", { deadlineSecAfterCommit: 0 }),
-    "a retention of 0 years": set("terms", { retentionYears: 0 }),
     "an expected size as a string": deliverable({ kind: "attested-payload", payloadFormat: "application/json", expectedSizeBytes: "10" }),
     "a schemaUrl that is not a string": deliverable({ kind: "storage-program", schemaUrl: 7 }),
     "a negative entitlement": deliverable({ kind: "entitlement", durationSec: -1, renewable: false }),
@@ -316,7 +316,7 @@ test("legacy-sdk-v0.1 listings: an Ed25519 envelope by the agentId's own key", a
     "another agent's listing": await verdict({ ...legacyScope, agentId: dids[1], signature: envelope({ value: legacyValue(0, { ...legacyScope, agentId: dids[1] }) }) }),
     "not a listing": await verdict({ listingId: "legacy", signature: envelope() }),
   }, {
-    "an envelope": null, "a compact value": "legacy-sdk-v0.1", "a 0x value": null,
+    "an envelope": "legacy-sdk-v0.1", "a compact value": "legacy-sdk-v0.1", "a 0x value": "legacy-sdk-v0.1",
     "another algorithm": null, "a signer that is not a string": null, "a value that is not a string": null,
     "a value that is not a signature": null, "an envelope list": null, "no signature": null,
     "another signer's envelope": null, "another agent's listing": null, "not a listing": null,
@@ -538,4 +538,30 @@ test("current listing envelopes require canonical SIG-6 bytes", async () => {
     assert.equal(await verifyListing({ ...canonical, signature: { ...signature, value } }), null,
       `noncanonical envelope ${value.slice(0, 12)}`);
   }
+});
+
+
+test("LR-2 caps the complete canonical unsigned scope at exactly 16,384 bytes", async () => {
+  const { canonicalize, stripSignature } = await import("../src/catalog/canonical.js");
+  for (const size of [16_300, 16_384, 16_385]) {
+    const signed = listing(scope => {
+      scope.extension = "";
+      scope.extension = "x".repeat(size - Buffer.byteLength(canonicalize(scope), "utf8"));
+    });
+    assert.equal(Buffer.byteLength(canonicalize(stripSignature(signed)), "utf8"), size);
+    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `unsigned scope ${size}`);
+    (signed as Obj).extension += "x";
+    assert.equal(await verifyListing(signed), null, "extension bytes remain signed");
+  }
+});
+
+
+test("LP-2 permits a second authorized seller claim to sign the Listing", async () => {
+  const signed = listing(scope => {
+    const identity: Obj = { bundleVersion: "1", presentedBy: dids[0], presentedAt: 1, claims: [{ ref: dids[0] }, { ref: dids[1] }] };
+    (scope.seller as Obj).identity = { ...identity, presentation: perClaim(identity) };
+  }, { signer: 1 });
+  assert.ok(await verifyListing(signed));
+  const foreign = listing(() => {}, { signer: 1 });
+  assert.equal(await verifyListing(foreign), null, "a key absent from seller claims is unauthorized");
 });

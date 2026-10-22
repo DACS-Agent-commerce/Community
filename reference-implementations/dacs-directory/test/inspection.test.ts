@@ -77,6 +77,7 @@ test("directory service profile envelope is listed-only and does not claim sourc
   assert.equal(envelope.artifact.listing.version, 1);
   assert.equal(envelope.artifact.listing.seller, "did:demos:agent:directory-sample-demo");
   assert.equal(envelope.artifact.maturityProfile.maturity, "listed");
+  assert.match(envelope.artifact.maturityProfile.reason, /separate verifier adapters/);
   assert.equal(envelope.maturity, envelope.artifact.maturityProfile.maturity);
   assert.equal(envelope.artifact.maturityProfile.noReputationClaim, true);
   assert.equal(envelope.artifact.maturityProfile.noLivePaymentClaim, true);

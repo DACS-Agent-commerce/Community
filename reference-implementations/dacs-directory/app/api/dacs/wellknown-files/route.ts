@@ -4,7 +4,7 @@
  *   /.well-known/agent.json            (dacs block, hash-bound index ref)
  *   /.well-known/dacs/listings.json    (per-listing anchors + content hashes)
  * All hashes computed from CHAIN STATE, so the files are correct-by-
- * construction — host them byte-exact, then register the domain here.
+ * construction — host them byte-exact, then submit it to POST /api/dacs/register-domain.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { contentHash, sha256Hex, stripSignature } from "@kynesyslabs/dacs/canonical";
@@ -99,6 +99,6 @@ export async function GET(req: NextRequest) {
       "/.well-known/agent.json": agentJson,
       "/.well-known/dacs/listings.json": listingsJson,
     },
-    note: "Host both files byte-exact (the indexHash binds listings.json), then register the domain on this page.",
+    note: "Host both files byte-exact (the indexHash binds listings.json), then submit { domain } to POST /api/dacs/register-domain.",
   });
 }

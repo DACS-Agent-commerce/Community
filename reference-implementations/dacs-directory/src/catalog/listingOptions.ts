@@ -26,13 +26,13 @@ export const PUBLISHABLE_RAIL_OPTIONS = [
  * `signatureValid` is false, and the SDK resolver answers `indeterminate`
  * (`pa1-definition-unverifiable`) once every other LRR check passes.
  */
-export const PUBLISHER_IN_CODE_RAIL_DEFINITIONS = PUBLISHABLE_RAIL_OPTIONS.map((rail) => ({
+export const PUBLISHER_IN_CODE_RAIL_DEFINITIONS = Object.freeze(PUBLISHABLE_RAIL_OPTIONS.map((rail) => Object.freeze({
   railId: rail.railId,
   railVersion: rail.railVersion,
   phaseHandler: rail.phaseKind,
   governanceAnchoring: "in-code",
   signatureValid: false,
-}));
+})));
 
 /**
  * A pay-bearing listing is published only on DACS-1 LP-6 `verified`. With the

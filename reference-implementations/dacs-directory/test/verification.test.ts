@@ -56,11 +56,12 @@ const listing = {
   supportedDelivery: ["deliver-attested-payload"],
 };
 
-test("legacy listing reads do not invent a structured signature profile outside the SDK boundary", async () => {
+test("legacy structured listing signatures preserve the historical authenticated read profile", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
-  assert.equal(await verifyListing(signed), null);
+  assert.ok(await verifyListing(signed));
+  assert.equal(await verifyListing({ ...signed, signature: { ...signed.signature, signer: buyerDid } }), null);
   assert.equal(await verifyListing({ ...signed, name: "tampered" }), null);
   assert.equal(await verifyListing({ ...signed, signatures: [null] }), null);
   assert.equal(ownerClaim(`0x${did.slice(-64)}`), did);

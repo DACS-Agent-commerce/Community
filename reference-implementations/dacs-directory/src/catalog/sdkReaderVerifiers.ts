@@ -5,7 +5,7 @@ import {
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
 // CORE §B.7 SIG-6: canonical unpadded base64url carrying a 64-byte Ed25519 value.
-import { canonicalSignatureBytes } from "./signatureValue.js";
+import { canonicalSignatureBytes, presentationSignatureBytes } from "./signatureValue.js";
 
 /**
  * Independent `verifyListingSignature` for the SDK's ordered Listing reader:
@@ -37,7 +37,7 @@ export function sdkIdentityPresentationVerifier(
     const presentation = bundle.presentation;
     if (presentation.kind !== "per-claim") return false;
     const entry = presentation.signatures.find((item) => item.ref === bundle.presentedBy);
-    const bytes = entry ? canonicalSignatureBytes(entry.signature) : null;
+    const bytes = entry ? presentationSignatureBytes(entry.signature) : null;
     return Boolean(bytes && await verifyPrimaryClaimSignature(
       signedBytes, bytes, bundle.presentedBy, "ed25519", resolveKey,
     ));

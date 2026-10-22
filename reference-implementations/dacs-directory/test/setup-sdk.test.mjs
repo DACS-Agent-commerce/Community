@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +53,7 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
     mkdirSync(join(root, "scripts"));
     writeFileSync(join(root, "scripts/setup-sdk.sh"), pinned.replace(`SDK_DIST_SHA256="${distSha}"`, `SDK_DIST_SHA256="${fixtureSha}"`));
     copyFileSync(digestScript, join(root, "scripts/sdk-dist-digest.mjs"));
+    copyFileSync(new URL("../scripts/dacs-sdk-compat.patch", import.meta.url), join(root, "scripts/dacs-sdk-compat.patch"));
     const sdk = join(root, "vendor/dacs-sdk");
     mkdirSync(join(sdk, source ? ".git" : "dist"), { recursive: true });
     if (!source) for (const [name, content] of Object.entries(dist)) writeFileSync(join(sdk, "dist", name), content);
@@ -175,4 +177,18 @@ test("the digest CLI prints the digest from an app path with spaces, # or %, or 
       rmSync(scratch, { recursive: true, force: true });
     }
   }
+});
+
+
+test("npm tarball distribution is explicitly unsupported", () => {
+  const result = spawnSync(process.execPath, [new URL("../scripts/source-release-only.mjs", import.meta.url).pathname], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /distributed from source/);
+});
+
+
+test("the SDK compatibility patch bytes match their setup pin", () => {
+  const expected = pinned.match(/^SDK_PATCH_SHA256="([0-9a-f]{64})"$/m)?.[1];
+  const patch = readFileSync(new URL("../scripts/dacs-sdk-compat.patch", import.meta.url));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), expected);
 });

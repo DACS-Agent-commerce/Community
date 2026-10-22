@@ -70,3 +70,19 @@ test("storage failures refuse unsafe publication persistence", () => {
   assert.equal(writePendingListingPublication(brokenWrite, pending), false);
   assert.equal(readPendingListingPublication(brokenRead), null);
 });
+
+test("recovery parsing handles null roots and malformed receipt members without throwing", () => {
+  assert.doesNotThrow(() => assert.equal(parsePendingListingPublication(null), null));
+  for (const anchorReceipt of [null, []]) {
+    assert.equal(parsePendingListingPublication({ ...pending, anchorReceipt }), null);
+  }
+  assert.deepEqual(parsePendingListingPublication({ ...pending, anchorReceipt: {} }), { ...pending, anchorReceipt: {} });
+});
+
+test("recovery transaction references have an exact string boundary", () => {
+  const transactionRef = "ab".repeat(32);
+  assert.equal(parsePendingListingPublication({ ...pending, transactionRef })?.transactionRef, transactionRef);
+  for (const malformed of [[transactionRef], `junk${transactionRef}`, `${transactionRef}junk`]) {
+    assert.equal(parsePendingListingPublication({ ...pending, transactionRef: malformed }), null);
+  }
+});

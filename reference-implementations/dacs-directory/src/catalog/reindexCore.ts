@@ -19,7 +19,8 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { pinnedNodeDeployment } from "./listingFinality";
+import { catalogNodeDeployment } from "./listingFinality";
+import { pinnedChainIdentity } from "./nodeDeployment";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
@@ -44,6 +45,7 @@ import {
   clearChainDerivedArtifacts,
   recordArtifact,
   pruneFailureHistory,
+  pruneListingRejections,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -68,9 +70,9 @@ export interface ReindexOptions {
   resolveRecipe?: ResolveRecipe;
   /**
    * Deployment preflight injected by tests. Production checks the configured
-   * node's reported build and chain against the pin (pinnedNodeDeployment).
+   * node's chain against the pin; build drift is diagnostic.
    */
-  nodeDeployment?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  nodeDeployment?: () => Promise<{ ok: true; chainIdentity?: string; warning?: string | null } | { ok: false; reason: string }>;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
@@ -107,13 +109,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   const prior = loadStoredCatalog();
 
-  // Nothing from a node outside the pinned build and chain reaches the public
+  // Nothing from a node outside the pinned chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.
   // The refusal is still recorded as a failed run, so the public status shows
   // that the catalog is not advancing.
-  const deployment = await (opts.nodeDeployment ?? pinnedNodeDeployment)().catch((error: unknown) => ({
+  const deployment = await (opts.nodeDeployment ?? catalogNodeDeployment)().catch((error: unknown) => ({
     ok: false as const,
-    reason: `could not read the Demos node's build and chain: ${error instanceof Error ? error.message : String(error)}`,
+    reason: `could not read the Demos node's chain: ${error instanceof Error ? error.message : String(error)}`,
   }));
   if (!deployment.ok) {
     const error = `catalog not updated: ${deployment.reason}`;
@@ -121,11 +123,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
     throw new Error(error);
   }
+  if (deployment.warning) log(`node build warning: ${deployment.warning}`);
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
-  //    confirmed large tip regression clears derived state before a genesis
-  //    rescan. First run backfills the full history.
+  //    changed chain identity or confirmed large tip regression clears derived
+  //    state before a genesis rescan. An old cache without an identity replays too. First run backfills the full history.
   let state = loadScanState();
   const resetThreshold = chainResetThreshold();
   let observedChainTip: number | null = null;
@@ -135,13 +138,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  if (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold)) {
+  const servedChain = deployment.chainIdentity ?? pinnedChainIdentity();
+  const identityChanged = state.chainIdentity !== servedChain;
+  if (identityChanged || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
+      // An interrupted genesis replay must not be marked migrated.
+      schemaVersion: 0,
+      chainIdentity: servedChain,
       lastSeenTxId: 0,
-      lastChainTip: observedChainTip,
+      ...(observedChainTip === null ? {} : { lastChainTip: observedChainTip }),
       listings: {},
       deals: {},
       programs: {},
@@ -153,8 +160,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
     log(
-      `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs ` +
-        `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
+      `chain replacement detected: identity ${String(state.chainIdentity)}, tip ${observedChainTip}, previous cursor ${previousCursor}; ` +
+        `cleared chain-derived cache and restarting from genesis`,
     );
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
@@ -462,6 +469,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
+    pruneListingRejections(catalogSellers.map((seller) => seller.primaryClaim));
     saveCatalog(rebuildCatalogObservations({ catalogVersion: "1", generatedAt, sellers: catalogSellers }));
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });

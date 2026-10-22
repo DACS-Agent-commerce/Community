@@ -13,6 +13,7 @@ export function listingUpgradeReaderDeps(input: {
   supportedPayloadMethods: readonly string[];
   signer: string;
   nowMs?: () => number;
+  inCodeDefinitions?: ReadonlyArray<Omit<(typeof PUBLISHER_IN_CODE_RAIL_DEFINITIONS)[number], "signatureValid"> & { signatureValid: boolean }>;
 }): ListingValidationDeps {
   return {
     nowMs: input.nowMs ?? (() => Date.now()),
@@ -27,7 +28,7 @@ export function listingUpgradeReaderDeps(input: {
       trustPhase: "PA-1",
       trustPolicyAcceptsPA1: true,
       registry: { state: "not-used", entries: [], definitions: [] },
-      inCodeDefinitions: PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+      inCodeDefinitions: (input.inCodeDefinitions ?? PUBLISHER_IN_CODE_RAIL_DEFINITIONS).map((definition) => ({ ...definition })),
     }),
     resolvePayloadVerificationCapability: ({ verificationMethod }) =>
       input.supportedPayloadMethods.includes(verificationMethod.kind)

@@ -8,7 +8,8 @@ import { NextRequest } from "next/server";
 import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import type { ListingSummary, SellerRecord } from "../src/catalog/types.js";
+import { registrationMessage } from "../src/catalog/registrationSig.js";
+import type { Registration, ListingSummary, SellerRecord } from "../src/catalog/types.js";
 
 // Directory listing admission against what the pinned SDK defines for a
 // Listing: DPA-1 verification methods, transaction readiness (only the SDK's
@@ -150,8 +151,8 @@ test("the indexer excludes verification-method failures with diagnostics and adm
       diagnostics.items.map(({ locator, listingId, listingVersion, code }) => ({ locator, listingId, listingVersion, code }))
         .sort((left, right) => left.locator.localeCompare(right.locator)),
       [
-        { locator: `stor-${"1".repeat(40)}`, listingId: "string-method", listingVersion: 1, code: "VERIFICATION_METHOD_INVALID" },
-        { locator: `stor-${"2".repeat(40)}`, listingId: "missing-method", listingVersion: 1, code: "VERIFICATION_METHOD_INVALID" },
+        { locator: `stor-${"1".repeat(40)}`, listingId: undefined, listingVersion: undefined, code: "VERIFICATION_METHOD_INVALID" },
+        { locator: `stor-${"2".repeat(40)}`, listingId: undefined, listingVersion: undefined, code: "VERIFICATION_METHOD_INVALID" },
       ],
     );
   } finally {
@@ -406,4 +407,100 @@ test("a declared content hash mismatch excludes a listing and a corrected declar
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("diagnostic coordinates preserve current precedence and validate the legacy fallback", async () => {
+  const { listingDiagnosticCoordinates: coordinates } = await import("../src/catalog/listingAdmission.js");
+  assert.deepEqual(coordinates({ serviceId: "legacy", version: 3 }), { listingId: "legacy", listingVersion: 3 });
+  assert.deepEqual(coordinates({ serviceId: "legacy" }), { listingId: "legacy", listingVersion: 1 });
+  assert.deepEqual(coordinates({ listingId: "current", listingVersion: 2, serviceId: "legacy", version: 3 }),
+    { listingId: "current", listingVersion: 2 });
+  for (const raw of [{ serviceId: 123 }, { serviceId: "legacy", version: 0 },
+    { serviceId: "legacy", version: -1 }, { listingId: "", serviceId: "legacy" }]) {
+    assert.equal(coordinates(raw), undefined);
+  }
+});
+
+test("malformed attested deliverables retain verification-method diagnostics", async () => {
+  for (const extra of [{ offering: undefined }, { offering: {} },
+    { offering: { deliverable: { kind: "storage-program", verificationMethod: { kind: "self-signed" } } } },
+    { offering: {}, pipeline: [null, 7, [], ...ATTESTED_PIPELINE] }]) {
+    assert.deepEqual(await verifyListingResult({ dacsVersion: "1", ...extra, pipeline: extra.pipeline ?? ATTESTED_PIPELINE }),
+      { ok: false, code: "VERIFICATION_METHOD_INVALID" });
+  }
+  assert.deepEqual(await verifyListingResult({ signatures: [] }), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+});
+
+test("exception wrappers preserve their selected profile's rejection code", async () => {
+  for (const [raw, code] of [[{ dacsVersion: "1" }, "NORMATIVE_LISTING_INVALID"], [{}, "LEGACY_LISTING_INVALID"]] as const) {
+    const throwing = new Proxy(raw, { get() { throw new Error("fixture read failure"); } });
+    assert.deepEqual(await verifyListingResult(throwing), { ok: false, code });
+  }
+});
+
+test("every rejection has a public explanation and coordinate-free diagnostics omit the version", async () => {
+  const { LISTING_REJECTION_CODES } = await import("../src/catalog/listingAdmission.js");
+  for (const [index, code] of LISTING_REJECTION_CODES.entries()) {
+    const at = `stor-${(800 + index).toString(16).padStart(40, "0")}`;
+    store.recordListingRejection(at, seller, code);
+    const item = store.indexerDiagnostics({ deadLetterLocator: at }).listingRejectionDiagnostics.items[0];
+    assert.equal(item.code, code);
+    assert.ok(item.message.trim().length > 0, code);
+    assert.equal(Object.hasOwn(item, "listingId"), false, code);
+    assert.equal(Object.hasOwn(item, "listingVersion"), false, code);
+  }
+});
+
+
+test("rejections never assign unauthenticated coordinates or blame another seller; latest pointers replace stale diagnostics", async () => {
+  const anchor = `stor-${"a".repeat(40)}`;
+  const other = `did:demos:agent:${"f".repeat(64)}`;
+  let data = signedListing("valid-seller", attested({ kind: "self-signed" }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
+  const reg = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] };
+  try {
+    const wrong = await indexRegistration({ ...reg, primaryClaim: other }, undefined, async () => ({}));
+    assert.equal(wrong.listings.length, 0);
+    let diagnostic = store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor)!;
+    assert.equal(diagnostic.code, "SELLER_CLAIM_BINDING");
+    assert.equal(diagnostic.listingId, undefined);
+    assert.equal(diagnostic.publicNotice, false);
+    assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings[0].listingId, "valid-seller");
+    data = { ...data, signature: { algorithm: "ed25519", signer: seller, value: "junk" } };
+    await indexRegistration(reg, undefined, async () => ({}));
+    diagnostic = store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor)!;
+    assert.equal(diagnostic.listingId, undefined);
+    assert.equal(diagnostic.publicNotice, false);
+    await indexRegistration({ ...reg, listingAnchors: [] }, undefined, async () => ({}));
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === anchor && item.code !== "SELLER_CLAIM_BINDING"), false);
+    await indexRegistration({ ...reg, primaryClaim: other, listingAnchors: [] }, undefined, async () => ({}));
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === anchor), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("only owner-signed, seller-matching pointer failures appear publicly, and a corrected pointer clears them", async () => {
+  const anchor = `stor-${"b".repeat(40)}`;
+  const data = signedListing("public-pointer", attested({ kind: "self-signed" }));
+  const reg: Registration = { primaryClaim: seller, displayName: "Signed seller", listingAnchors: [anchor],
+    listingContentHashes: { [anchor]: "0".repeat(64) } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
+  try {
+    await indexRegistration(reg, undefined, async () => ({}));
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0);
+    const message = registrationMessage(reg, 1);
+    reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
+    await indexRegistration(reg, undefined, async () => ({}));
+    let diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
+    assert.equal(diagnostics.publicTotal, 1);
+    assert.equal(diagnostics.items.find((item) => item.publicNotice)?.listingId, "public-pointer");
+    assert.match(diagnostics.items.find((item) => item.publicNotice)?.guidance ?? "", /declared hash in the discovery channel/);
+    reg.listingContentHashes = {};
+    assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings.length, 1);
+    diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
+    assert.equal(diagnostics.publicTotal, 0);
+    assert.equal(diagnostics.items.some((item) => item.locator === anchor), false);
+  } finally { globalThis.fetch = originalFetch; }
 });

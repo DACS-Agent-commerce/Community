@@ -2,7 +2,7 @@
   "name": "dacs-directory",
   "version": "0.1.0",
   "private": true,
-  "description": "DACS Directory — community catalog (§6.3.6 API), agent registry UI, and in-browser deal verification for the DACS agent-commerce standard.",
+  "description": "DACS Directory \u2014 community catalog (\u00a76.3.6 API), agent registry UI, and in-browser deal verification for the DACS agent-commerce standard.",
   "license": "MIT",
   "scripts": {
     "setup": "bash scripts/setup-sdk.sh",
@@ -14,6 +14,7 @@
     "check:node-runtime": "node scripts/check-node-runtime.mjs",
     "verify:origin-sources": "node scripts/verify-origin-sources.mjs",
     "check:node": "tsx scripts/check-node-contract.ts",
+    "check:node-deployment": "tsx scripts/check-node-deployment.ts",
     "check:listing-upgrade": "tsx scripts/check-live-listing-upgrade.ts",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:e2e": "playwright test e2e/home.spec.ts e2e/register.spec.ts",
@@ -21,7 +22,8 @@
     "test:seed": "tsx --test test/seed-smoke.test.ts",
     "index": "tsx src/catalog/reindex.ts",
     "seed:counterparty-fixture": "tsx scripts/seed-counterparty-fixture.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node scripts/source-release-only.mjs"
   },
   "engines": {
     "node": "22.23.3"

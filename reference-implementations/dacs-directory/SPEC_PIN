@@ -1,6 +1,6 @@
 # DACS Standard source revision used by this Directory's partial implementation
-# github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
-4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
+# github.com/DACS-Agent-commerce/DACS-Standard, same revision as the pinned SDK
+d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # Additional primary-claim profile: did:demos:agent:<64 lowercase hex>, Ed25519,
 # from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7.
 # This is a source pin, not a declaration of complete DACS conformance.
@@ -75,11 +75,13 @@
 # Vendored conformance inputs (byte hashes and local decisions are checked by
 # test/standard-vectors.test.ts, test/listing-vectors.test.ts and
 # test/revocation-vectors.test.ts):
+# SDK compatibility patch: scripts/dacs-sdk-compat.patch; its SHA-256 and the
+# rebuilt distribution SHA-256 are pinned in scripts/setup-sdk.sh.
 # conformance/vectors/security/signature-value-encoding-v0.1.json
-# sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+# sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-# conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+# conformance/vectors/security/listing-preserve-unknown-v0.1.json 987d3661c2c4ce9da3f4e7c57c55c7cda154743c99d1d3ef4ae164e8a5ae77e9
 # conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert

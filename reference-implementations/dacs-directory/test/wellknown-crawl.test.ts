@@ -218,3 +218,14 @@ test("a listing is indexed only when it matches the content hash its domain decl
   assert.deepEqual(await indexed(activeHash), ["wk-active"]);
   assert.deepEqual(await indexed("0".repeat(64)), [], "a declared hash that does not match withholds the listing");
 });
+
+test("an array seller produces a classified crawl error without throwing", async () => {
+  const files = await generatedFiles();
+  const index = JSON.parse(files["/.well-known/dacs/listings.json"]!);
+  const hosted = rehashed(files, JSON.stringify({ ...index, seller: [claim] }));
+  await assert.doesNotReject(async () => {
+    const crawled = await crawlDomain(domain, served(hosted));
+    assert.ok("error" in crawled);
+    assert.match(crawled.error, /no canonical Demos seller/);
+  });
+});

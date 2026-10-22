@@ -126,6 +126,7 @@ process.env.DEMOS_CHAIN_IDENTITY = chainId;
 const pinnedCommit = "61b8e75aa8db5e408c49e1c3a89db4d673f45578";
 const cleanBuild = { name: "demos-node-software", version: "0.9.8", commit: pinnedCommit, dirty: false };
 const coordinates = {
+  transactionRef: transactionHash,
   anchorAddress,
   programName,
   contentHash: listingHash,
@@ -170,7 +171,7 @@ function stubChain(overrides: {
   /** getNetworkInfo's `nodeVersion`; a clean build of the pinned commit by default. */
   nodeVersion?: Record<string, unknown> | null;
   /** getTxByHash answers node2's unknown-hash `result: 400` for every hash. */
-  byHashUnknown?: boolean;
+  byHashUnknown?: boolean | "node2";
   /** getTransactions pages keyed by `start`; by default one newest page holding the write. */
   historyPages?: Record<string, NodeTransaction[]>;
   /** Members replacing the native readback's. */
@@ -205,7 +206,9 @@ function stubChain(overrides: {
       return Response.json({ result: 200, response: overrides.history === false ? [] : [historyRow(written)] });
     }
     if (call.message === "getTxByHash") {
-      if (overrides.byHashUnknown) return Response.json({ result: 400, response: "error" });
+      if (overrides.byHashUnknown) return overrides.byHashUnknown === "node2"
+        ? Response.json({ result: 404, response: null, extra: { reason: "not_found" } })
+        : Response.json({ result: 400, response: "error" });
       return call.data.hash === transactionHash
         ? Response.json({ result: 200, response: { ...byHashRow(written), ...overrides.byHash } })
         : Response.json({ result: 404, response: "error" });
@@ -531,88 +534,24 @@ test("a by-hash write at another locator or with other content never stands in f
   }
 });
 
-test("a missed by-hash read falls back to newest history, paging down by transaction id", async () => {
+test("public confirmation requires a transaction reference and never walks history on a miss", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    // node2 answers an unknown hash with `result: 400`; the write is on the second page.
-    stubChain({
-      byHashUnknown: true,
-      historyPages: { latest: [transfer(12), transfer(11)], 10: [historyWrite(10, transactionHash)] },
-    });
-    const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(response.status, 200);
-    const body = await response.json() as { state: string; nodeObservation: Observation };
-    assert.equal(body.state, "finality-unverified");
-    assert.equal(body.nodeObservation.transactionRef, transactionHash);
-    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }, { start: 10, limit: 100 }]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("history paging stops at the oldest transaction and refuses a page without a cursor", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    stubChain({ historyPages: { latest: [transfer(2), transfer(1)] } });
-    const exhausted = await POST(request(coordinates));
-    assert.equal(exhausted.status, 202);
-    assert.equal((await exhausted.json() as { reason: string }).reason, "canonical transaction is not included");
-    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }], "transaction one is the end of history");
-
-    for (const [name, page] of [
-      ["no ids", [transfer(undefined)]],
-      ["a negative id", [transfer(-1)]],
-      ["a fractional id", [transfer(1.5)]],
-    ] as const) {
-      stubChain({ historyPages: { latest: [...page] } });
-      const response = await POST(request(coordinates));
-      assert.equal(response.status, 202, name);
-      assert.match((await response.json() as { reason: string }).reason, /no valid cursor/, name);
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("unexpected node request"); };
+    assert.equal((await POST(request({ ...coordinates, transactionRef: undefined }))).status, 400);
+    assert.equal(calls, 0, "missing transaction ref is rejected before any node read");
+    for (const byHashUnknown of [true, "node2"] as const) {
+      const observed = stubChain({ byHashUnknown });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const before = observed.length;
+        const response = await POST(request(coordinates));
+        assert.equal(response.status, 202);
+        assert.equal(observed.length - before, 1, "one by-hash RPC per attempt");
+      }
+      assert.deepEqual(historyRequests, [], "no fallback history requests");
     }
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("a history write at another locator, with other bytes, or under another hash never stands in", async () => {
-  const originalFetch = globalThis.fetch;
-  const other = `stor-${"cd".repeat(20)}`;
-  const impostors = {
-    otherLocator: historyWrite(14, "a1".repeat(32), { to: other }),
-    otherBytes: historyWrite(13, "a2".repeat(32), { data: { ...listing, terms: { other: true } } }),
-    rewrite: historyWrite(12, "a3".repeat(32)),
-  };
-  // The block would carry any of them, so only the history match decides.
-  const block = {
-    content: {
-      timestamp: 1_786_360_000,
-      ordered_transactions: [transactionHash, ...Object.values(impostors).map((tx) => tx.hash)],
-    },
-  };
-  try {
-    // Without a browser transactionRef, the newest write of these exact bytes at this locator.
-    stubChain({ block, historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, historyWrite(10, transactionHash)] } });
-    const plain = await POST(request(coordinates));
-    assert.equal(plain.status, 200);
-    assert.equal((await plain.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
-
-    // With one, an identical rewrite under another hash is not the browser's write either.
-    stubChain({
-      block,
-      byHashUnknown: true,
-      historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, impostors.rewrite, historyWrite(10, transactionHash)] },
-    });
-    const pinned = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(pinned.status, 200);
-    assert.equal((await pinned.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
-
-    stubChain({ block, byHashUnknown: true, historyPages: { latest: Object.values(impostors) } });
-    const none = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(none.status, 202);
-    assert.equal((await none.json() as { state: string }).state, "inclusion-pending");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("a native readback that reports another storage address is a coordinate mismatch", async () => {
@@ -688,7 +627,7 @@ test("only the pinned Demos deployment's report becomes an observation", async (
 test("the release pins its reviewed chain and clean node build by default", () => {
   delete process.env.DEMOS_CHAIN_IDENTITY;
   try {
-    assert.equal(pinnedChainIdentity(), "83082fbb733d76475a33a9f52fe3700d667a976c2d46bef33a149f47057f7dd4");
+    assert.equal(pinnedChainIdentity(), "d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc");
   } finally {
     process.env.DEMOS_CHAIN_IDENTITY = chainId;
   }
@@ -699,3 +638,209 @@ test("the release pins its reviewed chain and clean node build by default", () =
   assert.equal(nodeBuildRejection({ nodeVersion: { commit: pinnedCommit.toUpperCase(), dirty: false } }, [pinnedCommit]),
     "Demos node reports no build identity");
 });
+
+const { observeListingAnchorInclusion, pinnedNodeDeployment } = await import("../src/catalog/listingFinality.js");
+const observationInput = { anchorAddress, logicalAddress, programName, listingContentHash: listingHash, sellerClaim };
+
+async function withChain(run: () => Promise<void>) {
+  const originalFetch = globalThis.fetch;
+  try { await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("node observation requests preserve the normalized RPC transport contract", async () => withChain(async () => {
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      posts++;
+      assert.equal(String(input), `${(process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "")}/`);
+      assert.equal(new Headers(init.headers).get("content-type"), "application/json");
+      assert.equal(init.cache, "no-store");
+      assert.equal(JSON.parse(String(init.body)).method, "nodeCall");
+    }
+    return chainFetch(input, init);
+  };
+  assert.equal((await observeListingAnchorInclusion(observationInput)).status, "included");
+  assert.ok(posts > 0);
+}));
+
+test("failed HTTP and RPC envelopes cannot certify otherwise valid response data", async () => withChain(async () => {
+  for (const failure of ["http", "rpc"]) {
+    stubChain();
+    const chainFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const response = await chainFetch(input, init);
+      if (init?.method !== "POST") return response;
+      const body = await response.json();
+      return failure === "http" ? Response.json(body, { status: 503 }) : Response.json({ ...body, result: 500 });
+    };
+    await assert.rejects(pinnedNodeDeployment(), failure === "http" ? /transport failed/ : /returned 500/);
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.length > 0);
+  }
+}));
+
+test("block-one predecessor normalization retains valid observations and unrelated by-hash writes stay pending", async () => withChain(async () => {
+  const normalizedChain = "ab".repeat(32);
+  process.env.DEMOS_CHAIN_IDENTITY = normalizedChain;
+  try {
+    stubChain({ first: { content: { previousHash: `  ${normalizedChain.toUpperCase()}  ` } },
+      byHash: { type: "native", content: { ...transaction.content, type: "native" } } });
+    const result = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+    assert.equal(result.status, "pending");
+    assert.deepEqual(historyRequests, []);
+    stubChain({ first: { content: { previousHash: `  ${normalizedChain.toUpperCase()}  ` } } });
+    const valid = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+    assert.equal(valid.status, "included");
+    assert.equal(valid.status === "included" && valid.observation.chainIdentity, normalizedChain);
+  } finally { process.env.DEMOS_CHAIN_IDENTITY = chainId; }
+}));
+
+test("history lookup stops at 5000 rows and requests only its remaining budget", async () => withChain(async () => {
+  for (const matchLast of [false, true]) {
+    stubChain();
+    const chainFetch = globalThis.fetch;
+    const limits: number[] = [];
+    let seen = 0;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === "POST") {
+        const call = JSON.parse(String(init.body)).params[0];
+        if (call.message === "getTransactions") {
+          limits.push(call.data.limit);
+          assert.ok(limits.length <= 51, "history must stop at the work bound");
+          const count = matchLast && seen === 4900 ? 99 : call.data.limit;
+          const rows = matchLast && seen === 4999 ? [historyRow(transaction)]
+            : Array.from({ length: count }, (_, index) => historyRow(transfer(10000 - seen - index)));
+          seen += rows.length;
+          return Response.json({ result: 200, response: rows });
+        }
+      }
+      return chainFetch(input, init);
+    };
+    const result = await observeListingAnchorInclusion(observationInput);
+    if (matchLast) {
+      assert.equal(result.status, "included");
+      assert.deepEqual(limits, [...Array(50).fill(100), 1]);
+    } else {
+      assert.deepEqual(result, { status: "pending", reason: "finality lookup exceeded 5000 transactions" });
+      assert.deepEqual(limits, Array(50).fill(100));
+    }
+    assert.equal(seen, 5000);
+  }
+}));
+
+test("history pages may include null rows without losing the next valid cursor", async () => withChain(async () => {
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  const cursors: unknown[] = [];
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params[0];
+      if (call.message === "getTransactions") {
+        cursors.push(call.data.start);
+        return Response.json({ result: 200, response: cursors.length === 1
+          ? [null, historyRow(transfer(12)), historyRow(transfer(11))] : [historyRow(transaction)] });
+      }
+    }
+    return chainFetch(input, init);
+  };
+  assert.equal((await observeListingAnchorInclusion(observationInput)).status, "included");
+  assert.deepEqual(cursors, ["latest", 10]);
+}));
+
+test("a disappeared second native read is pending and changed coordinates are rejected", async () => withChain(async () => {
+  stubChain();
+  const initialRead = globalThis.fetch;
+  let nativeReads = 0;
+  globalThis.fetch = async (input, init) => init?.method === "POST" || ++nativeReads === 1
+    ? initialRead(input, init) : new Response(null, { status: 503 });
+  const missing = await POST(request(coordinates));
+  assert.equal(missing.status, 202);
+  const missingBody = await missing.json();
+  assert.equal(missingBody.state, "inclusion-pending");
+  assert.equal(missingBody.reason, "native anchor is not readable");
+  assert.equal(Object.hasOwn(missingBody, "nodeObservation"), false);
+
+  stubChain();
+  const changedRead = globalThis.fetch;
+  nativeReads = 0;
+  globalThis.fetch = async (input, init) => {
+    const response = await changedRead(input, init);
+    if (init?.method === "POST" || ++nativeReads === 1) return response;
+    return Response.json({ ...await response.json(), programName: "another-program" });
+  };
+  const changed = await POST(request(coordinates));
+  assert.equal(changed.status, 409);
+  assert.equal((await changed.json()).error, "native anchor coordinates do not match");
+
+  stubChain({ native: { storageAddress: undefined, owner: undefined } });
+  const allowed = await observeListingAnchorInclusion(observationInput);
+  assert.equal(allowed.status, "included");
+  assert.equal(allowed.status === "included" && allowed.observation.nativeRead.owner, "");
+}));
+
+test("observation timestamp boundaries reject negative/fractional values and accept zero", async () => withChain(async () => {
+  for (const [timestamp, expected] of [[-1, null], [1.5, null], [0, 0],
+    [99_999_999_999, 99_999_999_999_000], [100_000_000_000, 100_000_000_000]]) {
+    stubChain({ block: { content: { timestamp, ordered_transactions: [transactionHash] } } });
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, expected === null ? "pending" : "included", String(timestamp));
+    if (result.status === "included") assert.equal(result.observation.blockTimestamp, expected);
+  }
+}));
+
+test("block number zero remains an allowed observation boundary", async () => withChain(async () => {
+  stubChain({ byHash: { blockNumber: 0 } });
+  const chainFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") {
+      const call = JSON.parse(String(init.body)).params[0];
+      if (call.message === "getBlockByNumber" && call.data.blockNumber === 0) return Response.json({ result: 200,
+        response: { status: "confirmed", number: 0, hash: chainId,
+          content: { timestamp: 0, ordered_transactions: [transactionHash] },
+          validation_data: { signatures: { [`0x${"aa".repeat(32)}`]: `0x${"bb".repeat(64)}` } } } });
+    }
+    return chainFetch(input, init);
+  };
+  const result = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+  assert.equal(result.status, "included");
+  if (result.status === "included") {
+    assert.equal(result.authenticated, false);
+    assert.equal(result.observation.blockNumber, 0);
+    assert.equal(result.observation.blockTimestamp, 0);
+  }
+}));
+
+test("native data cannot substitute for the original transaction even with consistently rebound metadata", async () => withChain(async () => {
+  const changed = { ...listing, terms: { changed: true } };
+  // Keep the claimed tuple and both metadata copies identical; only the native signed scope disagrees.
+  const rebound = { ...metadata, envelopeHash: sha256Hex(canonicalize(changed)) };
+  stubChain({ native: { data: changed }, nativeMetadata: rebound, transactionMetadata: rebound });
+  const result = await observeListingAnchorInclusion(observationInput);
+  assert.deepEqual(result, { status: "rejected", reason: "native listing metadata does not bind the signed artifact" });
+}));
+
+test("pending observation reasons remain useful for native, history and non-Error failures", async () => withChain(async () => {
+  for (const native of [false, true]) {
+    stubChain({ history: false });
+    if (!native) globalThis.fetch = async () => new Response(null, { status: 503 });
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.length > 0);
+  }
+  for (const overrides of [{ first: { status: "pending" } }, { block: { status: "pending" } }]) {
+    stubChain(overrides);
+    const result = await observeListingAnchorInclusion(observationInput);
+    assert.equal(result.status, "pending");
+    assert.ok("reason" in result && result.reason.trim().length > 0);
+  }
+  stubChain();
+  const chainFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === "POST") throw "non-Error fixture failure";
+    return chainFetch(input, init);
+  };
+  assert.deepEqual(await observeListingAnchorInclusion(observationInput), { status: "pending", reason: "inclusion observation failed" });
+}));

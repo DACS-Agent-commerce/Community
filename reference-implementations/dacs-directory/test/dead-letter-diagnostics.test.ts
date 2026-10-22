@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { pinnedChainIdentity } from "../src/catalog/nodeDeployment.js";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import {
@@ -129,8 +130,10 @@ test("listing binding rejections are persistent, public-safe, filterable, and re
     locator: target,
     listingId: "seller-service",
     listingVersion: 3,
+    publicNotice: false,
     code: "OWNER_CLAIM_BINDING",
     message: "The listing anchor owner does not match the registration claim.",
+    guidance: "Correct the registration's storage pointer to an anchor owned by the seller.",
     occurrences: 2,
     firstSeenAt: diagnostics.listingRejectionDiagnostics.items[0].firstSeenAt,
     lastSeenAt: diagnostics.listingRejectionDiagnostics.items[0].lastSeenAt,
@@ -198,9 +201,15 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   const target = locator("5");
   store.recordArtifactFailure(target, "unknown", "STORAGE_UNREADABLE", "raw RPC secret", 1);
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    result: 200, response: [{ id: 123 }],
-  }), { status: 200, headers: { "content-type": "application/json" } });
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    return Response.json({
+      result: 200,
+      response: call.message === "getBlockByNumber"
+        ? { number: 0, hash: pinnedChainIdentity() }
+        : call.message === "getNetworkInfo" ? {} : [{ id: 123 }],
+    });
+  };
   try {
     const response = await statusRoute.GET(new NextRequest(
       `https://directory.example/api/dacs/status?locator=${target}&deadLetterLimit=1`,
@@ -289,4 +298,174 @@ test("age pruning is batched, spares active dead-letters, and resets firstSeenAt
   // Documented rediscovery semantics: pruned history restarts.
   store.recordArtifactFailure(locator("8"), "listing", "STORAGE_UNREADABLE", "fresh", 1);
   assert.equal(store.failureHistorySize(), 1);
+});
+
+
+test("status exposes build drift while the configured node serves the pinned chain", async () => {
+  const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    if (call.message === "getNetworkInfo") return Response.json({ result: 200, response: { nodeVersion: { commit: "f".repeat(40), dirty: true, builtAt: "test" } } });
+    if (call.message === "getBlockByNumber") return call.data.blockNumber === 0
+      ? Response.json({ result: 400, response: "error" })
+      : Response.json({ result: 200, response: { number: 1, status: "confirmed", hash: "a".repeat(64), content: { previousHash: PINNED_DEMOS_CHAIN_IDENTITY } } });
+    return Response.json({ result: 200, response: [{ id: 3 }] });
+  };
+  try {
+    const response = await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.nodeDeployment.ok, true);
+    assert.equal(body.nodeDeployment.chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+    assert.match(body.nodeDeployment.warning, /is not pinned/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+function nodeStatusReply(call: { message: string; data: { blockNumber?: number } }, chain = pinnedChainIdentity()): Response {
+  if (call.message === "getBlockByNumber") return call.data.blockNumber === 0
+    ? Response.json({ result: 400, response: "error" })
+    : Response.json({ result: 200, response: { number: 1, status: "confirmed", hash: "b".repeat(64), content: { previousHash: chain } } });
+  if (call.message === "getNetworkInfo") return Response.json({ result: 200, response: {} });
+  return Response.json({ result: 200, response: [{ id: 123 }] });
+}
+
+const statusRequest = () => new NextRequest("https://directory.example/api/dacs/status");
+
+test("status suppresses the tip on a confirmed chain mismatch without querying transactions", async () => {
+  const originalFetch = globalThis.fetch;
+  const messages: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    messages.push(`${call.message}:${call.data.blockNumber ?? ""}`);
+    return nodeStatusReply(call, "c".repeat(64));
+  };
+  try {
+    const body = await (await statusRoute.GET(statusRequest())).json();
+    assert.equal(body.nodeDeployment.ok, false);
+    assert.match(body.nodeDeployment.reason, /not the pinned chain/);
+    assert.equal(body.nodeDeployment.unavailable, undefined);
+    assert.equal(body.chainLatestTx, null);
+    assert.equal(body.txsBehind, null);
+    assert.deepEqual(messages, ["getBlockByNumber:0", "getBlockByNumber:1"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("status gives the tip a fresh three-second deadline after deployment checks", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const budgets: AbortController[] = [];
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    assert.equal(ms, 3_000);
+    const controller = new AbortController();
+    budgets.push(controller);
+    return controller.signal;
+  });
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    if (call.message === "getTransactions") {
+      assert.equal(budgets.length, 2);
+      assert.equal(init?.signal, budgets[1].signal);
+      assert.equal(init?.signal?.aborted, false);
+      assert.deepEqual(call.data, { start: "latest", limit: 1 });
+    } else {
+      assert.equal(init?.signal, budgets[0].signal);
+      // Deployment can finish just as its budget runs out; the tip still gets its full budget.
+      if (call.message === "getNetworkInfo") budgets[0].abort(new Error("deployment budget spent"));
+    }
+    return nodeStatusReply(call);
+  };
+  try {
+    const body = await (await statusRoute.GET(statusRequest())).json();
+    assert.equal(body.nodeDeployment.ok, true);
+    assert.equal(body.chainLatestTx, 123);
+    assert.equal(budgets.length, 2);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+for (const hungMethod of ["getBlockByNumber", "getTransactions"]) {
+  test(`status bounds a hung ${hungMethod} read and preserves unavailable vs verified chain state`, async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    const keepAlive = setTimeout(() => {}, 5_000);
+    globalThis.fetch = async (_input, init) => {
+      const call = JSON.parse(String(init?.body)).params[0];
+      calls.push(call.message);
+      if (call.message !== hungMethod) return nodeStatusReply(call);
+      const signal = init?.signal;
+      assert.ok(signal);
+      signal.throwIfAborted();
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const started = performance.now();
+    try {
+      const body = await (await statusRoute.GET(statusRequest())).json();
+      const elapsed = performance.now() - started;
+      assert.ok(elapsed >= 2_900 && elapsed < 4_000, `status took ${elapsed}ms`);
+      assert.equal(body.chainLatestTx, null);
+      assert.equal(body.txsBehind, null);
+      if (hungMethod === "getBlockByNumber") {
+        assert.equal(body.nodeDeployment.ok, false);
+        assert.equal(body.nodeDeployment.unavailable, true);
+        assert.match(body.nodeDeployment.reason, /timed out/);
+        assert.ok(!calls.includes("getTransactions"));
+      } else {
+        assert.equal(body.nodeDeployment.ok, true);
+        assert.equal(body.nodeDeployment.chainIdentity, pinnedChainIdentity());
+      }
+    } finally {
+      clearTimeout(keepAlive);
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+test("status refuses oversized, excess-row, invalid-id and HTTP-error tip replies", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const response of [
+      () => Response.json({ result: 200, response: [{ id: 1 }, { id: 2 }] }),
+      () => Response.json({ result: 200, response: [{ id: -1 }] }),
+      () => Response.json({ result: 200, response: [{ id: 1.5 }] }),
+      () => Response.json({ result: 200, response: [{ id: Number.MAX_SAFE_INTEGER + 1 }] }),
+      () => Response.json({ result: 200, response: [{ id: 1 }] }, { status: 500 }),
+      () => new Response(' '.repeat(1024 * 1024 + 1)),
+    ]) {
+      globalThis.fetch = async (_input, init) => {
+        const call = JSON.parse(String(init?.body)).params[0];
+        return call.message === "getTransactions" ? response() : nodeStatusReply(call);
+      };
+      const body = await (await statusRoute.GET(statusRequest())).json();
+      assert.equal(body.nodeDeployment.ok, true);
+      assert.equal(body.chainLatestTx, null);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("a node slower than the status budget can still pass the indexing deployment preflight", async () => {
+  const { catalogNodeDeployment } = await import("../src/catalog/listingFinality.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    const signal = init?.signal;
+    assert.ok(signal);
+    signal.throwIfAborted();
+    if (call.message === "getBlockByNumber") {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 3_100);
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        signal.addEventListener("abort", abort, { once: true });
+      });
+      return Response.json({ result: 200, response: { number: 0, hash: pinnedChainIdentity() } });
+    }
+    return nodeStatusReply(call);
+  };
+  try {
+    const status = await (await statusRoute.GET(statusRequest())).json();
+    assert.equal(status.nodeDeployment.ok, false);
+    assert.equal(status.nodeDeployment.unavailable, true);
+    assert.match(status.nodeDeployment.reason, /timed out/);
+    assert.equal((await catalogNodeDeployment()).ok, true);
+  } finally { globalThis.fetch = originalFetch; }
 });

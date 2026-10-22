@@ -14,6 +14,10 @@ if [ ! -f "$DATA_DIR/registrations.json" ] && [ -f data/registrations.example.js
   cp data/registrations.example.json "$DATA_DIR/registrations.json"
 fi
 
+# Say at boot, not only in later refusals, when the node is not the pinned
+# deployment. Not fatal: the web app still serves the last verified catalog.
+npm run check:node-deployment || echo "[indexer] the configured Demos node is not the pinned deployment; catalog refreshes are refused until DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS are reviewed and set"
+
 reindex_forever() {
   while true; do
     echo "[indexer] refreshing the DACS catalog"

@@ -19,6 +19,7 @@ import { ownArray } from "./scanState.js";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "./canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
+import { cciProofLinks } from "./cciProofLinks.js";
 import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 // verifyBundleCore is exported from the SDK's agent barrel, but that barrel
 // also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
@@ -45,6 +46,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  clearRegistrationListingRejections,
   isOwnerRevocationCandidate,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -162,6 +164,10 @@ export async function indexRegistration(
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
+  const ownerRegistered = reg.ownerSignature
+    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
+    : false;
+  clearRegistrationListingRejections(reg.primaryClaim);
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -169,6 +175,7 @@ export async function indexRegistration(
   try {
     const resolved = await resolveIdentities(hex);
     const record = parseCciRecord(reg.primaryClaim, resolved);
+    const proofLinks = cciProofLinks(reg.primaryClaim, record.raw);
     // The SDK already associates each proof with its parsed claim across all
     // supported GCR envelopes, and skips malformed preceding rows.
     const profileFor = (platform: string, handle: string): string | undefined =>
@@ -179,7 +186,7 @@ export async function indexRegistration(
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
     cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
-          proofUrl: c.proof, linkUrl: profileFor(c.platform, c.handle) }
+          proofUrl: proofLinks.get(c.ref), linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
           linkUrl: explorerFor(c.chainType, c.address) });
   } catch {
@@ -203,7 +210,6 @@ export async function indexRegistration(
         anchor,
         reg.primaryClaim,
         verification.code,
-        listingDiagnosticCoordinates(anchored.data),
       );
       continue;
     }
@@ -219,7 +225,8 @@ export async function indexRegistration(
         anchor,
         reg.primaryClaim,
         bindingRejection,
-        listingDiagnosticCoordinates(verified.scope),
+        bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING",
       );
       continue;
     }
@@ -230,6 +237,7 @@ export async function indexRegistration(
         reg.primaryClaim,
         "DECLARED_CONTENT_HASH_MISMATCH",
         listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered,
       );
       continue;
     }
@@ -652,9 +660,6 @@ export async function indexRegistration(
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
   // submission-time replay gate only — the cryptographic binding must hold).
-  const ownerRegistered = reg.ownerSignature
-    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false;
   const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
   const identityTier = identityTiers.includes("institutional") ? "institutional"
     : identityTiers.includes("verified") ? "verified" : "self-declared";

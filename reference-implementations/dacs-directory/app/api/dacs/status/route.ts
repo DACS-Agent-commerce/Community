@@ -11,6 +11,8 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
+import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
+import { storageResponseJson } from "@/src/catalog/artifactLimits";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -23,28 +25,40 @@ export async function GET(req: NextRequest) {
   }
   const catalog = loadCatalog();
   const scan = loadScanState();
+  // Deployment and tip each get a short budget, independent of indexing preflights.
+  const signal = AbortSignal.timeout(3_000);
+  const nodeDeployment = await catalogNodeDeployment(signal).catch(() => ({
+    ok: false as const,
+    unavailable: true,
+    reason: signal.aborted ? "Demos node chain check timed out" : "could not read the Demos node's chain",
+  }));
 
   let chainLatestTx: number | null = null;
-  try {
-    const res = await fetch(RPC + "/", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: AbortSignal.timeout(10_000),
-      cache: "no-store",
-      body: JSON.stringify({
-        method: "nodeCall",
-        params: [{
-          type: "nodeCall", message: "getTransactions",
-          sender: null, receiver: null, timestamp: null,
-          data: { start: "latest", limit: 1 }, extra: "",
-        }],
-      }),
-    });
-    const json = (await res.json()) as { result?: number; response?: Array<{ id?: number }> };
-    const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
-    if (typeof id === "number") chainLatestTx = id;
-  } catch {
-    /* node unreachable — report lag as unknown */
+  if (nodeDeployment.ok) {
+    try {
+      const res = await fetch(RPC + "/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(3_000),
+        cache: "no-store",
+        body: JSON.stringify({
+          method: "nodeCall",
+          params: [{
+            type: "nodeCall", message: "getTransactions",
+            sender: null, receiver: null, timestamp: null,
+            data: { start: "latest", limit: 1 }, extra: "",
+          }],
+        }),
+      });
+      if (!res.ok) throw new Error("chain tip transport failed");
+      const json = (await storageResponseJson(res)) as { result?: number; response?: Array<{ id?: number }> };
+      const rows = json?.result === 200 && Array.isArray(json.response) && json.response.length <= 1
+        ? json.response : [];
+      const id = rows[0]?.id;
+      if (typeof id === "number" && Number.isSafeInteger(id) && id >= 0) chainLatestTx = id;
+    } catch {
+      /* node unreachable — report lag as unknown */
+    }
   }
 
   const resetThreshold = chainResetThreshold();
@@ -52,6 +66,7 @@ export async function GET(req: NextRequest) {
   const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
+    nodeDeployment,
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,

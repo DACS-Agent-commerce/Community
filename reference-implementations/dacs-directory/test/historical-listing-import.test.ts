@@ -138,6 +138,7 @@ test("a pin retains a Listing the earlier publisher wrote with wallet hex in bot
     for (const [label, variant] of [
       ["uppercase hex", oldPublisherListing((hex) => hex.toUpperCase())],
       ["base64url", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64url"))],
+      ["padded base64", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64"))],
     ] as const) {
       configure(variant.hash);
       assert.equal((await verifyStoredListing(variant.raw, at))?.contentHash, variant.hash, `pinned presentation: ${label}`);
@@ -145,7 +146,6 @@ test("a pin retains a Listing the earlier publisher wrote with wallet hex in bot
     for (const [label, variant] of [
       ["0x hex", oldPublisherListing((hex) => `0x${hex}`)],
       ["truncated hex", oldPublisherListing((hex) => hex.slice(2))],
-      ["padded base64", oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64"))],
       ["another key", oldPublisherListing(undefined, undefined, otherKey)],
       ["base64url by another key",
         oldPublisherListing((hex) => Buffer.from(hex, "hex").toString("base64url"), undefined, otherKey)],
@@ -214,7 +214,8 @@ test("a Listing main's /register publishes stays in the catalog; a bad presentat
 
     // Each variant is re-signed, so only the presentation spelling, key or bytes differ.
     for (const [label, variant] of [
-      ["base64url (SDK sellers and this release's /register)", mainRegisterListing((signature) => signature.toString("base64url"))],
+      ["base64url", mainRegisterListing((signature) => signature.toString("base64url"))],
+      ["padded base64", mainRegisterListing((signature) => signature.toString("base64"))],
       ["uppercase hex (main stored the wallet's case)", mainRegisterListing((signature) => signature.toString("hex").toUpperCase())],
     ] as const) {
       delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
@@ -230,7 +231,6 @@ test("a Listing main's /register publishes stays in the catalog; a bad presentat
       ["base64url over other bytes",
         mainRegisterListing((signature) => signature.toString("base64url"), undefined, (bundleHash) => `dacs-listing:v1:${bundleHash}`)],
       ["0x hex", mainRegisterListing((signature) => `0x${signature.toString("hex")}`)],
-      ["padded base64", mainRegisterListing((signature) => signature.toString("base64"))],
       ["hex with a trailing space", mainRegisterListing((signature) => `${signature.toString("hex")} `)],
     ] as const) {
       delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
