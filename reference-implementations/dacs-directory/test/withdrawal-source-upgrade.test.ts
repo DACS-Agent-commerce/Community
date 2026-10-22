@@ -18,6 +18,7 @@ content_hash TEXT, seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', 
 const put = db.prepare('INSERT INTO kv_state VALUES (?, ?, 0)');
 for (const [key, value] of Object.entries({
  'schema-version': 1, 'sr2-anchor-schema-version': 2, 'revocation-read-schema-version': 1,
+ 'listing-admission-schema-version': 1, // Isolate withdrawal-source migration.
  'withdrawal-carriage-schema-version': 2,
  'withdrawal-sources': [{domain:'https://seller.example',seller:claim,hashes:[hash],incomplete:[hash],index:{generatedAt:123,hash:'a'.repeat(64)}}],
  'scan-state': {schemaVersion:10,lastSeenTxId:0,listings:{},deals:{}},

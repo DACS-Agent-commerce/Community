@@ -27,6 +27,7 @@ seeded.exec(`
     updated_at INTEGER NOT NULL
   );
   INSERT INTO kv_state(key,value_json,updated_at) VALUES ('schema-version','1',0);
+  INSERT INTO kv_state(key,value_json,updated_at) VALUES ('listing-admission-schema-version','1',0);
   INSERT INTO kv_state(key,value_json,updated_at) VALUES ('sr2-anchor-schema-version','2',0);
 `);
 seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog',?,0)").run(JSON.stringify({

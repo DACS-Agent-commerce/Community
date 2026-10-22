@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isListing } from "@kynesyslabs/dacs/artifacts";
+import { isListing, readListingArtifact } from "@kynesyslabs/dacs/artifacts";
 import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
 import { identityBundleHash } from "@kynesyslabs/dacs/identity";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
@@ -395,7 +395,7 @@ test("admission reads the identity presentation: exact presentedBy entry, base64
 });
 
 
-test("legacy Listing admission enforces the exact 16 KiB UTF-8 boundary", async () => {
+test("legacy Listing admission preserves the SDK draft size policy, excluding no valid signature bytes", async () => {
   const scope = {
     agentId: claim, serviceId: "legacy-size", name: "Legacy size boundary", description: "",
     claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
@@ -405,15 +405,15 @@ test("legacy Listing admission enforces the exact 16 KiB UTF-8 boundary", async 
     const body = { ...scope, description };
     return { ...body, signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${contentHash(body)}`, "utf8"), privateKey)).toString("hex") };
   };
-  const overhead = Buffer.byteLength(JSON.stringify(signed("")), "utf8");
-  const atLimit = signed("a".repeat(16_384 - overhead));
-  const overLimit = signed("a".repeat(16_385 - overhead));
-  assert.equal(Buffer.byteLength(JSON.stringify(atLimit), "utf8"), 16_384);
-  assert.equal((await verifyListingResult(atLimit)).ok, true);
-  assert.deepEqual(await verifyListingResult(overLimit), { ok: false, code: "LEGACY_LISTING_INVALID" });
-  const multibyte = signed("é".repeat(Math.ceil((16_385 - overhead) / 2)));
-  assert.ok(JSON.stringify(multibyte).length < 16_384);
-  assert.deepEqual(await verifyListingResult(multibyte), { ok: false, code: "LEGACY_LISTING_INVALID" });
+  const overhead = Buffer.byteLength(canonicalize(scope), "utf8");
+  for (const description of ["a".repeat(16_300 - overhead), "a".repeat(16_385), "é".repeat(8_193)]) {
+    const raw = signed(description);
+    assert.ok(Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384);
+    assert.equal(readListingArtifact(raw)?.compatibility, "legacy-mvp");
+    assert.equal((await verifyListingResult(raw)).ok, true);
+    assert.deepEqual(await verifyListingResult({ ...raw, description: `${description}!` }),
+      { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
 });
 
 const RFQ = { maxTurns: 6, timeoutSec: 300 };

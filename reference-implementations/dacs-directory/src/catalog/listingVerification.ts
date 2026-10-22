@@ -263,9 +263,6 @@ async function verifyListingArtifact(
     };
   }
 
-  if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) {
-    return invalid("LEGACY_LISTING_INVALID");
-  }
   // The historical Directory also wrote a structured envelope. Validate its
   // exact unsigned legacy body before authenticating the original envelope.
   const legacyScope = stripSignature(raw);

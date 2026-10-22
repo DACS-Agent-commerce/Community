@@ -78,10 +78,23 @@ export async function checkListingUpgrades(write = (message: string) => { proces
       throw new Error(`${replacement.replacementListingId} replacement tuple does not match its manifest and prior seller`);
     }
 
-    const catalog = await json(`${directory}/api/dacs/listings?primaryClaim=${encodeURIComponent(authenticated.value.sellerClaim)}&limit=100`);
-    const summaries = Array.isArray(catalog.listings) ? catalog.listings : [];
-    const summary = summaries.find((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate) &&
-      candidate.listingId === replacement.replacementListingId && candidate.version === replacement.replacementVersion) as Record<string, unknown> | undefined;
+    const catalogUrl = new URL(`${directory}/api/dacs/listings`);
+    catalogUrl.searchParams.set("primaryClaim", authenticated.value.sellerClaim);
+    catalogUrl.searchParams.set("limit", "100");
+    const seenCursors = new Set<string>();
+    let summary: Record<string, unknown> | undefined;
+    for (;;) {
+      const catalog = await json(catalogUrl.toString());
+      const summaries = Array.isArray(catalog.listings) ? catalog.listings : [];
+      summary = summaries.find((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate) &&
+        candidate.listingId === replacement.replacementListingId && candidate.version === replacement.replacementVersion) as Record<string, unknown> | undefined;
+      if (summary || catalog.cursor === undefined || catalog.cursor === null) break;
+      if (typeof catalog.cursor !== "string" || !catalog.cursor || seenCursors.has(catalog.cursor)) {
+        throw new Error("catalog returned an invalid or repeated pagination cursor");
+      }
+      seenCursors.add(catalog.cursor);
+      catalogUrl.searchParams.set("cursor", catalog.cursor);
+    }
     if (
       !summary ||
       (summary.anchor as Record<string, unknown> | undefined)?.locator !== replacement.replacementLocator ||

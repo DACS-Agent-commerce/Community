@@ -17,6 +17,7 @@ db.exec(`CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, 
     content_hash TEXT, seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator));`);
 const put = db.prepare("INSERT INTO kv_state VALUES (?, ?, 0)");
 put.run("schema-version", "1"); put.run("sr2-anchor-schema-version", "2"); put.run("revocation-read-schema-version", "1");
+put.run("listing-admission-schema-version", "1"); // Isolate withdrawal-carriage migration.
 put.run("withdrawal-carriage-schema-version", "1");
 put.run("scan-state", JSON.stringify({ schemaVersion: 10, lastSeenTxId: 100, listings: {}, deals: {} }));
 put.run("catalog", JSON.stringify({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim,

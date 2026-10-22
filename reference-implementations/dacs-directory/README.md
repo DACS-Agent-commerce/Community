@@ -464,8 +464,8 @@ SDK reader accepts.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
-- **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation (v0.4,
-  `d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
+- **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation at
+  `d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20`, the conformance vector files vendored under `test/fixtures/dacs-standard/`
   with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
   SIG-6 encoding and Demos agent claim resolution. `test/listing-vectors.test.ts` and
   `test/revocation-vectors.test.ts` check the two listing/withdrawal fixture hashes and
@@ -610,7 +610,13 @@ remain rejected; the labelled draft SDK profile keeps its separate reader.
 `test/build-listing.test.ts` cover import boundaries and immutable history/recovery.
 
 Legacy draft Listings retain the SDK `44d8ff2` hashing profile, including NFC member-name
-normalization. Current Listings use the pinned SDK canonicalizer. Rejection diagnostics
+normalization and the SDK legacy reader's size policy; the current Listing's 16,384-byte
+canonical cap does not apply to that draft compatibility reader. Historical raw-hex
+delivery attestations use the same frozen hash profile. Current Listings use the pinned
+SDK canonicalizer. On upgrade, cached active summaries from the earlier admission
+profile are withheld until a successful reindex validates their signed artifacts with
+the current reader. Registrations, scan pointers and revoked tombstones are retained;
+a failed refresh does not republish unvalidated offers. Rejection diagnostics
 retain occurrence counts and first-seen timestamps for continuing failures; each seller
 indexing pass prunes failures it no longer observes. Only authenticated, seller-matching artifacts from
 owner-signed registrations can appear in the public pointer notice. Registration binding and

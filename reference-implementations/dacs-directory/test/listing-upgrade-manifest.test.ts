@@ -47,6 +47,9 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
   process.env.NEXT_PUBLIC_DIRECTORY_URL = "https://directory.example";
   process.env.DACS_LISTING_UPGRADE_REPLACEMENTS = JSON.stringify(entries);
   let hideReplacement = false;
+  let paginate = false;
+  let repeatCursor = false;
+  let secondPages = 0;
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/storage-program/")) return Response.json({ success: true, data: anchors.get(url.pathname.split("/").pop()!) });
@@ -54,6 +57,14 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
       { locator: url.searchParams.get("locator"), code: "VERIFICATION_METHOD_INVALID" },
     ] } } });
     assert.equal(url.searchParams.get("primaryClaim"), dids[1]);
+    assert.equal(url.searchParams.get("limit"), "100");
+    if (paginate) {
+      if (!url.searchParams.has("cursor") || repeatCursor) {
+        return Response.json({ listings: Array.from({ length: 100 }, (_, index) => ({ listingId: `preceding-${index}`, version: 1 })), cursor: "100" });
+      }
+      assert.equal(url.searchParams.get("cursor"), "100");
+      secondPages++;
+    }
     return Response.json({ listings: hideReplacement ? [] : summaries });
   };
   try {
@@ -61,6 +72,12 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
     await checkListingUpgrades((message) => { output.push(message); });
     assert.equal(output.filter((line) => line.includes("authenticated and discoverable")).length, 3);
     assert.equal(output.filter((line) => line.includes("reader remains unassessed")).length, 3);
+    paginate = true;
+    await checkListingUpgrades(() => {});
+    assert.equal(secondPages, 3, "all three replacements are found beyond the first 100 summaries");
+    repeatCursor = true;
+    await assert.rejects(checkListingUpgrades(() => {}), /repeated pagination cursor/);
+    repeatCursor = false;
     summaries[0].status = "revoked";
     await assert.rejects(checkListingUpgrades(() => {}), /required-binding-missing/);
     const markerScope = { listingId: entries[0].replacementListingId, listingVersion: 1,
@@ -79,6 +96,7 @@ test("the complete catalog replacement check runs with fresh IDs and unassessed 
     delete summaries[0].revocation;
     hideReplacement = true;
     await assert.rejects(checkListingUpgrades(() => {}), /not exposed by the reindexed catalog/);
+    assert.equal(secondPages, 6, "absence is reported only after the final page");
   } finally {
     globalThis.fetch = originalFetch;
     if (previous.origin === undefined) delete process.env.NEXT_PUBLIC_DIRECTORY_URL; else process.env.NEXT_PUBLIC_DIRECTORY_URL = previous.origin;

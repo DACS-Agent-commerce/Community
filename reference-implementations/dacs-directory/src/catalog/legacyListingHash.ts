@@ -1,7 +1,8 @@
 import { assertValidUnicode, canonicalize, sha256Hex } from "./canonical.js";
 
 /**
- * Frozen SDK 44d8ff2 Listing hash profile. That draft NFC-normalized member
+ * Frozen SDK 44d8ff2 artifact hash profile, shared by Listings and historical
+ * delivery attestations. That draft NFC-normalized member
  * names before sorting as well as string values. Current Listings continue to
  * use the pinned SDK's member-name-preserving canonicalizer.
  */
