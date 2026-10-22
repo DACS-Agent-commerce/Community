@@ -156,10 +156,33 @@ export const catalogStatusSchema = {
   required: [
     "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
-    "cursorStallThresholdSeconds", "cursorStalled", "indexer",
+    "cursorStallThresholdSeconds", "cursorStalled", "indexer", "nodeDeployment",
   ],
   properties: {
     generatedAt: { type: "integer" },
+    nodeDeployment: {
+      oneOf: [
+        {
+          type: "object", additionalProperties: false,
+          required: ["ok", "build", "chainIdentity", "warning"],
+          properties: {
+            ok: { const: true },
+            build: { type: ["string", "null"] },
+            chainIdentity: { type: "string" },
+            warning: { type: ["string", "null"] },
+          },
+        },
+        {
+          type: "object", additionalProperties: false,
+          required: ["ok", "reason"],
+          properties: {
+            ok: { const: false },
+            reason: { type: "string" },
+            unavailable: { const: true, description: "The short status probe could not read the chain; this is not a confirmed chain mismatch." },
+          },
+        },
+      ],
+    },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },

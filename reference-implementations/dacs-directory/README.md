@@ -237,6 +237,15 @@ Catalog responses include validators, cache policy, and typed `Link` headers. Hu
 service and seller pages expose canonical URLs and JSON alternates, while the dynamic
 sitemap includes the currently indexed catalog.
 
+`GET /api/dacs/status` gives the chain/deployment probe a 3-second deadline and,
+when it confirms the configured chain, gives the tip read a separate 3 seconds
+(at most 6 seconds of node reads). Tip replies are bounded to 1 MiB and one row.
+A timeout or unreadable chain is returned as `nodeDeployment.unavailable: true`
+and shown as “Chain status unavailable.” The UI shows “Indexing blocked” for a
+confirmed chain mismatch or the latest persisted failed refresh. Indexing retains
+its longer preflight budget and can succeed after a short status probe times out.
+Deployment observations are read fresh for each request.
+
 `GET /api/dacs/status` also exposes a bounded, public-safe view of active exhausted
 storage reads. Pass `locator=stor-...` to diagnose one exact reference and
 `deadLetterLimit=1..100` to bound the recent list. An `unclassified-storage` result

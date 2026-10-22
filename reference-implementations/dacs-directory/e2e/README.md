@@ -15,3 +15,6 @@ npx playwright install chromium
 
 The configured development server starts on `http://localhost:3400`; the readiness
 check uses `/`, and `NEXT_PUBLIC_DIRECTORY_URL` is set to the same local origin.
+Stop any existing development server on port 3400 before running the suite.
+Playwright starts its own server with an unreachable local chain and isolated
+test data; it refuses to reuse a server with another configuration.

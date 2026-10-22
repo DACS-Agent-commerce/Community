@@ -116,6 +116,13 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(status.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/CatalogStatus");
   assert.ok(catalogStatusSchema.properties.indexer.properties.deadLetterDiagnostics);
   assert.ok(catalogStatusSchema.properties.indexer.properties.listingRejectionDiagnostics);
+  assert.ok(catalogStatusSchema.required.includes("nodeDeployment"));
+  const [available, refused] = catalogStatusSchema.properties.nodeDeployment.oneOf;
+  assert.equal(available.properties.ok.const, true);
+  assert.deepEqual(available.required, ["ok", "build", "chainIdentity", "warning"]);
+  assert.equal(refused.properties.ok.const, false);
+  assert.deepEqual(refused.required, ["ok", "reason"]);
+  assert.equal(refused.properties.unavailable.const, true);
   assert.ok(catalogStatusSchema.required.includes("cursorAheadBy"));
   assert.ok(catalogStatusSchema.required.includes("chainResetSuspected"));
   assert.ok(catalogStatusSchema.required.includes("secondsSinceCursorAdvanced"));

@@ -11,8 +11,9 @@ interface Status {
   syncedToTx: number;
   chainLatestTx: number | null;
   txsBehind: number | null;
-  nodeDeployment?: { ok: boolean; reason?: string };
+  nodeDeployment?: { ok: boolean; reason?: string; unavailable?: boolean };
   indexer?: {
+    lastRun?: { status: "running" | "complete" | "failed" } | null;
     listingRejectionDiagnostics?: {
       total: number;
       publicTotal: number;
@@ -56,13 +57,18 @@ export default function CatalogStatus() {
 
   if (!status) return null;
 
-  const blocked = status.nodeDeployment?.ok === false;
-  if (status.generatedAt === 0 && !blocked) return null;
+  const unavailable = status.nodeDeployment?.ok === false && status.nodeDeployment.unavailable === true;
+  const mismatch = status.nodeDeployment?.ok === false && !unavailable;
+  const failedRefresh = status.indexer?.lastRun?.status === "failed";
+  const warning = mismatch || failedRefresh || unavailable;
+  if (status.generatedAt === 0 && !warning) return null;
 
   const behind = status.txsBehind;
   const inSync = behind !== null && behind === 0;
-  const cls = blocked ? "warn" : behind === null ? "" : inSync ? "ok" : "warn";
-  const label = blocked ? "Indexing blocked: chain check failed" : behind === null
+  const cls = warning ? "warn" : behind === null ? "" : inSync ? "ok" : "warn";
+  const label = mismatch ? "Indexing blocked: chain mismatch"
+    : failedRefresh ? "Indexing blocked: last refresh failed"
+    : unavailable ? "Chain status unavailable" : behind === null
       ? `synced to tx ${status.syncedToTx.toLocaleString()}`
       : inSync
         ? "in sync with chain"
@@ -75,7 +81,9 @@ export default function CatalogStatus() {
         className={`sync-chip ${cls}`}
         role="status"
         aria-live="polite"
-        title={blocked ? status.nodeDeployment?.reason : `Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
+        title={mismatch || unavailable ? status.nodeDeployment?.reason : failedRefresh
+          ? "The latest catalog refresh failed. The operator can retry it."
+          : `Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
           status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
         } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
       >

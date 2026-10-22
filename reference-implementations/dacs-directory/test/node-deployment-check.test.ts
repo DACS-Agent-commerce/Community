@@ -117,3 +117,16 @@ test("a status deadline also cancels the fallback chain read", async () => {
     assert.deepEqual(calls, [0, 1]);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("catalog deployment reports the pinned clean build without a warning", async () => {
+  const { catalogNodeDeployment } = await import("../src/catalog/listingFinality.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = nodeReporting({ commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false }, PINNED_DEMOS_CHAIN_IDENTITY);
+  try {
+    const result = await catalogNodeDeployment();
+    assert.equal(result.ok, true);
+    assert.ok(result.ok);
+    assert.equal(result.build, PINNED_DEMOS_NODE_BUILDS[0]);
+    assert.equal(result.warning, null);
+  } finally { globalThis.fetch = originalFetch; }
+});
