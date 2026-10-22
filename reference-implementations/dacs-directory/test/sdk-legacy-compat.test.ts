@@ -86,3 +86,16 @@ test("LR-2 measures canonical bytes without the Listing signature", async () => 
     assert.equal(isListing(raw), bytes === 16_384);
   }
 });
+
+
+test("a current Listing referenced by a historical bundle retains its current hash profile", () => {
+  const listing: Obj = { dacsVersion: "1", listingId: "current-svc", listingVersion: 1,
+    "e\u0301": "current member", terms: { cancellationPolicy: "pre-commit" } };
+  const hash = contentHash(listing);
+  assert.notEqual(hash, legacyListingHash(listing));
+  const verification = { bundle: { listingRef: { listingId: "current-svc", version: 1, contentHash: hash } } } as unknown as Parameters<typeof verifiedListingTerms>[0];
+  const artifacts = [{ kind: "dacs-1-listing", raw: listing }];
+  assert.deepEqual(verifiedListingTerms(verification, artifacts, true), listing.terms);
+  listing["e\u0301"] = "modified";
+  assert.equal(verifiedListingTerms(verification, artifacts, true), undefined);
+});

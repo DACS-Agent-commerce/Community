@@ -1,5 +1,5 @@
 import { legacyListingHash } from "./legacyListingHash.js";
-import { stripSignature } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import {
   isLegacyMvpAttestationBundle,
 } from "@kynesyslabs/dacs/artifacts";
@@ -125,6 +125,15 @@ export interface ResolvedArtifact {
   raw: Record<string, unknown>;
   /** Exact source pointer, required to select an out-of-band historical import. */
   locator?: string;
+}
+
+// A current Listing keeps its own hash profile even when a historical bundle
+// references it. Other artifacts on this path use the frozen SDK-MVP format.
+function referenceHash(artifact: ResolvedArtifact): string {
+  const scope = stripSignature(artifact.raw);
+  return artifact.kind === "dacs-1-listing" && "dacsVersion" in artifact.raw
+    ? contentHash(scope)
+    : legacyListingHash(scope);
 }
 
 interface ExpectedArtifact {
@@ -255,7 +264,7 @@ export async function refsPassStrictPolicy(
         (artifact.raw.buyer !== bundleBuyers[0].primaryClaim ||
          artifact.raw.seller !== bundleSellers[0].primaryClaim)) return false;
     try {
-      if (legacyListingHash(stripSignature(artifact.raw)) !== want.contentHash) return false;
+      if (referenceHash(artifact) !== want.contentHash) return false;
     } catch {
       return false;
     }
@@ -288,7 +297,7 @@ export function verifiedListingTerms(
       : null;
   if (version === null) return undefined;
   try {
-    if (listingId !== ref.listingId || version !== ref.version || legacyListingHash(scope) !== ref.contentHash) return undefined;
+    if (listingId !== ref.listingId || version !== ref.version || referenceHash(artifact) !== ref.contentHash) return undefined;
   } catch {
     return undefined;
   }
