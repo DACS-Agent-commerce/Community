@@ -41,12 +41,12 @@ const requestFiles = () => wellknownFiles(new NextRequest(
   `https://directory.example/api/dacs/wellknown-files?claim=${encodeURIComponent(seller)}&domain=1.1.1.1`,
 ));
 
-test("signed negative revokedAt withdraws a Listing and remains revoked on the next pass", async (t) => {
-  const raw = currentListing("negative-withdrawal");
+test("signed zero revokedAt withdraws a Listing and remains revoked on the next pass", async (t) => {
+  const raw = currentListing("zero-withdrawal");
   const verified = await verifyListing(raw);
   assert.ok(verified);
-  const markerScope = { listingId: "negative-withdrawal", listingVersion: 1,
-    listingContentHash: verified.contentHash, revokedAt: -1 };
+  const markerScope = { listingId: "zero-withdrawal", listingVersion: 1,
+    listingContentHash: verified.contentHash, revokedAt: 0 };
   const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: seller,
     value: sign(`dacs-revocation:v1:${contentHash(markerScope)}`) } };
   const [listingAt, markerAt] = [locator(1001), locator(1002)];

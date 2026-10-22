@@ -91,7 +91,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   const verdict = async (marker: Obj, expectedVersion = 2, against: VerifiedListing = listing) => verifyListingRevocation(marker, against, expectedVersion);
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
-  for (const revokedAt of [-Number.MAX_SAFE_INTEGER, -1, 0, Number.MAX_SAFE_INTEGER]) {
+  for (const revokedAt of [0, Number.MAX_SAFE_INTEGER]) {
     assert.equal(await verdict(await signed({ ...tuple, revokedAt })), true, `revokedAt ${revokedAt} is in range`);
   }
   const rejected: Record<string, boolean> = {
@@ -102,6 +102,8 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "another listingContentHash": await verdict(await signed({ ...tuple, listingContentHash: "d".repeat(64) })),
     "a listingContentHash that is not a string": await verdict(await signed({ ...tuple, listingContentHash: 7 })),
     "a revokedAt that is not a number": await verdict(await signed({ ...tuple, revokedAt: "1" })),
+    "a negative revokedAt": await verdict(await signed({ ...tuple, revokedAt: -1 })),
+    "the lowest safe integer revokedAt": await verdict(await signed({ ...tuple, revokedAt: -Number.MAX_SAFE_INTEGER })),
     "another key's signature": await verdict(await signed(tuple, otherSeed)),
     "an envelope naming another signer": await verdict(await signed(tuple, seed, { signer: didOf(otherSeed) })),
     "a non-Ed25519 algorithm": await verdict(await signed(tuple, seed, { algorithm: "ecdsa-secp256k1" })),
@@ -129,6 +131,27 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   const legacy: VerifiedListing = { ...listing, scope: { serviceId: "svc" }, listing: { serviceId: "svc" } as unknown as LegacyMvpListing, profile: "legacy-sdk-v0.1" };
   assert.equal(await verdict(await signed(tuple), 2, legacy), true);
   assert.equal(await verdict(await signed({ ...tuple, listingId: "other" }), 2, legacy), false);
+});
+
+test("RB-1: standalone marker versions must be positive safe integers even when the caller supplies the same version", async () => {
+  const tuple = { listingId: "svc", listingVersion: 1, listingContentHash: listingHash, revokedAt: 1 };
+  for (const listingVersion of [1, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(await verifyListingRevocation(await signed({ ...tuple, listingVersion }), listing, listingVersion), true);
+  }
+  for (const listingVersion of [0, -1, -Number.MAX_SAFE_INTEGER, "1", null, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+    const scope = { ...tuple, listingVersion };
+    // Sign the flat RFC 8785 form independently, including values the SDK's
+    // canonicalizer refuses, so the verifier must fail closed without throwing.
+    const jcs = JSON.stringify(Object.fromEntries(Object.entries(scope).sort(([a], [b]) => a < b ? -1 : 1)));
+    const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
+      privateKeyFromSeed(seed))).toString("base64url");
+    const marker = { ...scope, signature: { algorithm: "ed25519", signer: didOf(seed), value } };
+    // Exercise an unvalidated caller value at the standalone API boundary.
+    const expectedVersion = listingVersion as number;
+    assert.equal(await verifyListingRevocation(marker, listing, expectedVersion), false, `listingVersion ${listingVersion}`);
+    assert.equal(await findValidListingRevocation(["marker"], listing, expectedVersion, async () => marker), null,
+      `listingVersion ${listingVersion} must not produce a binding`);
+  }
 });
 
 test("RB-4: the first valid marker in the batch wins and the binding names it; unread and rejected candidates are reported", async () => {
