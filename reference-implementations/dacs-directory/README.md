@@ -7,7 +7,7 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
 the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
-listings must pass the pinned SDK's normative `isListing()` gate on their exact signed bytes, with CORE §B.7
+listings must pass the pinned SDK's `isListing()` gate with the Directory compatibility patch on their exact signed bytes, with CORE §B.7
 SIG-6 base64url signature values, before catalog admission. They are exposed as
 authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
 rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display
@@ -126,9 +126,12 @@ checks a clean checkout of that commit), the SDK's `package.json` declares the p
 (`scripts/sdk-dist-digest.mjs`; the SDK build is reproducible, and a source build is held to
 the same digest and records its per-file `dist/.dacs-sdk-manifest`); otherwise it refuses to
 continue. The reproducible source build applies `scripts/dacs-sdk-compat.patch`, checked against
-`SDK_PATCH_SHA256`, and restores the clean SDK source after building. The patch keeps
-a 16 KiB cap on the complete canonical Listing, including its signature, and authenticates
-historical SDK agreement/evidence signatures only in their explicit compatibility profile.
+`SDK_PATCH_SHA256`, and restores the clean SDK source after building. The pinned SDK enforces
+a 16,384-byte cap on the complete canonical Listing, including its signature. This is a
+stricter SDK profile than DACS-1 §6.3.4 and CORE §B.2, whose canonical-form cap omits
+`signature`: a Listing within the Standard's cap can still exceed the SDK cap and be
+excluded by this Directory. The patch authenticates historical SDK agreement/evidence
+signatures only in their explicit compatibility profile.
 The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
 profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
 integer. Catalog admission alone does not promise SDK transaction readiness.
@@ -247,7 +250,9 @@ A timeout or unreadable chain is returned as `nodeDeployment.unavailable: true`
 and shown as “Chain status unavailable.” The UI shows “Indexing blocked” for a
 confirmed chain mismatch or the latest persisted failed refresh. Indexing retains
 its longer preflight budget and can succeed after a short status probe times out.
-Deployment observations are read fresh for each request.
+Deployment and tip observations share one in-flight probe and are cached for 30 seconds
+per server process, including unavailable results. Catalog and indexer diagnostics are
+still loaded on each request. Indexing preflights always perform their own reads.
 
 `GET /api/dacs/status` also exposes a bounded, public-safe view of active exhausted
 storage reads. Pass `locator=stor-...` to diagnose one exact reference and
@@ -589,7 +594,7 @@ registration requests, index rows or the listing itself. At most 256 entries and
 65,536 UTF-8 bytes are accepted; malformed or incomplete pins cannot import hex.
 The declared encoding applies to the Listing signature only. The identity presentation,
 which the earlier `/register` publisher also wrote as wallet hex, needs no pin: every
-current Listing's presentation is read as canonical base64url or 128 hex digits (see
+current Listing's presentation is read as canonical base64url, padded Base64, or 128 hex digits without a `0x` prefix (see
 the upgrade note above), must be the `presentedBy` entry and must verify under the
 seller's key. A pin never applies to a Listing whose own signature is already
 canonical; such a Listing is admitted or refused on its own signatures.
@@ -604,7 +609,8 @@ remain rejected; the labelled draft SDK profile keeps its separate reader.
 `test/build-listing.test.ts` cover import boundaries and immutable history/recovery.
 
 Legacy draft Listings retain the SDK `44d8ff2` hashing profile, including NFC member-name
-normalization. Current Listings use the pinned SDK canonicalizer. Rejection diagnostics are
-replaced on each seller indexing pass; only authenticated, seller-matching artifacts from
+normalization. Current Listings use the pinned SDK canonicalizer. Rejection diagnostics
+retain occurrence counts and first-seen timestamps for continuing failures; each seller
+indexing pass prunes failures it no longer observes. Only authenticated, seller-matching artifacts from
 owner-signed registrations can appear in the public pointer notice. Registration binding and
 content-hash diagnostics call for a signed pointer update, not a new Listing ID.

@@ -7,11 +7,12 @@
  * construction — host them byte-exact, then submit it to POST /api/dacs/register-domain.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash, sha256Hex, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
 import { loadCatalog } from "@/src/catalog/store";
+import { verifyStoredListing } from "@/src/catalog/listingVerification";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -34,10 +35,12 @@ export async function GET(req: NextRequest) {
   for (const l of seller.listings) {
     const raw = await readAnchor(l.anchor.locator);
     if (!raw) continue;
+    const verified = await verifyStoredListing(raw, l.anchor.locator);
+    if (!verified || verified.contentHash !== l.contentHash) continue;
     entries.push({
       listingId: l.listingId,
       version: l.version,
-      contentHash: contentHash(stripSignature(raw)),
+      contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: l.anchor.locator },
       summary: {
         title: l.offering.title,

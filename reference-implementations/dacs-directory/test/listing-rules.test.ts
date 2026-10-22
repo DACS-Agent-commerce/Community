@@ -541,7 +541,7 @@ test("current listing envelopes require canonical SIG-6 bytes", async () => {
 });
 
 
-test("LR-2 caps the complete canonical Listing at exactly 16,384 bytes with SDK parity", async () => {
+test("the stricter SDK complete-envelope size profile caps Listings at exactly 16,384 bytes", async () => {
   const { canonicalize } = await import("../src/catalog/canonical.js");
   const { isListing } = await import("@kynesyslabs/dacs/artifacts");
   for (const size of [16_300, 16_384, 16_385]) {

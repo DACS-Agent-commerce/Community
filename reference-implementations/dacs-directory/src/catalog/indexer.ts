@@ -46,7 +46,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
-  clearRegistrationListingRejections,
+  pruneRegistrationListingRejections,
   isOwnerRevocationCandidate,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -165,7 +165,7 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false;
-  clearRegistrationListingRejections(reg.primaryClaim);
+  const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -204,6 +204,7 @@ export async function indexRegistration(
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
+      rejectedListingAnchors.add(anchor);
       recordListingRejection(
         anchor,
         reg.primaryClaim,
@@ -219,6 +220,7 @@ export async function indexRegistration(
       reg.primaryClaim,
     );
     if (bindingRejection) {
+      rejectedListingAnchors.add(anchor);
       recordListingRejection(
         anchor,
         reg.primaryClaim,
@@ -230,6 +232,7 @@ export async function indexRegistration(
     }
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
     if (declaredHash && declaredHash !== verified.contentHash) {
+      rejectedListingAnchors.add(anchor);
       recordListingRejection(
         anchor,
         reg.primaryClaim,
@@ -360,6 +363,8 @@ export async function indexRegistration(
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
+
+  pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];

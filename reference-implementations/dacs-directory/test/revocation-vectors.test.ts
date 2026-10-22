@@ -91,7 +91,9 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   const verdict = async (marker: Obj, expectedVersion = 2, against: VerifiedListing = listing) => verifyListingRevocation(marker, against, expectedVersion);
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
-  assert.equal(await verdict(await signed({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER })), true, "the largest safe integer is in range");
+  for (const revokedAt of [-Number.MAX_SAFE_INTEGER, -1, 0, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(await verdict(await signed({ ...tuple, revokedAt })), true, `revokedAt ${revokedAt} is in range`);
+  }
   const rejected: Record<string, boolean> = {
     "another listingId": await verdict(await signed({ ...tuple, listingId: "svc-2" })),
     "another listingVersion": await verdict(await signed({ ...tuple, listingVersion: 3 })),
