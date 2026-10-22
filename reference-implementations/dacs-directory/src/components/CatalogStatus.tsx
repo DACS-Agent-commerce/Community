@@ -74,6 +74,7 @@ export default function CatalogStatus() {
       <span
         className={`sync-chip ${cls}`}
         role="status"
+        aria-label="Catalog indexing status"
         aria-live="polite"
         title={blocked ? status.nodeDeployment?.reason : `Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
           status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""

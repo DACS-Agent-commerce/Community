@@ -25,7 +25,7 @@ test("pages are served with indexing blocked while the chain is unreachable", as
   expect(after.indexer.lastRun.status).toBe("failed");
 
   await page.goto("/discover");
-  await expect(page.getByRole("status")).toContainText("Indexing blocked: chain check failed");
+  await expect(page.getByRole("status", { name: "Catalog indexing status", exact: true })).toContainText("Indexing blocked: chain check failed");
 });
 
 test("the landing page is catalog-led", async ({ page }) => {
