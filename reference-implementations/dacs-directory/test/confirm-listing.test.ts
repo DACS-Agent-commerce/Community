@@ -126,6 +126,7 @@ process.env.DEMOS_CHAIN_IDENTITY = chainId;
 const pinnedCommit = "61b8e75aa8db5e408c49e1c3a89db4d673f45578";
 const cleanBuild = { name: "demos-node-software", version: "0.9.8", commit: pinnedCommit, dirty: false };
 const coordinates = {
+  transactionRef: transactionHash,
   anchorAddress,
   programName,
   contentHash: listingHash,
@@ -170,7 +171,7 @@ function stubChain(overrides: {
   /** getNetworkInfo's `nodeVersion`; a clean build of the pinned commit by default. */
   nodeVersion?: Record<string, unknown> | null;
   /** getTxByHash answers node2's unknown-hash `result: 400` for every hash. */
-  byHashUnknown?: boolean;
+  byHashUnknown?: boolean | "node2";
   /** getTransactions pages keyed by `start`; by default one newest page holding the write. */
   historyPages?: Record<string, NodeTransaction[]>;
   /** Members replacing the native readback's. */
@@ -205,7 +206,9 @@ function stubChain(overrides: {
       return Response.json({ result: 200, response: overrides.history === false ? [] : [historyRow(written)] });
     }
     if (call.message === "getTxByHash") {
-      if (overrides.byHashUnknown) return Response.json({ result: 400, response: "error" });
+      if (overrides.byHashUnknown) return overrides.byHashUnknown === "node2"
+        ? Response.json({ result: 404, response: null, extra: { reason: "not_found" } })
+        : Response.json({ result: 400, response: "error" });
       return call.data.hash === transactionHash
         ? Response.json({ result: 200, response: { ...byHashRow(written), ...overrides.byHash } })
         : Response.json({ result: 404, response: "error" });
@@ -531,88 +534,24 @@ test("a by-hash write at another locator or with other content never stands in f
   }
 });
 
-test("a missed by-hash read falls back to newest history, paging down by transaction id", async () => {
+test("public confirmation requires a transaction reference and never walks history on a miss", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    // node2 answers an unknown hash with `result: 400`; the write is on the second page.
-    stubChain({
-      byHashUnknown: true,
-      historyPages: { latest: [transfer(12), transfer(11)], 10: [historyWrite(10, transactionHash)] },
-    });
-    const response = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(response.status, 200);
-    const body = await response.json() as { state: string; nodeObservation: Observation };
-    assert.equal(body.state, "finality-unverified");
-    assert.equal(body.nodeObservation.transactionRef, transactionHash);
-    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }, { start: 10, limit: 100 }]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("history paging stops at the oldest transaction and refuses a page without a cursor", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    stubChain({ historyPages: { latest: [transfer(2), transfer(1)] } });
-    const exhausted = await POST(request(coordinates));
-    assert.equal(exhausted.status, 202);
-    assert.equal((await exhausted.json() as { reason: string }).reason, "canonical transaction is not included");
-    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }], "transaction one is the end of history");
-
-    for (const [name, page] of [
-      ["no ids", [transfer(undefined)]],
-      ["a negative id", [transfer(-1)]],
-      ["a fractional id", [transfer(1.5)]],
-    ] as const) {
-      stubChain({ historyPages: { latest: [...page] } });
-      const response = await POST(request(coordinates));
-      assert.equal(response.status, 202, name);
-      assert.match((await response.json() as { reason: string }).reason, /no valid cursor/, name);
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("unexpected node request"); };
+    assert.equal((await POST(request({ ...coordinates, transactionRef: undefined }))).status, 400);
+    assert.equal(calls, 0, "missing transaction ref is rejected before any node read");
+    for (const byHashUnknown of [true, "node2"] as const) {
+      const observed = stubChain({ byHashUnknown });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const before = observed.length;
+        const response = await POST(request(coordinates));
+        assert.equal(response.status, 202);
+        assert.equal(observed.length - before, 1, "one by-hash RPC per attempt");
+      }
+      assert.deepEqual(historyRequests, [], "no fallback history requests");
     }
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("a history write at another locator, with other bytes, or under another hash never stands in", async () => {
-  const originalFetch = globalThis.fetch;
-  const other = `stor-${"cd".repeat(20)}`;
-  const impostors = {
-    otherLocator: historyWrite(14, "a1".repeat(32), { to: other }),
-    otherBytes: historyWrite(13, "a2".repeat(32), { data: { ...listing, terms: { other: true } } }),
-    rewrite: historyWrite(12, "a3".repeat(32)),
-  };
-  // The block would carry any of them, so only the history match decides.
-  const block = {
-    content: {
-      timestamp: 1_786_360_000,
-      ordered_transactions: [transactionHash, ...Object.values(impostors).map((tx) => tx.hash)],
-    },
-  };
-  try {
-    // Without a browser transactionRef, the newest write of these exact bytes at this locator.
-    stubChain({ block, historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, historyWrite(10, transactionHash)] } });
-    const plain = await POST(request(coordinates));
-    assert.equal(plain.status, 200);
-    assert.equal((await plain.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
-
-    // With one, an identical rewrite under another hash is not the browser's write either.
-    stubChain({
-      block,
-      byHashUnknown: true,
-      historyPages: { latest: [impostors.otherLocator, impostors.otherBytes, impostors.rewrite, historyWrite(10, transactionHash)] },
-    });
-    const pinned = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(pinned.status, 200);
-    assert.equal((await pinned.json() as { nodeObservation: Observation }).nodeObservation.transactionRef, transactionHash);
-
-    stubChain({ block, byHashUnknown: true, historyPages: { latest: Object.values(impostors) } });
-    const none = await POST(request({ ...coordinates, transactionRef: transactionHash }));
-    assert.equal(none.status, 202);
-    assert.equal((await none.json() as { state: string }).state, "inclusion-pending");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("a native readback that reports another storage address is a coordinate mismatch", async () => {
@@ -743,16 +682,19 @@ test("failed HTTP and RPC envelopes cannot certify otherwise valid response data
   }
 }));
 
-test("block-one predecessor normalization and non-storage by-hash fallback retain valid observations", async () => withChain(async () => {
+test("block-one predecessor normalization retains valid observations and unrelated by-hash writes stay pending", async () => withChain(async () => {
   const normalizedChain = "ab".repeat(32);
   process.env.DEMOS_CHAIN_IDENTITY = normalizedChain;
   try {
     stubChain({ first: { content: { previousHash: `  ${normalizedChain.toUpperCase()}  ` } },
       byHash: { type: "native", content: { ...transaction.content, type: "native" } } });
     const result = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
-    assert.equal(result.status, "included");
-    assert.equal(result.status === "included" && result.observation.chainIdentity, normalizedChain);
-    assert.deepEqual(historyRequests, [{ start: "latest", limit: 100 }]);
+    assert.equal(result.status, "pending");
+    assert.deepEqual(historyRequests, []);
+    stubChain({ first: { content: { previousHash: `  ${normalizedChain.toUpperCase()}  ` } } });
+    const valid = await observeListingAnchorInclusion({ ...observationInput, transactionRef: transactionHash });
+    assert.equal(valid.status, "included");
+    assert.equal(valid.status === "included" && valid.observation.chainIdentity, normalizedChain);
   } finally { process.env.DEMOS_CHAIN_IDENTITY = chainId; }
 }));
 

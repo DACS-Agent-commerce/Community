@@ -94,8 +94,7 @@ async function findCanonicalWrite(
   expectedTxRef?: string,
 ): Promise<Record<string, unknown> | null> {
   if (expectedTxRef) {
-    const known = await writeByHash(anchorAddress, listingContentHash, expectedTxRef);
-    if (known) return known;
+    return writeByHash(anchorAddress, listingContentHash, expectedTxRef);
   }
   let cursor: number | "latest" = "latest";
   let scanned = 0;

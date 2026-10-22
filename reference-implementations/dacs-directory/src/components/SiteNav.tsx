@@ -9,7 +9,7 @@ const LINKS = [
   { href: "/discover", label: "discover", featured: true },
   { href: "/how-it-works", label: "how it works" },
   { href: "/verify", label: "verify" },
-  { href: "/register", label: "list your service" },
+  { href: "/register", label: "submit listing pointers" },
   { href: "/api/dacs", label: "developer api" },
 ];
 

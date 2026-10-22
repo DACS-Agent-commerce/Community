@@ -42,9 +42,7 @@ export async function POST(req: NextRequest) {
     typeof body.sellerClaim !== "string" || canonicalOwner(body.sellerClaim) === null ||
     typeof body.listingId !== "string" || !/^[a-z0-9-]{1,64}$/.test(body.listingId) ||
     !Number.isSafeInteger(body.listingVersion) || Number(body.listingVersion) < 1 ||
-    (body.transactionRef !== undefined && (
-      typeof body.transactionRef !== "string" || !/^[0-9a-fA-F]{64}$/.test(body.transactionRef)
-    ))
+    typeof body.transactionRef !== "string" || !/^[0-9a-fA-F]{64}$/.test(body.transactionRef)
   ) {
     return NextResponse.json({ error: "invalid listing confirmation coordinates" }, { status: 400 });
   }

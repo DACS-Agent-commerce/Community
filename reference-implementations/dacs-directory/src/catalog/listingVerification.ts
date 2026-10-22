@@ -4,6 +4,7 @@ import {
   isListing,
   isVerificationMethod,
   readListingArtifact,
+  isLegacyMvpListing,
   verifyComponentSignature,
   type IdentityBundle,
   type LegacyMvpListing,
@@ -63,8 +64,8 @@ const record = (value: unknown): Record<string, unknown> | null =>
 
 // Directory catalog profile: the rules this catalog keeps on top of the pinned
 // SDK reader's isListing. They only ever refuse, and run after isListing has
-// accepted the artifact, so these rules never admit a Listing isListing
-// refuses. They are not the whole reader: the identity presentation also
+// accepted the artifact (with the pinned compatibility patch). These rules
+// never admit a Listing isListing refuses. They are not the whole reader: the identity presentation also
 // accepts main's hex signature spelling, which the SDK's presentation
 // verifier refuses (README, "Listings that /register published"). Procurement remains outside this reader profile until reconciliation
 // can resolve the publisher as buyer and attribute supplier history to the
@@ -145,9 +146,9 @@ function invalid(
  * DACS-1 §6.3.2 per-claim presentation by the presenting claim: the entry
  * whose `ref` is the exact `presentedBy` bytes, verified under that claim's
  * key over the same bundle-presentation bytes the SDK reader signs. The
- * Standard leaves this signature's encoding open; the pinned SDK reader
- * (sdkReaderVerifiers.ts) reads only Base64URL, but main's `/register` wrote
- * wallet hex, so both spellings are read (presentationSignatureBytes). The
+ * Standard leaves this bare signature's encoding open. Directory and its SDK
+ * adapter accept Base64URL, historical wallet hex and the pinned Standard
+ * vector's padded Base64 (presentationSignatureBytes). The
  * spelling is signed Listing scope, so the Listing signature fixes it.
  */
 export async function verifyIdentityPresentation(
@@ -264,7 +265,12 @@ async function verifyListingArtifact(
   if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384) {
     return invalid("LEGACY_LISTING_INVALID");
   }
-  const readable = readListingArtifact(raw);
+  // The historical Directory also wrote a structured envelope. Validate its
+  // exact unsigned legacy body before authenticating the original envelope.
+  const legacyScope = stripSignature(raw);
+  const readable = typeof raw.signature === "object" && isLegacyMvpListing(legacyScope)
+    ? { compatibility: "legacy-mvp" as const, listing: legacyScope }
+    : readListingArtifact(raw);
   if (!readable || readable.compatibility !== "legacy-mvp") {
     return invalid("LEGACY_LISTING_INVALID");
   }

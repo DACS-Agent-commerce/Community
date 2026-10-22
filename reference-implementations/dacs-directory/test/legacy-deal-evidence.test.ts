@@ -92,9 +92,7 @@ async function indexed(deal: RegisteredDeal, primaryClaim = seller) {
   return record;
 }
 
-test("a fully signed legacy two-copy deal never counts: the pinned SDK authenticates no legacy agreement", async () => {
-  // verifyBundleCore reports every legacy agreement reference as `signature-missing`
-  // (legacy-agreement-signatures-missing), so the strict reference policy cannot pass.
+test("a fully signed legacy two-copy deal retains authenticated agreement verification", async () => {
   const registered = legacyDeal("legacy-ok", [{ role: "buyer" }, { role: "seller" }]);
   const scope = { ...storage[registered.buyerBundleRef] };
   delete scope.signatures;
@@ -103,13 +101,13 @@ test("a fully signed legacy two-copy deal never counts: the pinned SDK authentic
   const [deal] = record.deals;
   assert.equal(deal.outcome, "completed", "the legacy reader read and shape-checked both copies");
   assert.equal(deal.signatureVerified, true, "both parties signed the copy");
-  assert.equal(deal.anchoredByRole, "buyer", "no copy passed the strict policy, so the buyer copy is reported");
+  assert.equal(deal.anchoredByRole, "seller", "the authenticated seller copy is preferred");
   assert.equal(deal.bundleContentHash, contentHash(scope), "the root callback captures precisely the signed scope");
   assert.equal(deal.finalisedAt, 1_700_000_000_000);
   assert.equal(deal.sellerOutcome, "completed");
-  assert.equal(deal.refsVerified, false);
-  assert.equal(deal.reputationEligible, false);
-  assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(deal.refsVerified, true);
+  assert.equal(deal.reputationEligible, true);
+  assert.equal(record.reputation.bundleCount, 1);
 });
 
 test("each legacy two-copy guard withholds reputation", async () => {
@@ -136,7 +134,7 @@ test("each legacy two-copy guard withholds reputation", async () => {
   }
 });
 
-test("a legacy buyer-anchored copy reports the seller-relative outcome and its own SR-2 anchor time", async () => {
+test("an authenticated legacy seller copy reports its own outcome and SR-2 anchor time", async () => {
   const deal = legacyDeal("legacy-abort", [
     { role: "buyer", change: (body) => { body.outcome = "aborted-by-self"; } },
     { role: "seller", change: (body) => { body.outcome = "aborted-by-other"; } },
@@ -145,10 +143,10 @@ test("a legacy buyer-anchored copy reports the seller-relative outcome and its o
     store.recordArtifact({ locator: at, kind: "bundle", profile: "legacy", observedAt: 1, contentHash: "a".repeat(64), anchorTime });
   }
   const [published] = (await indexed(deal)).deals;
-  assert.equal(published.outcome, "aborted-by-self");
+  assert.equal(published.outcome, "aborted-by-other");
   assert.equal(published.sellerOutcome, "aborted-by-other", "the buyer's own abort is the seller's counterparty abort");
-  assert.equal(published.anchorTimestamp, 111, "the reported copy is the buyer's");
-  assert.equal(published.reputationEligible, false);
+  assert.equal(published.anchorTimestamp, 222, "the reported copy is the seller's");
+  assert.equal(published.reputationEligible, true);
 });
 
 test("a legacy deal with only one verifiable copy keeps its signature verdict but never counts", async () => {
@@ -174,41 +172,26 @@ test("legacy anchor names are the historical producer's raw-jobId names", () => 
   assert.equal(legacySessionAnchorName.agreement("a:b%2F"), "dacs3:agreement:a:b%2F");
 });
 
-test("legacy public metadata distinguishes missing, malformed, and unsigned buyer copies", async () => {
+test("a valid seller copy retains its metadata when the buyer copy is missing, malformed or unsigned", async () => {
   for (const failure of ["missing", "malformed", "unsigned"] as const) {
     const deal = legacyDeal(`legacy-${failure}`, [{ role: "buyer", signers: failure === "unsigned" ? [] : undefined }, { role: "seller" }]);
     if (failure === "missing") delete storage[deal.buyerBundleRef];
     if (failure === "malformed") storage[deal.buyerBundleRef] = { unexpected: true };
-    const raw = storage[deal.buyerBundleRef];
     const [published] = (await indexed(deal)).deals;
-    assert.equal(published.signatureVerified, false, failure);
+    assert.equal(published.signatureVerified, true, failure);
     assert.equal(published.refsVerified, false, failure);
     assert.equal(published.reputationEligible, false, failure);
-    if (failure !== "unsigned") {
-      assert.equal(published.outcome, undefined, failure);
-      assert.equal(published.anchoredByRole, undefined, failure);
-      assert.equal(published.bundleContentHash, undefined, failure);
-      assert.equal(published.finalisedAt, undefined, failure);
-    } else {
-      const scope = { ...raw };
-      delete scope.signatures;
-      delete scope.anchoredByRole;
-      assert.equal(published.outcome, "completed");
-      assert.equal(published.anchoredByRole, "buyer");
-      assert.equal(published.bundleContentHash, contentHash(scope));
-    }
+    assert.equal(published.anchoredByRole, "seller", failure);
+    assert.equal(published.outcome, "completed", failure);
+    assert.equal(published.finalisedAt, 1_700_000_000_000, failure);
   }
-  const noDeals = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [] },
-    undefined, async () => { throw new Error("identity unavailable"); });
-  assert.deepEqual(noDeals.deals, []);
-  assert.equal(noDeals.reputation.bundleCount, 0);
 });
 
-test("an unverified legacy orchestrator copy retains its reported role without reputation", async () => {
+test("an unauthenticated orchestrator copy cannot give a valid seller copy reputation", async () => {
   const registered = legacyDeal("legacy-orchestrator", [{ role: "orchestrator" }, { role: "seller" }]);
   const [published] = (await indexed(registered)).deals;
-  assert.equal(published.anchoredByRole, "orchestrator");
-  assert.equal(published.signatureVerified, false);
+  assert.equal(published.anchoredByRole, "seller");
+  assert.equal(published.signatureVerified, true);
   assert.equal(published.refsVerified, false);
   assert.equal(published.reputationEligible, false);
 });
@@ -286,4 +269,58 @@ test("legacy discovery requires the expected buyer and both authenticated party 
     (agreement.signatures as Obj[]).map(s => ({ ...s, value: "invalid" }))]) {
     assert.equal(await validAgreementForDiscovery({ ...agreement, signatures }, jobId, buyer), false);
   }
+});
+
+
+test("legacy agreement authentication rejects missing, invalid and foreign party signatures", async () => {
+  for (const mode of ["missing", "buyer-only", "invalid", "foreign"] as const) {
+    const jobId = `legacy-auth-${mode}`;
+    const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
+    const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))];
+    if (mode === "missing") delete agreement.signatures;
+    if (mode === "buyer-only") agreement.signatures = (agreement.signatures as Obj[]).slice(0, 1);
+    if (mode === "invalid") (agreement.signatures as Obj[])[1].value = "A".repeat(86);
+    if (mode === "foreign") (agreement.signatures as Obj[])[1].party = outsider;
+    const record = await indexed(deal);
+    assert.equal(record.deals[0].refsVerified, false, mode);
+    assert.equal(record.reputation.bundleCount, 0, mode);
+  }
+});
+
+
+test("legacy evidence is independently authenticated before the two-copy deal counts", async () => {
+  for (const mode of ["valid", "orchestrator", "missing", "invalid", "foreign", "seller", "tampered"] as const) {
+    const jobId = `legacy-evidence-${mode}`;
+    const evidence: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 1,
+      outcome: "failure", paymentTxRefs: [], observedAt: 1700000000000 };
+    const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
+    const signed: Obj = { ...evidence, signature: {
+      algorithm: "ed25519", signer: mode === "foreign" || mode === "orchestrator" ? outsider : mode === "seller" ? seller : buyer,
+      value: signWith(mode === "foreign" || mode === "orchestrator" ? 2 : mode === "seller" ? 1 : 0, `dacs-evidence:v1:${contentHash(evidence)}`, "base64url"),
+    } };
+    if (mode === "missing") delete signed.signature;
+    if (mode === "invalid") (signed.signature as Obj).value = "A".repeat(86);
+    if (mode === "tampered") signed.observedAt = 42;
+    storage[deriveAnchorAddress(buyer, legacySessionAnchorName.evidence(jobId))] = signed;
+    for (const at of [deal.buyerBundleRef, deal.sellerBundleRef!]) {
+      const body = { ...storage[at] }; delete body.signatures; delete body.anchoredByRole;
+      if (mode === "orchestrator") (body.parties as Obj[]).push({ role: "orchestrator", primaryClaim: outsider, bundleHash: "o".repeat(64) });
+      body.settlementEvidence = [{ kind: "dacs-4-evidence", id: `evidence-${jobId}`, contentHash: contentHash(evidence) }];
+      storage[at] = { ...body, anchoredByRole: storage[at].anchoredByRole,
+        signatures: (mode === "orchestrator" ? [0, 1, 2] : [0, 1]).map(index => partySignature(index, "dacs-bundle:v1:", body)) };
+    }
+    const record = await indexed(deal);
+    const allowed = mode === "valid" || mode === "orchestrator";
+    assert.equal(record.deals[0].refsVerified, allowed, mode);
+    assert.equal(record.reputation.bundleCount, allowed ? 1 : 0, mode);
+  }
+});
+
+
+test("historical hex agreement signatures retain their authenticated read profile", async () => {
+  const jobId = "legacy-hex-agreement";
+  const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
+  const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))];
+  for (const signature of agreement.signatures as Obj[]) signature.value = Buffer.from(signature.value as string, "base64url").toString("hex");
+  assert.equal((await indexed(deal)).deals[0].refsVerified, true);
 });

@@ -350,20 +350,20 @@ test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top
 
 test("admission reads the identity presentation: exact presentedBy entry, base64url or /register hex", async () => {
   // DACS-1 §6.3.2 and CORE §B.7 leave the per-claim signature's encoding open.
-  // The pinned SDK reader reads base64url only; main's /register wrote the
-  // wallet's 128 hex digits, so the Directory reads both, over the same bytes.
+  // Directory and its SDK adapter accept the Standard vector's Base64 and
+  // historical wallet hex alongside Base64URL, all over the same signed bytes.
   const signatureBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey));
   const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 99)));
   const otherBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), otherKey));
   const cases: Record<string, [(message: string) => { ref: string; signature: string }, boolean, boolean]> = {
     "canonical base64url under the exact presentedBy": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64url") }), true, true],
-    "raw hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex") }), false, true],
-    "uppercase hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex").toUpperCase() }), false, true],
+    "raw hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex") }), true, true],
+    "uppercase hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex").toUpperCase() }), true, true],
     "base64url by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("base64url") }), false, false],
     "raw hex by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("hex") }), false, false],
     "raw hex over other bytes": [(message) => ({ ref: claim, signature: signatureBytes(`${message}0`).toString("hex") }), false, false],
     "0x-prefixed hex": [(message) => ({ ref: claim, signature: `0x${signatureBytes(message).toString("hex")}` }), false, false],
-    "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), false, false],
+    "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), true, true],
     // Same CF-3 identity, other bytes: SDK readers select the entry by exact `ref`.
     "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), false, false],
   };
@@ -535,8 +535,8 @@ const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown
   return scope;
 };
 
-test("LR-2 caps the canonical form of the signed Listing at 16,384 bytes, as the SDK reader does, not the raw JSON", async () => {
-  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
+test("LR-2 caps canonical unsigned Listing scope at 16,384 bytes, independently of raw JSON", async () => {
+  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(stripEnvelope(listing)), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
     padding: "x".repeat(bytes - canonicalBytes(signedCurrentListing({ padding: "" }))),
   });
@@ -544,10 +544,10 @@ test("LR-2 caps the canonical form of the signed Listing at 16,384 bytes, as the
   assert.equal(canonicalBytes(atCap), 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
-  // The signature envelope counts: an unsigned form at the cap is over it once signed.
+  // The envelope is omitted from canonical signed scope, including at the cap.
   const unsignedAtCap = signedCurrentListing({ padding: "x".repeat(16_384 - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))) });
   assert.equal(canonicalBytes(stripEnvelope(unsignedAtCap)), 16_384);
-  assert.equal(await verifyListing(unsignedAtCap), null);
+  assert.ok(await verifyListing(unsignedAtCap));
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);

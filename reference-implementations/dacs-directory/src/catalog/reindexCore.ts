@@ -19,6 +19,7 @@ import {
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
 import { pinnedNodeDeployment } from "./listingFinality";
+import { pinnedChainIdentity } from "./nodeDeployment";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
@@ -69,7 +70,7 @@ export interface ReindexOptions {
    * Deployment preflight injected by tests. Production checks the configured
    * node's reported build and chain against the pin (pinnedNodeDeployment).
    */
-  nodeDeployment?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  nodeDeployment?: () => Promise<{ ok: true; chainIdentity?: string } | { ok: false; reason: string }>;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
@@ -123,8 +124,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
-  //    confirmed large tip regression clears derived state before a genesis
-  //    rescan. First run backfills the full history.
+  //    changed chain identity or confirmed large tip regression clears derived
+  //    state before a genesis rescan. An old cache without an identity replays too. First run backfills the full history.
   let state = loadScanState();
   const resetThreshold = chainResetThreshold();
   let observedChainTip: number | null = null;
@@ -134,13 +135,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  if (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold)) {
+  const servedChain = deployment.chainIdentity ?? pinnedChainIdentity();
+  const identityChanged = state.chainIdentity !== servedChain;
+  if (identityChanged || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
+      // An interrupted genesis replay must not be marked migrated.
+      schemaVersion: 0,
+      chainIdentity: servedChain,
       lastSeenTxId: 0,
-      lastChainTip: observedChainTip,
+      ...(observedChainTip === null ? {} : { lastChainTip: observedChainTip }),
       listings: {},
       deals: {},
       programs: {},
@@ -152,8 +157,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
     log(
-      `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs ` +
-        `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
+      `chain replacement detected: identity ${String(state.chainIdentity)}, tip ${observedChainTip}, previous cursor ${previousCursor}; ` +
+        `cleared chain-derived cache and restarting from genesis`,
     );
   }
   // v9 replays history to recover duplicate programs discarded by older caches.

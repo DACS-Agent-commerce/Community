@@ -117,7 +117,7 @@ function sql(query: string, ...params: unknown[]) {
   } finally { db.close(); }
 }
 const emptyState = (): ScanState => ({
-  schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
+  schemaVersion: 9, chainIdentity: "d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc", lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
   verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
 });
 const candidateTable = () => sql("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").length > 0;

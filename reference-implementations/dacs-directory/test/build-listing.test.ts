@@ -362,7 +362,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
         assert.deepEqual(value.listing, signedListing, "original hex bytes survive recovery");
       }
       const { POST: confirm } = await import("../app/api/dacs/confirm-listing/route.js");
-      const confirmed = await confirm(request({ anchorAddress: built.anchorAddress, programName: built.programName,
+      const confirmed = await confirm(request({ transactionRef: "cd".repeat(32), anchorAddress: built.anchorAddress, programName: built.programName,
         contentHash: built.contentHash, sellerClaim: claim, listingId: built.listing.listingId,
         listingVersion: built.listing.listingVersion }));
       // Recovered history passes confirm-listing's verification; registration

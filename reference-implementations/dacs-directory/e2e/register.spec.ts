@@ -1,239 +1,53 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { LISTING_PUBLICATION_KEY } from "../src/components/listing-publication-recovery.js";
-
-const keyHex = "12".repeat(32);
-const claim = `did:demos:agent:${keyHex}`;
+const claim = `did:demos:agent:${"12".repeat(32)}`;
 const anchorAddress = `stor-${"34".repeat(20)}`;
-const programName = "dacs1-ZGFjczEtdGVzdA";
-const contentHash = "56".repeat(32);
+const pending = {
+  version: 1, claim, listingId: "saved-service", listingVersion: 1, anchorAddress,
+  programName: "saved-program", contentHash: "56".repeat(32), signedListing: {}, transaction: null,
+  registration: { primaryClaim: claim, listingAnchors: [anchorAddress] },
+  stage: "broadcast-uncertain", createdAt: 1786360000000,
+};
 
-async function json(route: Route, body: unknown, status = 200) {
-  await route.fulfill({
-    status,
-    contentType: "application/json",
-    body: JSON.stringify(body),
-    headers: { "access-control-allow-origin": "*" },
+test("this release exposes discovery submission, with no wallet publication flow", async ({ page }) => {
+  const writes: string[] = [];
+  await page.route("**/api/dacs/**", async route => {
+    if (route.request().method() === "POST") writes.push(route.request().url());
+    await route.fulfill({ json: {} });
   });
-}
-
-test("seller publication survives registration failure and reload without rebroadcasting", async ({ context, page }) => {
-  await page.addInitScript((address) => {
-    const calls: Array<{ method: string; params?: unknown[] }> = [];
-    Object.assign(window, {
-      __sellerWalletCalls: calls,
-      demos: {
-        request: async (request: { method: string; params?: unknown[] }) => {
-          calls.push(request);
-          if (request.method === "connect") return { success: true, data: { address } };
-          if (request.method === "sign") return { success: true, data: { signature: "ab".repeat(64) } };
-          if (request.method === "sendTransaction") return { success: true, data: { hash: "cd".repeat(32) } };
-          throw new Error(`unexpected wallet method ${request.method}`);
-        },
-      },
-    });
-  }, `0x${keyHex}`);
-
-  const unsignedRegistration = {
-    primaryClaim: claim,
-    displayName: "Recovery service",
-    listingAnchors: [anchorAddress],
-    deals: [],
-  };
-  let registrationPosts = 0;
-  let confirmationPosts = 0;
-  await context.route("**/api/dacs/build-listing", async (route) => {
-    const input = route.request().postDataJSON() as { identitySignature?: string; listingSignature?: string };
-    if (!input.identitySignature) {
-      return json(route, { identityMessage: "identity-message", identityPresentedAt: 1_786_360_000_000 });
-    }
-    const listing = {
-      dacsVersion: "1",
-      listingId: "recovery-service",
-      listingVersion: 1,
-      offering: { deliverable: { kind: "storage-program", accessModel: "public" } },
-      ...(input.listingSignature ? { signature: { algorithm: "ed25519", signer: claim, value: input.listingSignature } } : {}),
-    };
-    if (!input.listingSignature) return json(route, {
-      listing,
-      message: "listing-message",
-      contentHash,
-      logicalAddress: `dacs1:did%3Ademos%3Aagent%3A${keyHex}:recovery-service:v1`,
-      programName,
-      exists: false,
-      publicationReady: false,
-      tx: null,
-    });
-    return json(route, {
-      listing,
-      contentHash,
-      logicalAddress: `dacs1:did%3Ademos%3Aagent%3A${keyHex}:recovery-service:v1`,
-      programName,
-      anchorAddress,
-      exists: false,
-      publicationReady: true,
-      tx: {
-        content: {
-          type: "storageProgram",
-          data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", data: listing, salt: "" }],
-          nonce: 8,
-        },
-      },
-      registration: {
-        ...unsignedRegistration,
-        ownerSignature: { message: "initial-registration-message", signedAt: 1_786_360_000_000 },
-      },
-    });
-  });
-  await context.route("**/api/dacs/confirm-listing", async (route) => {
-    confirmationPosts++;
-    return json(route, {
-      confirmed: true,
-      // The shape of a future verified receipt; the server issues none at this pin.
-      state: "finalized",
-      anchorReceipt: { receiptVersion: "1", state: "finalized", transactionRef: { kind: "demos-storage-program", value: "cd".repeat(32) } },
-    });
-  });
-  await context.route("**/api/dacs/prepare-registration", (route) => json(route, {
-    registration: {
-      ...unsignedRegistration,
-      ownerSignature: { message: `registration-message-${registrationPosts + 1}`, signedAt: Date.now() },
-    },
-  }));
-  await context.route("**/api/dacs/register", async (route) => {
-    registrationPosts++;
-    return registrationPosts === 1
-      ? json(route, { error: "temporary registry write failure" }, 503)
-      : json(route, { ok: true, ownerVerified: true, queued: true });
-  });
-
   await page.goto("/register");
-  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Service title").fill("Recovery service");
-  await page.getByLabel("What the buyer receives").fill("A signed result with restart-safe publication recovery.");
-  await page.getByLabel("Service ID").fill("recovery-service");
-  await page.getByLabel("Fixed amount").fill("1");
-  await expect(page.getByText("Ready for review.", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review listing" }).click();
-  await expect(page.getByText(/expect four wallet approvals/i)).toBeVisible();
-  await page.getByRole("button", { name: "Build exact artifact" }).click();
-  await expect(page.getByText(/Exact unsigned artifact ready/)).toBeVisible();
-  await page.getByText("Exact artifact presented for Listing signature").click();
-  await expect(page.getByText(/"accessModel": "public"/)).toBeVisible();
-  await page.getByRole("button", { name: "Sign exact artifact and publish" }).click();
-
-  await expect(page.getByText("temporary registry write failure", { exact: true })).toBeVisible();
-  await expect(page.locator(".progress-list li.failed")).toContainText("Register the catalog pointer");
-  await expect.poll(() => page.evaluate(() => (
-    (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
-      .filter((call) => call.method === "sendTransaction").length
-  ))).toBe(1);
-  const sentPayload = await page.evaluate(() => {
-    const calls = (window as unknown as {
-      __sellerWalletCalls: Array<{ method: string; params?: unknown[] }>;
-    }).__sellerWalletCalls;
-    return calls.find((call) => call.method === "sendTransaction")?.params?.[0] as {
-      content?: { data?: [string, { salt?: string; data?: { signature?: { signer?: string } } }] };
-    };
-  });
-  expect(sentPayload.content?.data?.[1].salt).toBe("");
-  expect(sentPayload.content?.data?.[1].data?.signature?.signer).toBe(claim);
-  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();
-
-  await page.reload();
-  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
-  await expect(page.getByText("recovery-service · version 1", { exact: true })).toBeVisible();
-  await expect(page.getByText(anchorAddress, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Check chain and resume" }).click();
-
-  await expect(page.getByText(/finalized on-chain.*authenticated as a catalog candidate/)).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (
-    (window as unknown as { __sellerWalletCalls: Array<{ method: string }> }).__sellerWalletCalls
-      .filter((call) => call.method === "sendTransaction").length
-  ))).toBe(0);
-  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).toBeNull();
-  expect(registrationPosts).toBe(2);
-  expect(confirmationPosts).toBe(2);
+  await expect(page.getByRole("heading", { name: "Submit listing pointers" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Read the registration API" })).toHaveAttribute("href", "/api/dacs");
+  await expect(page.getByRole("button", { name: /connect|sign|publish|resume/i })).toHaveCount(0);
+  expect(writes).toEqual([]);
 });
 
-test("unfinished publication blocks another wallet with actionable mobile-safe guidance", async ({ page }) => {
-  const otherKeyHex = "78".repeat(32);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.addInitScript(({ key, savedClaim, savedAnchor, savedProgram, savedHash, connectedAddress }) => {
-    localStorage.setItem(key, JSON.stringify({
-      version: 1,
-      claim: savedClaim,
-      listingId: "saved-service",
-      listingVersion: 2,
-      anchorAddress: savedAnchor,
-      programName: savedProgram,
-      contentHash: savedHash,
-      signedListing: { dacsVersion: "1", listingId: "saved-service", listingVersion: 2, signature: {} },
-      transaction: null,
-      registration: { primaryClaim: savedClaim, displayName: "Saved service", listingAnchors: [savedAnchor], deals: [] },
-      stage: "registering",
-      createdAt: Date.now(),
-    }));
-    Object.assign(window, {
-      demos: {
-        request: async (request: { method: string }) => {
-          if (request.method === "connect") return { success: true, data: { address: connectedAddress } };
-          throw new Error(`unexpected wallet method ${request.method}`);
-        },
-      },
-    });
-  }, {
-    key: LISTING_PUBLICATION_KEY,
-    savedClaim: claim,
-    savedAnchor: anchorAddress,
-    savedProgram: programName,
-    savedHash: contentHash,
-    connectedAddress: `0x${otherKeyHex}`,
+for (const value of [null, { listingId: "saved-service" }]) test(`saved publication can be checked and deliberately discarded (${value ? "visible" : "unreadable"})`, async ({ page }) => {
+  await page.addInitScript(({ key, pending }) => { localStorage.setItem(key, JSON.stringify(pending)); }, { key: LISTING_PUBLICATION_KEY, pending });
+  const requests: string[] = [];
+  await page.route("**/api/dacs/**", async route => {
+    requests.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
+    await route.fulfill({ json: { value } });
   });
-
   await page.goto("/register");
-  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
-  await expect(page.getByText(/Switch to that account in Demos Wallet, then reload this page/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Continue" })).toHaveCount(0);
-  const dimensions = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: window.innerWidth }));
-  expect(dimensions.width).toBeLessThanOrEqual(dimensions.viewport);
+  await expect(page.getByRole("heading", { name: "Saved publication recovery" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Discard local recovery data" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Check saved anchor" }).click();
+  await expect(page.getByRole("status")).toContainText(value ? "reports data" : "no readable data");
+  await expect(page.getByRole("button", { name: "Discard local recovery data" })).toBeDisabled();
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Discard local recovery data" }).click();
+  await expect(page.getByRole("heading", { name: "Saved publication recovery" })).toHaveCount(0);
+  expect(await page.evaluate(key => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).toBeNull();
+  expect(requests).toEqual(["GET /api/dacs/artifact"]);
 });
 
-
-test("an included receipt cannot advance publication to either registration endpoint", async ({ context, page }) => {
-  await page.addInitScript(({ key, savedClaim, savedAnchor, savedProgram, savedHash, address }) => {
-    localStorage.setItem(key, JSON.stringify({
-      version: 1, claim: savedClaim, listingId: "saved-service", listingVersion: 1,
-      anchorAddress: savedAnchor, programName: savedProgram, contentHash: savedHash,
-      signedListing: { dacsVersion: "1", listingId: "saved-service", listingVersion: 1, signature: {} },
-      transaction: null,
-      registration: { primaryClaim: savedClaim, displayName: "Saved service", listingAnchors: [savedAnchor], deals: [] },
-      stage: "confirming", createdAt: Date.now(),
-    }));
-    Object.assign(window, { demos: { request: async ({ method }: { method: string }) => {
-      if (method === "connect") return { success: true, data: { address } };
-      throw new Error(`unexpected wallet method ${method}`);
-    } } });
-  }, { key: LISTING_PUBLICATION_KEY, savedClaim: claim, savedAnchor: anchorAddress, savedProgram: programName, savedHash: contentHash, address: `0x${keyHex}` });
-  let preparePosts = 0;
-  let registrationPosts = 0;
-  await context.route("**/api/dacs/confirm-listing", (route) => json(route, {
-    confirmed: true, state: "included", anchorReceipt: { receiptVersion: "1", state: "included" },
-  }));
-  await context.route("**/api/dacs/prepare-registration", (route) => {
-    preparePosts++;
-    return json(route, { error: "registration must wait for finality" }, 500);
-  });
-  await context.route("**/api/dacs/register", (route) => {
-    registrationPosts++;
-    return json(route, { error: "registration must wait for finality" }, 500);
-  });
+test("an unavailable anchor check retains recovery data", async ({ page }) => {
+  await page.addInitScript(({ key, pending }) => { localStorage.setItem(key, JSON.stringify(pending)); }, { key: LISTING_PUBLICATION_KEY, pending });
+  await page.route("**/api/dacs/artifact?*", route => route.fulfill({ status: 503, json: {} }));
   await page.goto("/register");
-  await page.getByRole("button", { name: "Connect Demos wallet" }).click();
-  await page.getByRole("button", { name: "Check chain and resume" }).click();
-  await expect(page.locator(".progress-list li.failed")).toContainText("Verify the listing from chain");
-  await expect(page.getByText("The anchored listing failed independent verification.")).toBeVisible();
-  expect(preparePosts).toBe(0);
-  expect(registrationPosts).toBe(0);
-  expect(await page.evaluate((key) => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();
+  await page.getByRole("button", { name: "Check saved anchor" }).click();
+  await expect(page.getByRole("status")).toContainText("could not be checked");
+  await expect(page.getByRole("button", { name: "Discard local recovery data" })).toHaveCount(0);
+  expect(await page.evaluate(key => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();
 });
