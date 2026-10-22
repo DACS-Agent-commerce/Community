@@ -446,9 +446,82 @@ test("every rejection has a public explanation and coordinate-free diagnostics o
     const item = store.indexerDiagnostics({ deadLetterLocator: at }).listingRejectionDiagnostics.items[0];
     assert.equal(item.code, code);
     assert.ok(item.message.trim().length > 0, code);
+    assert.ok(item.guidance.trim().length > 0, code);
     assert.equal(Object.hasOwn(item, "listingId"), false, code);
     assert.equal(Object.hasOwn(item, "listingVersion"), false, code);
   }
+});
+
+test("owner-mismatch diagnostics preserve authenticated coordinates but require a signed registration for public notice", async () => {
+  const anchor = `stor-${"c".repeat(40)}`;
+  const data = signedListing("owner-mismatch", attested({ kind: "self-signed" }));
+  assert.equal((await verifyListingResult(data)).ok, true);
+  const reg: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${"f".repeat(64)}`, programName: "opaque", data });
+  try {
+    for (const signed of [false, true]) {
+      if (signed) {
+        const message = registrationMessage(reg, 1);
+        reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
+      }
+      const record = await indexRegistration(reg, undefined, async () => ({}));
+      assert.deepEqual(record.listings, []);
+      const diagnostics = store.indexerDiagnostics({ deadLetterLocator: anchor }).listingRejectionDiagnostics;
+      const item = diagnostics.items.find((item) => item.locator === anchor)!;
+      assert.equal(item.code, "OWNER_CLAIM_BINDING");
+      assert.equal(item.listingId, "owner-mismatch");
+      assert.equal(item.listingVersion, 1);
+      assert.equal(item.publicNotice, signed);
+      assert.equal(diagnostics.publicTotal, signed ? 1 : 0);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.clearRegistrationListingRejections(seller);
+  }
+});
+
+test("diagnostic pruning keeps current sellers case-insensitively and removes departed sellers", () => {
+  const keepAt = `stor-${"d".repeat(40)}`, dropAt = `stor-${"e".repeat(40)}`;
+  const other = `did:demos:agent:${"f".repeat(64)}`;
+  store.recordListingRejection(keepAt, seller, "LISTING_SIGNATURE_INVALID");
+  store.recordListingRejection(dropAt, other, "LISTING_SIGNATURE_INVALID");
+  store.pruneListingRejections([seller.toUpperCase()]);
+  const items = store.indexerDiagnostics().listingRejectionDiagnostics.items;
+  assert.ok(items.some((item) => item.locator === keepAt));
+  assert.equal(items.some((item) => item.locator === dropAt), false);
+  store.clearRegistrationListingRejections(seller);
+});
+
+test("missing candidate owners and restored withdrawal sources without bindings are empty", async () => {
+  assert.equal(store.isOwnerRevocationCandidate("a".repeat(64), `stor-${"f".repeat(40)}`, `0x${keyHex}`), false);
+  const { default: Database } = await import("better-sqlite3");
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  const previous = db.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string } | undefined;
+  try {
+    db.prepare("INSERT OR REPLACE INTO kv_state(key,value_json,updated_at) VALUES ('withdrawal-sources',?,1)")
+      .run(JSON.stringify([{ domain: "restored.example", seller, hashes: [], incomplete: [], provenance: "publisher-signature" }]));
+    assert.deepEqual(store.boundWellKnownRevocations(seller, "a".repeat(64), "listing", 1), []);
+  } finally {
+    if (previous) db.prepare("UPDATE kv_state SET value_json=? WHERE key='withdrawal-sources'").run(previous.value_json);
+    else db.prepare("DELETE FROM kv_state WHERE key='withdrawal-sources'").run();
+    db.close();
+  }
+});
+
+test("legacy numeric-looking validity strings do not become current-profile numeric windows", async () => {
+  const scope = { agentId: seller, serviceId: "legacy-window", name: "Legacy", description: "Historical validity extension",
+    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
+    supportedDelivery: ["deliver-storage-program"], validity: { notBefore: "9007199254740991", notAfter: "1" } };
+  const data = { ...scope, signature: Buffer.from(sign(`dacs-listing:v1:${contentHash(scope)}`), "base64url").toString("hex") };
+  assert.equal((await verifyListingResult(data)).ok, true);
+  const anchor = `stor-${"9".repeat(40)}`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
+  try {
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "Legacy", listingAnchors: [anchor] }, undefined, async () => ({}));
+    assert.deepEqual(record.listings.map((item) => [item.listingId, item.status]), [["legacy-window", "active"]]);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 

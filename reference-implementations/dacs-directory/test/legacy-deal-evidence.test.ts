@@ -324,3 +324,44 @@ test("historical hex agreement signatures retain their authenticated read profil
   for (const signature of agreement.signatures as Obj[]) signature.value = Buffer.from(signature.value as string, "base64url").toString("hex");
   assert.equal((await indexed(deal)).deals[0].refsVerified, true);
 });
+
+test("legacy vet references read the buyer's historical verifyrecord separately from agreement and evidence", async () => {
+  for (const mode of ["valid", "missing", "wrong-document", "tampered"] as const) {
+    const jobId = `legacy-vet-${mode}`;
+    const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
+    const vetScope: Obj = { recordVersion: "1", jobId, evaluatedParty: seller,
+      freshness: [], supplementary: [], dealSpecific: [], overallDecision: "pass" };
+    const vet = { ...vetScope, signature: { algorithm: "ed25519", signer: outsider,
+      value: signWith(2, `dacs-composite:v1:${contentHash(vetScope)}`, "base64url") } };
+    const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 1,
+      outcome: "failure", paymentTxRefs: [], observedAt: 1700000000000 };
+    const evidence = { ...evidenceScope, signature: { algorithm: "ed25519", signer: buyer,
+      value: signWith(0, `dacs-evidence:v1:${contentHash(evidenceScope)}`, "base64url") } };
+    // Literal historical producer names, deliberately independent of the dispatch helper.
+    const vetAt = deriveAnchorAddress(buyer, `dacs2:verifyrecord:${jobId}`);
+    const evidenceAt = deriveAnchorAddress(buyer, `dacs4:evidence:${jobId}`);
+    const agreementAt = deriveAnchorAddress(buyer, `dacs3:agreement:${jobId}`);
+    assert.equal(new Set([vetAt, evidenceAt, agreementAt]).size, 3);
+    storage[evidenceAt] = evidence;
+    if (mode !== "missing") storage[vetAt] = mode === "wrong-document" ? evidence
+      : mode === "tampered" ? { ...vet, overallDecision: "fail" } : vet;
+    for (const at of [deal.buyerBundleRef, deal.sellerBundleRef!]) {
+      const body = { ...storage[at] }; delete body.signatures; delete body.anchoredByRole;
+      body.vetRecords = [{ kind: "dacs-2-verifyresult", id: `vet-${jobId}`, contentHash: contentHash(vetScope) }];
+      body.settlementEvidence = [{ kind: "dacs-4-evidence", id: `evidence-${jobId}`, contentHash: contentHash(evidenceScope) }];
+      storage[at] = { ...body, anchoredByRole: storage[at].anchoredByRole,
+        signatures: [0, 1].map(index => partySignature(index, "dacs-bundle:v1:", body)) };
+    }
+    const record = await indexed(deal);
+    assert.ok((reads.get(vetAt) ?? 0) > 0, `${mode}: buyer-owned dacs2:verifyrecord requested`);
+    const allowed = mode === "valid";
+    assert.equal(record.deals[0].signatureVerified, true, mode);
+    assert.equal(record.deals[0].refsVerified, allowed, mode);
+    assert.equal(record.deals[0].reputationEligible, allowed, mode);
+    assert.equal(record.reputation.bundleCount, allowed ? 1 : 0, mode);
+    if (allowed) {
+      assert.ok((reads.get(agreementAt) ?? 0) > 0);
+      assert.ok((reads.get(evidenceAt) ?? 0) > 0);
+    }
+  }
+});

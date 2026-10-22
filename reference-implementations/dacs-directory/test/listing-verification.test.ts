@@ -641,6 +641,39 @@ test("legacy listing schema, signature decoding, and signed-scope tampering keep
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
 });
 
+test("neither legacy signature envelope bypasses the schema gate on authentically signed bytes", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  const { signature: _signature, ...original } = fixture.data;
+  for (const supportedDelivery of [original.supportedDelivery, 7]) {
+    const scope = { ...original, agentId: claim, supportedDelivery };
+    const value = signMessage(`dacs-listing:v1:${contentHash(scope)}`);
+    for (const signature of [Buffer.from(value, "base64url").toString("hex"),
+      { algorithm: "ed25519", signer: claim, value }]) {
+      const result = await verifyListingResult({ ...scope, signature });
+      if (supportedDelivery === 7) {
+        assert.deepEqual(result, { ok: false, code: "LEGACY_LISTING_INVALID" });
+      } else {
+        assert.equal(result.ok, true);
+        assert.equal(result.ok && result.value.signer, claim);
+      }
+    }
+  }
+});
+
+test("a resolver unavailable on the second signature lookup retains the signature rejection code", async () => {
+  const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
+  for (const throws of [false, true]) {
+    let calls = 0;
+    const result = await verifyListingResult(signedCurrentListing(), async (ref, algorithm) => {
+      if (++calls === 1) return resolveDemosPrimaryClaimKey(ref, algorithm);
+      if (throws) throw new Error("key temporarily unavailable");
+      return null;
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result, { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
+});
+
 
 test("legacy Listing hashing preserves draft NFC member-name semantics without changing current Listings", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));

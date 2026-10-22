@@ -102,3 +102,32 @@ test("an interrupted re-pin replay remains due and same-chain incremental scans 
   await reindexAll({ log: () => {}, nodeDeployment: deployment });
   assert.ok(Object.hasOwn(store.loadScanState().listings, known), "same chain retains accumulated discoveries");
 });
+
+test("same-chain tip regression clears discoveries only beyond the configured threshold", async () => {
+  const chainIdentity = "d".repeat(64);
+  const anchor = `stor-${"a".repeat(40)}`;
+  for (const [previousTip, reset] of [[2000, true], [500, false]] as const) {
+    globalThis.fetch = async (_input, init) => init?.method === "POST"
+      ? Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 }] })
+      : new Response(null, { status: 503 });
+    // An earlier zero-work pass retained the cursor but stored the replacement's low tip.
+    store.saveScanState({ schemaVersion: 10, chainIdentity, lastSeenTxId: previousTip, lastChainTip: 5,
+      listings: { [anchor]: `0x${"b".repeat(64)}` }, deals: {} });
+    const logs: string[] = [];
+    await reindexAll({ log: line => logs.push(line), nodeDeployment: async () => ({ ok: true, chainIdentity }) });
+    assert.equal(Object.hasOwn(store.loadScanState().listings, anchor), !reset);
+    assert.equal(logs.some(line => line.includes("chain replacement detected")), reset);
+    assert.equal(store.loadScanState().chainIdentity, chainIdentity);
+  }
+});
+
+test("successful refreshes log a deployment build warning", async () => {
+  const chainIdentity = "d".repeat(64);
+  store.saveScanState({ schemaVersion: 10, chainIdentity, lastSeenTxId: 3, lastChainTip: 5, listings: {}, deals: {} });
+  globalThis.fetch = async () => Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 }] });
+  const logs: string[] = [];
+  const warning = "Demos node build differs from the reviewed build";
+  const result = await reindexAll({ log: line => logs.push(line), nodeDeployment: async () => ({ ok: true, chainIdentity, warning }) });
+  assert.equal(result.cursor, 3);
+  assert.ok(logs.some(line => line.includes(warning)));
+});

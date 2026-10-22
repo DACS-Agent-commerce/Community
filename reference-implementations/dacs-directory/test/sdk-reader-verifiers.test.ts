@@ -78,6 +78,7 @@ test("the acceptance check refuses a valid replacement while the PA-1 table is u
   assert.equal(listingUpgradeRefusal({ disposition: "verified" }), null);
   for (const disposition of ["rejected", "revoked", "indeterminate"]) {
     assert.match(listingUpgradeRefusal({ disposition, reason: "other" }) ?? "accepted", new RegExp(`returned ${disposition} \\(other\\)$`));
+    assert.equal(listingUpgradeRefusal({ disposition }), `complete SDK reader returned ${disposition} (no reason)`);
   }
 });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 
 import {
   ed25519Sign,
@@ -83,7 +84,9 @@ const request = (body: Record<string, unknown>) => new NextRequest(
   },
 );
 
-test("publisher uses PA-1 rail resolution and signs the exact staged Listing before creating a transaction", async () => {
+test("publisher uses PA-1 rail resolution and signs the exact staged Listing before creating a transaction", async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
   const identityResponse = await POST(request(base));
   assert.equal(identityResponse.status, 200);
   const identity = await identityResponse.json() as {
@@ -127,12 +130,16 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
       logicalAddress: string;
       programName: string;
       exists: boolean;
+      artifactProfile: string;
       publicationReady: boolean;
       railResolution: { disposition: string; reason: string; authorityBasis: string };
       payloadCapability: { disposition: string };
       tx: null;
     };
     assert.equal(preview.publicationReady, false);
+    assert.equal(preview.artifactProfile, "dacs-v0.1");
+    assert.equal(preview.exists, false);
+    assert.deepEqual(preview.listing.requiredCapabilities, ["SR-2"]);
     assert.equal(preview.tx, null, "an unsigned preview must not contain a broadcastable transaction");
     // LP-6: publication proceeds only on `verified`, here from the modelled signed snapshot.
     assert.equal(preview.railResolution.disposition, "verified");
@@ -191,6 +198,15 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
       deriveStorageAddress(`0x${keyHex}`, built.programName, 1, LIVE_STORAGE_SALT),
     );
     assert.equal(built.contentHash.length, 64);
+    assert.deepEqual(built.tx, {
+      content: { type: "storageProgram", from: `0x${keyHex}`, to: built.anchorAddress, amount: 0,
+        data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", storageAddress: built.anchorAddress,
+          programName: built.programName, encoding: "json", data: built.listing,
+          metadata: { logicalAddress: built.logicalAddress, contentHash: built.contentHash, envelopeHash: sha256Hex(canonicalize(built.listing)) },
+          acl: { mode: "public" }, salt: "", storageLocation: "onchain" }],
+        nonce: 1, timestamp: now, transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null } },
+      signature: null, hash: "", status: "", blockNumber: null,
+    });
 
     assert.ok(await verifyListing(built.listing));
     const sig6 = /^[A-Za-z0-9_-]{86}$/;
@@ -324,7 +340,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
       });
     };
 
-    const recoveredResponse = await POST(request(finalInput));
+    const recoveredResponse = await POST(request({ ...finalInput, name: "A different requested name" }));
     assert.equal(recoveredResponse.status, 200);
     const recovered = await recoveredResponse.json() as {
       exists: boolean;
@@ -333,6 +349,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
       listing: Record<string, unknown>;
       contentHash: string;
       anchorAddress: string;
+      registration: { displayName: string };
     };
     assert.equal(recovered.exists, true);
     assert.equal(recovered.tx, null);
@@ -340,6 +357,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
     assert.equal(recovered.anchorAddress, built.anchorAddress);
     assert.equal(recovered.contentHash, built.contentHash);
     assert.deepEqual(recovered.listing, signedListing);
+    assert.equal(recovered.registration.displayName, base.name, "recovery keeps the occupied artifact's display name");
 
     const previousImports = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
     (signedListing.signature as { value: string }).value = listingSignature;
@@ -635,4 +653,331 @@ test("publication rejects lone high/low surrogate keys and values and accepts a 
   const response = await POST(request({ ...base, name: "Service \ud83d\ude00", ["\ud83d\ude00"]: "valid" }));
   assert.equal(response.status, 200);
   assert.ok((await response.json()).identityMessage);
+});
+
+const walletSignature = (message: string, key = privateKey) =>
+  Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), key)).toString("hex");
+
+/** Answer only the explicitly modelled read RPCs, never contact a node. */
+function emptyPublisherChain(nonceReply: () => Response = () => Response.json({ result: 200, response: 0 })): typeof fetch {
+  return async (_input, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    const call = JSON.parse(String(init?.body)).params[0];
+    if (call.message === "searchStoragePrograms") return Response.json({ result: 200, response: [] });
+    assert.equal(call.message, "getAddressNonce");
+    return nonceReply();
+  };
+}
+
+async function publisherIdentity(body: Record<string, unknown> = base, key = privateKey) {
+  const response = await POST(request(body));
+  assert.equal(response.status, 200, await response.clone().text());
+  const identity = await response.json();
+  return { ...body, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage, key) };
+}
+
+test("publisher validates optional and required input before offering a signing preimage", async () => {
+  const invalid: unknown[] = [null, {}, { ...base, claim: undefined }, { ...base, claim: null }, { ...base, claim: `${claim}junk` }];
+  for (const key of ["serviceId", "name", "description"]) {
+    for (const value of [undefined, null, "", "   "]) invalid.push({ ...base, [key]: value });
+  }
+  for (const [key, values] of Object.entries({
+    serviceId: ["UPPER", "with/slash", "x".repeat(65)], name: ["x".repeat(201)], description: ["x".repeat(2001)],
+    rails: [null, "ap2:stripe-paymentintents", [], Array(17).fill(base.rails[0]), [base.rails[0], null], [base.rails[0], ""], [base.rails[0], base.rails[0]], ["unknown:rail"]],
+    delivery: [null, "deliver-storage-program", [], Array(17).fill("deliver-storage-program"), ["deliver-storage-program", null], ["deliver-storage-program", ""], ["deliver-storage-program", "deliver-entitlement"], ["deliver-unknown"]],
+    category: ["", "with/slash", "x".repeat(65)],
+    tags: [null, "tag", [7], Array(17).fill("tag"), ["x".repeat(33)]],
+    publicEndpoint: ["http://example.com/", "https://127.0.0.1/", "javascript:alert(1)"],
+  })) for (const value of values) invalid.push({ ...base, [key]: value });
+  for (const body of invalid) {
+    const response = await POST(request(body as Record<string, unknown>));
+    assert.equal(response.status, 400, JSON.stringify(body));
+    const result = await response.json();
+    assert.equal(result.tx, undefined);
+    assert.equal(result.identityMessage, undefined);
+  }
+  for (const extra of [{ serviceId: "x".repeat(64) }, { name: "x".repeat(200) }, { description: "x".repeat(2000) },
+    { tags: Array(16).fill("x".repeat(32)) }, { category: "x".repeat(64) }]) {
+    const response = await POST(request({ ...base, ...extra }));
+    assert.equal(response.status, 200);
+    assert.ok((await response.json()).identityMessage);
+  }
+});
+
+test("publisher normalizes fields, emits entitlement terms and retains all supported delivery decisions", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    const input = await publisherIdentity({ ...base, serviceId: "  normalized  ", name: "  Name  ", description: "  Description  ",
+      category: "  Services.Test  ", tags: ["  one  ", " ", "two"], publicEndpoint: "  https://example.com/api  ",
+      delivery: ["deliver-entitlement"] });
+    const response = await POST(request(input));
+    assert.equal(response.status, 200);
+    const preview = await response.json();
+    assert.equal(preview.listing.listingId, "normalized");
+    assert.equal(preview.listing.seller.displayName, "Name");
+    assert.equal(preview.listing.seller.publicEndpoint, "https://example.com/api");
+    assert.deepEqual(preview.listing.offering, { title: "Name", description: "Description", category: "services.test", tags: ["one", "two"],
+      deliverable: { kind: "entitlement", durationSec: 2_592_000, renewable: false } });
+    assert.equal(preview.listing.pipeline[3].kind, "deliver-entitlement");
+    const attested = await POST(request(await publisherIdentity({ ...base, delivery: ["deliver-attested-payload"] })));
+    assert.equal(attested.status, 409);
+    assert.match((await attested.json()).error, /attested-payload production capability/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher pricing validates each model and emits normalized terms and negotiation parameters", async () => {
+  const invalid = [
+    { kind: "barter" }, ...["", "0", "-1", "01", "1.0", "1e2", "Infinity"].map(amount => ({ amount })),
+    ...["", "USD/DEM", "x".repeat(33)].map(currency => ({ currency })),
+    ...[{ minPct: -1, maxPct: 1 }, { minPct: 100, maxPct: 1 }, { minPct: 1, maxPct: -1 }, { maxPct: 1 }, { minPct: 1 }]
+      .map(fields => ({ kind: "negotiable", ...fields })),
+    { kind: "auction", selectionRule: "unknown" },
+    ...["", " ", "x".repeat(65)].map(unit => ({ kind: "metered", unit })),
+    ...["0", "01", "-1", "1.0"].map(minTotal => ({ kind: "metered", unit: "call", minTotal })),
+  ];
+  for (const pricing of invalid) {
+    const response = await POST(request({ ...base, pricing: { amount: "10", currency: "USD", ...pricing } }));
+    assert.equal(response.status, 400, JSON.stringify(pricing));
+  }
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    const cases: Array<{ kind?: string; amount: string; currency: string; unit?: string; minTotal?: string;
+      minPct?: number; maxPct?: number; selectionRule?: string }> = [
+      { amount: " 1.25 ", currency: " USD ", unit: " call " },
+      { kind: "fixed", amount: "1", currency: "USD" },
+      { kind: "fixed", amount: "1", currency: "USD", unit: " " },
+      { kind: "fixed", amount: "1", currency: "USD", unit: "x".repeat(65) },
+      { kind: "negotiable", amount: "10", currency: "USD", minPct: 0, maxPct: 0 },
+      { kind: "negotiable", amount: "10", currency: "USD", minPct: 99, maxPct: 1000 },
+      ...[undefined, "lowest-price", "highest-price", "first-acceptable"].map(selectionRule => ({ kind: "auction", amount: "10", currency: "USD", selectionRule })),
+      { kind: "metered", amount: "0.01", currency: "USD", unit: ` ${"x".repeat(64)} ` },
+      { kind: "metered", amount: "0.01", currency: "USD", unit: " call ", minTotal: " 1.25 " },
+    ];
+    for (const pricing of cases) {
+      const input = await publisherIdentity({ ...base, pricing });
+      const response = await POST(request(input));
+      assert.equal(response.status, 200, JSON.stringify(pricing));
+      const { listing } = await response.json();
+      const kind = pricing.kind ?? "fixed";
+      const price = { amount: pricing.amount.trim(), currency: pricing.currency.trim(),
+        ...(kind !== "metered" && pricing.unit?.trim() ? { unit: pricing.unit.trim().slice(0, 64) } : {}) };
+      const expected = kind === "fixed" ? { kind, price }
+        : kind === "negotiable" ? { kind, bandCenter: price, minPct: pricing.minPct, maxPct: pricing.maxPct }
+        : kind === "auction" ? { kind, reservePrice: price, selectionRule: pricing.selectionRule ?? "first-acceptable" }
+        : { kind, unitPrice: price, unit: pricing.unit!.trim(), ...(pricing.minTotal ? { minTotal: { amount: pricing.minTotal.trim(), currency: "USD" } } : {}) };
+      assert.deepEqual(listing.pricing, expected);
+      const deadline = input.identityPresentedAt + 7 * 24 * 60 * 60 * 1000;
+      assert.deepEqual(listing.validity, { notBefore: input.identityPresentedAt, ...(kind === "auction" ? { notAfter: deadline } : {}) });
+      assert.deepEqual(listing.pipeline[0], kind === "auction"
+        ? { kind: "negotiate-sealed-envelope", parameters: { commitDeadline: deadline, revealWindow: 3600, selectionRule: pricing.selectionRule ?? "first-acceptable" } }
+        : kind === "negotiable" ? { kind: "negotiate-rfq", parameters: { maxTurns: 8, timeoutSec: 300, rfqInitiator: "buyer" } }
+        : { kind: "negotiate-fixed-price" });
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher signature import accepts wallet prefixes and rejects trailing junk and wrong identity proofs", async () => {
+  const input = await publisherIdentity();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    for (const prefix of ["", "0x", "0x0x"]) {
+      const response = await POST(request({ ...input, identitySignature: prefix + input.identitySignature }));
+      assert.equal(response.status, 200, prefix);
+      const preview = await response.json();
+      assert.equal(preview.artifactProfile, "dacs-v0.1");
+      assert.equal(preview.exists, false);
+      const signed = await POST(request({ ...input, identitySignature: prefix + input.identitySignature,
+        listingSignature: prefix + walletSignature(preview.message) }));
+      assert.equal(signed.status, 200, prefix);
+      assert.ok((await signed.json()).tx);
+    }
+    const other = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 13)));
+    const identityMessage = `dacs-bundle-presentation:v1:${contentHash({ bundleVersion: "1", presentedBy: claim,
+      presentedAt: input.identityPresentedAt, claims: [{ ref: claim }] })}`;
+    for (const identitySignature of [input.identitySignature + "junk", walletSignature("wrong message"), walletSignature(identityMessage, other), "ff".repeat(64)]) {
+      const response = await POST(request({ ...input, identitySignature }));
+      assert.equal(response.status, 400);
+      const result = await response.json();
+      assert.equal(result.tx, undefined);
+      assert.equal(result.listing, undefined);
+    }
+    const malformedClaim = `did:demos:agent:${"ff".repeat(32)}`;
+    const malformedScope = { bundleVersion: "1", presentedBy: malformedClaim, presentedAt: input.identityPresentedAt,
+      claims: [{ ref: malformedClaim }] };
+    const malformed = await POST(request({ ...input, claim: malformedClaim,
+      identitySignature: walletSignature(`dacs-bundle-presentation:v1:${contentHash(malformedScope)}`) }));
+    assert.equal(malformed.status, 400, "malformed-key verification errors must be controlled refusals");
+    assert.equal((await malformed.json()).tx, undefined);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher identity freshness accepts the exact skew limits", async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    for (const [offset, accepted] of [[-900_001, false], [-900_000, true], [60_000, true], [60_001, false], [0.5, false]] as const) {
+      const presentedAt = now + offset;
+      const message = Number.isSafeInteger(presentedAt) ? `dacs-bundle-presentation:v1:${contentHash({ bundleVersion: "1", presentedBy: claim, presentedAt, claims: [{ ref: claim }] })}` : "unrepresentable";
+      const response = await POST(request({ ...base, identityPresentedAt: presentedAt, identitySignature: walletSignature(message) }));
+      assert.equal(response.status, accepted ? 200 : 409, String(offset));
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher nonce reads pin the transport and reject unusable node replies", async () => {
+  const input = await publisherIdentity();
+  const originalFetch = globalThis.fetch;
+  let reply = () => Response.json({ result: 200, response: 0 });
+  globalThis.fetch = async (url, init) => {
+    const call = JSON.parse(String(init?.body)).params[0];
+    if (call.message === "getAddressNonce") {
+      assert.equal(String(url), `${(process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "")}/`);
+      assert.equal(init?.method, "POST");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json");
+      assert.deepEqual(JSON.parse(String(init?.body)), { method: "nodeCall", params: [{ type: "nodeCall", message: "getAddressNonce",
+        sender: null, receiver: null, timestamp: null, data: { address: `0x${keyHex}` }, extra: "" }] });
+      return reply();
+    }
+    return emptyPublisherChain()(url, init);
+  };
+  try {
+    const preview = await (await POST(request(input))).json();
+    const finalInput = { ...input, listingSignature: walletSignature(preview.message) };
+    assert.equal((await POST(request(finalInput))).status, 200);
+    for (const failure of [() => Response.json({ result: 200, response: 0 }, { status: 503 }),
+      () => Response.json({ result: 400, response: 0 }), () => Response.json(null),
+      ...[-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "NaN", undefined].map(response => () => Response.json({ result: 200, response }))]) {
+      reply = failure;
+      await assert.rejects(POST(request(finalInput)), /nonce/);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher enforces its ten-minute proxy rate window and request size cap", async (t) => {
+  const { resetRateLimitState } = await import("../src/catalog/security.js");
+  const previous = process.env.DACS_TRUST_PROXY;
+  process.env.DACS_TRUST_PROXY = "1";
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  resetRateLimitState();
+  const req = (ip: string, length?: number) => new NextRequest("https://directory.example/api/dacs/build-listing", {
+    method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": ip, ...(length ? { "content-length": String(length) } : {}) }, body: JSON.stringify(base) });
+  try {
+    for (let n = 0; n < 10; n++) assert.equal((await POST(req("203.0.113.1"))).status, 200);
+    const limited = await POST(req("203.0.113.1"));
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "600");
+    assert.equal((await POST(req("203.0.113.2"))).status, 200);
+    now += 599_999;
+    assert.equal((await POST(req("203.0.113.1"))).status, 429);
+    now++;
+    assert.equal((await POST(req("203.0.113.1"))).status, 200);
+    assert.equal((await POST(req("203.0.113.3", 65_537))).status, 413);
+    assert.equal((await POST(req("203.0.113.3", 65_536))).status, 200);
+  } finally {
+    resetRateLimitState();
+    if (previous === undefined) delete process.env.DACS_TRUST_PROXY; else process.env.DACS_TRUST_PROXY = previous;
+  }
+});
+
+test("publisher recovery refuses independently authenticated artifacts with a different tuple, seller or profile", async () => {
+  const input = await publisherIdentity();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    const preview = await (await POST(request(input))).json();
+    const scope = preview.listing;
+    const otherSeed = Uint8Array.from(Buffer.alloc(32, 13));
+    const otherKey = privateKeyFromSeed(otherSeed);
+    const otherClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(otherSeed))).toString("hex")}`;
+    const identity = { bundleVersion: "1", presentedBy: otherClaim, presentedAt: input.identityPresentedAt, claims: [{ ref: otherClaim }] };
+    const otherSeller = { ...scope.seller, identity: { ...identity, presentation: { kind: "per-claim", signatures: [
+      { ref: otherClaim, signature: Buffer.from(walletSignature(`dacs-bundle-presentation:v1:${contentHash(identity)}`, otherKey), "hex").toString("base64url") },
+    ] } } };
+    const legacyScope = { agentId: claim, serviceId: base.serviceId, name: base.name, description: base.description,
+      claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-storage-program"] };
+    const candidates = [
+      { body: { ...scope, listingId: "another-id" }, signer: claim, key: privateKey },
+      { body: { ...scope, listingVersion: 2 }, signer: claim, key: privateKey },
+      { body: { ...scope, seller: otherSeller }, signer: otherClaim, key: otherKey },
+    ].map(({ body, signer, key }) => ({ ...body, signature: { algorithm: "ed25519", signer,
+      value: Buffer.from(walletSignature(`dacs-listing:v1:${contentHash(body)}`, key), "hex").toString("base64url") } }));
+    const occupied = [...candidates, { ...legacyScope, signature: walletSignature(`dacs-listing:v1:${contentHash(legacyScope)}`) }];
+    const address = `stor-${"7".repeat(40)}`;
+    for (const candidate of occupied) {
+      assert.ok(await verifyListing(candidate), "the refusal must not be caused by an invalid signature or schema");
+      globalThis.fetch = async (_url, init) => init?.method === "POST"
+        ? Response.json({ result: 200, response: [{ storageAddress: address, programName: preview.programName }] })
+        : Response.json({ success: true, owner: `0x${keyHex}`, programName: preview.programName, data: candidate });
+      const response = await POST(request(input));
+      assert.equal(response.status, 409);
+      const result = await response.json();
+      assert.equal(result.tx, undefined);
+      assert.match(result.error, /expected authenticated listing candidate/);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("publisher chooses the matching catalog seller and preserves their registration data on recovery", async () => {
+  const store = await import("../src/catalog/store.js");
+  const priorCatalog = store.loadCatalog(), priorRegistrations = store.loadRegistrations();
+  const other = `did:demos:agent:${"f".repeat(64)}`;
+  const existingAnchor = `stor-${"1".repeat(40)}`, catalogAnchor = `stor-${"2".repeat(40)}`;
+  const deal = { jobId: "prior-job", rail: "pay-dem", buyerBundleRef: `stor-${"3".repeat(40)}`, owners: { buyer: other, seller: claim } };
+  const { logicalBundleAddress, verifyBundleBinding } = await import("../src/catalog/bundleBinding.js");
+  const bindingScope = { bindingVersion: "1" as const, jobId: "prior-job", role: "seller" as const,
+    logicalAddress: logicalBundleAddress("prior-job", "seller"), nativeAddress: `stor-${"4".repeat(40)}`,
+    bundleContentHash: "b".repeat(64), signer: claim };
+  const binding = { ...bindingScope, signature: { algorithm: "ed25519", signer: claim,
+    value: Buffer.from(walletSignature(`dacs-bundle-binding:v1:${contentHash(bindingScope)}`), "hex").toString("base64url") } };
+  assert.ok(await verifyBundleBinding(binding));
+  const summary = (primaryClaim: string, version: number) => ({ listingId: base.serviceId, version,
+    anchor: { kind: "storage-program", locator: catalogAnchor }, seller: { primaryClaim } });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [
+    { primaryClaim: other, displayName: "Other seller", listings: [summary(other, 9)] },
+    { primaryClaim: claim, displayName: "Original seller", listings: [summary(claim, 2)] },
+  ] } as never);
+  store.saveRegistrations([
+    { primaryClaim: other, displayName: "Other seller", listingAnchors: [] },
+    { primaryClaim: claim, displayName: "Prior name", listingAnchors: [existingAnchor], deals: [deal], bundleBindings: [binding] },
+  ] as never);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = emptyPublisherChain();
+  try {
+    const input = await publisherIdentity();
+    const preview = await (await POST(request(input))).json();
+    assert.equal(preview.listing.listingVersion, 3);
+    assert.equal(preview.listing.seller.displayName, "Original seller");
+    const built = await (await POST(request({ ...input, listingSignature: walletSignature(preview.message) }))).json();
+    globalThis.fetch = async (_url, init) => init?.method === "POST"
+      ? Response.json({ result: 200, response: [{ storageAddress: built.anchorAddress, programName: built.programName }] })
+      : Response.json({ success: true, owner: `0x${keyHex}`, programName: built.programName, data: built.listing });
+    const response = await POST(request({ ...input, name: "Replacement request name" }));
+    assert.equal(response.status, 200);
+    const recovered = await response.json();
+    assert.deepEqual(Object.keys(recovered).sort(), ["listing", "contentHash", "artifactProfile", "logicalAddress", "programName", "anchorAddress", "exists", "tx", "publicationReady", "railResolution", "payloadCapability", "registration"].sort());
+    assert.equal(recovered.exists, true);
+    assert.equal(recovered.tx, null);
+    assert.equal(recovered.publicationReady, true);
+    assert.equal(recovered.artifactProfile, "dacs-v0.1");
+    const { ownerSignature, ...registration } = recovered.registration;
+    assert.deepEqual(registration, { primaryClaim: claim, displayName: "Original seller",
+      listingAnchors: [existingAnchor, catalogAnchor, built.anchorAddress], deals: [deal], bundleBindings: [binding] });
+    const { registrationMessage } = await import("../src/catalog/registrationSig.js");
+    assert.equal(ownerSignature.message, registrationMessage(registration, ownerSignature.signedAt));
+    assert.equal(recovered.programName, built.programName);
+    assert.equal(recovered.anchorAddress, built.anchorAddress);
+    assert.equal(recovered.contentHash, built.contentHash);
+    assert.deepEqual(recovered.listing, built.listing);
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveCatalog(priorCatalog);
+    store.saveRegistrations(priorRegistrations);
+  }
 });
