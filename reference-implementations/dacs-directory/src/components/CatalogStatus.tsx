@@ -80,6 +80,7 @@ export default function CatalogStatus() {
       <span
         className={`sync-chip ${cls}`}
         role="status"
+        aria-label="Catalog indexing status"
         aria-live="polite"
         title={mismatch || unavailable ? status.nodeDeployment?.reason : failedRefresh
           ? "The latest catalog refresh failed. The operator can retry it."

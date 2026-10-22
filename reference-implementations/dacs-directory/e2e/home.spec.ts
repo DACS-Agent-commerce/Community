@@ -26,7 +26,7 @@ test("pages are served and a failed refresh is shown while the chain is unreacha
   expect(after.indexer.lastRun.status).toBe("failed");
 
   await page.goto("/discover");
-  await expect(page.locator('.sync-chip[role="status"]')).toContainText("Indexing blocked: last refresh failed");
+  await expect(page.getByRole("status", { name: "Catalog indexing status", exact: true })).toContainText("Indexing blocked: last refresh failed");
 });
 
 for (const scenario of [
@@ -41,7 +41,7 @@ for (const scenario of [
     nodeDeployment: scenario.nodeDeployment, indexer: { lastRun: scenario.lastRun },
   } }));
   await page.goto("/discover");
-  await expect(page.locator('.sync-chip[role="status"]')).toContainText(scenario.label);
+  await expect(page.getByRole("status", { name: "Catalog indexing status", exact: true })).toContainText(scenario.label);
 });
 
 test("the landing page is catalog-led", async ({ page }) => {
