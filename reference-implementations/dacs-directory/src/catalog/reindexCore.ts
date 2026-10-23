@@ -7,6 +7,7 @@
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { boundedJson } from "./artifactLimits.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
@@ -392,7 +393,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           if (!reg.listingAnchors.includes(anchor)) {
             const retained = retainedListingRevocation(agent.contentHashes[anchor]);
             if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
-                retained?.sellerPrimaryClaim !== agent.seller) continue;
+                canonicalDemosAgentClaim(retained?.sellerPrimaryClaim ?? "") !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {
@@ -468,7 +469,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    pruneListingRejections(catalogSellers.map((seller) => seller.primaryClaim));
+    pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });

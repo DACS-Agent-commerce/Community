@@ -40,10 +40,11 @@ export function listingUpgradeReaderDeps(input: {
 }
 
 /**
- * Why a replacement fails acceptance, or null when the reader returned
+ * Describe a replacement's reader limitation, or null when the reader returned
  * `verified` (DACS-1 LR-3, LP-6). With this release's unsigned PA-1 table a
- * pay-bearing replacement resolves `indeterminate`, so the check refuses it,
- * as the publisher does.
+ * pay-bearing replacement resolves `indeterminate`/`pa1-definition-unverifiable`.
+ * The acceptance script reports that result without failing catalog acceptance;
+ * the publisher still refuses preparation until a signed snapshot ships.
  */
 export function listingUpgradeRefusal(validation: { disposition: string; reason?: string }): string | null {
   if (validation.disposition === "verified") return null;

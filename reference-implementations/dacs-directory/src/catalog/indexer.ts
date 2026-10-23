@@ -256,6 +256,9 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
+    // DACS-1 §6.3.4 reader step 3: future terms cannot authenticate deal history.
+    const validity = scope.validity as { notBefore?: unknown } | undefined;
+    if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
     const presentation = listingPresentation(scope);
     // Historical deals retain authenticated terms and category after expiry or revocation.
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });

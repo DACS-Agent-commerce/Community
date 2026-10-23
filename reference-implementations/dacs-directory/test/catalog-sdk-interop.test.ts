@@ -84,7 +84,7 @@ for (const [name, presentedBy] of [
 
     const view = await (await sellersRoute.GET(
       new NextRequest(`https://directory.test/api/dacs/sellers/${encodeURIComponent(claim)}`),
-      { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(claim) }) },
+      { params: Promise.resolve({ primaryClaimRef: claim }) },
     )).json();
     assert.deepEqual(view.listings.map((l: { status: string }) => l.status).sort(), ["active", "revoked"]);
     for (const summary of view.listings) {

@@ -117,7 +117,7 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
   assert.equal((await detail.json() as Obj).serviceId, "svc");
 
   const seller = await sellerRoute.GET(anonymous(`/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
+    { params: Promise.resolve({ primaryClaimRef: dids[SELLER] }) });
   assert.equal(seller.status, 200);
   assert.equal(((await seller.json() as { listings: Obj[] }).listings).length, 1);
 

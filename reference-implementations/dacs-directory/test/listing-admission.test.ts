@@ -229,7 +229,7 @@ test("published summaries never claim transaction readiness the Directory did no
   const catalog = await (await listingsGet(new NextRequest("https://directory.example/api/dacs/listings"))).json();
   const sellerView = await (await sellerGet(
     new NextRequest(`https://directory.example/api/dacs/sellers/${encodeURIComponent(seller)}`),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(seller) }) },
+    { params: Promise.resolve({ primaryClaimRef: seller }) },
   )).json();
   for (const published of [...catalog.listings, ...sellerView.listings]) {
     assert.deepEqual(published.transactionReadiness, DIRECTORY_TRANSACTION_READINESS, published.listingId);

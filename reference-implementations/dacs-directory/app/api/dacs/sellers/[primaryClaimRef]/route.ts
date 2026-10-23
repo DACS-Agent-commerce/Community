@@ -15,10 +15,8 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ primaryClaimRef: string }> },
 ) {
-  const { primaryClaimRef } = await params;
-  let raw: string;
-  try { raw = decodeURIComponent(primaryClaimRef); }
-  catch { return NextResponse.json({ error: "invalid primaryClaim encoding" }, { status: 400 }); }
+  // Next has already decoded the path segment; CF-2 parameter escapes are data.
+  const { primaryClaimRef: raw } = await params;
   if (Buffer.byteLength(raw, "utf8") > MAX_CLAIM_QUERY_BYTES) {
     return NextResponse.json({ error: "primaryClaim exceeds 1024 bytes" }, { status: 400 });
   }

@@ -2,11 +2,13 @@ import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { GET as wellknownFiles } from "../app/api/dacs/wellknown-files/route.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
+import { reindexAll } from "../src/catalog/reindexCore.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { crawlDomain } from "../src/catalog/wellknown.js";
 import * as store from "../src/catalog/store.js";
@@ -148,4 +150,41 @@ test("continuing listing rejections retain firstSeenAt and occurrences while sta
   await indexRegistration(registration, undefined, offline);
   await indexRegistration({ ...registration, listingAnchors: [] }, undefined, offline);
   assert.equal(diagnostic(), undefined);
+});
+
+test("an omitted seller keeps rejection history until its registration leaves the pass", async (t) => {
+  const anchor = locator(1040);
+  const raw = currentListing("omitted-seller");
+  t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => init?.body
+    ? Response.json({ result: 200, response: [] })
+    : Response.json({ success: true, owner: `0x${"f".repeat(64)}`, data: raw }));
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
+  store.saveDomains([]);
+  const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true }), log: () => {}, resolveIdentities: offline });
+  const diagnostic = () => store.indexerDiagnostics({ deadLetterLocator: anchor }).listingRejectionDiagnostics.items[0];
+  await run();
+  assert.equal(diagnostic()?.firstSeenAt, 1000);
+  assert.equal(diagnostic()?.occurrences, 1);
+
+  const prepare = Database.prototype.prepare;
+  const interrupted = t.mock.method(Database.prototype, "prepare", function (this: Database.Database, sql: string) {
+    if (sql === "SELECT locator FROM listing_rejections WHERE registration_claim = ?") throw new Error("seller indexing interrupted");
+    return prepare.call(this, sql);
+  });
+  now = 2000;
+  await run();
+  interrupted.mock.restore();
+  assert.deepEqual(store.loadCatalog().sellers, [], "the failed seller is omitted from this catalog");
+  assert.equal(diagnostic()?.firstSeenAt, 1000);
+  assert.equal(diagnostic()?.occurrences, 2);
+
+  now = 3000;
+  await run();
+  assert.equal(diagnostic()?.firstSeenAt, 1000);
+  assert.equal(diagnostic()?.occurrences, 3);
+  store.saveRegistrations([]);
+  await run();
+  assert.equal(diagnostic(), undefined, "removed registrations still lose stale diagnostics");
 });

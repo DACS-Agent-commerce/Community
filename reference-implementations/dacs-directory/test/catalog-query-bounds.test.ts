@@ -67,18 +67,30 @@ test("seller-record identity drives filters and links while summaries retain exa
 });
 
 
-test("seller path claims share the UTF-8 query bound and refuse malformed encoding", async () => {
+test("seller path claims share the UTF-8 query bound after framework decoding", async () => {
   const request = new NextRequest("https://directory.test/api/dacs/sellers/test");
   for (const raw of ["a".repeat(1024), "é".repeat(512)]) {
-    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(raw) }) });
+    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: raw }) });
     assert.equal(response.status, 404, "a claim at the byte limit reaches lookup");
   }
   for (const raw of [presentedBy, "a".repeat(1025), "é".repeat(513)]) {
-    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(raw) }) });
+    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: raw }) });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: "primaryClaim exceeds 1024 bytes" });
   }
   const malformed = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: "%GG" }) });
-  assert.equal(malformed.status, 400);
-  assert.deepEqual(await malformed.json(), { error: "invalid primaryClaim encoding" });
+  assert.equal(malformed.status, 404, "a literal percent in a decoded path is not a valid seller identity");
+});
+
+test("seller paths preserve reserved escapes inside framework-decoded ClaimReferences", async () => {
+  saveCatalog(catalog);
+  for (const reference of [claim, `${claim}?a=%25`, `${claim}?a=%3A`, `${claim}?a=%2525`]) {
+    const response = await sellers.GET(new NextRequest(`https://directory.test/api/dacs/sellers/${encodeURIComponent(reference)}`),
+      { params: Promise.resolve({ primaryClaimRef: reference }) });
+    assert.equal(response.status, 200, reference);
+    assert.equal((await response.json()).listings.length, 100);
+  }
+  const unknown = `did:demos:agent:${"b".repeat(64)}?a=%25`;
+  assert.equal((await sellers.GET(new NextRequest(`https://directory.test/api/dacs/sellers/${encodeURIComponent(unknown)}`),
+    { params: Promise.resolve({ primaryClaimRef: unknown }) })).status, 404);
 });

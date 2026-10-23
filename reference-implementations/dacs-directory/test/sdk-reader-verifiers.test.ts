@@ -69,7 +69,7 @@ const readerDeps = (inCodeDefinitions?: typeof signedRailSnapshot) => listingUpg
   signer: claim,
 });
 
-test("the acceptance check refuses a valid replacement while the PA-1 table is unsigned, as the publisher does", async () => {
+test("the acceptance reader reports an unsigned PA-1 replacement as indeterminate", async () => {
   const result = await validateListingArtifact(listing, readerDeps()) as { disposition: string; step?: number; reason?: string };
   assert.equal(result.disposition, "indeterminate");
   assert.equal(result.step, 8);

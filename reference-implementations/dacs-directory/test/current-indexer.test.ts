@@ -1034,6 +1034,31 @@ test("completed deals remain verifiable after their Listing expires out of disco
   }
 });
 
+test("not-yet-effective Listings cannot authenticate completed deal history", async (t) => {
+  const fixture = await vector("future-listing-job", 2120);
+  t.mock.method(Date, "now", () => 1000);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.validity = { notBefore: 2000 };
+  fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  const deal = registeredDeal("future-listing-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+  assert.equal(record.reputation.averageSellerRating, null);
+  assert.deepEqual(record.reputation.observedTransactionalVolume, []);
+});
+
 test("signed evidence with absent or malformed transaction refs cannot deduplicate independent jobs", async () => {
   for (const refs of [undefined, null, { txId: "not-an-array" }, [{}, null, { txId: null }, { id: null }, { txId: "" }, { id: "" }]]) {
     const allMaps = new Map<string, Obj>();

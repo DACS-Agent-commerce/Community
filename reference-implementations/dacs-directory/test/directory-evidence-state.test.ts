@@ -104,7 +104,7 @@ test("keeps fixture and legacy listing evidence visibly distinct", () => {
 
 
 test("catalog authentication labels reflect current, legacy and fixture evidence", () => {
-  assert.equal(catalogAuthenticationLabel("dacs-v0.1"), "Structure, signature, identity presentation, owner binding, and chain anchor authenticated");
-  assert.equal(catalogAuthenticationLabel("legacy-sdk-v0.1"), "Legacy structure, signature, owner binding, and chain anchor authenticated");
+  assert.equal(catalogAuthenticationLabel("dacs-v0.1"), "Structure, signature, and identity presentation authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)");
+  assert.equal(catalogAuthenticationLabel("legacy-sdk-v0.1"), "Legacy structure and signature authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)");
   assert.equal(catalogAuthenticationLabel("fixture-listing"), "Fixture machine contract and content hash match; no chain anchor claimed");
 });
