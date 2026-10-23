@@ -113,7 +113,10 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
   assert.match(definition, /does not establish that the summary covers the full signed pipeline/);
   assert.match(definition, /can suppress another session's observed counts/);
   // Rule 2 lists exactly the manifest's filters.
-  assert.match(definition, /`category`, `tag`, `credential`, `primaryClaim`, `identityTier`,\s+`rail`, `priceMax`, `q`, `profile`, `limit` and `cursor`/);
+  const filterList = /^2\. The listings API accepts only the documented listing filters:([\s\S]+?) \(the manifest's/m.exec(definition);
+  assert.ok(filterList, "TP-1 Rule 2 must declare the listing filters");
+  const documentedFilters = [...filterList[1].matchAll(/`([^`]+)`/g)].map((match) => match[1]);
+  assert.deepEqual(documentedFilters, directoryManifest("https://directory.example").filters);
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
   assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
 });
