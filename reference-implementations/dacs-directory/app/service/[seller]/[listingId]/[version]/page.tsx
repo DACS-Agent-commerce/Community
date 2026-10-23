@@ -9,7 +9,7 @@ import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvi
 import { activeOffer } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
-import { directoryEvidenceState } from "@/src/components/directory-evidence-state";
+import { catalogAuthenticationLabel, directoryEvidenceState } from "@/src/components/directory-evidence-state";
 
 export const dynamic = "force-dynamic";
 
@@ -126,7 +126,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <h2 id="trust-heading" className="card-section-title">Evidence boundaries</h2>
           <ul className="trust-checks">
             <li><span className={seller.cci.length ? "check ok" : "check"}>{seller.cci.length ? "✓" : "–"}</span><div><strong>Identity links</strong><p>{seller.cci.length ? `${seller.cci.length} GCR identity link${seller.cci.length === 1 ? "" : "s"}; no fresh DACS-2 verification resolved` : "No linked identities beyond the signing key"}</p></div></li>
-            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Catalog candidate</strong><p>{isFixtureListing ? "Fixture machine contract and content hash match; no chain anchor claimed" : "Structure, signature, identity presentation, owner binding, and chain anchor authenticated"}</p></div></li>
+            <li><span className={isFixtureListing ? "check" : "check ok"}>{isFixtureListing ? "–" : "✓"}</span><div><strong>Catalog candidate</strong><p>{catalogAuthenticationLabel(technicalArtifactProfile)}</p></div></li>
             <li><span className="check">–</span><div><strong>Transaction readiness</strong><p>Unassessed here; buyers must run the current SDK reader with their own rail, revocation, payload, and signer-control dependencies</p></div></li>
             <li><span className="check">{engagementEndpoint ? "•" : "–"}</span><div><strong>Endpoint declaration</strong><p>{evidence.endpoint.label}; this says nothing about availability</p></div></li>
             <li><span className={evidence.reachability.kind === "reachable" ? "check ok" : "check"}>{evidence.reachability.kind === "reachable" ? "✓" : "–"}</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>

@@ -506,12 +506,14 @@ export async function verifyListingRevocation(
   }
   if (
     scope.listingId !== (listing.scope.listingId ?? listing.scope.serviceId) ||
+    // Enforce RB-1's SDK numeric profile even when discovery is bypassed or
+    // the caller supplies an unvalidated expectedVersion. Hashing is not validation.
+    !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // The SDK's RB-1 isRevocationMarker reads revokedAt as a non-negative safe integer.
-    !Number.isSafeInteger(scope.revokedAt) ||
-    Number(scope.revokedAt) < 0
+    // The pinned SDK's RB-1 isRevocationMarker requires a non-negative safe integer.
+    !Number.isSafeInteger(scope.revokedAt) || Number(scope.revokedAt) < 0
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;

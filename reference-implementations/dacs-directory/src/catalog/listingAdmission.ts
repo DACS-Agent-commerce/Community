@@ -37,7 +37,7 @@ export function listingDiagnosticCoordinates(
 export const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
   SELLER_CLAIM_BINDING: "The authenticated listing candidate seller does not match the registration claim.",
   OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
-  NORMATIVE_LISTING_INVALID: "The current listing does not satisfy the pinned SDK's normative Listing validator or this Directory's catalog profile.",
+  NORMATIVE_LISTING_INVALID: "The current listing does not satisfy the patched SDK validator or this Directory's catalog profile, including the LR-2 16,384-byte canonical Listing limit (signature omitted).",
   VERIFICATION_METHOD_INVALID: "The listing deliverable verification method is missing or is not a registered structured variant.",
   LISTING_SIGNATURE_INVALID: "The listing signature is malformed, unsupported, unresolved, or cryptographically invalid.",
   IDENTITY_PRESENTATION_INVALID: "The listing seller identity presentation could not be authenticated.",

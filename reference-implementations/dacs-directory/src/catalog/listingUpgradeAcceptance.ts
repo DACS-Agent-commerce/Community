@@ -8,7 +8,7 @@ import { PUBLISHER_IN_CODE_RAIL_DEFINITIONS } from "./listingOptions.js";
 import { sdkIdentityPresentationVerifier, sdkListingSignatureVerifier } from "./sdkReaderVerifiers.js";
 
 export function listingUpgradeReaderDeps(input: {
-  catalogObservedAt: number;
+  catalog: { status: unknown; catalogObservedAt: unknown; revocation?: unknown };
   readMarker: (marker: { locator: string }) => Promise<unknown>;
   supportedPayloadMethods: readonly string[];
   signer: string;
@@ -19,9 +19,10 @@ export function listingUpgradeReaderDeps(input: {
     nowMs: input.nowMs ?? (() => Date.now()),
     verifyListingSignature: sdkListingSignatureVerifier(),
     revocation: {
-      surfaces: [{ kind: "catalog", status: "active", catalogObservedAt: input.catalogObservedAt }],
+      surfaces: [{ kind: "catalog", status: input.catalog.status, catalogObservedAt: input.catalog.catalogObservedAt,
+        ...(input.catalog.revocation === undefined ? {} : { binding: input.catalog.revocation }) }],
       readMarker: input.readMarker,
-      verifyMarkerSignature: () => false,
+      verifyMarkerSignature: sdkListingSignatureVerifier(),
     },
     verifyIdentityPresentation: sdkIdentityPresentationVerifier(),
     loadRailResolution: () => ({
@@ -34,7 +35,7 @@ export function listingUpgradeReaderDeps(input: {
       input.supportedPayloadMethods.includes(verificationMethod.kind)
         ? { disposition: "supported", reason: "deployment acceptance verifier is configured for this method" }
         : { disposition: "unsupported", reason: "method is not configured in this independent verifier" },
-    verifySellerControl: ({ bundle, signer }) => signer === bundle.presentedBy && signer === input.signer,
+    verifySellerControl: ({ bundle, signer }) => signer === input.signer && bundle.claims.some(claim => claim.ref === signer),
   } as ListingValidationDeps;
 }
 

@@ -16,7 +16,16 @@ fi
 
 # Say at boot, not only in later refusals, when the node is not the pinned
 # deployment. Not fatal: the web app still serves the last verified catalog.
-npm run check:node-deployment || echo "[indexer] the configured Demos node is not the pinned deployment; publication/inclusion observations require reviewed DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS; catalog refresh requires the chain pin and continues with a warning for build drift alone"
+if npm run check:node-deployment; then
+  :
+else
+  deployment_status=$?
+  if [ "$deployment_status" -eq 1 ]; then
+    echo "[indexer] the configured Demos node differs from the deployment pins; review DEMOS_CHAIN_IDENTITY and DEMOS_NODE_BUILDS"
+  else
+    echo "[indexer] could not observe the Demos deployment (exit $deployment_status); check RPC connectivity and the diagnostic above"
+  fi
+fi
 
 reindex_forever() {
   while true; do

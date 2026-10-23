@@ -1,3 +1,4 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { pinnedChainIdentity } from "../src/catalog/nodeDeployment.js";
+import { statusNodeObservationCache } from "../src/catalog/statusNodeObservation.js";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import {
@@ -18,6 +20,8 @@ const store = await import("../src/catalog/store.js");
 const statusRoute = await import("../app/api/dacs/status/route.js");
 
 const locator = (digit: string) => `stor-${digit.repeat(40)}`;
+
+test.beforeEach(() => statusNodeObservationCache.invalidate());
 
 test.after(() => {
   rmSync(dataDirectory, { recursive: true, force: true });
@@ -432,6 +436,7 @@ test("status refuses oversized, excess-row, invalid-id and HTTP-error tip replie
       () => Response.json({ result: 200, response: [{ id: 1 }] }, { status: 500 }),
       () => new Response(' '.repeat(1024 * 1024 + 1)),
     ]) {
+      statusNodeObservationCache.invalidate();
       globalThis.fetch = async (_input, init) => {
         const call = JSON.parse(String(init?.body)).params[0];
         return call.message === "getTransactions" ? response() : nodeStatusReply(call);

@@ -16,6 +16,7 @@ import {
 } from "../src/catalog/listingVerification.js";
 import { sdkIdentityPresentationVerifier, sdkListingSignatureVerifier } from "../src/catalog/sdkReaderVerifiers.js";
 import { checkListingRevocation } from "../vendor/dacs-sdk/dist/agent/listingValidation.js";
+import { LISTING_REJECTION_MESSAGES } from "../src/catalog/listingAdmission.js";
 
 const seed = Uint8Array.from(Buffer.from("11".repeat(32), "hex"));
 const privateKey = privateKeyFromSeed(seed);
@@ -535,19 +536,17 @@ const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown
   return scope;
 };
 
-test("LR-2 caps the complete canonical Listing at 16,384 bytes, independently of raw JSON", async () => {
+test("LR-2 caps the canonical Listing without its signature", async () => {
   const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
-    padding: "x".repeat(bytes - canonicalBytes(signedCurrentListing({ padding: "" }))),
+    padding: "x".repeat(bytes - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))),
   });
   const atCap = sized(16_384);
-  assert.equal(canonicalBytes(atCap), 16_384);
+  assert.equal(canonicalBytes(stripEnvelope(atCap)), 16_384);
+  assert.ok(canonicalBytes(atCap) > 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
-  // A scope at the cap is oversized once its signature envelope is included.
-  const unsignedAtCap = signedCurrentListing({ padding: "x".repeat(16_384 - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))) });
-  assert.equal(canonicalBytes(stripEnvelope(unsignedAtCap)), 16_384);
-  assert.equal(await verifyListing(unsignedAtCap), null);
+  assert.match(LISTING_REJECTION_MESSAGES.NORMATIVE_LISTING_INVALID, /16,384-byte.*signature omitted/);
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);

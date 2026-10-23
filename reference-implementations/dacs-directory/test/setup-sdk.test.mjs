@@ -53,6 +53,7 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
     mkdirSync(join(root, "scripts"));
     writeFileSync(join(root, "scripts/setup-sdk.sh"), pinned.replace(`SDK_DIST_SHA256="${distSha}"`, `SDK_DIST_SHA256="${fixtureSha}"`));
     copyFileSync(digestScript, join(root, "scripts/sdk-dist-digest.mjs"));
+    writeFileSync(join(root, "scripts/sdk-compat-output.mjs"), "// The fixture compiler already emitted the fixture dist.\n");
     copyFileSync(new URL("../scripts/dacs-sdk-compat.patch", import.meta.url), join(root, "scripts/dacs-sdk-compat.patch"));
     const sdk = join(root, "vendor/dacs-sdk");
     mkdirSync(join(sdk, source ? ".git" : "dist"), { recursive: true });

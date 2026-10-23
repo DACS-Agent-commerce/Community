@@ -905,10 +905,23 @@ export function clearListingRejection(locator: string, registrationClaim: string
     .run(locator, registrationClaim.toLowerCase());
 }
 
-/** Replace each seller's diagnostics on every indexing pass, including empty passes. */
+/** Clear all diagnostics when a seller leaves the registration set. */
 export function clearRegistrationListingRejections(registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
 }
+
+/** Keep continuing failures' history, then remove failures not observed this pass. */
+export const pruneRegistrationListingRejections = db.transaction((
+  registrationClaim: string,
+  currentRejections: ReadonlySet<string>,
+): void => {
+  const claim = registrationClaim.toLowerCase();
+  const rows = db.prepare("SELECT locator FROM listing_rejections WHERE registration_claim = ?")
+    .all(claim) as Array<{ locator: string }>;
+  for (const { locator } of rows) {
+    if (!currentRejections.has(locator)) clearListingRejection(locator, claim);
+  }
+});
 
 export const pruneListingRejections = db.transaction((claims: string[]): void => {
   const keep = new Set(claims.map((claim) => claim.toLowerCase()));
