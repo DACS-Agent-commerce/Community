@@ -250,8 +250,11 @@
 #   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
 # A2A protocol v0.3.0 (github.com/a2aproject/A2A, tag v0.3.0 = 8d57eba286de756176892518a8fc39b0ac2ccefb,
 #   Apache-2.0): generated agent cards (src/catalog/a2a.ts) are validated against its AgentCard schema
-#   (test/discovery-exports.test.ts). Vendored byte-identical at test/fixtures/a2a/:
+#   (test/discovery-exports.test.ts). Full upstream source SHA-256 (provenance):
 #   specification/json/a2a.json 97d6e2435336836cd1d41dffacf83a1a97902b62b826ef14ec5704db85c95f17
+#   Vendored excerpt: AgentCard's complete dependency closure plus TransportProtocol (19 definitions);
+#   root metadata, definition order and contents retained from that source. Excerpt SHA-256:
+#   test/fixtures/a2a/a2a.json 2358df8a4f7f0f4d05827065ba31878d3d5e48d769d65c17c06537626782243e
 
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert

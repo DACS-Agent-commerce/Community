@@ -21,7 +21,7 @@ const { GET: sellerView } = await import("../app/api/dacs/sellers/[primaryClaimR
 const { default: sitemap } = await import("../app/sitemap.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
-// A2A v0.3.0 specification/json/a2a.json, byte-identical at the SPEC_PIN commit.
+// A2A v0.3.0 AgentCard dependency closure plus TransportProtocol; source and excerpt pinned in SPEC_PIN.
 const a2aSchemaBytes = readFileSync(new URL("./fixtures/a2a/a2a.json", import.meta.url));
 const a2aSchema = JSON.parse(a2aSchemaBytes.toString("utf8"));
 const agentCardErrors = (card: unknown) => schemaErrors(a2aSchema, a2aSchema.definitions.AgentCard, card);
@@ -158,7 +158,7 @@ test("the register page's A2A fields reach the generator and set the card's serv
 
 test("every generated card is a valid A2A v0.3.0 AgentCard under the vendored schema", async () => {
   const pinned = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
-  assert.match(pinned, new RegExp(`a2a\\.json\\s+${createHash("sha256").update(a2aSchemaBytes).digest("hex")}`), "SPEC_PIN records the vendored bytes");
+  assert.match(pinned, new RegExp(`Excerpt SHA-256:\\s*\\n#\\s+test/fixtures/a2a/a2a\\.json\\s+${createHash("sha256").update(a2aSchemaBytes).digest("hex")}`), "SPEC_PIN records the vendored excerpt bytes");
   assert.deepEqual([...A2A_TRANSPORTS], a2aSchema.definitions.TransportProtocol.enum);
   assert.equal(A2A_PROTOCOL_VERSION, a2aSchema.definitions.AgentCard.properties.protocolVersion.default);
   assert.ok(agentCardErrors({ name: "x" }).some((error) => error.includes("missing required url")), "positive control: the validator rejects a partial card");

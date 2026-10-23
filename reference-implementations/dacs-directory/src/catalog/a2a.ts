@@ -2,8 +2,8 @@
  * The A2A agent-card fields the well-known generator emits. DACS-1 §6.3.5 adds the `dacs` block
  * to an existing A2A agent card, so a generated card is a complete A2A AgentCard.
  * Pinned to A2A protocol v0.3.0: github.com/a2aproject/A2A tag v0.3.0, commit
- * 8d57eba286de756176892518a8fc39b0ac2ccefb, specification/json/a2a.json (vendored byte-identical at
- * test/fixtures/a2a/a2a.json; its sha256 is recorded in SPEC_PIN).
+ * 8d57eba286de756176892518a8fc39b0ac2ccefb, specification/json/a2a.json (AgentCard dependency closure
+ * and TransportProtocol excerpt at test/fixtures/a2a/a2a.json; source and excerpt sha256 in SPEC_PIN).
  */
 export const A2A_PROTOCOL_VERSION = "0.3.0";
 /** a2a.json `TransportProtocol`. */
