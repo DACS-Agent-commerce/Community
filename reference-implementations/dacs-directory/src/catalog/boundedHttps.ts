@@ -71,8 +71,11 @@ export interface VettedUrl {
   ip: string;
 }
 
-/** Resolve, reject every non-public answer, and pin one approved address. */
-export async function validatePublicHttpsUrl(raw: string): Promise<VettedUrl> {
+/**
+ * Every check validatePublicHttpsUrl makes without a DNS lookup: an IP-literal host is checked
+ * here, a hostname only when it resolves. Returns the URL and its bare lowercase hostname.
+ */
+export function vetPublicHttpsUrl(raw: string): { url: URL; hostname: string } {
   let url: URL;
   try { url = new URL(raw); } catch { throw new OutboundTargetError("invalid URL"); }
   if (url.href.length > 2_048 || url.protocol !== "https:" || url.username || url.password ||
@@ -83,17 +86,21 @@ export async function validatePublicHttpsUrl(raw: string): Promise<VettedUrl> {
   if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
     throw new OutboundTargetError("local hostnames are not allowed");
   }
+  if (isIP(hostname) && isPrivateAddress(hostname)) throw new OutboundTargetError("URL resolves to a non-public address");
+  return { url, hostname };
+}
+
+/** Resolve, reject every non-public answer, and pin one approved address. */
+export async function validatePublicHttpsUrl(raw: string): Promise<VettedUrl> {
+  const { url, hostname } = vetPublicHttpsUrl(raw);
+  if (isIP(hostname)) return { url, ip: hostname };
   let resolved: Array<{ address: string; family: number }>;
-  if (isIP(hostname)) {
-    resolved = [{ address: hostname, family: isIP(hostname) }];
-  } else {
-    try { resolved = await lookup(hostname, { all: true, verbatim: true }); }
-    catch (error) { throw new Error("target DNS lookup failed", { cause: error }); }
-  }
+  try { resolved = await lookup(hostname, { all: true, verbatim: true }); }
+  catch (error) { throw new Error("target DNS lookup failed", { cause: error }); }
   if (resolved.length === 0 || resolved.some((record) => isPrivateAddress(record.address))) {
     throw new OutboundTargetError("URL resolves to a non-public address");
   }
-  if (!isIP(hostname)) url.hostname = hostname;
+  url.hostname = hostname;
   return { url, ip: resolved[0].address };
 }
 

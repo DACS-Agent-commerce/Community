@@ -163,6 +163,9 @@
 #     their publisher must issue a new signed version. Legacy SDK rail names retain that profile.
 #   Anonymous restricted-program reads on node ac8f45f are denied: buyer-only is indeterminate
 #     on that deployment. ACL-success tests model a hypothetical readable metadata contract.
+#   §6.3.5/RB-3 well-known export: a withdrawal cached by releases before revocation bindings were
+#     recorded has no binding. The generator retains it as `status: "revoked"` without `revocation`
+#     (readers return indeterminate under RB-5) rather than dropping the withdrawal from the index.
 #   Revocation candidates: discovered markers returning NOT_FOUND, PERMISSION_DENIED or a transport
 #     failure stay pending/indeterminate. Persistent 1–60 second exponential backoff bounds retries.
 #     Only successfully read invalid content can reject a candidate; verified revocation is retained.
@@ -194,7 +197,7 @@
 #   unsupported; listing publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding.
-# - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
+# - Generated A2A cards use the publisher-declared A2A endpoint and transport; generation does not probe them.
 # - scan.ts requires structured errorCode NOT_FOUND on HTTP 404 before
 #   classifying STORAGE_NOT_FOUND. Proxy/bare/wrong-route 404s stay retryable
 #   STORAGE_RPC_UNAVAILABLE (test/scan-addresses.test.ts); structured permission
@@ -247,6 +250,14 @@
 #   conformance/vectors/security/bundle-absence-evidence-v0.3.json 304c07d0f39f92db52dc3f5d2feac9149cf253298abe514668501451e9ee7b8e
 #   conformance/vectors/security/metered-pricing-v0.3.json 36ec8725d058062ab6dfefe79a8b0c7c97b33be3c614b6073f392647c05d4009
 #   conformance/vectors/security/phase-kind-divergence-v0.3.json 0c2c97ca1d4dece0b1f16011834aa21c446b3226311ef0a23417228565ed151e
+# A2A protocol v0.3.0 (github.com/a2aproject/A2A, tag v0.3.0 = 8d57eba286de756176892518a8fc39b0ac2ccefb,
+#   Apache-2.0): generated agent cards (src/catalog/a2a.ts) are validated against its AgentCard schema
+#   (test/discovery-exports.test.ts). Full upstream source SHA-256 (provenance):
+#   specification/json/a2a.json 97d6e2435336836cd1d41dffacf83a1a97902b62b826ef14ec5704db85c95f17
+#   Vendored excerpt: AgentCard's complete dependency closure plus TransportProtocol (19 definitions);
+#   root metadata, definition order and contents retained from that source. Excerpt SHA-256:
+#   test/fixtures/a2a/a2a.json 2358df8a4f7f0f4d05827065ba31878d3d5e48d769d65c17c06537626782243e
+
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert
 # end-to-end catalog status for every vector. In particular, unauthenticated
@@ -263,3 +274,8 @@
 # raw signatures use canonical unpadded Base64URL (64 bytes / 86 characters).
 # Hash the exact served index bytes; the signature is external in the agent card.
 # See README and test/withdrawal-publisher-signature.test.ts.
+# Well-known generation (src/catalog/a2a.ts):
+#   §6.3.5 extends an A2A agent card, so well-known generation requires the publisher's A2A service
+#   endpoint and transport and emits a complete A2A v0.3.0 AgentCard; it never claims an A2A service
+#   at the hosting origin. A seller without an A2A service is discovered through the catalog API.
+#   The endpoint's transport support is the publisher's declaration; generation does not probe it.

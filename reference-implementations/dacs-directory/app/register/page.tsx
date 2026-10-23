@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useDemosWallet } from "@/src/components/useDemosWallet";
+import { WellKnownFiles } from "@/src/components/wellknown-files";
 import {
   clearPendingListingPublication,
   readPendingListingPublication,
@@ -484,7 +485,7 @@ export default function Register() {
         </section>
       )}
 
-      {screen === "done" && <WellKnownFiles claim={claim} />}
+      {screen === "done" && <WellKnownFiles claim={claim} sign={wallet.sign} />}
     </div>
   );
 }
@@ -505,29 +506,4 @@ function progressState(current: PublishStep, target: PublishStep, failedAt: Publ
 
 function Progress({ label, state }: { label: string; state: ProgressState }) {
   return <li className={state}><span aria-hidden>{state === "complete" ? "✓" : state === "current" ? "●" : state === "failed" ? "✗" : "○"}</span>{label}</li>;
-}
-
-function WellKnownFiles({ claim }: { claim: string | null }) {
-  const [domain, setDomain] = useState("");
-  const [files, setFiles] = useState<Record<string, string> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const generate = async () => {
-    if (!claim) return;
-    setBusy(true); setError(null); setFiles(null);
-    const response = await fetch(`/api/dacs/wellknown-files?claim=${encodeURIComponent(claim)}&domain=${encodeURIComponent(domain.trim())}`);
-    const body = await response.json();
-    if (!response.ok) setError(body.error); else setFiles(body.files);
-    setBusy(false);
-  };
-  return (
-    <section className="card" style={{ marginTop: 16 }} aria-labelledby="domain-heading">
-      <div className="eyebrow">optional</div><h2 id="domain-heading" className="card-section-title">Publish discovery files on your domain</h2>
-      <p className="agent-desc">This makes the same listing independently discoverable from your agent&apos;s own domain.</p>
-      <div className="form-field"><label htmlFor="agent-domain">Agent domain</label><input id="agent-domain" className="form-control mono" placeholder="agent.example.com" value={domain} onChange={(event) => setDomain(event.target.value)} /></div>
-      <button className="btn" type="button" onClick={generate} disabled={busy || !claim || !domain.trim()}>{busy ? "Generating…" : "Generate .well-known files"}</button>
-      {error && <p className="verdict err" role="alert">{error}</p>}
-      {files && Object.entries(files).map(([path, content]) => <details className="technical-disclosure" key={path}><summary className="mono">{path}</summary><pre className="artifact">{content}</pre></details>)}
-    </section>
-  );
 }
