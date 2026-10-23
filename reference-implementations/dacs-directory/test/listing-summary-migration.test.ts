@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { Catalog } from "../src/catalog/types.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-listing-summary-migration-"));
 const seller = `did:demos:agent:${"8".repeat(64)}`;
@@ -63,19 +64,30 @@ seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog
 }));
 seeded.close();
 
-process.env.DACS_DIRECTORY_DATA = dataDirectory;
-const store = await import("../src/catalog/store.js");
+// First store import happens in a fresh process, with the on-disk source active.
+// A cached parent import must never stand in for startup migration coverage.
+const startStore = () => {
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "--input-type=module", "--eval",
+    `const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
+     process.stdout.write(JSON.stringify(store.loadCatalog()));`,
+  ], { env: { ...process.env, DACS_DIRECTORY_DATA: dataDirectory }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr);
+  return JSON.parse(child.stdout) as Catalog;
+};
+const migrated = startStore();
 
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 test("persisted revocationBinding summaries migrate to normative revocation once", () => {
-  const listing = store.loadCatalog().sellers[0]?.listings[0];
+  const listing = migrated.sellers[0]?.listings[0];
   assert.deepEqual(listing?.revocation, revocationBinding);
   assert.equal("revocationBinding" in (listing ?? {}), false);
 });
 
 test("startup migrates ready and missing readiness summaries once across restarts", () => {
-  const listings = store.loadCatalog().sellers[0]?.listings;
+  const listings = migrated.sellers[0]?.listings;
   assert.equal(listings?.length, 2);
   for (const listing of listings ?? []) {
     assert.equal(listing.transactionReadiness?.disposition, "unassessed");
@@ -83,20 +95,19 @@ test("startup migrates ready and missing readiness summaries once across restart
   }
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
-    const readMigration = () => db.prepare("SELECT * FROM kv_state WHERE key IN ('catalog', 'listing-summary-readiness-schema-version') ORDER BY key").all();
+    const readMigration = () => db.prepare("SELECT * FROM kv_state WHERE key IN ('catalog', 'listing-summary-readiness-schema-version', 'listing-summary-revocation-schema-version') ORDER BY key").all();
     const before = readMigration();
     assert.equal((db.prepare("SELECT value_json FROM kv_state WHERE key='listing-summary-readiness-schema-version'").get() as { value_json: string }).value_json, "1");
-    const restart = spawnSync(process.execPath, [
-      "--import", "tsx", "--input-type=module", "--eval",
-      `await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});`,
-    ], { env: { ...process.env, DACS_DIRECTORY_DATA: dataDirectory }, encoding: "utf8", timeout: 30_000 });
-    assert.equal(restart.status, 0, restart.stderr);
+    assert.equal((db.prepare("SELECT value_json FROM kv_state WHERE key='listing-summary-revocation-schema-version'").get() as { value_json: string }).value_json, "1");
+    const persisted = JSON.parse((db.prepare("SELECT value_json FROM kv_state WHERE key='catalog'").get() as { value_json: string }).value_json);
+    assert.deepEqual(persisted, migrated, "the migrated wire fields are durable, not just transformed on read");
+    assert.deepEqual(startStore(), migrated, "restart reads the same migrated catalog");
     assert.deepEqual(readMigration(), before, "a restart does not rewrite the migrated catalog or version marker");
   } finally { db.close(); }
 });
 
 test("an active migrated row drops obsolete revocation evidence while revoked rows retain it", () => {
-  const [revoked, active] = store.loadCatalog().sellers[0].listings;
+  const [revoked, active] = migrated.sellers[0].listings;
   assert.deepEqual(revoked.revocation, revocationBinding);
   assert.equal(Object.hasOwn(active, "revocationBinding"), false);
   assert.equal(Object.hasOwn(active, "revocation"), false);

@@ -131,3 +131,24 @@ test("a current Listing referenced by a historical bundle retains its current ha
   listing["e\u0301"] = "modified";
   assert.equal(verifiedListingTerms(verification, artifacts, true), undefined);
 });
+
+
+test("a historical agreement with dacsVersion keeps its historical hash profile", async () => {
+  const f = fixture("structured", true);
+  const scope = { ...stripSignature(f.agreement), dacsVersion: "1" };
+  f.agreement = { ...scope, signatures: [0, 1].map(index => partySignature(scope, "dacs-agreement:v1:", index)) } as typeof f.agreement;
+  const historicalHash = legacyListingHash(scope);
+  const currentHash = contentHash(f.agreement);
+  assert.notEqual(historicalHash, currentHash, "decomposed member names distinguish the profiles");
+  ((f.bundle as Obj).agreementRef as { contentHash: string }).contentHash = historicalHash;
+  const { anchoredByRole: _role, ...bundleScope } = stripSignature(f.bundle);
+  f.bundle.signatures = [0, 1].map(index => partySignature(bundleScope, "dacs-bundle:v1:", index));
+  const checked = await verify(f);
+  assert.equal(checked.result.ok, true, JSON.stringify(checked.result));
+  assert.ok(checked.result.refs.every(ref => ref.verdict === "ok"));
+  assert.equal(checked.strict, true, "an additive extension cannot change a historical agreement's profile");
+  const substituted = structuredClone(checked.result);
+  substituted.bundle!.agreementRef!.contentHash = currentHash;
+  assert.equal(await refsPassStrictPolicy(substituted, checked.artifacts), false,
+    "successful SDK verdicts cannot authorize a substituted current-profile hash");
+});

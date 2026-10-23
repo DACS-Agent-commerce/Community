@@ -43,3 +43,13 @@ test("manifest validation independently rejects wrong containers, entry fields a
   valid[0].replacementListingId = "A.b_c~d-".repeat(16);
   assert.deepEqual(parseListingUpgradeManifest(valid), valid);
 });
+
+
+test("a complete manifest plus an unknown source fails the exact inventory cardinality check", () => {
+  const valid = manifest();
+  assert.deepEqual(parseListingUpgradeManifest(valid), valid);
+  const extra = { ...valid[0], sourceListingId: "unknown-source", replacementListingId: "unknown-replacement",
+    replacementLocator: `stor-${"f".repeat(40)}` };
+  assert.throws(() => parseListingUpgradeManifest([...valid, extra]),
+    { message: `replacement manifest must contain exactly ${old.length} entries` });
+});

@@ -50,3 +50,11 @@ test("browser util predicates distinguish byte arrays from ordinary JSON", async
   assert.equal(types.isUint8Array(new Uint8Array([1, 2])), true);
   assert.equal(types.isUint8Array({ 0: 1, length: 1 }), false);
 });
+
+
+test("browser IP entry points refuse non-string runtime inputs without coercion", () => {
+  for (const value of [null, undefined, 7, {}, ["127.0.0.1"], ["::1"]]) {
+    assert.equal(isIPv6(value as unknown as string), false);
+    assert.equal(isIP(value as unknown as string), 0);
+  }
+});

@@ -11,6 +11,7 @@ const { saveCatalog } = await import("../src/catalog/store.js");
 const listings = await import("../app/api/dacs/listings/route.js");
 const detail = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
 const inspection = await import("../app/api/dacs/inspect-service/[listingId]/[version]/route.js");
+const sellers = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
 const claim = `did:demos:agent:${"a".repeat(64)}`;
 const parameters = Array.from({ length: 1542 }, (_, i) => `k${String(i).padStart(4, "0")}=v`).join("&");
 const presentedBy = `${claim}?${parameters}`;
@@ -63,4 +64,21 @@ test("seller-record identity drives filters and links while summaries retain exa
     params: Promise.resolve({ listingId: "svc-0", version: "1" }),
   });
   assert.equal(response.status, 200);
+});
+
+
+test("seller path claims share the UTF-8 query bound and refuse malformed encoding", async () => {
+  const request = new NextRequest("https://directory.test/api/dacs/sellers/test");
+  for (const raw of ["a".repeat(1024), "é".repeat(512)]) {
+    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(raw) }) });
+    assert.equal(response.status, 404, "a claim at the byte limit reaches lookup");
+  }
+  for (const raw of [presentedBy, "a".repeat(1025), "é".repeat(513)]) {
+    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(raw) }) });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "primaryClaim exceeds 1024 bytes" });
+  }
+  const malformed = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: "%GG" }) });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), { error: "invalid primaryClaim encoding" });
 });
