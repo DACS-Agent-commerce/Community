@@ -9,7 +9,7 @@ import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared
 import { PathnameContext, SearchParamsContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime.js";
 import DirectoryExplorer from "../src/components/DirectoryExplorer.js";
 import { ObservedOutcomeBadge } from "../src/components/Badge.js";
-import { noRateCatalog, noRateClaim } from "./fixtures/no-rate-catalog.js";
+import { noRateCatalog, noRateClaim, withheldPaidCatalog } from "./fixtures/no-rate-catalog.js";
 import { projectTestnetCatalog } from "../src/catalog/testnetMetrics.js";
 
 // The app's JSX is normally transformed by Next; tsx uses the classic runtime
@@ -74,8 +74,9 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
 test("rendered legacy filter and ranking URLs explicitly refuse the query and offer clearing", () => {
   for (const query of [
     "trackRecord=90", "minCompletionRate=0.9", "minRating=5", "sort=completionRate", "minCompletionRate%5B%5D=0.9", "order=asc",
-    // Any name outside the listing filters, whatever its spelling.
-    "sortKey=rating", "sortDirection=desc", "direction=desc", "sortOrder=desc", "filter=completionRate", "utm_source=x",
+    // Rate and ranking aliases still refuse the request.
+    "sortKey=rating", "sortDirection=desc", "direction=desc", "sortOrder=desc", "filter=completionRate",
+    "utm_source=x&minRating=5", "fbclid=x&sort=completionRate",
   ]) {
     const html = renderDiscovery(query);
     assert.match(html, /role="alert"/);
@@ -83,7 +84,9 @@ test("rendered legacy filter and ranking URLs explicitly refuse the query and of
     assert.match(html, /Clear all filters/);
     assert.doesNotMatch(html, /class="card service-card"/);
   }
-  for (const query of ["", "category=services&rail=demos-native:DEM&identityTier=self-declared"]) {
+  for (const query of ["", "category=services&rail=demos-native:DEM&identityTier=self-declared",
+    "utm_source=x", "fbclid=x", "gclid=x", "ref=x", "unknown=x", "utm_source=x&category=services",
+    "utm_campaign=rating", "ref=completion_rate", "unknown=score"]) {
     const html = renderDiscovery(query);
     assert.doesNotMatch(html, /role="alert"/, query);
     assert.match(html, /class="card service-card"/, query);
@@ -100,4 +103,20 @@ test("the verify page's outcome badge is a neutral observation, never a success 
   const source = readFileSync(new URL("../app/verify/page.tsx", import.meta.url), "utf8");
   assert.match(source, /<ObservedOutcomeBadge outcome=\{loaded\.outcome\} \/>/);
   assert.doesNotMatch(source, /outcome === "completed"/);
+});
+
+
+test("paid history withheld from counts is disclosed on discovery, seller and service pages", async () => {
+  const fixture = withheldPaidCatalog();
+  saveCatalog(fixture);
+  const discovery = renderWithRouter(React.createElement(DiscoverPage));
+  const seller = renderToStaticMarkup(await SellerPage({ params: Promise.resolve({ claim: noRateClaim }) }));
+  const service = renderToStaticMarkup(await ServicePage({ params: Promise.resolve({ seller: noRateClaim,
+    listingId: "observed-history", version: "1" }) }));
+  for (const html of [discovery, seller, service]) {
+    assert.match(html, /Observed outcomes: 1, not verified; 10 evidence records withheld; counts are incomplete/);
+    assert.match(html, /Completion verification unavailable/);
+    assert.doesNotMatch(html, /0%|completion rate/i);
+  }
+  assert.equal((seller.match(/verify yourself →/g) ?? []).length, 11);
 });

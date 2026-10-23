@@ -67,3 +67,18 @@ export function noRateCatalog(): Catalog {
   };
   return { catalogVersion: "1", generatedAt: 200, sellers: [seller] };
 }
+
+/** The pinned writer cannot supply payment logical-address metadata. */
+export function withheldPaidCatalog(): Catalog {
+  const catalog = noRateCatalog();
+  const seller = catalog.sellers[0];
+  const completed = seller.deals[0];
+  seller.deals = Array.from({ length: 10 }, (_, index) => ({
+    ...completed, jobId: `paid-${index}`, bundleContentHash: index.toString(16).padStart(64, "0"),
+    reputationEligible: false, settlementTxIds: [],
+  }));
+  seller.deals.push({ ...noRateCatalog().sellers[0].deals[5],
+    jobId: "negotiation-abort", anchorTimestamp: 105,
+  });
+  return catalog;
+}

@@ -67,7 +67,9 @@ two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its li
 uses the early SDK's compact signature encoding; the verifier accepts that encoding
 only after checking the same Ed25519 signature, signed scope, agent key, and anchor owner
 as current structured signature envelopes. Historical deals are displayed, but only
-strictly party-bound bundles with verified references contribute to labelled observed counts.
+strictly party-bound bundles with verified references and supported settlement projections contribute to labelled observed counts.
+The pinned SDK session writer omits the logical-address metadata needed to project
+paid completions; those deals stay in history and are disclosed as withheld records.
 
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
@@ -469,9 +471,11 @@ the publisher as buyer and attributes supplier history to the agreement seller.
 The catalog profile also refuses APR-1 `pay-alternative` pipelines, which the pinned
 SDK reader accepts.
 
-Observed-history processing retains volume, settlement uniqueness, anchor-time
-windowing and evidence references. Completion and fault rates and numeric reputation
-scores remain unavailable during testnet.
+Observed-history processing retains eligible volume, settlement uniqueness, anchor-time
+windowing and evidence references. Seller reputation and listing hints publish
+`withheldRecordCount` for retained evidence omitted from their counts; a positive
+value explicitly labels the counts as incomplete. Completion and fault rates and
+numeric reputation scores remain unavailable during testnet.
 
 The Node no-rate regression tests use an isolated populated catalog, including
 aborted outcomes, old numeric metrics and missing listing hints. They check the API,
@@ -487,12 +491,26 @@ and declares these as open `nonconforming` deviations in the Standard's
 restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
 document `2.0.0`. A cached listing with no hint, or one the pinned SDK reader would
 reject, still has null metrics and uses the catalog snapshot window. Every served
-hint's observed count is recomputed from the retained category records the seller
+hint's observed count is rebuilt from the retained category records the seller
 reputation counts, after the DACS-4 SB-2 settlement-collision exclusion that
 `docs/TP-1.md` describes. The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
 `completed` and `totalAgreements` for compatibility, with explicit observed-count
-labels. Currency totals count observed priced completed outcomes and do not
-establish completion or settlement.
+labels. These fields describe a counted subset, not the seller's complete history,
+and must not be divided into a completion rate. `withheldRecordCount` counts
+excluded evidence records in the same category/window (including duplicates and
+undated records), not failed deals. The pinned SDK's payment-evidence writer
+omits `metadata.logicalAddress`, so its paid completions and amounts are withheld
+while earlier aborts may count; ten such completions and one early abort publish
+`completed: 0`, `totalAgreements: 1`, `withheldRecordCount: 10` and an explicit
+incomplete-count label. Currency totals include only the counted priced completed
+outcomes and do not establish completion or settlement.
+
+The public projection is cached per exact persisted catalog, with fresh copies
+for callers and invalidation on writes from other processes. Eligibility is
+prepared once per seller and category counts are reused per window. Health checks
+read only the stored snapshot date. `/discover` ignores unrelated query names
+such as `utm_source`, `fbclid`, `gclid` and `ref`, while still refusing rate, score
+and ranking requests; the JSON listings API refuses every undocumented name.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
@@ -540,12 +558,14 @@ transactions) that reports the storage not-found answer, both search paths, meta
 shape and the node's self-reported build, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one
 matching public program with object or null metadata. Without a logical address,
-the report has `scope: "generic-read"`; a successful diagnostic exits 2 and makes
+the report has `scope: "generic-read"`; a successful diagnostic exits 3 and makes
 no SDK-anchor claim. For a known SDK-written listing or bound-repository
 anchor with logical-address metadata, pass its logical address too: the report
 has `scope: "sdk-anchor"`, and exit 0 requires matching
 `metadata.logicalAddress`, `programName === logicalToStorageProgramName(logicalAddress)`
-and a reported build. A failed observation exits 1. The pinned SDK's session-runtime
+and a reported build. The probe checks the bounded set of exact-name candidates
+until one fresh reply satisfies every check. A failed observation exits 1;
+a missing program-name argument exits 2. The pinned SDK's session-runtime
 payment-evidence writer does not include logical-address metadata, so those
 anchors cannot satisfy this metadata check. This checks the read contract without authenticating the
 metadata writer or attesting a deployment. Its output is dated runtime evidence, not a pin. Run it when the

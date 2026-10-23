@@ -74,30 +74,37 @@ export async function probeNodeContract(rpc: string, programName: string, expect
   const searchesAgree = viaNodeCall && viaGcr ? JSON.stringify(viaNodeCall) === JSON.stringify(viaGcr) : null;
   // Agreement on an empty page proves no positive search/read contract. A known
   // program must still be publicly readable with the same exact name now.
-  const candidate = viaGcr?.[0];
   let knownProgramReadable = false;
   let storageMetadata = false;
   let anchorMetadataMatches: boolean | null = expectedLogicalAddress === undefined ? null : false;
-  if (candidate) {
+  for (const candidate of new Set(viaGcr ?? [])) {
     try {
       const response = await fetch(`${base}/storage-program/${candidate}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
       const body = await storageResponseJson(response) as { success?: unknown; programName?: unknown; owner?: unknown; data?: unknown; metadata?: unknown } | null;
-      knownProgramReadable = response.ok && body?.success === true && body.programName === programName &&
+      const readable = response.ok && body?.success === true && body.programName === programName &&
         typeof body.owner === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(body.owner) &&
         body.data !== null && typeof body.data === "object" && !Array.isArray(body.data);
       const metadata = body?.metadata;
       const metadataObject = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
         ? metadata as Record<string, unknown> : null;
-      storageMetadata = response.ok && body?.success === true && (metadata === null || metadataObject !== null);
+      const metadataValid = response.ok && body?.success === true && (metadata === null || metadataObject !== null);
+      storageMetadata ||= metadataValid;
+      let matches = expectedLogicalAddress === undefined;
       if (expectedLogicalAddress !== undefined) {
         const logicalAddress = metadataObject?.logicalAddress;
         // The pinned SDK DemosAdapter writes this name/address relation. This
         // observes the node's contract; it does not authenticate the writer.
-        anchorMetadataMatches = typeof logicalAddress === "string" && logicalAddress.length > 0 &&
+        matches = typeof logicalAddress === "string" && logicalAddress.length > 0 &&
           logicalAddress.trim() === logicalAddress && logicalAddress === expectedLogicalAddress &&
           body?.programName === logicalToStorageProgramName(logicalAddress);
       }
-    } catch { /* A missing, private or malformed known program cannot certify this deployment. */ }
+      if (expectedLogicalAddress !== undefined) anchorMetadataMatches ||= matches;
+      // A single fresh reply must satisfy every read/metadata/anchor check.
+      if (readable && metadataValid && matches) {
+        knownProgramReadable = true;
+        break;
+      }
+    } catch { /* Continue through the bounded search set after an unreadable candidate. */ }
   }
   const network = await post(base, { "content-type": "application/json" }, {
     method: "nodeCall",

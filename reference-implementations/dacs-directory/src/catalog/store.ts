@@ -546,8 +546,7 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
 }
 
 /** The persisted catalog as indexed. Writers read this; public reads use loadCatalog. */
-export const loadStoredCatalog = (): Catalog => {
-  const catalog: Catalog = getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
     const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
     if (listing.status === "revoked" && !listing.revocation && legacy.revocationBinding) listing.revocation = legacy.revocationBinding;
@@ -555,9 +554,30 @@ export const loadStoredCatalog = (): Catalog => {
   }
   return catalog;
 };
-// TP-1 projection on every public read. Never save its result: that would
-// persist the null rating values over the indexed ones.
-export const loadCatalog = (): Catalog => projectTestnetCatalog(loadStoredCatalog());
+export const loadStoredCatalog = (): Catalog => normalizeStoredCatalog(
+  getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] }),
+);
+
+const catalogRow = db.prepare("SELECT value_json FROM kv_state WHERE key = 'catalog'");
+let publicCatalogCache: { source: string | undefined; projection: Catalog } | undefined;
+// Compare the persisted bytes on each read: another process can write a catalog
+// with the same generatedAt (or within the same updated_at millisecond). Return
+// a fresh copy so callers cannot mutate the shared projection. Never persist it.
+export const loadCatalog = (): Catalog => {
+  const source = (catalogRow.get() as { value_json: string } | undefined)?.value_json;
+  if (!publicCatalogCache || publicCatalogCache.source !== source) {
+    const stored = source === undefined ? { catalogVersion: "1" as const, generatedAt: 0, sellers: [] } : JSON.parse(source) as Catalog;
+    publicCatalogCache = { source, projection: projectTestnetCatalog(normalizeStoredCatalog(stored)) };
+  }
+  return structuredClone(publicCatalogCache.projection);
+};
+
+/** Health checks need the snapshot date, without rebuilding or copying evidence. */
+export const loadCatalogGeneratedAt = (): number => {
+  const row = db.prepare("SELECT json_extract(value_json, '$.generatedAt') AS generated_at FROM kv_state WHERE key = 'catalog'").get() as
+    { generated_at: number } | undefined;
+  return row?.generated_at ?? 0;
+};
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);

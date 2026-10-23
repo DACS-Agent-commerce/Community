@@ -205,3 +205,49 @@ test("node contract probe refuses self-consistent empty and padded addresses wit
     });
   }
 });
+
+test("node contract probe checks later exact-name candidates after unreadable or nonmatching replies", async (t) => {
+  const logicalAddress = paymentEvidenceAddress("01J8ME0SXKQ4T9V2RC5HJ6WX7D", "demos-native:DEM", 2);
+  const programName = logicalToStorageProgramName(logicalAddress);
+  const first = `stor-${"1".repeat(40)}`;
+  const second = `stor-${"2".repeat(40)}`;
+  for (const scenario of ["null metadata", "wrong address", "HTTP error", "read error", "no matching candidate", "split checks", "full page"]) {
+    await t.test(scenario, async () => {
+      const reads: string[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input, init) => {
+        assert.ok(init?.signal);
+        if (init?.method === "POST") {
+          const request = JSON.parse(String(init.body));
+          if (request.params[0].message === "getNetworkInfo") {
+            return Response.json({ result: 200, response: { nodeVersion: { commit: "12".repeat(20), dirty: false } } });
+          }
+          const candidates = scenario === "full page" ? Array.from({ length: 32 }, () => first) : [first, second];
+          return Response.json({ result: 200, response: candidates.map((storageAddress) => ({ storageAddress, programName })) });
+        }
+        const address = String(input).split("/").pop()!;
+        if (address === `stor-${"0".repeat(40)}`) {
+          return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+        }
+        reads.push(address);
+        if (address === first && scenario === "read error") throw new Error("unavailable");
+        const matches = address === second && scenario !== "no matching candidate" && scenario !== "split checks";
+        return Response.json({ success: true, programName,
+          owner: address === first && scenario === "split checks" ? "invalid" : `0x${"34".repeat(32)}`,
+          data: { observed: true },
+          metadata: matches || (address === first && scenario === "split checks") ? { logicalAddress }
+            : address === first && scenario === "wrong address" ? { logicalAddress: `${logicalAddress}:other` } : null,
+        }, { status: address === first && scenario === "HTTP error" ? 503 : 200 });
+      };
+      try {
+        const report = await probeNodeContract("https://node.example", programName, logicalAddress);
+        const accepted = !["no matching candidate", "split checks", "full page"].includes(scenario);
+        assert.equal(report.ok, accepted, scenario);
+        assert.deepEqual(reads, scenario === "full page" ? [] : [first, second], "bounded complete search set is checked");
+        if (accepted) assert.equal(report.anchorMetadataMatches, true);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});

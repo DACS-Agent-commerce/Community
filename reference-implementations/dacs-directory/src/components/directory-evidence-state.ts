@@ -81,7 +81,7 @@ export function directoryEvidenceState(
     deals: Object.freeze({
       completed,
       total,
-      label: observedOutcomesLabel(total),
+      label: observedOutcomesLabel(total, seller.reputation.withheldRecordCount),
       explanation: COMPLETION_VERIFICATION_UNAVAILABLE,
     }),
   });

@@ -650,15 +650,17 @@ export async function indexRegistration(
   const windowEnd = now;
   const reputation = deriveSellerReputation(deals, windowStart, windowEnd);
   // Listing hints count the same SB-2-filtered records as the seller reputation.
-  const counted = countableDeals(deals, windowStart, windowEnd).deals;
+  const counted = countableDeals(deals, windowStart, windowEnd);
   const listingsWithHint = listings.map((l) => ({
     ...l,
     reputationHint: (() => {
-      const categoryDeals = counted.filter((d) => inCategory(d, l.offering.category));
+      const categoryDeals = counted.deals.filter((d) => inCategory(d, l.offering.category));
+      const withheldRecordCount = counted.withheldDeals.filter((d) => inCategory(d, l.offering.category)).length;
       return {
         categoryScope: l.offering.category,
+        withheldRecordCount,
         ...UNAVAILABLE_TESTNET_METRICS,
-        observedOutcomesLabel: observedOutcomesLabel(categoryDeals.length),
+        observedOutcomesLabel: observedOutcomesLabel(categoryDeals.length, withheldRecordCount),
         bundleCount: categoryDeals.length,
         windowStart,
         windowEnd,

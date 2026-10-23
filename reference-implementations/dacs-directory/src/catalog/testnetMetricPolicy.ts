@@ -14,8 +14,9 @@ export const UNAVAILABLE_TESTNET_METRICS = {
   metricsProfile: "TP-1",
 } as const;
 
-export const observedOutcomesLabel = (count: number | undefined): string =>
-  count === undefined ? "Observed outcomes unavailable, not verified" : `Observed outcomes: ${count}, not verified`;
+export const observedOutcomesLabel = (count: number | undefined, withheldRecordCount = 0): string =>
+  (count === undefined ? "Observed outcomes unavailable, not verified" : `Observed outcomes: ${count}, not verified`) +
+  (withheldRecordCount > 0 ? `; ${withheldRecordCount} evidence records withheld; counts are incomplete` : "");
 
 // Bundles whose signatures and referenced artifacts checked. This count is not
 // gated by SB-2 or the projection version, so it is never called an outcome.
@@ -38,15 +39,17 @@ export const LISTING_QUERY_PARAMETERS: readonly string[] = [
 ];
 
 /**
- * TP-1 rule 2. Any query name outside LISTING_QUERY_PARAMETERS is refused,
- * whatever its spelling, so no rate filter or ordering request is answered
- * with an unfiltered, unsorted page. Rate and ranking names get the specific
- * reason; the message never echoes the name.
+ * TP-1 rule 2. The JSON API refuses every undocumented query name. Human
+ * discovery ignores unrelated names (including tracking parameters), while
+ * both surfaces explicitly refuse rate/score filters and ranking requests.
+ * The message never echoes the name.
  */
-export function unavailableMetricQuery(params: URLSearchParams): string | undefined {
+export function unavailableMetricQuery(params: URLSearchParams, surface: "api" | "discovery" = "api"): string | undefined {
   // Rate, rating, score and ordering words in any segment of a bracketed
   // (`filter[x]`, `x[gte]`), dotted (`x.gte`) or `_`/`-` separated name, or
-  // in the value of an unknown name (`filter=completionRate`).
+  // in a filter wrapper's value (`filter=completionRate`). On the strict API
+  // all unknown names may supply the rate-specific error; human tracking
+  // values such as `utm_campaign=rating` are unrelated to filtering.
   const metricWord = /completionrate|faultrate|rating|score|trackrecord/;
   const rankingWord = /^(?:sort|order|rank|direction|dir$)/;
   const rateReason = `Rate and score filters are unavailable on testnet under TP-1. ${COMPLETION_VERIFICATION_UNAVAILABLE}.`;
@@ -57,7 +60,9 @@ export function unavailableMetricQuery(params: URLSearchParams): string | undefi
     if (segments.some((segment) => rankingWord.test(segment))) {
       return "Sorting and ranking are unavailable on testnet under TP-1.";
     }
-    if (metricWord.test(value.toLowerCase().replace(/[_-]/g, ""))) return rateReason;
+    const filterWrapper = segments.some((segment) => /^filters?$/.test(segment));
+    if ((surface === "api" || filterWrapper) && metricWord.test(value.toLowerCase().replace(/[_-]/g, ""))) return rateReason;
+    if (surface === "discovery") continue;
     return "Unsupported listing query parameter. Only the documented listing filters are accepted; " +
       "rate filters, sorting and ranking are unavailable on testnet under TP-1.";
   }

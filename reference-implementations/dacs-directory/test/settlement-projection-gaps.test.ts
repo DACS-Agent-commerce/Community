@@ -197,7 +197,7 @@ test("SB-2 missing or null cached owners retain non-throwing, idempotent session
     if (state === "missing") delete (cached as { owners?: DealRecord["owners"] }).owners;
     else (cached as unknown as { owners: null }).owners = null;
     const copies = [cached, { ...cached }];
-    assert.deepEqual(countableDeals(copies, 0, 200), { deals: [cached], useAnchorTimestamps: true }, state);
+    assert.deepEqual(countableDeals(copies, 0, 200), { deals: [cached], withheldDeals: [copies[1]], useAnchorTimestamps: true }, state);
     const projected = projectTestnetCatalog(catalogOf([seller(copies)])).sellers[0];
     assert.deepEqual(projected.deals, copies, `${state}: cached evidence is retained`);
     assert.equal(projected.reputation.bundleCount, 1, state);

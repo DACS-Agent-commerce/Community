@@ -19,28 +19,39 @@ the revision the pinned SDK declares.
    `metricsProfile: "TP-1"`. Individual rating values are `null`. Raw signed
    artifacts (`/api/dacs/artifact`) are served as signed so they stay
    inspectable, including the values a signed RatingRecord carries.
-2. The listings API and `/discover` accept only the documented listing
-   filters: `category`, `tag`, `credential`, `primaryClaim`, `identityTier`,
+2. The listings API accepts only the documented listing filters: `category`,
+   `tag`, `credential`, `primaryClaim`, `identityTier`,
    `rail`, `priceMax`, `q`, `profile`, `limit` and `cursor` (the manifest's
-   `filters`). Every other query name returns 400, or the refusal notice on
-   `/discover`, whatever its spelling. That covers the rate and score filters
+   `filters`). Every other API query name returns 400. `/discover` ignores
+   unrelated query names, including tracking parameters, while refusing rate,
+   score and ranking requests with an explicit notice. That covers the filters
    (`minCompletionRate`, `minRating`, `trackRecord`, `maxFaultRate`, the
    metric names themselves, `reputationScore`) and every sorting or ranking
    parameter.
-3. The projection runs on every read, so a catalog cached by an older release
-   is safe to serve. Writers read and save the stored catalog, never the
+3. Every public read uses the projection, so a catalog cached by an older
+   release is safe to serve. The projection is cached per exact stored catalog;
+   changed stored bytes invalidate it, including writes by another process.
+   Callers receive independent copies, and health checks read only `generatedAt`.
+   Writers read and save the stored catalog, never the
    projection. Unknown `*Rate`, `*Rating` and `*Score` keys are dropped at
    seller, deal and listing level.
 4. Observed counts (`completed`, `totalAgreements`, `bundleCount`), currency
    totals and `bundleRefs` are rebuilt together from eligible retained records,
    labelled as observations that do not establish completion or settlement.
+   Both seller reputation and listing hints publish `withheldRecordCount`:
+   the number of retained evidence records excluded from their counts in the
+   same category/window. Excluded records use their available anchor timestamp
+   or `finalisedAt`; undated excluded records are disclosed in every window.
+   Duplicate presentations are evidence records too, not additional outcomes.
+   A positive withheld count labels the counts as incomplete. These are counted
+   subsets, never completion denominators or party-fault decisions.
    Records without the current `settlementProjectionVersion` contribute to
    neither seller aggregates nor listing hints until a successful reindex.
    Saving an older catalog does not upgrade its records.
 5. A listing hint keeps the shape the pinned SDK catalog reader requires. A
    missing or malformed cached hint is replaced by one over the listing's
    category and the catalog snapshot window. Its `bundleCount` is always
-   recomputed on read from the retained records the seller reputation counts
+   rebuilt from the retained records the seller reputation counts
    (the settlement rule below), within the hint's scope and window.
 
 ## Contract versions
@@ -99,6 +110,11 @@ manifest; this Directory publishes no manifest.
 The pinned SDK's session runtime writes payment-evidence anchors without
 `metadata.logicalAddress`. The Directory therefore retains those paid deals
 as history but excludes them from observed counts, amounts and listing hints.
+Earlier failures or aborts that require no settlement claim can still count.
+For ten paid completions without that metadata and one negotiation abort, the
+seller publishes `completed: 0`, `totalAgreements: 1`, `withheldRecordCount: 10`
+and a label stating that the counts are incomplete. Amounts are likewise only
+those of the counted subset. No completion or fault rate follows from them.
 Fixtures with logical-address metadata describe the supported metadata-bearing
 path, rather than the pinned SDK session writer's output. A successful reindex
 cannot fill metadata that the source anchor never contained.

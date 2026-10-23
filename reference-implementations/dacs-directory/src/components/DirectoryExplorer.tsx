@@ -34,7 +34,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
   const ownNavigation = useRef(false);
   const rail = params.get("rail");
   const category = params.get("category");
-  const unavailableQuery = unavailableMetricQuery(new URLSearchParams(paramsString));
+  const unavailableQuery = unavailableMetricQuery(new URLSearchParams(paramsString), "discovery");
   const identityTier = params.get("identityTier");
 
   useEffect(() => {

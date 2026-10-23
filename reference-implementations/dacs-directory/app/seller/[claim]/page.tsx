@@ -96,7 +96,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
       </p>
 
       <div className="stat-row">
-        <div className="stat"><div className="l">{COMPLETION_VERIFICATION_UNAVAILABLE}</div><div className="l">{observedOutcomesLabel(seller.reputation.totalAgreements)}</div></div>
+        <div className="stat"><div className="l">{COMPLETION_VERIFICATION_UNAVAILABLE}</div><div className="l">{observedOutcomesLabel(seller.reputation.totalAgreements, seller.reputation.withheldRecordCount)}</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
         <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">{CHECKED_BUNDLES_LABEL}</div></div>
       </div>

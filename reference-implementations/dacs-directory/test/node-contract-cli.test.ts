@@ -38,8 +38,14 @@ test("node contract CLI reserves exit zero for an observed requested SDK anchor"
     };
   `);
   try {
+    const usage = spawnSync(process.execPath, ["--import", "tsx", "scripts/check-node-contract.ts"], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 15_000,
+    });
+    assert.ifError(usage.error);
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /usage:/);
     for (const [args, status, scope, matches, ok] of [
-      [[programName], 2, "generic-read", null, true],
+      [[programName], 3, "generic-read", null, true],
       [[programName, logicalAddress], 0, "sdk-anchor", true, true],
       [[programName, otherAddress], 1, "sdk-anchor", false, false],
     ] as const) {

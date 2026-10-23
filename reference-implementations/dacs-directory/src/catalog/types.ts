@@ -162,6 +162,7 @@ export interface ReputationHint {
   categoryScope: string;
   metricsUnavailableReason?: string;
   observedOutcomesLabel?: string;
+  withheldRecordCount?: number;
   metricsProfile?: "TP-1";
   completionRate: number | null;
   averageSellerRating?: number | null;
@@ -256,6 +257,7 @@ export interface SellerRecord {
   reputation: {
     metricsUnavailableReason?: string;
     observedOutcomesLabel?: string;
+    withheldRecordCount?: number;
     metricsProfile?: "TP-1";
     completedLabel?: string;
     totalAgreementsLabel?: string;

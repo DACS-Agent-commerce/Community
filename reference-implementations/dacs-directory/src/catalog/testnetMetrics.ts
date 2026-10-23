@@ -1,8 +1,8 @@
 import {
-  countableDeals, inCategory, settlementCollisions, SETTLEMENT_PROJECTION_VERSION, type SettlementExclusions,
+  prepareCountableDeals, settlementCollisions, SETTLEMENT_PROJECTION_VERSION, type CountableDeals,
 } from "./settlementUniqueness.js";
 import { deriveSellerReputation } from "./reputation.js";
-import type { Catalog, ListingSummary, ReputationHint, SellerRecord } from "./types.js";
+import type { Catalog, DealRecord, ListingSummary, ReputationHint } from "./types.js";
 
 import {
   COMPLETION_VERIFICATION_UNAVAILABLE, UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel,
@@ -35,7 +35,7 @@ function withoutMetricKeys<T extends object>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !UNAVAILABLE_METRIC_KEY.test(key))) as T;
 }
 
-function listingObservationHint(seller: SellerRecord, listing: ListingSummary, generatedAt: number, excluded: SettlementExclusions): ReputationHint {
+function listingObservationHint(listing: ListingSummary, generatedAt: number, countsForWindow: (start: number, end: number) => WindowCounts): ReputationHint {
   // A missing or malformed cached hint must still have the count/window shape
   // the SDK catalog reader requires. The count is always recomputed from the
   // retained records with the indexer's SB-2 rule, so a hint cached before a
@@ -48,8 +48,9 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
     windowEnd: generatedAt,
     computedAt: generatedAt,
   };
-  const bundleCount = countableDeals(seller.deals ?? [], hint.windowStart, hint.windowEnd, excluded).deals
-    .filter((deal) => inCategory(deal, hint.categoryScope)).length;
+  const counts = countsForWindow(hint.windowStart, hint.windowEnd);
+  const bundleCount = counts.categories.get(hint.categoryScope) ?? 0;
+  const withheldRecordCount = counts.withheldCategories.get(hint.categoryScope) ?? 0;
   return {
     categoryScope: hint.categoryScope,
     bundleCount,
@@ -57,8 +58,30 @@ function listingObservationHint(seller: SellerRecord, listing: ListingSummary, g
     windowEnd: hint.windowEnd,
     computedAt: hint.computedAt,
     ...UNAVAILABLE_TESTNET_METRICS,
-    observedOutcomesLabel: observedOutcomesLabel(bundleCount),
+    withheldRecordCount,
+    observedOutcomesLabel: observedOutcomesLabel(bundleCount, withheldRecordCount),
   };
+}
+
+interface WindowCounts {
+  counted: CountableDeals;
+  categories: Map<string, number>;
+  withheldCategories: Map<string, number>;
+}
+
+function categoryCounts(deals: DealRecord[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const deal of deals) {
+    if (deal.category === undefined) continue;
+    let category = deal.category;
+    for (;;) {
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+      const dot = category.lastIndexOf(".");
+      if (dot < 0) break;
+      category = category.slice(0, dot);
+    }
+  }
+  return counts;
 }
 
 export function rebuildCatalogObservations(catalog: Catalog): Catalog {
@@ -76,16 +99,28 @@ export function rebuildCatalogObservations(catalog: Catalog): Catalog {
   return {
     ...catalog,
     sellers: sellers.map((seller, index) => {
+      const prepared = prepareCountableDeals(seller.deals, excluded);
+      const windows = new Map<string, WindowCounts>();
+      const countsForWindow = (start: number, end: number): WindowCounts => {
+        const key = `${start}:${end}`;
+        let counts = windows.get(key);
+        if (!counts) {
+          const counted = prepared(start, end);
+          counts = { counted, categories: categoryCounts(counted.deals), withheldCategories: categoryCounts(counted.withheldDeals) };
+          windows.set(key, counts);
+        }
+        return counts;
+      };
       const windowStart = isSafeUint(seller.reputation?.windowStart) ? seller.reputation.windowStart : 0;
       const windowEnd = isSafeUint(seller.reputation?.windowEnd) && seller.reputation.windowEnd >= windowStart
         ? seller.reputation.windowEnd : Math.max(windowStart, catalog.generatedAt);
-      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd, excluded);
+      const reputation = deriveSellerReputation(seller.deals, windowStart, windowEnd, excluded, countsForWindow(windowStart, windowEnd).counted);
       return {
         ...catalog.sellers[index],
         reputation,
         listings: (seller.listings ?? []).map((listing) => ({
           ...listing,
-          reputationHint: listingObservationHint(seller, listing, catalog.generatedAt, excluded),
+          reputationHint: listingObservationHint(listing, catalog.generatedAt, countsForWindow),
         })),
       };
     }),

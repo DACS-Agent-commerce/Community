@@ -129,12 +129,15 @@ function assertLegacyObservation(record: SellerRecord, registered: RegisteredDea
   assert.equal(record.reputation.completed, count);
   assert.equal(record.reputation.totalAgreements, count);
   assert.equal(record.reputation.bundleCount, count);
+  assert.equal(record.reputation.withheldRecordCount, 1 - count);
+  if (!count) assert.match(record.reputation.observedOutcomesLabel!, /1 evidence records withheld; counts are incomplete/);
   assert.equal(record.reputation.bundleRefs?.length, count);
   assert.equal(record.listings.length, 1, "the signed legacy listing is registered and verified");
   assert.equal(record.listings[0].listingId, "svc");
   assert.equal(record.listings[0].artifactProfile, "legacy-sdk-v0.1");
   assert.equal(deal.category, record.listings[0].offering.category);
   assert.equal(record.listings[0].reputationHint?.bundleCount, count);
+  assert.equal(record.listings[0].reputationHint?.withheldRecordCount, 1 - count);
   for (const at of [registered.buyerBundleRef, registered.sellerBundleRef!]) {
     assert.ok((reads.get(at) ?? 0) >= 2, "the failed routing read is followed by a legacy verification read");
   }

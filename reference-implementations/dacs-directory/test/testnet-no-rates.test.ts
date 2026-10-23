@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { noRateCatalog, noRateClaim, noRateOutcomes } from "./fixtures/no-rate-catalog.js";
+import { noRateCatalog, noRateClaim, noRateOutcomes, withheldPaidCatalog } from "./fixtures/no-rate-catalog.js";
 import { SETTLEMENT_PROJECTION_VERSION } from "../src/catalog/settlementUniqueness.js";
 import type { Catalog } from "../src/catalog/types.js";
 import { deriveSellerReputation } from "../src/catalog/reputation.js";
@@ -153,7 +153,8 @@ test("cached listings without a hint publish null metrics and scoped observation
     const hint = body.listings[0].reputationHint;
     for (const [key, value] of Object.entries(UNAVAILABLE_TESTNET_METRICS)) assert.equal(hint[key], value, key);
     assert.equal(hint.bundleCount, 2, "only retained eligible observations in the exact category or a child count");
-    assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 2, not verified");
+    assert.equal(hint.withheldRecordCount, 2);
+    assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 2, not verified; 2 evidence records withheld; counts are incomplete");
     assert.equal(hint.windowStart, 0);
     assert.equal(hint.windowEnd, fixture.generatedAt);
     assert.equal(hint.computedAt, fixture.generatedAt);
@@ -197,7 +198,8 @@ test("cached hints the SDK reader would reject fall back to the synthesized hint
     assert.equal(sdkStatus, "ok", name);
     assert.deepEqual({ ...hint }, {
       categoryScope: "services.test", bundleCount: 5, windowStart: 0, windowEnd: 200, computedAt: 200,
-      ...UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel: "Observed outcomes: 5, not verified",
+      ...UNAVAILABLE_TESTNET_METRICS, withheldRecordCount: 1,
+      observedOutcomesLabel: "Observed outcomes: 5, not verified; 1 evidence records withheld; counts are incomplete",
     }, name);
   }
   // A well-formed parent-scope cached hint is still served as cached.
@@ -231,7 +233,7 @@ test("a served hint never counts SB-2 collision records its cached count still i
   assert.equal(sdkStatus, "ok");
   assert.equal(deriveSellerReputation(fixture.sellers[0].deals, 0, 200).bundleCount, 4);
   assert.equal(hint.bundleCount, 4);
-  assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 4, not verified");
+  assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 4, not verified; 2 evidence records withheld; counts are incomplete");
   const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
     params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
   });
@@ -510,4 +512,47 @@ test("cached API reads remove cross-seller settlement reuse from every affected 
   assert.equal(body.listings.length, 2);
   assert.ok(body.listings.every((listing: { reputationHint: { bundleCount: number } }) => listing.reputationHint.bundleCount === 0));
   assert.equal(loadStoredCatalog().sellers[0].deals[0].ratings![0].value, 5);
+});
+
+
+test("ten withheld paid completions and one negotiation abort disclose an incomplete observation set", async () => {
+  const fixture = withheldPaidCatalog();
+  saveCatalog(fixture);
+  const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
+    params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
+  });
+  assert.equal(response.status, 200);
+  const seller = await response.json();
+  assert.equal(seller.deals.length, 11, "all evidence remains inspectable");
+  assert.equal(seller.deals.filter((deal: { sellerOutcome: string }) => deal.sellerOutcome === "completed").length, 10);
+  assert.equal(seller.reputation.completed, 0, "the counted subset is not the complete history");
+  assert.equal(seller.reputation.totalAgreements, 1);
+  assert.equal(seller.reputation.withheldRecordCount, 10);
+  assert.equal(seller.reputation.observedOutcomesLabel, "Observed outcomes: 1, not verified; 10 evidence records withheld; counts are incomplete");
+  assert.equal(seller.reputation.completionRate, null);
+  assert.deepEqual(seller.reputation.observedTransactionalVolume, []);
+  const { hint, sdkStatus } = await listingPageHint(fixture);
+  assert.equal(sdkStatus, "ok", "the additive disclosure is accepted by the pinned SDK");
+  assert.equal(hint.bundleCount, 1);
+  assert.equal(hint.withheldRecordCount, 10);
+  assert.equal(hint.observedOutcomesLabel, seller.reputation.observedOutcomesLabel);
+
+  // A window with only uncountable paid history still discloses that history.
+  fixture.sellers[0].deals.pop();
+  saveCatalog(fixture);
+  assert.equal(loadCatalog().sellers[0].reputation.withheldRecordCount, 10);
+  assert.equal(loadCatalog().sellers[0].reputation.bundleCount, 0);
+  const undated = noRateCatalog().sellers[0].deals[0];
+  delete undated.finalisedAt;
+  undated.reputationEligible = false;
+  const undatedReputation = deriveSellerReputation([undated], 120, 150);
+  assert.equal(undatedReputation.withheldRecordCount, 1, "undated excluded records cannot imply a complete window");
+
+  // Existing eligible outcomes remain countable; disclosure does not tighten admission.
+  fixture.sellers[0].deals.forEach((deal) => { deal.reputationEligible = true; });
+  saveCatalog(fixture);
+  const allowed = loadCatalog().sellers[0].reputation;
+  assert.equal(allowed.completed, 10);
+  assert.equal(allowed.withheldRecordCount, 0);
+  assert.deepEqual(allowed.observedTransactionalVolume, [{ currency: "DEM", amount: "20" }]);
 });

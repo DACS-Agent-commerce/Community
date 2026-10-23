@@ -258,6 +258,47 @@ export function settlementCollisions(presentedDeals: DealRecord[]): SettlementEx
   return { settlementIds: conflicting(tuples), sessions: conflicting(bundles) };
 }
 
+export interface CountableDeals {
+  deals: DealRecord[];
+  withheldDeals: DealRecord[];
+  useAnchorTimestamps: boolean;
+}
+
+/** Prepare identity and collision checks once per seller, before window projection. */
+export function prepareCountableDeals(deals: DealRecord[], excluded: SettlementExclusions): (start: number, end: number) => CountableDeals {
+  const eligible = deals.filter(isAdmissibleDeal);
+  const admitted = eligible.map((deal) => ({ deal, session: sessionKey(deal) })).filter(({ deal, session }) =>
+    !excluded.sessions.has(session) && !(deal.settlementTxIds ?? []).some((tx) => excluded.settlementIds.has(tx.id)));
+  // Use one honest timestamp basis for the whole eligible set, as before.
+  const useAnchorTimestamps = eligible.length > 0 && eligible.every((deal) => typeof deal.anchorTimestamp === "number");
+  return (windowStart, windowEnd) => {
+    const inWindow = (deal: DealRecord) => {
+      const timestamp = useAnchorTimestamps ? deal.anchorTimestamp : deal.finalisedAt;
+      return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
+    };
+    const sessions = new Set<string>();
+    const scoped = admitted.filter(({ deal, session }) => {
+      if (!inWindow(deal) || sessions.has(session)) return false;
+      sessions.add(session);
+      return true;
+    }).map(({ deal }) => deal);
+    const counted = new Set(scoped);
+    return {
+      deals: scoped,
+      // This is a record count, not a denominator or a fault verdict. Duplicate
+      // presentations also remain inspectable but do not count twice.
+      withheldDeals: deals.filter((deal) => {
+        // An excluded/old record may lack the counted set's timestamp basis.
+        // Never hide that omission: use its available date, or disclose it as
+        // undated evidence in every window rather than implying completeness.
+        const timestamp = useAnchorTimestamps ? deal.anchorTimestamp ?? deal.finalisedAt : deal.finalisedAt;
+        return !counted.has(deal) && (typeof timestamp !== "number" || (timestamp >= windowStart && timestamp <= windowEnd));
+      }),
+      useAnchorTimestamps,
+    };
+  };
+}
+
 /**
  * The records DACS-5 may count over one window, shared by seller reputation and
  * listing hints so the two never disagree.
@@ -275,34 +316,8 @@ export function settlementCollisions(presentedDeals: DealRecord[]): SettlementEx
 export function countableDeals(
   deals: DealRecord[], windowStart: number, windowEnd: number,
   excluded: SettlementExclusions = settlementCollisions(deals),
-): {
-  deals: DealRecord[];
-  useAnchorTimestamps: boolean;
-} {
-  const eligible = deals.filter(isAdmissibleDeal);
-  const admitted = eligible.filter((deal) => !excluded.sessions.has(sessionKey(deal)) &&
-    !(deal.settlementTxIds ?? []).some((tx) => excluded.settlementIds.has(tx.id)));
-  // A determinism receipt declares one timestamp basis for its entire input
-  // set. Use SR-2 anchor time only when it is available for every eligible
-  // record; otherwise fall back to finalisedAt uniformly and exclude records
-  // that cannot be evaluated on that honest basis.
-  const useAnchorTimestamps = eligible.length > 0 &&
-    eligible.every((deal) => typeof deal.anchorTimestamp === "number");
-  const sessions = new Set<string>();
-  return {
-    useAnchorTimestamps,
-    deals: admitted.filter((deal) => {
-      const timestamp = useAnchorTimestamps ? deal.anchorTimestamp : deal.finalisedAt;
-      return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
-    }).filter((deal) => {
-      // The window is applied first, so which identical copy counts never
-      // depends on presentation order.
-      const session = sessionKey(deal);
-      if (sessions.has(session)) return false;
-      sessions.add(session);
-      return true;
-    }),
-  };
+): CountableDeals {
+  return prepareCountableDeals(deals, excluded)(windowStart, windowEnd);
 }
 
 /** A deal in the category or one of its dot-separated children. */

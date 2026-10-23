@@ -119,6 +119,7 @@ export const listingSummarySchema = {
         metricsUnavailableReason: { const: "Completion verification unavailable" },
         metricsProfile: { const: "TP-1" },
         observedOutcomesLabel: { type: "string" },
+        withheldRecordCount: { ...safeUint, description: "Evidence records in this scope and window excluded from bundleCount, including duplicate presentations. A positive count means the observed counts are incomplete and cannot form a completion denominator." },
         bundleCount: safeUint,
         windowStart: safeUint,
         windowEnd: safeUint,
