@@ -60,9 +60,9 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
   Object.assign(fixture.sellers[0].listings[0].reputationHint!, { reputationScore: 7, futureScore: 8 });
   Object.assign(fixture.sellers[0].deals[0].ratings![0], { numericScore: 9 });
   // Unknown cached metrics outside the allowlisted shapes, at every level.
-  Object.assign(fixture.sellers[0], { trustScore: 4, completionRate: 0.9 });
-  Object.assign(fixture.sellers[0].deals[0], { reputationScore: 3, faultRate: "0.1" });
-  Object.assign(fixture.sellers[0].listings[0], { completionRate: 0.9, sellerRating: 5 });
+  Object.assign(fixture.sellers[0], { trustScore: 4, completionRate: 0.9, corporateName: "Seller Corporation" });
+  Object.assign(fixture.sellers[0].deals[0], { reputationScore: 3, faultRate: "0.1", corporateName: "Deal Corporation" });
+  Object.assign(fixture.sellers[0].listings[0], { completionRate: 0.9, sellerRating: 5, corporateName: "Listing Corporation" });
   saveCatalog(fixture);
   const { bundleRefs, observedTransactionalVolume, transactionCountByCurrency } = fixture.sellers[0].reputation;
   // Repeat reads without reindexing; the cached numeric inputs must stay hidden.
@@ -77,12 +77,16 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
     for (const record of [catalog.sellers[0], catalog.sellers[0].deals[0], catalog.sellers[0].listings[0]]) {
       assert.deepEqual(Object.keys(record).filter((key) => /(?:rate|rating|score)$/i.test(key)), []);
     }
+    assert.equal((catalog.sellers[0] as unknown as Record<string, unknown>).corporateName, "Seller Corporation");
+    assert.equal((catalog.sellers[0].deals[0] as unknown as Record<string, unknown>).corporateName, "Deal Corporation");
+    assert.equal((catalog.sellers[0].listings[0] as unknown as Record<string, unknown>).corporateName, "Listing Corporation");
     const listings = await getListings(new NextRequest("https://directory.example/api/dacs/listings"));
     assert.equal(listings.status, 200);
     const page = await listings.json();
     assert.equal(page.total, 1);
     assertUnavailable(page.listings[0].reputationHint);
     assert.ok(page.listings[0].inspection.href);
+    assert.equal(page.listings[0].corporateName, "Listing Corporation");
     assertNoNumericMetrics(page);
     const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
       params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
@@ -99,6 +103,8 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
     assert.deepEqual(seller.reputation.bundleRefs, bundleRefs);
     assert.deepEqual(seller.reputation.observedTransactionalVolume, observedTransactionalVolume);
     assert.deepEqual(seller.reputation.transactionCountByCurrency, transactionCountByCurrency);
+    assert.equal(seller.deals[0].corporateName, "Deal Corporation");
+    assert.equal(seller.listings[0].corporateName, "Listing Corporation");
     assert.equal(seller.deals[0].reputationScore, undefined);
     assert.equal(seller.deals[0].buyerBundleRef, fixture.sellers[0].deals[0].buyerBundleRef);
     assert.equal(seller.deals[0].ratings[0].value, null);
@@ -120,6 +126,9 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
   const stored = loadStoredCatalog();
   assert.equal(stored.sellers[0].deals[0].ratings![0].value, 5);
   assert.equal(stored.sellers[0].reputation.completionRate, 0.95);
+  assert.equal((stored.sellers[0] as unknown as Record<string, unknown>).corporateName, "Seller Corporation");
+  assert.equal((stored.sellers[0].deals[0] as unknown as Record<string, unknown>).corporateName, "Deal Corporation");
+  assert.equal((stored.sellers[0].listings[0] as unknown as Record<string, unknown>).corporateName, "Listing Corporation");
   assert.equal(fixture.sellers[0].reputation.completionRate, 0.95, "input fixture is not mutated");
   assert.equal((fixture.sellers[0].reputation as unknown as Record<string, unknown>).reputationScore, 7);
 });
@@ -397,6 +406,24 @@ test("every query name the listings API does not read returns 400, whatever its 
     if (typeof reason === "string") assert.equal(error, reason, query);
     else assert.match(error, reason, query);
     assert.doesNotMatch(error, /sortOrder|sortKey|utm_source|Category=|seller=|top=/, query);
+  }
+});
+
+test("metric query spellings retain the rate reason and unrelated names retain the unsupported-name reason", async () => {
+  const rateReason = "Rate and score filters are unavailable on testnet under TP-1. Completion verification unavailable.";
+  const unsupportedReason = "Unsupported listing query parameter. Only the documented listing filters are accepted; " +
+    "rate filters, sorting and ranking are unavailable on testnet under TP-1.";
+  for (const [query, reason] of [
+    ["completionRate=1", rateReason],
+    ["min_completion_rate=0.5", rateReason],
+    ["completion.rate=1", rateReason],
+    ["filter=completion_rate", rateReason],
+    ["unsorted=x", unsupportedReason],
+    ["directoryName=x", unsupportedReason],
+  ]) {
+    const response = await getListings(new NextRequest(`https://directory.example/api/dacs/listings?${query}`));
+    assert.equal(response.status, 400, query);
+    assert.deepEqual(await response.json(), { error: reason }, query);
   }
 });
 
