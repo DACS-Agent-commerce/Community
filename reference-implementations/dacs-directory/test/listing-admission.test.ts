@@ -160,6 +160,46 @@ test("the indexer excludes verification-method failures with diagnostics and adm
   }
 });
 
+test("unreadable listing anchors retain rejection notices and history until admission or removal", async () => {
+  const anchor = `stor-${"9".repeat(40)}`;
+  const invalid = signedListing("retry-notice", attested("x402-receipt"));
+  const valid = signedListing("retry-notice", attested({ kind: "self-signed" }));
+  const reg = { primaryClaim: seller, displayName: "Retry Desk", listingAnchors: [anchor] };
+  let response: Obj | number = invalid;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => typeof response === "number"
+    ? new Response(null, { status: response })
+    : Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: response });
+  const index = () => indexRegistration(reg, undefined, async () => ({}));
+  const diagnostic = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor);
+  try {
+    await index();
+    // A previously authenticated public notice must survive a transport failure too.
+    store.recordListingRejection(anchor, seller, "VERIFICATION_METHOD_INVALID", { listingId: "retry-notice", listingVersion: 1 }, true);
+    const before = diagnostic();
+    assert.ok(before?.publicNotice);
+    for (const status of [503, 404]) {
+      response = status;
+      assert.deepEqual((await index()).listings, []);
+      assert.deepEqual(diagnostic(), before, `HTTP ${status} does not erase or advance diagnostic history`);
+    }
+    response = invalid;
+    await index();
+    assert.equal(diagnostic()?.occurrences, before.occurrences + 1);
+    assert.equal(diagnostic()?.firstSeenAt, before.firstSeenAt);
+    response = valid;
+    assert.equal((await index()).listings.length, 1);
+    assert.equal(diagnostic(), undefined, "successful admission clears the notice");
+    response = invalid;
+    await index();
+    assert.ok(diagnostic());
+    await indexRegistration({ ...reg, listingAnchors: [] }, undefined, async () => ({}));
+    assert.equal(diagnostic(), undefined, "removing the anchor clears the notice");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("published summaries never claim transaction readiness the Directory did not assess", async () => {
   const summary = (listingId: string, transactionReadiness?: unknown): ListingSummary => ({
     listingId,

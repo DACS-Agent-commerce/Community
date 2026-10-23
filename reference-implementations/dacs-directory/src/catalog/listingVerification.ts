@@ -519,6 +519,9 @@ export async function verifyListingRevocation(
     s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return false;
+  // RB-1 compares signer references, not just their resolved keys. Keep CF-3
+  // parameters from the original Listing envelope for current-profile markers.
+  if (listing.profile === "dacs-v0.1" && s.signer !== listing.listing.signature.signer) return false;
   // A marker is a current-profile artifact whatever the listing's profile: SIG-6 applies.
   const sig = canonicalSignatureBytes(s.value);
   if (!sig) return false;

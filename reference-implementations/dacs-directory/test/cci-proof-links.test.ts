@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import { cciProofLinks } from "../src/catalog/cciProofLinks.js";
+import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 
 test("CCI badges prefer original HTTP proof links to commitments across RPC envelopes", async () => {
   const claim = `did:demos:agent:${"a".repeat(64)}`;
@@ -37,4 +38,34 @@ test("proof URL projection accepts HTTP and strips unsafe or non-string proof fi
     { username: "unsafe-explicit", proofUrl: "javascript:alert(1)" },
   ] } });
   assert.deepEqual([...links.values()], ["http://example.com/proof"]);
+});
+
+test("conflicting display URLs affect only that accepted CCI claim", async () => {
+  const claim = `did:demos:agent:${"a".repeat(64)}`;
+  const conflicting = [
+    { username: "duplicate", proofHash: "ab".repeat(32), proof: "https://example.com/one" },
+    { username: "duplicate", proofHash: "ab".repeat(32), proof: "https://example.com/two" },
+    { username: "duplicate", proofHash: "ab".repeat(32), proof: "https://example.com/one" },
+  ];
+  for (const rows of [conflicting, [conflicting[1], conflicting[0], conflicting[2]]]) {
+    const payload = { web2: { discord: [
+      ...rows,
+      { username: "unique", proof: "https://example.com/unique" },
+      { username: "same-url", proofHash: "cd".repeat(32), proof: "https://example.com/same" },
+      { username: "same-url", proofHash: "cd".repeat(32), proof: "https://example.com/same" },
+    ] }, xm: { evm: { "1": [{ address: `0x${"b".repeat(40)}` }] } } };
+    for (const raw of [payload, { result: 200, response: { data: payload } }]) {
+      const parsed = parseCciRecord(claim, raw);
+      assert.equal(parsed.web2.length, 3, "the original commitments are consistent");
+      assert.equal(parsed.wallets.length, 1);
+      const links = cciProofLinks(claim, raw);
+      assert.equal(links.has("cci-web2:discord:duplicate"), false);
+      assert.equal(links.get("cci-web2:discord:unique"), "https://example.com/unique");
+      assert.equal(links.get("cci-web2:discord:same-url"), "https://example.com/same");
+      const seller = await indexRegistration({ primaryClaim: claim, displayName: "CCI", listingAnchors: [] }, undefined, async () => raw);
+      assert.equal(seller.cci.length, 4, "a fresh seller retains every accepted badge, including the wallet");
+      assert.equal(seller.cci.find((badge) => badge.handle === "duplicate")?.proofUrl, undefined);
+      assert.equal(seller.cci.find((badge) => badge.handle === "unique")?.proofUrl, "https://example.com/unique");
+    }
+  }
 });

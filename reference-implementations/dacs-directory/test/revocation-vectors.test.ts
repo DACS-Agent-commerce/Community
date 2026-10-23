@@ -30,7 +30,7 @@ const vectorKeys: ResolvePrimaryClaimKey = async (claim, algorithm) => vectors.p
   ? { canonicalClaim: claim, algorithm, publicKey: Uint8Array.from(Buffer.from(vectors.publicKeys[claim], "base64url")) } : null;
 /** A verified current Listing as RB-2 reads it: its id and exact `presentedBy` bytes. */
 const currentListing = (listingId: string, presentedBy: string) =>
-  ({ listingId, seller: { identity: { presentedBy } } }) as unknown as Listing;
+  ({ listingId, seller: { identity: { presentedBy } }, signature: { signer: presentedBy } }) as unknown as Listing;
 const vectorListing: VerifiedListing = {
   listing: currentListing(fixtures.listing.listingId, fixtures.listing.sellerPrimaryClaim), scope: { listingId: fixtures.listing.listingId },
   contentHash: fixtures.listing.listingContentHash, signer: fixtures.listing.signer, sellerClaim: fixtures.listing.sellerPrimaryClaim, profile: "dacs-v0.1",

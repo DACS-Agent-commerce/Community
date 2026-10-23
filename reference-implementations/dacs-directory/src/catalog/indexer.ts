@@ -202,7 +202,11 @@ export async function indexRegistration(
   const { verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
-    if (!anchored) continue;
+    if (!anchored) {
+      // An unread anchor cannot clear an earlier rejection or reset its history.
+      rejectedListingAnchors.add(anchor);
+      continue;
+    }
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {

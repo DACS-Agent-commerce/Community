@@ -325,6 +325,60 @@ test("RB-2: a published revocation binding carries the exact presentedBy bytes a
   assert.equal(sdk.disposition, "revoked", JSON.stringify(sdk));
 });
 
+test("RB-1: revocations require the exact Listing signer reference, including advisory parameters", async () => {
+  const signer = `${claim}?purpose=listing`;
+  const listing = signedCurrentListing({}, signer);
+  const verified = await verifyListing(listing);
+  assert.ok(verified);
+  const scope = { listingId: "sig5-preserve-unknown", listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const marker = (reference: string) => ({ ...scope, signature: {
+    algorithm: "ed25519", signer: reference, value: signMessage(`dacs-revocation:v1:${contentHash(scope)}`),
+  } });
+  const binding = await findValidListingRevocation(["marker"], verified, 1, async () => marker(signer));
+  assert.ok(binding, "an exactly matching qualified signer may revoke");
+  for (const reference of [signer, claim, `${claim}?purpose=other`]) {
+    const candidate = marker(reference);
+    const sdk = await checkListingRevocation(listing as never, verified.contentHash, {
+      nowMs: () => 2,
+      surfaces: [{ kind: "catalog", status: "revoked", catalogObservedAt: 2, binding }],
+      readMarker: async () => candidate,
+      verifyMarkerSignature: sdkListingSignatureVerifier(),
+    });
+    assert.equal(sdk.disposition, reference === signer ? "revoked" : "indeterminate");
+    assert.equal(Boolean(await findValidListingRevocation(["marker"], verified, 1, async () => candidate)),
+      sdk.disposition === "revoked", reference);
+  }
+});
+
+test("RB-1: a second authorized seller key may sign and revoke its Listing", async () => {
+  const secondSeed = Uint8Array.from(Buffer.alloc(32, 29));
+  const secondKey = privateKeyFromSeed(secondSeed);
+  const secondClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(secondSeed))).toString("hex")}?purpose=listing`;
+  const identity: Record<string, unknown> = {
+    bundleVersion: "1", presentedBy: claim, presentedAt: 1,
+    claims: [{ ref: claim, kind: "signing-key" }, { ref: secondClaim, kind: "signing-key" }],
+  };
+  identity.presentation = { kind: "per-claim", signatures: [{
+    ref: claim, signature: signMessage(`dacs-bundle-presentation:v1:${contentHash(identity)}`),
+  }] };
+  const { signature: _, ...scope } = signedCurrentListing({ seller: { displayName: "Two keys", identity } });
+  const signSecond = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message), secondKey)).toString("base64url");
+  const raw = { ...scope, signature: {
+    algorithm: "ed25519", signer: secondClaim, value: signSecond(`dacs-listing:v1:${contentHash(scope)}`),
+  } };
+  const verified = await verifyListing(raw);
+  assert.ok(verified, "LP-2 permits any key in seller.identity.claims");
+  const markerScope = { listingId: scope.listingId, listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const marker = { ...markerScope, signature: {
+    algorithm: "ed25519", signer: secondClaim, value: signSecond(`dacs-revocation:v1:${contentHash(markerScope)}`),
+  } };
+  assert.ok(await findValidListingRevocation(["marker"], verified, 1, async () => marker));
+  const primaryMarker = { ...markerScope, signature: {
+    algorithm: "ed25519", signer: claim, value: signMessage(`dacs-revocation:v1:${contentHash(markerScope)}`),
+  } };
+  assert.equal(await findValidListingRevocation(["marker"], verified, 1, async () => primaryMarker), null);
+});
+
 test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top-level signature member", async () => {
   const listingWith = (presentationHash: (bundle: Record<string, unknown>) => string) => {
     const identity: Record<string, unknown> = {
