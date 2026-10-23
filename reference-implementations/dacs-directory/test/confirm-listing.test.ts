@@ -247,6 +247,41 @@ function stubChain(overrides: {
   return calls;
 }
 
+test("chain identity and inclusion reject hash junk while accepting padded fallback hashes", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  for (const hash of [`x${chainId}`, `${chainId}x`]) {
+    stubChain({ genesis: { number: 0, hash } });
+    const body = await (await POST(request(coordinates))).json();
+    assert.equal(body.state, "finality-unverified");
+    assert.equal(body.nodeObservation.chainIdentity, chainId, "malformed genesis uses block one's predecessor");
+  }
+  for (const hash of [`x${"12".repeat(32)}`, `${"12".repeat(32)}x`]) {
+    stubChain({ first: { hash } });
+    const body = await (await POST(request(coordinates))).json();
+    assert.equal(body.state, "inclusion-pending");
+    assert.equal(body.nodeObservation, undefined);
+  }
+  stubChain({ first: { hash: `  ${"12".repeat(32)}  ` } });
+  assert.equal((await (await POST(request(coordinates))).json()).state, "finality-unverified");
+  for (const hash of [null, 7, [blockHash], "", `x${blockHash}`, `${blockHash}x`]) {
+    stubChain({ block: { hash } });
+    const body = await (await POST(request(coordinates))).json();
+    assert.equal(body.state, "inclusion-pending");
+    assert.equal(body.nodeObservation, undefined);
+  }
+});
+
+test("uncanonicalizable transaction metadata cannot match valid native metadata", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  stubChain({ transactionMetadata: { ...metadata, extension: "\ud800" } });
+  const body = await (await POST(request(coordinates))).json();
+  assert.equal(body.state, "inclusion-failed");
+  assert.equal(body.nodeObservation, undefined);
+  assert.match(body.error, /metadata/);
+});
+
 test("a node-reported inclusion is an unauthenticated observation, never a receipt or a confirmation", async () => {
   const originalFetch = globalThis.fetch;
   stubChain();

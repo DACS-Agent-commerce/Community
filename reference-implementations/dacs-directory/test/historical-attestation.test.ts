@@ -28,3 +28,23 @@ test("historical delivery attestations retain NFC member-name hashing and reject
   // Current canonical hashing still distinguishes NFC/NFD member names (CF-1).
   assert.notEqual(contentHash({ "e\u0301": 1 }), contentHash({ "é": 1 }));
 });
+
+test("historical adapter refuses unsupported signature shapes without invoking verification", async () => {
+  const separator = dacsXSeparator("delivery-attestation") as never;
+  let calls = 0;
+  for (const signature of [undefined, null, {}, [], 7]) {
+    assert.equal(await verifySignedArtifact({ jobId: "delivery-1", signature } as never, separator,
+      new Uint8Array(32), () => { calls++; return true; }), false);
+  }
+  assert.equal(calls, 0);
+});
+
+test("historical adapter resolves verifier throws and rejections to strict false", async () => {
+  const separator = dacsXSeparator("delivery-attestation") as never;
+  const signed = { jobId: "delivery-1", signature: "ab".repeat(64) };
+  for (const verify of [() => { throw new Error("verifier failed"); },
+    async () => { throw new Error("verifier rejected"); }]) {
+    assert.equal(await verifySignedArtifact(signed, separator, new Uint8Array(32), verify), false);
+  }
+  assert.equal(await verifySignedArtifact(signed, separator, new Uint8Array(32), () => false), false);
+});

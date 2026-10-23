@@ -638,6 +638,12 @@ test("legacy listing schema, signature decoding, and signed-scope tampering keep
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
   assert.deepEqual(await verifyListingResult({ ...fixture.data, description: "tampered after signing" }),
     { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  const valid = { algorithm: "ed25519", signer: fixture.data.agentId, value: fixture.data.signature };
+  assert.equal((await verifyListingResult({ ...fixture.data, signature: valid })).ok, true);
+  for (const change of [{ algorithm: "unsupported" }, { signer: null }, { signer: 7 }, { value: null }, { value: {} }]) {
+    assert.deepEqual(await verifyListingResult({ ...fixture.data, signature: { ...valid, ...change } }),
+      { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
 });
 
 test("neither legacy signature envelope bypasses the schema gate on authentically signed bytes", async () => {

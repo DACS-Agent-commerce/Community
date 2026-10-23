@@ -12,6 +12,21 @@ test("explicit legacy references select the historical reader independently of s
   assert.equal(usesCurrentBundleProfile(null), false);
 });
 
+test("phase-only current references win over an otherwise historical agreement", () => {
+  for (const anchor of [current.anchor, null]) {
+    assert.equal(usesCurrentBundleProfile({ bundleVersion: "1", agreementRef: legacy,
+      phaseSummary: [{ attestationRef: { anchor, contentHash: current.contentHash } }] }), true);
+  }
+});
+
+test("incomplete historical references select current and malformed phase rows do not throw", () => {
+  for (const agreementRef of [{ kind: legacy.kind }, { id: legacy.id }, {}]) {
+    assert.equal(usesCurrentBundleProfile({ bundleVersion: "1", agreementRef }), true);
+  }
+  assert.equal(usesCurrentBundleProfile({ bundleVersion: "1", agreementRef: legacy,
+    phaseSummary: [null, false, 7, "phase", []] }), false);
+});
+
 test("current and mixed reference formats never fall back to legacy on malformed data", () => {
   for (const raw of [
     { bundleVersion: "1", agreementRef: current },

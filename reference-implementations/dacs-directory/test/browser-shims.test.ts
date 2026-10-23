@@ -3,7 +3,7 @@ import { isIP as nodeIsIP } from "node:net";
 import { domainToASCII as nodeDomainToASCII } from "node:url";
 import test from "node:test";
 
-import { isIP } from "../src/shims/node-net.js";
+import { isIP, isIPv6 } from "../src/shims/node-net.js";
 import { domainToASCII, domainToUnicode } from "../src/shims/node-url.js";
 
 // The SDK's DACS-1 DCR-2 hostname check (identity/domainHost) reaches the
@@ -35,6 +35,11 @@ test("browser IP parsing refuses malformed zones and address suffixes", () => {
     assert.equal(nodeIsIP(value), 0);
     assert.equal(isIP(value), 0, value);
   }
+});
+
+test("direct browser IPv6 parsing returns strict false on malformed addresses", () => {
+  for (const value of ["1::2::3", ":::x", "g::1", "::1]/x"]) assert.equal(isIPv6(value), false, value);
+  assert.equal(isIPv6("::1"), true);
 });
 
 test("browser util predicates distinguish byte arrays from ordinary JSON", async () => {

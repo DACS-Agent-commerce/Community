@@ -54,6 +54,8 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseDataPointer, "/data");
   assert.equal(manifest.substrates.demos.anchors["storage-program"].read.responseOwnerPointer, "/owner");
   assert.ok(manifest.filters.includes("identityTier"));
+  assert.ok(manifest.maturity.listings.length > 0);
+  assert.ok(openApiDocument(origin).info.description.length > 0);
 });
 
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {

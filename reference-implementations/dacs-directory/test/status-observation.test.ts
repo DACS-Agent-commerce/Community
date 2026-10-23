@@ -43,6 +43,104 @@ test("unexpected probe errors release the shared request for a later retry", asy
   assert.equal(calls, 2);
 });
 
+test("default status probe pins the RPC request and refuses malformed tip replies", async (t) => {
+  let reply: unknown;
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    const call = body.params[0];
+    if (call.message === "getBlockByNumber") return Response.json({ result: 200, response: { hash: pinnedChainIdentity() } });
+    if (call.message === "getNetworkInfo") return Response.json({ result: 200, response: {} });
+    calls++;
+    assert.equal(String(input), (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "") + "/");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(init?.headers, { "content-type": "application/json" });
+    assert.equal(init?.cache, "no-store");
+    assert.ok(init?.signal instanceof AbortSignal);
+    assert.deepEqual(body, { method: "nodeCall", params: [{ type: "nodeCall", message: "getTransactions",
+      sender: null, receiver: null, timestamp: null, data: { start: "latest", limit: 1 }, extra: "" }] });
+    return Response.json(reply);
+  });
+  const cache = createStatusNodeObservationCache();
+  const replies: Array<[unknown, number | null]> = [
+    [{ result: 200, response: [{ id: 0 }] }, 0],
+    [{ result: 200, response: [{ id: 12 }] }, 12],
+    [{ result: 500, response: [{ id: 12 }] }, null],
+    [{ result: 200, response: [{ id: 12 }, { id: 13 }] }, null],
+    [{ result: 200, response: { id: 12 } }, null],
+    ...[-1, 0.5, "12", undefined, Number.MAX_SAFE_INTEGER + 1].map(id =>
+      [{ result: 200, response: [{ id }] }, null] as [unknown, null]),
+  ];
+  for (const [body, expected] of replies) {
+    reply = body; cache.invalidate();
+    const result = await cache.read();
+    assert.equal(result.nodeDeployment.ok, true);
+    assert.equal(result.chainLatestTx, expected, JSON.stringify(body));
+  }
+  assert.equal(calls, replies.length);
+});
+
+test("default status configuration observes chain identity and build pin changes", async () => {
+  const saved = [process.env.DEMOS_CHAIN_IDENTITY, process.env.DEMOS_NODE_BUILDS];
+  let calls = 0;
+  const cache = createStatusNodeObservationCache(async () => ({
+    nodeDeployment: { ok: false, unavailable: true, reason: "offline" }, chainLatestTx: ++calls,
+  }));
+  try {
+    await cache.read(); await cache.read();
+    assert.equal(calls, 1);
+    process.env.DEMOS_CHAIN_IDENTITY = "a".repeat(64);
+    await cache.read();
+    assert.equal(calls, 2);
+    process.env.DEMOS_NODE_BUILDS = "b".repeat(40);
+    await cache.read(); await cache.read();
+    assert.equal(calls, 3);
+  } finally {
+    for (const [i, name] of ["DEMOS_CHAIN_IDENTITY", "DEMOS_NODE_BUILDS"].entries()) {
+      if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i];
+    }
+  }
+});
+
+test("obsolete probes cannot overwrite a new cache or clear its shared pending request", async () => {
+  for (const change of ["invalidate", "configuration"] as const) {
+    for (const oldFirst of [true, false]) {
+      let key = "a", calls = 0;
+      const releases: Array<(value: { nodeDeployment: { ok: false; unavailable: boolean; reason: string }; chainLatestTx: number }) => void> = [];
+      const cache = createStatusNodeObservationCache(() => {
+        calls++;
+        return new Promise(resolve => releases.push(resolve));
+      }, () => 1, () => key);
+      const value = (id: number) => ({ nodeDeployment: { ok: false as const, unavailable: true, reason: "offline" }, chainLatestTx: id });
+      const old = cache.read(); await Promise.resolve();
+      if (change === "invalidate") cache.invalidate(); else key = "b";
+      const current = cache.read(); await Promise.resolve();
+      assert.equal(calls, 2);
+      if (oldFirst) {
+        releases[0](value(1)); await old;
+        const shared = cache.read(); await Promise.resolve();
+        assert.equal(calls, 2, "old completion must not clear the current in-flight request");
+        releases[1](value(2));
+        assert.equal((await shared).chainLatestTx, 2);
+      } else {
+        releases[1](value(2)); await current;
+        releases[0](value(1)); await old;
+      }
+      assert.equal((await current).chainLatestTx, 2);
+      assert.equal((await cache.read()).chainLatestTx, 2, "old completion must not replace cached current data");
+      assert.equal(calls, 2);
+    }
+  }
+});
+
+test("a failed default deployment probe has a nonempty non-timeout cause", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("offline"); });
+  const result = await createStatusNodeObservationCache().read();
+  assert.equal(result.nodeDeployment.ok, false);
+  assert.ok("reason" in result.nodeDeployment && result.nodeDeployment.reason.length > 0);
+  assert.equal(result.chainLatestTx, null);
+});
+
 test("concurrent HTTP status calls share node reads while persisted diagnostics stay current", async (t) => {
   statusNodeObservationCache.invalidate();
   t.after(() => statusNodeObservationCache.invalidate());

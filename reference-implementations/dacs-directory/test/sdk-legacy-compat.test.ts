@@ -87,6 +87,38 @@ test("LR-2 measures canonical bytes without the Listing signature", async () => 
   }
 });
 
+test("strict references independently bind each expected hash after successful verification", async () => {
+  const checked = await verify(fixture("structured", true));
+  assert.equal(checked.result.ok, true);
+  assert.ok(checked.result.refs.every(ref => ref.verdict === "ok"));
+  assert.equal(checked.strict, true);
+  for (const field of ["agreementRef", "listingRef"] as const) {
+    const result = structuredClone(checked.result);
+    result.bundle![field]!.contentHash = "0".repeat(64);
+    assert.deepEqual(result.refs, checked.result.refs, "SDK reference verdicts stay successful");
+    assert.equal(await refsPassStrictPolicy(result, checked.artifacts), false, field);
+  }
+});
+
+test("Listing terms independently require the exact reference ID and version with hash fixed", async () => {
+  const historical = await verify(fixture("structured", true));
+  const current: Obj = { dacsVersion: "1", listingId: "current-svc", listingVersion: 2,
+    terms: { cancellationPolicy: "pre-commit" } };
+  for (const [verification, artifacts] of [
+    [historical.result, historical.artifacts],
+    [{ bundle: { listingRef: { listingId: "current-svc", version: 2, contentHash: contentHash(current) } } },
+      [{ kind: "dacs-1-listing", raw: current }]],
+  ] as Array<[Parameters<typeof verifiedListingTerms>[0], Parameters<typeof verifiedListingTerms>[1]]>) {
+    assert.deepEqual(verifiedListingTerms(verification, artifacts, true), { cancellationPolicy: "pre-commit" });
+    for (const field of ["listingId", "version"] as const) {
+      const changed = structuredClone(verification);
+      if (field === "version") changed!.bundle!.listingRef.version++;
+      else changed!.bundle!.listingRef.listingId += "-other";
+      assert.equal(verifiedListingTerms(changed, artifacts, true), undefined, field);
+    }
+  }
+});
+
 
 test("a current Listing referenced by a historical bundle retains its current hash profile", () => {
   const listing: Obj = { dacsVersion: "1", listingId: "current-svc", listingVersion: 1,

@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import crypto from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { NextRequest } from "next/server";
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 
@@ -83,6 +85,54 @@ const request = (body: Record<string, unknown>) => new NextRequest(
     body: JSON.stringify(body),
   },
 );
+
+test("Listing signature decoding and verifier exceptions refuse transaction release", async (t) => {
+  t.mock.method(Date, "now", () => 1_810_000_000_000);
+  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    const call = init?.body ? JSON.parse(String(init.body)).params?.[0]?.message : null;
+    return Response.json({ result: 200, response: call === "searchStoragePrograms" ? [] : 0 });
+  });
+  const input = { ...base, serviceId: "signature-refusal" };
+  const identity = await (await POST(request(input))).json();
+  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") };
+  const preview = await (await POST(request(authenticated))).json();
+  assert.equal(preview.tx, null);
+  const listingSignature = Buffer.from(ed25519Sign(Buffer.from(preview.message), privateKey)).toString("hex");
+  const valid = await POST(request({ ...authenticated, listingSignature }));
+  assert.equal(valid.status, 200);
+  assert.ok((await valid.json()).tx, "allowed control: an authentic signature releases the transaction");
+  for (const malformed of [null, {}, "", "ab", "z".repeat(128), `${listingSignature}junk`, "00".repeat(64)]) {
+    const response = await POST(request({ ...authenticated, listingSignature: malformed }));
+    assert.equal(response.status, 400, JSON.stringify(malformed));
+    const body = await response.json();
+    assert.ok(typeof body.error === "string" && body.error.length > 0);
+    assert.equal(body.tx, undefined);
+    assert.equal(body.listing, undefined);
+  }
+  const originalVerify = crypto.verify;
+  let listingCalls = 0;
+  const verifier = t.mock.method(crypto, "verify", (algorithm: null, data: Uint8Array,
+    key: crypto.KeyObject, signature: Uint8Array) => {
+    if (Buffer.from(data).toString("utf8").startsWith("dacs-listing:v1:")) {
+      listingCalls++;
+      throw new Error("Listing verifier failed");
+    }
+    return originalVerify(algorithm, data, key, signature);
+  });
+  syncBuiltinESMExports();
+  try {
+    const response = await POST(request({ ...authenticated, listingSignature }));
+    assert.equal(listingCalls, 1, "the Listing verifier exception path was reached");
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.ok(typeof body.error === "string" && body.error.length > 0);
+    assert.equal(body.tx, undefined);
+    assert.equal(body.listing, undefined);
+  } finally { verifier.mock.restore(); syncBuiltinESMExports(); }
+});
 
 test("publisher uses PA-1 rail resolution and signs the exact staged Listing before creating a transaction", async (t) => {
   const now = 1_800_000_000_000;

@@ -184,6 +184,7 @@ test("a valid seller copy retains its metadata when the buyer copy is missing, m
     assert.equal(published.signatureVerified, true, failure);
     assert.equal(published.refsVerified, false, failure);
     assert.equal(published.reputationEligible, false, failure);
+    assert.equal(published.verificationLimitation, undefined, "ordinary reference failures are not unsupported vetting");
     assert.equal(published.anchoredByRole, "seller", failure);
     assert.equal(published.outcome, "completed", failure);
     assert.equal(published.finalisedAt, 1_700_000_000_000, failure);
@@ -329,7 +330,7 @@ test("historical hex agreement signatures retain their authenticated read profil
 });
 
 test("legacy vet references read the buyer's historical verifyrecord separately from agreement and evidence", async () => {
-  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered"] as const) {
+  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered", "invalid-signatures"] as const) {
     const jobId = `legacy-vet-${mode}`;
     const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
     const vetScope: Obj = { recordVersion: "1", jobId, evaluatedParty: seller,
@@ -358,23 +359,26 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
       body.settlementEvidence = [{ kind: "dacs-4-evidence", id: `evidence-${jobId}`, contentHash: contentHash(evidenceScope) }];
       storage[at] = { ...body, anchoredByRole: storage[at].anchoredByRole,
         signatures: [0, 1].map(index => partySignature(index, "dacs-bundle:v1:", body)) };
+      if (mode === "invalid-signatures") {
+        (storage[at].signatures as Obj[]).forEach(signature => { signature.value = "invalid"; });
+      }
     }
     const record = await indexed(deal);
     assert.equal(reads.get(vetAt), 2, `${mode}: each copy reads buyer-owned dacs2:verifyrecord`);
     assert.equal(reads.get(wrongAt) ?? 0, 0, "no alternate name can substitute for the historical producer name");
     assert.equal(reads.get(agreementAt), 2, "agreement dispatch remains separate");
     assert.equal(reads.get(evidenceAt), 2, "evidence dispatch remains separate");
-    assert.equal(record.deals[0].signatureVerified, true, mode);
+    assert.equal(record.deals[0].signatureVerified, mode !== "invalid-signatures", mode);
     // This release has no authenticated session recipe/composite adapter. A
     // shaped and signed record alone cannot establish a completed vet graph.
     assert.equal(record.deals[0].refsVerified, false, mode);
     assert.equal(record.deals[0].reputationEligible, false, mode);
-    assert.equal(record.deals[0].verificationLimitation, "legacy-vet-unsupported", mode);
+    assert.equal(record.deals[0].verificationLimitation, mode === "invalid-signatures" ? undefined : "legacy-vet-unsupported", mode);
     assert.equal(record.reputation.bundleCount, 0, mode);
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [record] });
     const { GET } = await import("../app/api/dacs/status/route.js");
     const status = await (await GET(new NextRequest("https://directory.test/api/dacs/status"))).json();
-    assert.equal(status.legacyVetUnsupportedDeals, 1, "two copies contribute one diagnostic deal");
+    assert.equal(status.legacyVetUnsupportedDeals, mode === "invalid-signatures" ? 0 : 1, "two copies contribute one diagnostic deal");
   }
 });
 

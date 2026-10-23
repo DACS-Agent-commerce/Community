@@ -27,3 +27,48 @@ test("historical member ordering is stable across large insertion permutations a
     }
   }
 });
+
+test("historical hashes refuse non-integer numbers at every nested position", () => {
+  for (const value of [0.5, -0.5, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, NaN, Infinity]) {
+    for (const scope of [{ value }, { nested: { value } }, { nested: [{ value }] }, { nested: [value] }]) {
+      assert.throws(() => legacyListingHash(scope), /legacy canonical form requires safe integers/);
+    }
+  }
+  for (const value of [0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
+    const scope = { nested: [value] };
+    assert.equal(legacyListingHash(scope), digest(`{"nested":[${value}]}`));
+  }
+  assert.equal(canonicalize({ nested: [0.5] }), '{"nested":[0.5]}');
+});
+
+test("historical NFC-equal members keep insertion order across separate sorting runs", () => {
+  const names = ["s\u0323\u0307", "s\u0307\u0323", "ṣ\u0307", "ṩ"];
+  const ordinary = Array.from({ length: 160 }, (_, i) => [`k${String(i).padStart(3, "0")}`, i] as const);
+  const sorted = ordinary.map(([key, value]) => `"${key}":${value}`);
+  for (const order of [names, [...names].reverse()]) {
+    const members: Array<readonly [string, number]> = [];
+    for (let i = 0; i < order.length; i++) {
+      members.push([order[i], i], ...ordinary.slice(i * 40, (i + 1) * 40).reverse());
+    }
+    assert.equal(new Set(order.map(name => name.normalize("NFC"))).size, 1);
+    // Construct the frozen preimage independently, without sorting normalized keys.
+    const collisions = order.map((_, i) => `"ṩ":${i}`);
+    assert.equal(legacyListingHash(Object.fromEntries(members)), digest(`{${[...sorted, ...collisions].join(",")}}`));
+  }
+});
+
+test("historical equal-name stability spans a galloping merge between long sorted runs", () => {
+  const lower = Array.from({ length: 96 }, (_, i) => [`a${String(i).padStart(3, "0")}`, i] as const);
+  const firstHigher = Array.from({ length: 63 }, (_, i) => [`\uf000${String(i).padStart(3, "0")}`, i] as const);
+  const lastHigher = Array.from({ length: 96 }, (_, i) => [`\uf100${String(i).padStart(3, "0")}`, i] as const);
+  const encode = ([key, value]: readonly [string, number]) => `${JSON.stringify(key)}:${value}`;
+  for (const names of [["e\u0301", "é"], ["é", "e\u0301"]]) {
+    const first = [names[0], 1000] as const, second = [names[1], 2000] as const;
+    // Two separately ascending runs: the second's long lower-key prefix forces
+    // the merge to batch comparisons immediately before the NFC-equal members.
+    const scope = Object.fromEntries([first, ...firstHigher, ...lower, second, ...lastHigher]);
+    const expected = `{${[...lower.map(encode), '\"é\":1000', '\"é\":2000',
+      ...firstHigher.map(encode), ...lastHigher.map(encode)].join(",")}}`;
+    assert.equal(legacyListingHash(scope), digest(expected));
+  }
+});

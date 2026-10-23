@@ -20,6 +20,14 @@ test("CCI badges prefer original HTTP proof links to commitments across RPC enve
   }
 });
 
+test("CCI signatures are commitments rather than display proof URLs", () => {
+  const claim = `did:demos:agent:${"a".repeat(64)}`;
+  for (const signature of ["https://example.com/signature", "http://example.com/signature", "commitment", "javascript:alert(1)"]) {
+    const links = cciProofLinks(claim, { web2: { discord: [{ username: "signature-only", signature }] } });
+    assert.equal(links.size, 0, signature);
+  }
+});
+
 test("proof URL projection accepts HTTP and strips unsafe or non-string proof fields", () => {
   const claim = `did:demos:agent:${"a".repeat(64)}`;
   const links = cciProofLinks(claim, { web2: { discord: [

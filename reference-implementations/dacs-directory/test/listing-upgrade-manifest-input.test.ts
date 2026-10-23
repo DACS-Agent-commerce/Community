@@ -24,6 +24,11 @@ test("manifest validation independently rejects wrong containers, entry fields a
     ["mixed method types", entry => { entry.supportedPayloadMethods = ["self-signed", 7]; }],
     ["method container", entry => { entry.supportedPayloadMethods = "self-signed"; }],
   ];
+  for (const entry of [null, false, 7, "entry", []]) {
+    const entries: unknown[] = manifest();
+    entries[0] = entry;
+    assert.throws(() => parseListingUpgradeManifest(entries), /invalid entry/);
+  }
   for (const [name, change] of changes) {
     const entries = manifest();
     change(entries[0]);
