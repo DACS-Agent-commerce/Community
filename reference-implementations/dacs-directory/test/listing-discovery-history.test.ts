@@ -127,12 +127,20 @@ test("continuing listing rejections retain firstSeenAt and occurrences while sta
   assert.equal(diagnostic()?.lastSeenAt, 2_000);
   assert.equal(diagnostic()?.occurrences, 2);
   assert.deepEqual(store.indexerDiagnostics({ deadLetterLocator: removed }).listingRejectionDiagnostics.items, []);
-  // An unavailable read cannot reassert a public rejection from stale bytes.
+  // DACS-1 §6.3.6: cached diagnostics do not establish current Listing validity.
+  // An unavailable read preserves history without recording a fresh rejection.
+  const beforeUnavailable = diagnostic();
+  assert.equal(beforeUnavailable?.publicNotice, false);
+  now = 3_000;
   available = false;
-  await indexRegistration(registration, undefined, offline);
-  assert.equal(diagnostic(), undefined);
+  assert.deepEqual((await indexRegistration(registration, undefined, offline)).listings, []);
+  assert.deepEqual(diagnostic(), beforeUnavailable);
+  now = 4_000;
   available = true;
   await indexRegistration(registration, undefined, offline);
+  assert.equal(diagnostic()?.firstSeenAt, 1_000);
+  assert.equal(diagnostic()?.lastSeenAt, 4_000);
+  assert.equal(diagnostic()?.occurrences, 3);
   currentOwner = owner;
   assert.equal((await indexRegistration(registration, undefined, offline)).listings.length, 1);
   assert.equal(diagnostic(), undefined);
