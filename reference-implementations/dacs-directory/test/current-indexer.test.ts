@@ -985,6 +985,55 @@ test("a verified two-copy deal publishes exactly the evidence its authoritative 
   assert.equal(record.reputation.bundleCount, 1);
 });
 
+test("completed deals remain verifiable after their Listing expires out of discovery", async (t) => {
+  const fixture = await vector("listing-expiry-job", 2100);
+  const notAfter = 200;
+  let now = notAfter - 1;
+  t.mock.method(Date, "now", () => now);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.validity = { notBefore: 1, notAfter };
+  fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  const deal = registeredDeal("listing-expiry-job", fixture.locators.buyer, fixture.locators.seller);
+  const registration: Registration = {
+    primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal],
+    bundleBindings: [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ],
+  };
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return Response.json(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, data } : { success: false },
+      { status: data ? 200 : 404 });
+  });
+  const resolveIdentities = async () => { throw new Error("identity unavailable"); };
+  const before = await indexRegistration(registration, undefined, resolveIdentities);
+  assert.equal(before.listings.length, 1);
+  assert.equal(before.listings[0].contentHash, listingRef.contentHash);
+  assert.equal(before.deals[0].refsVerified, true);
+  assert.equal(before.deals[0].finalisedAt, 120, "the deal completed before Listing expiry");
+
+  now = notAfter + 1;
+  const after = await indexRegistration(registration, before, resolveIdentities);
+  assert.deepEqual(after.listings, [], "expired Listings must leave the discoverable catalog");
+  for (const record of [before, after]) {
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, true, "expiry must preserve historical reference verification");
+    assert.equal(record.deals[0].signatureVerified, true);
+    assert.equal(record.deals[0].reputationEligible, true);
+    assert.equal(record.deals[0].outcome, "completed");
+    assert.equal(record.deals[0].category, "services.test");
+    assert.equal(record.deals[0].bundleContentHash, artifactHash(fixture.sellerBundle, "bundle"));
+    assert.equal(record.reputation.bundleCount, 1);
+    assert.equal(record.reputation.completed, 1);
+  }
+});
+
 test("signed evidence with absent or malformed transaction refs cannot deduplicate independent jobs", async () => {
   for (const refs of [undefined, null, { txId: "not-an-array" }, [{}, null, { txId: null }, { id: null }, { txId: "" }, { id: "" }]]) {
     const allMaps = new Map<string, Obj>();

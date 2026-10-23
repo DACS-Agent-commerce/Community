@@ -256,6 +256,10 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
+    const presentation = listingPresentation(scope);
+    // Historical deals retain authenticated terms and category after expiry or revocation.
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+    categoriesByListing.set(listingId, presentation.category);
     if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
@@ -318,16 +322,12 @@ export async function indexRegistration(
         [...unavailableMarkers].some((ref) => knownMarkers.includes(ref) ||
           isOwnerRevocationCandidate(verified.contentHash, ref, anchored.owner ?? null))
         ? "indeterminate" : "absent";
-    const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
       identityBundle = signedSeller.identity as Record<string, unknown>;
       identityBundles.push(identityBundle);
     }
-    // Past sessions still verify against the listing whatever its revocation state.
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
-    categoriesByListing.set(listingId, presentation.category);
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
