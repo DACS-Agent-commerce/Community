@@ -18,26 +18,29 @@ import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "./canonical.js";
+import { legacyListingHash } from "./legacyListingHash.js";
+import { usesCurrentBundleProfile } from "./bundleProfile.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
+import { cciProofLinks } from "./cciProofLinks.js";
+import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 // verifyBundleCore is exported from the SDK's agent barrel, but that barrel
 // also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
 // dependency chain (rubic-sdk → cetus-sui-clmm-sdk → a broken @mysten/bcs
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-// The SDK at SDK_REV (2026-07-04) doesn't export sessionAnchorName from its public
-// barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
-// reach into the vendored build until the pin moves.
-import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  verifyStoredListing,
+  revocationSellerClaim,
+  verifyStoredListingResult,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import { listingDiagnosticCoordinates } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -45,6 +48,8 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  pruneRegistrationListingRejections,
+  isOwnerRevocationCandidate,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
@@ -60,10 +65,10 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
+import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
   boundedBundleBindings,
   bundleBindingOverflowKey,
@@ -71,6 +76,7 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
+import { legacySessionAnchorName } from "./legacySessionAnchorName.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
@@ -99,9 +105,17 @@ const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
-/** Missing or unavailable current bytes cannot reject an older candidate (RB-5/6). */
-async function readRevocationCandidate(locator: string): Promise<Record<string, unknown> | null> {
+/**
+ * Missing or unavailable current bytes cannot reject an older candidate (RB-5/6).
+ * Every read that yields no artifact, a storage `not found` included, is noted
+ * in `unavailable`.
+ */
+async function readRevocationCandidate(
+  locator: string,
+  unavailable: Set<string>,
+): Promise<Record<string, unknown> | null> {
   const read = await readAnchorResult(locator);
+  if (read.status === "absent" || read.status === "unavailable") unavailable.add(locator);
   return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
 }
 
@@ -121,6 +135,20 @@ export function listingBindingRejection(
   return null;
 }
 
+/** DACS-1 reader step 3: only currently effective Listings are discoverable. */
+export function listingIsCurrentlyEffective(
+  scope: Record<string, unknown>,
+  now: number,
+): boolean {
+  const validity = scope.validity && typeof scope.validity === "object" && !Array.isArray(scope.validity)
+    ? scope.validity as { notBefore?: unknown; notAfter?: unknown }
+    : undefined;
+  if (!validity) return true; // Explicit legacy profile has no validity window.
+  if (typeof validity.notBefore === "number" && now < validity.notBefore) return false;
+  if (typeof validity.notAfter === "number" && now > validity.notAfter) return false;
+  return true;
+}
+
 /**
  * Index one registration into a verified SellerRecord.
  *
@@ -133,8 +161,13 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
+  verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
+  const ownerRegistered = reg.ownerSignature
+    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
+    : false;
+  const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -142,20 +175,18 @@ export async function indexRegistration(
   try {
     const resolved = await resolveIdentities(hex);
     const record = parseCciRecord(reg.primaryClaim, resolved);
-    // Proof URLs live in the raw GCR payload (web2.<platform>[].proof).
-    const rawWeb2 = ((resolved as { response?: { web2?: Record<string, Array<{ username?: string; proof?: string }>> } })
-      ?.response?.web2) ?? {};
-    const proofFor = (platform: string, handle: string): string | undefined =>
-      rawWeb2[platform]?.find((e) => e?.username?.toLowerCase() === handle.toLowerCase())?.proof;
+    const proofLinks = cciProofLinks(reg.primaryClaim, record.raw);
+    // The SDK already associates each proof with its parsed claim across all
+    // supported GCR envelopes, and skips malformed preceding rows.
     const profileFor = (platform: string, handle: string): string | undefined =>
       platform === "github" ? `https://github.com/${handle}` :
       platform === "twitter" ? `https://x.com/${handle}` : undefined;
     const explorerFor = (chainType: string, address: string): string | undefined =>
       chainType === "evm" ? `https://etherscan.io/address/${address}` :
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
-    cci = record.claims.map((c) => c.kind === "web2"
+    cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
-          proofUrl: proofFor(c.platform, c.handle), linkUrl: profileFor(c.platform, c.handle) }
+          proofUrl: proofLinks.get(c.ref), linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
           linkUrl: explorerFor(c.chainType, c.address) });
   } catch {
@@ -171,10 +202,23 @@ export async function indexRegistration(
   const { verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
-    if (!anchored) continue;
-    // A listing with no canonical form throws while hashing; skip it like any invalid one.
-    const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
-    if (!verified) continue;
+    if (!anchored) {
+      // An unread anchor cannot clear an earlier rejection or reset its history.
+      rejectedListingAnchors.add(anchor);
+      continue;
+    }
+    // Fails closed: a listing with no canonical form is rejected like any invalid one.
+    const verification = await verifyStoredListingResult(anchored.data, anchor);
+    if (!verification.ok) {
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        verification.code,
+      );
+      continue;
+    }
+    const verified = verification.value;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
@@ -182,12 +226,29 @@ export async function indexRegistration(
       reg.primaryClaim,
     );
     if (bindingRejection) {
-      recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        bindingRejection,
+        bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING",
+      );
+      continue;
+    }
+    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
+    if (declaredHash && declaredHash !== verified.contentHash) {
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        "DECLARED_CONTENT_HASH_MISMATCH",
+        listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered,
+      );
       continue;
     }
     clearListingRejection(anchor, reg.primaryClaim);
-    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    if (declaredHash && declaredHash !== verified.contentHash) continue;
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
     if (!listingId) continue;
@@ -195,10 +256,14 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    // DACS-1 validation step 3: notBefore ≤ now ≤ notAfter (if set).
-    const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
-    if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
-    if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
+    // DACS-1 §6.3.4 reader step 3: future terms cannot authenticate deal history.
+    const validity = scope.validity as { notBefore?: unknown } | undefined;
+    if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
+    const presentation = listingPresentation(scope);
+    // Historical deals retain authenticated terms and category after expiry or revocation.
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+    categoriesByListing.set(listingId, presentation.category);
+    if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
     // those anchored by the listing's own owner first. Only one batch is ever selected.
@@ -210,10 +275,12 @@ export async function indexRegistration(
     const carriedBindings = boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version);
     admitWellKnownRevocationCandidates(verified.contentHash, carriedBindings.map((binding) => binding.markerAnchor.locator));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
+    const knownMarkers = (verifiedRevocations[verified.contentHash] ?? []).slice(0, limit);
+    const unavailableMarkers = new Set<string>();
     const readMarkers = new Map<string, Record<string, unknown>>();
     const found = await findValidListingRevocation(
       [
-        ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
+        ...knownMarkers,
         ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
       ],
       verified,
@@ -229,7 +296,7 @@ export async function indexRegistration(
       async (locator) => {
         // Cached invalid bytes cannot adjudicate either a repaired marker or
         // its current source binding, even if only its signature has changed.
-        const marker = await readRevocationCandidate(locator);
+        const marker = await readRevocationCandidate(locator, unavailableMarkers);
         if (marker) readMarkers.set(locator, marker);
         return marker;
       },
@@ -241,24 +308,29 @@ export async function indexRegistration(
       if (marker) retainListingRevocation(found, marker);
     }
     const retained = retainedListingRevocation(verified.contentHash);
-    const boundRetained = retained?.sellerPrimaryClaim === verified.sellerClaim && retained.listingId === listingId &&
+    const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
     const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
     // Raw chain hints have no withdrawal authority. Only an authenticated source
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
+    // SDK readers also take a fresh `active` summary without a binding as
+    // established revocation absence, so a marker the node could not serve
+    // (including a storage `not found`, which DEMOS-MAPPING §A.2 makes
+    // indeterminate) holds the listing when it was verified before or the
+    // listing owner anchored it. Anyone can anchor other candidates, so an
+    // outage on those cannot hold it.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
-      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
-    const presentation = listingPresentation(scope);
+      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
+        [...unavailableMarkers].some((ref) => knownMarkers.includes(ref) ||
+          isOwnerRevocationCandidate(verified.contentHash, ref, anchored.owner ?? null))
+        ? "indeterminate" : "absent";
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
       identityBundle = signedSeller.identity as Record<string, unknown>;
       identityBundles.push(identityBundle);
     }
-    // Past sessions still verify against the listing whatever its revocation state.
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
-    categoriesByListing.set(listingId, presentation.category);
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
@@ -267,7 +339,14 @@ export async function indexRegistration(
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
-      seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
+      // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
+      // match the revocation binding against, the exact `presentedBy` bytes.
+      seller: {
+        primaryClaim: verified.profile === "dacs-v0.1"
+          ? verified.listing.seller.identity.presentedBy
+          : reg.primaryClaim,
+        displayName: reg.displayName,
+      },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {
@@ -290,8 +369,11 @@ export async function indexRegistration(
       status: revocation === "revoked" ? "revoked" : "active",
       ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
+      transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
+
+  pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
@@ -332,14 +414,14 @@ export async function indexRegistration(
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
-    const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
+    const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
       : await graphFor(deal.sellerBundleRef);
     // Profile selection is based on the signed format discriminator, not on
     // whether verification succeeds. A malformed current bundle must fail in
     // the current verifier instead of being retried by the legacy verifier.
-    if (jobBindings.length > 0 || buyerIsCurrent || sellerCurrentProbe?.bundle.bundleVersion === "1" || sellerCurrentProbe?.bundle.faultBundleVersion === "1") {
+    if (jobBindings.length > 0 || buyerIsCurrent || usesCurrentBundleProfile(sellerCurrentProbe?.bundle ?? null)) {
       const graphCache = new Map<string, Promise<EvidenceGraph>>();
       if (sellerCurrentProbe && deal.sellerBundleRef) {
         graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
@@ -446,6 +528,8 @@ export async function indexRegistration(
         bundleContentHash: authoritative?.bundleContentHash,
         reputationEligible: refsVerified,
         cancellationNeutral,
+        faultedParty: authoritative?.bundle.faultBundleVersion === "1"
+          ? authoritative.bundle.faultedParty as DealRecord["faultedParty"] : undefined,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
@@ -459,7 +543,7 @@ export async function indexRegistration(
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
       let rawBundle: Record<string, unknown> | null = null;
-      const verification = await verifyBundleCore(ref, {
+      const verification = await verifyLegacyBundle(ref, {
         readArtifact: async (r) => {
           const raw = await readAnchor(r);
           if (r === ref) rawBundle = raw;
@@ -467,9 +551,9 @@ export async function indexRegistration(
           return raw;
         },
         resolveRef: async (kind, jobId) => {
-          const name = kind === "dacs-3-agreement" ? sessionAnchorName.agreement(jobId)
-            : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
-              : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
+          const name = kind === "dacs-3-agreement" ? legacySessionAnchorName.agreement(jobId)
+            : kind === "dacs-4-evidence" ? legacySessionAnchorName.evidence(jobId)
+              : kind === "dacs-2-verifyresult" ? legacySessionAnchorName.vet(jobId) : null;
           if (!name) return null;
           const address = resolveProgramAddress(deal.owners.buyer, name);
           if (!address) return null;
@@ -480,38 +564,34 @@ export async function indexRegistration(
         resolvePublicKey: async (claim) =>
           (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
-      }).catch(() => null);
-      const bundle = verification?.bundle;
+      }).catch((error) => {
+        throwIfInfrastructureError(error);
+        return null;
+      });
+      const bundle = verification && isLegacyMvpAttestationBundle(verification.bundle)
+        ? verification.bundle
+        : undefined;
       const signaturesOk = verification ? hasRequiredBundleSignatures(
         verification,
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
+      const refsOk = verification && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole)
         ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
       return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
     const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
-    const divergent = Boolean(
-      buyerCopy.refsOk && sellerCopy?.refsOk &&
-      buyerCopy.bundle && sellerCopy.bundle && currentBundleCopiesDiverge(
-        buyerCopy.bundle as unknown as Record<string, unknown>,
-        sellerCopy.bundle as unknown as Record<string, unknown>,
-      ),
-    );
-    const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+    const { authoritative, refsVerified: strictRefsVerified, sellerOutcome, reputationEligible } =
+      reconcileLegacyCopies(buyerCopy, sellerCopy);
     const bundle = authoritative.bundle;
-    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {
       delete signedBundleScope.signatures;
       delete signedBundleScope.anchoredByRole;
     }
-    const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
-    const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = verifiedListingTerms(
       authoritative.verification,
@@ -524,14 +604,17 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
+      verificationLimitation: !strictRefsVerified && authoritative.signaturesOk && bundle?.vetRecords.length
+        ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
-      bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
-      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
+      bundleContentHash: bundle && signedBundleScope ? legacyListingHash(signedBundleScope) : undefined,
+      reputationEligible,
       cancellationNeutral,
+      faultedParty: undefined,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
       category: bundleCategory(bundle, categoriesByListing),
@@ -563,7 +646,7 @@ export async function indexRegistration(
         (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
       );
       const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
+      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral && d.faultedParty !== "orchestrator").length;
       return {
         categoryScope: l.offering.category,
         completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
@@ -578,9 +661,6 @@ export async function indexRegistration(
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
   // submission-time replay gate only — the cryptographic binding must hold).
-  const ownerRegistered = reg.ownerSignature
-    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false;
   const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
   const identityTier = identityTiers.includes("institutional") ? "institutional"
     : identityTiers.includes("verified") ? "verified" : "self-declared";

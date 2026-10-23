@@ -24,11 +24,11 @@ test('control: authenticated readable tombstone is revoked', async () => {
     value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
   const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
-    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('hex') }] } };
+    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
   const scope = { dacsVersion: '1', listingVersion: 1, listingId: 'svc', requiredCapabilities: ['SR-2'],
     seller: { displayName: 'Service', identity },
     offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
-      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json' } },
+      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
     buyerRequirement: { requirementVersion: '1', required: [] },
     pipeline: [{ kind: 'negotiate-fixed-price' }, { kind: 'commit-agreement' }, { kind: 'deliver-attested-payload' }],
     pricing: { kind: 'fixed', price: { amount: '1', currency: 'DEM' } },
@@ -59,7 +59,25 @@ test('control: authenticated readable tombstone is revoked', async () => {
     return Response.json({ success: true, owner: `0x${key}`, data: isMarker ? marker : listing });
   };
   try {
+    // Keep a fully authenticated carrier and readable Listing; change only one
+    // carried coordinate, before any candidate for this Listing has been saved.
+    for (const withdrawalAuthenticated of [true, false]) {
+      for (const change of [
+        { sellerPrimaryClaim: `did:demos:agent:${'b'.repeat(64)}` },
+        { sellerPrimaryClaim: `${claim}?note=other-presentation` },
+        { listingContentHash: 'c'.repeat(64) },
+        { listingId: 'other-service' },
+        { listingVersion: 2 },
+      ]) {
+        await ingestWellKnownRevocations({ ...crawled, withdrawalAuthenticated,
+          revocations: [{ ...binding, ...change }] });
+        assert.deepEqual(store.nextRevocationCandidates(verified.contentHash, `0x${key}`, 10), [], JSON.stringify(change));
+        assert.equal(store.retainedListingRevocation(verified.contentHash), null, JSON.stringify(change));
+      }
+    }
     await ingestWellKnownRevocations(crawled);
+    assert.deepEqual(store.nextRevocationCandidates(verified.contentHash, `0x${key}`, 10), [at(2)],
+      'matching authenticated carriage queues the marker');
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
     const indexed = await indexRegistration(reg, undefined, async () => { throw new Error('offline'); });
     assert.equal(indexed.listings.length, 1);

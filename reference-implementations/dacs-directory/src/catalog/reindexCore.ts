@@ -7,10 +7,11 @@
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
 import { boundedJson } from "./artifactLimits.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
+import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -18,6 +19,8 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
+import { catalogNodeDeployment } from "./listingFinality";
+import { pinnedChainIdentity } from "./nodeDeployment";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
@@ -42,6 +45,7 @@ import {
   clearChainDerivedArtifacts,
   recordArtifact,
   pruneFailureHistory,
+  pruneListingRejections,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -64,6 +68,11 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /**
+   * Deployment preflight injected by tests. Production checks the configured
+   * node's chain against the pin; build drift is diagnostic.
+   */
+  nodeDeployment?: () => Promise<{ ok: true; chainIdentity?: string; warning?: string | null } | { ok: false; reason: string }>;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
@@ -100,10 +109,26 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   const prior = loadCatalog();
 
+  // Nothing from a node outside the pinned chain reaches the public
+  // catalog or the scan state; a node that cannot be read fails the pass too.
+  // The refusal is still recorded as a failed run, so the public status shows
+  // that the catalog is not advancing.
+  const deployment = await (opts.nodeDeployment ?? catalogNodeDeployment)().catch((error: unknown) => ({
+    ok: false as const,
+    reason: `could not read the Demos node's chain: ${error instanceof Error ? error.message : String(error)}`,
+  }));
+  if (!deployment.ok) {
+    const error = `catalog not updated: ${deployment.reason}`;
+    const { lastSeenTxId } = loadScanState();
+    finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
+    throw new Error(error);
+  }
+  if (deployment.warning) log(`node build warning: ${deployment.warning}`);
+
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
-  //    confirmed large tip regression clears derived state before a genesis
-  //    rescan. First run backfills the full history.
+  //    changed chain identity or confirmed large tip regression clears derived
+  //    state before a genesis rescan. An old cache without an identity replays too. First run backfills the full history.
   let state = loadScanState();
   const resetThreshold = chainResetThreshold();
   let observedChainTip: number | null = null;
@@ -113,13 +138,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  if (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold)) {
+  const servedChain = deployment.chainIdentity ?? pinnedChainIdentity();
+  const identityChanged = state.chainIdentity !== servedChain;
+  if (identityChanged || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
+      // An interrupted genesis replay must not be marked migrated.
+      schemaVersion: 0,
+      chainIdentity: servedChain,
       lastSeenTxId: 0,
-      lastChainTip: observedChainTip,
+      ...(observedChainTip === null ? {} : { lastChainTip: observedChainTip }),
       listings: {},
       deals: {},
       programs: {},
@@ -131,8 +160,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
     log(
-      `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs ` +
-        `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
+      `chain replacement detected: identity ${String(state.chainIdentity)}, tip ${observedChainTip}, previous cursor ${previousCursor}; ` +
+        `cleared chain-derived cache and restarting from genesis`,
     );
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
@@ -364,7 +393,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           if (!reg.listingAnchors.includes(anchor)) {
             const retained = retainedListingRevocation(agent.contentHashes[anchor]);
             if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
-                retained?.sellerPrimaryClaim !== agent.seller) continue;
+                canonicalDemosAgentClaim(retained?.sellerPrimaryClaim ?? "") !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {
@@ -440,6 +469,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
+    pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
@@ -514,7 +544,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
           listing.contentHash !== agent.contentHashes[anchor]) continue;
       const id = listing.scope.listingId ?? listing.scope.serviceId;
       const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
-      if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
+      if (binding.sellerPrimaryClaim !== revocationSellerClaim(listing) || binding.listingContentHash !== listing.contentHash ||
           binding.listingId !== id || binding.listingVersion !== version) continue;
       if (provenance) {
         admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);

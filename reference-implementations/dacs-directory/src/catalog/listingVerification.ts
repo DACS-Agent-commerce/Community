@@ -1,5 +1,22 @@
-import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
+import { contentHash, stripSignature } from "./canonical.js";
+import { legacyListingHash } from "./legacyListingHash.js";
+import {
+  ARTIFACT_SEPARATORS,
+  isListing,
+  isVerificationMethod,
+  readListingArtifact,
+  isLegacyMvpListing,
+  verifyComponentSignature,
+  type IdentityBundle,
+  type LegacyMvpListing,
+  type Listing,
+} from "@kynesyslabs/dacs/artifacts";
+// This module reaches the browser bundle (VerifyDeal → bundlePolicy). The
+// SDK's identity barrel also loads its domain-claim and job-ID modules, whose
+// node:util/node:crypto names the browser shims do not provide, so import the
+// leaf module. test/client-bundle-imports.test.ts pins this for every client
+// entry.
+import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -7,136 +24,94 @@ import {
   resolveDemosPrimaryClaimKey,
   sameResolvedPrimaryClaim,
   verifyPrimaryClaimSignature,
+  verifyResolvedPrimaryClaimSignature,
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
+import {
+  canonicalSignatureBytes,
+  importLegacySignatureValue,
+  legacySignatureBytes,
+  presentationSignatureBytes,
+} from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
-/** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
-export const MAX_LISTING_CANONICAL_BYTES = 16_384;
 
-export interface VerifiedListing {
-  listing: Listing | Record<string, unknown>;
+interface VerifiedListingBase {
   scope: Record<string, unknown>;
   contentHash: string;
   signer: string;
   sellerClaim: string;
-  profile: "dacs-v0.1" | "legacy-sdk-v0.1";
 }
+
+export type VerifiedListing =
+  | VerifiedListingBase & { listing: Listing; profile: "dacs-v0.1" }
+  | VerifiedListingBase & { listing: LegacyMvpListing; profile: "legacy-sdk-v0.1" };
+
+export type ListingVerificationFailureCode =
+  | "NORMATIVE_LISTING_INVALID"
+  | "VERIFICATION_METHOD_INVALID"
+  | "LISTING_SIGNATURE_INVALID"
+  | "IDENTITY_PRESENTATION_INVALID"
+  | "LEGACY_LISTING_INVALID";
+
+export type ListingVerificationResult =
+  | { ok: true; value: VerifiedListing }
+  | { ok: false; code: ListingVerificationFailureCode };
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-// Procurement remains outside this reader profile until reconciliation can resolve
-// the publisher as buyer and attribute supplier history to the agreement seller.
+
+// Directory catalog profile: the rules this catalog keeps on top of the pinned
+// SDK reader's isListing. They only ever refuse, and run after isListing has
+// accepted the artifact (with the pinned compatibility patch). These rules
+// never admit a Listing isListing refuses. They are not the whole reader: the identity presentation also
+// accepts main's hex signature spelling, which the SDK's presentation
+// verifier refuses (README, "Listings that /register published"). Procurement remains outside this reader profile until reconciliation
+// can resolve the publisher as buyer and attribute supplier history to the
+// agreement seller.
 const PHASES = new Set([
   "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope",
   "commit-agreement", "commit-payee-bound-agreement",
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
-/** DACS-3 PS-3: the pricing kinds each negotiation pattern accepts. */
-const NEGOTIATION_PRICING: Record<string, ReadonlySet<string>> = {
-  "negotiate-fixed-price": new Set(["fixed", "negotiable", "metered"]),
-  "negotiate-rfq": new Set(["negotiable", "metered"]),
-  "negotiate-sealed-envelope": new Set(["auction"]),
-  "negotiate-sealed-envelope-procurement": new Set(["auction"]),
-};
 /** DACS-4 PricingSpec auction `selectionRule`: a closed enum plus content-hash-bound rule refs. */
 const SELECTION_RULES = new Set(["lowest-price", "highest-price", "first-acceptable"]);
 const validSelectionRule = (value: unknown): boolean =>
   typeof value === "string" && (SELECTION_RULES.has(value) || /^rule-ref:[0-9a-f]{64}:\S+$/.test(value));
 
-// Schema conformance (DACS-1 validation step 1) for the recognised members. Members a later
-// minor may add stay open-world, as below; a recognised member must have its defined type.
-const optional = (value: unknown, valid: (value: unknown) => boolean): boolean => value === undefined || valid(value);
-const isString = (value: unknown): boolean => typeof value === "string";
-const nonNegative = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value) && value >= 0;
-const oneOf = (...values: string[]) => (value: unknown): boolean => typeof value === "string" && values.includes(value);
-const CAPABILITIES = oneOf("SR-1", "SR-2", "SR-3", "SR-4", "SR-5");
-
-/** DACS-4 DeliverableSpec. */
-function validDeliverable(value: unknown): boolean {
-  const deliverable = record(value);
-  const sizeOk = optional(deliverable?.expectedSizeBytes, (size) => Number.isSafeInteger(size) && Number(size) >= 0);
-  return deliverable?.kind === "storage-program"
-    ? optional(deliverable.schemaUrl, isString) && sizeOk && optional(deliverable.accessModel, oneOf("public", "buyer-only", "encrypt-to-buyer"))
-    : deliverable?.kind === "entitlement" ? nonNegative(deliverable.durationSec) && typeof deliverable.renewable === "boolean"
-      : deliverable?.kind === "attested-payload"
-        ? typeof deliverable.payloadFormat === "string" && deliverable.payloadFormat.length > 0 && sizeOk &&
-          optional(deliverable.verificationMethod, (method) => typeof record(method)?.kind === "string")
-        : deliverable?.kind === "external"
-          ? typeof deliverable.description === "string" &&
-            optional(deliverable.verificationMethod, (method) => typeof record(method)?.kind === "string")
-          : false;
+function validPriceTerm(value: unknown): boolean {
+  const term = record(value);
+  return Boolean(term && typeof term.amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(term.amount) &&
+    Number.isFinite(Number(term.amount)) && Number(term.amount) > 0 && typeof term.currency === "string" && term.currency.length > 0 && term.currency.length <= 64 &&
+    (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
 }
 
-/** DACS-1 §6.3.3 BundleRequirement and ClaimRequirement. */
-function validClaimRequirement(value: unknown): boolean {
-  const requirement = record(value);
-  return Boolean(requirement && typeof requirement.scheme === "string" && requirement.scheme.length > 0 &&
-    typeof requirement.verificationRequired === "boolean" && optional(requirement.maxAge, nonNegative) &&
-    optional(requirement.recipeVersion, (version) => Number.isSafeInteger(version) && Number(version) >= 1) &&
-    optional(requirement.parameters, (parameters) => record(parameters) !== null));
-}
-function validBundleRequirement(value: unknown): boolean {
-  const requirement = record(value);
-  return Boolean(requirement && requirement.requirementVersion === "1" &&
-    Array.isArray(requirement.required) && requirement.required.every(validClaimRequirement) &&
-    optional(requirement.oneOf, (groups) => Array.isArray(groups) && groups.every((group) =>
-      Array.isArray(group) && group.length > 0 && group.every(validClaimRequirement))) &&
-    optional(requirement.preferredPresentation, oneOf("siwd", "sr1-root", "per-claim", "session-key", "any")) &&
-    optional(requirement.primaryClaimSelector, isString));
-}
-
-/** DACS-1 ListingTerms. */
-function validTerms(value: unknown): boolean {
-  const terms = record(value);
-  return Boolean(terms && optional(terms.termsOfServiceUrl, isString) && optional(terms.termsOfServiceHash, isString) &&
-    optional(terms.jurisdictions, (codes) => Array.isArray(codes) && codes.every((code) => typeof code === "string" && /^[A-Z]{2}$/.test(code))) &&
-    optional(terms.conflictOfLawsRule, (rule) => oneOf("buyer-jurisdiction", "seller-jurisdiction")(rule) ||
-      (typeof rule === "string" && /^rule-ref:\S+$/.test(rule))) &&
-    optional(terms.deadlineSecAfterCommit, nonNegative) && optional(terms.acceptanceModel, oneOf("auto-accept")) &&
-    optional(terms.cancellationPolicy, oneOf("none", "pre-commit", "with-fee")) && optional(terms.retentionYears, nonNegative) &&
-    optional(terms.transcriptDisclosurePolicy, oneOf("none", "encrypted-anchored-recommended", "encrypted-anchored-required")));
-}
-
-/** DACS-4 PaymentRailRef. */
-const validRail = (value: unknown): boolean => {
-  const rail = record(value);
-  return Boolean(rail && typeof rail.railId === "string" && rail.railId.length > 0 &&
-    optional(rail.railVersion, (version) => Number.isSafeInteger(version) && Number(version) >= 1) &&
-    optional(rail.parameters, (parameters) => record(parameters) !== null));
-};
-
-/**
- * DACS-1 PhaseStep per-kind parameters (DACS-3 §8.4.2-§8.4.3). A sealed-envelope step's
- * selectionRule is authoritative and the auction PricingSpec's must equal it.
- */
-function validPhaseParameters(step: Record<string, unknown>, pricing: Record<string, unknown> | null): boolean {
-  if (step.parameters === undefined) return !["negotiate-rfq", "negotiate-sealed-envelope", "negotiate-sealed-envelope-procurement"].includes(String(step.kind)) &&
-    !String(step.kind).startsWith("pay-");
-  const parameters = record(step.parameters);
-  if (!parameters) return false;
-  if (step.kind === "negotiate-rfq") {
-    return Number.isSafeInteger(parameters.maxTurns) && Number(parameters.maxTurns) >= 2 &&
-      typeof parameters.timeoutSec === "number" && parameters.timeoutSec > 0 &&
-      optional(parameters.channelSubnet, isString) && optional(parameters.rfqInitiator, oneOf("buyer", "seller")) &&
-      optional(parameters.fixedPriceFallback, (fallback) => typeof fallback === "boolean");
-  }
-  if (step.kind === "negotiate-sealed-envelope" || step.kind === "negotiate-sealed-envelope-procurement") {
-    const procurement = step.kind === "negotiate-sealed-envelope-procurement";
-    return typeof parameters.commitDeadline === "number" && Number.isSafeInteger(parameters.commitDeadline) &&
-      typeof parameters.revealWindow === "number" && parameters.revealWindow >= 60 &&
-      validSelectionRule(parameters.selectionRule) && parameters.selectionRule === pricing?.selectionRule &&
-      (procurement ? parameters.auctionMode === "procurement" : optional(parameters.auctionMode, oneOf("demand"))) &&
-      optional(parameters.channelSubnet, isString);
-  }
-  if (step.kind === "rate") return optional(parameters.required, (required) => typeof required === "boolean");
-  // The remaining recognized kinds have no required parameter members. Preserve
-  // object-valued additions in the signed scope; the caller checks the phase kind.
-  return true;
+function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
+  const seller = record(listing.seller);
+  const offering = record(listing.offering);
+  const pricing = record(listing.pricing);
+  const terms = record(listing.terms);
+  const pipeline = Array.isArray(listing.pipeline) ? listing.pipeline.map(record) : [];
+  const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
+    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter)
+      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
+        : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
+          typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
+          (pricing.minTotal === undefined || validPriceTerm(pricing.minTotal)) : false;
+  const negotiationIndex = pipeline.findIndex((step) => typeof step?.kind === "string" && step.kind.startsWith("negotiate-"));
+  const conflictOfLawsRule = terms?.conflictOfLawsRule;
+  return pricingOk && pipeline.every((step) => typeof step?.kind === "string" && PHASES.has(step.kind)) &&
+    // VPC-1/2: vet authorization precedes negotiation.
+    pipeline.every((step, index) => step?.kind !== "vet-credentials" || index < negotiationIndex) &&
+    // A sealed-envelope step's selectionRule is authoritative and the auction PricingSpec's must equal it.
+    pipeline.every((step) => step?.kind !== "negotiate-sealed-envelope" ||
+      (validSelectionRule(record(step.parameters)?.selectionRule) && record(step.parameters)?.selectionRule === pricing?.selectionRule)) &&
+    typeof offering?.category === "string" && /^[a-z0-9.-]{1,64}$/.test(offering.category) &&
+    (seller?.publicEndpoint === undefined || safePublicEndpoint(seller.publicEndpoint) !== undefined) &&
+    (typeof conflictOfLawsRule !== "string" || !conflictOfLawsRule.startsWith("rule-ref:") || /^rule-ref:\S+$/.test(conflictOfLawsRule));
 }
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
@@ -150,151 +125,155 @@ function validPhaseParameters(step: Record<string, unknown>, pricing: Record<str
 // allowlist here would reject every listing produced under the first minor that adds a
 // top-level field, breaking forward compatibility.
 
-function validPriceTerm(value: unknown): boolean {
-  const term = record(value);
-  return Boolean(term && typeof term.amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(term.amount) &&
-    Number.isFinite(Number(term.amount)) && Number(term.amount) > 0 && typeof term.currency === "string" && term.currency.length > 0 && term.currency.length <= 64 &&
-    (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
+function verificationMethodFailure(raw: Record<string, unknown>): boolean {
+  const offering = record(raw.offering);
+  const deliverable = record(offering?.deliverable);
+  const method = deliverable?.verificationMethod;
+  if (method !== undefined && !isVerificationMethod(method)) return true;
+  const requiresMethod = Array.isArray(raw.pipeline) && raw.pipeline.some((step) =>
+    record(step)?.kind === "deliver-attested-payload");
+  return requiresMethod && (
+    deliverable?.kind !== "attested-payload" || !isVerificationMethod(method)
+  );
 }
 
-function currentListing(scope: Record<string, unknown>): {
-  signer: string; sellerClaim: string; signature: Record<string, unknown>;
-} | null {
-  const seller = record(scope.seller);
-  const identity = record(seller?.identity);
-  const offering = record(scope.offering);
-  const pricing = record(scope.pricing);
-  const validity = record(scope.validity);
-  const signature = record((scope as Record<string, unknown>).signature);
-  const claims = Array.isArray(identity?.claims) ? identity.claims.map(record).filter(Boolean) as Record<string, unknown>[] : [];
-  const pipeline = Array.isArray(scope.pipeline) ? scope.pipeline.map(record).filter(Boolean) as Record<string, unknown>[] : [];
-  const tags = Array.isArray(offering?.tags) ? offering.tags : [];
-  const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
-    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter) && typeof pricing.minPct === "number" && pricing.minPct >= 0 && pricing.minPct < 100 && typeof pricing.maxPct === "number" && pricing.maxPct >= 0
-      : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
-        : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
-          typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
-          (pricing.minTotal === undefined || (
-            validPriceTerm(pricing.minTotal) &&
-            record(pricing.minTotal)?.currency === record(pricing.unitPrice)?.currency
-          )) : false;
-  const hasPayPhase = pipeline.some((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"));
-  const rails = Array.isArray(scope.acceptedRails) ? scope.acceptedRails.map(record).filter(Boolean) : [];
-  const schemaOk = Array.isArray(scope.pipeline) && pipeline.length === scope.pipeline.length &&
-    pipeline.every((step) => validPhaseParameters(step, pricing)) &&
-    optional(scope.acceptedRails, (value) => Array.isArray(value) && value.every(validRail)) &&
-    optional(scope.requiredCapabilities, (value) => Array.isArray(value) && value.every(CAPABILITIES)) &&
-    optional(offering?.extendedDescriptionUrl, isString) && optional(offering?.extendedDescriptionHash, isString) &&
-    validDeliverable(offering?.deliverable) && validBundleRequirement(scope.buyerRequirement) && validTerms(scope.terms) &&
-    optional(validity?.notAfter, (notAfter) => typeof notAfter === "number");
-  const railIds = new Set(rails.map((rail) => rail?.railId).filter((rail): rail is string => typeof rail === "string"));
-  const payBindingsOk = pipeline.filter((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"))
-    .every((step) => { const parameters = record(step.parameters); return typeof parameters?.rail === "string" && railIds.has(parameters.rail); });
-  const negotiationKinds = pipeline.map((step) => step.kind).filter((kind) => typeof kind === "string" && kind.startsWith("negotiate-"));
-  const negotiationIndex = pipeline.findIndex((step) => typeof step.kind === "string" && step.kind.startsWith("negotiate-"));
-  const commitmentIndexes = pipeline.flatMap((step, index) =>
-    step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? [index] : []);
-  const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
-  const negotiationOk = negotiationKinds.length === 1 && typeof pricing?.kind === "string" &&
-    Boolean(NEGOTIATION_PRICING[negotiationKinds[0] as string]?.has(pricing.kind));
-  // PIPE-1 and VPC-1/2: delivery is mandatory, and vet authorization precedes negotiation.
-  const pipelineOk = pipeline.some((step) => String(step.kind).startsWith("deliver-")) &&
-    pipeline.every((step, index) => step.kind !== "vet-credentials" || index < negotiationIndex);
-  const identityOk = identity?.bundleVersion === "1" && typeof identity.presentedAt === "number" &&
-    Number.isFinite(identity.presentedAt) && Array.isArray(identity.claims) && claims.length === identity.claims.length &&
-    claims.every((claim) => typeof claim.ref === "string" && claim.ref.length > 0);
-  const signer = typeof signature?.signer === "string" ? signature.signer : "";
-  const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
-  const signerIdentity = canonicalSigningIdentity(signer);
-  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
-  if (
-    scope.dacsVersion !== "1" || !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
-    typeof scope.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(scope.listingId) ||
-    typeof seller?.displayName !== "string" || seller.displayName.length > 200 ||
-    (seller.publicEndpoint !== undefined && !safePublicEndpoint(seller.publicEndpoint)) || !sellerClaim || claims.length === 0 ||
-    !claims.some((claim) => typeof claim.ref === "string" &&
-      canonicalSigningIdentity(claim.ref) === sellerIdentity) ||
-    !claims.some((claim) => typeof claim.ref === "string" &&
-      canonicalSigningIdentity(claim.ref) === signerIdentity) ||
-    typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
-    typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || !Array.isArray(offering.tags) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) ||
-    pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || !negotiationOk || !commitmentOk || !pipelineOk || !identityOk || !schemaOk ||
-    (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || typeof validity?.notBefore !== "number" ||
-    (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
-  ) return null;
-  return { signer, sellerClaim, signature };
+function invalid(
+  code: ListingVerificationFailureCode,
+): ListingVerificationResult {
+  return { ok: false, code };
 }
 
-async function verifyEd25519(
-  message: Uint8Array,
-  signer: string,
-  sig: Uint8Array | null,
-  resolveKey: ResolvePrimaryClaimKey,
-): Promise<ResolvedPrimaryClaimKey | null> {
-  return sig
-    ? verifyPrimaryClaimSignature(message, sig, signer, "ed25519", resolveKey)
-    : null;
-}
-
+/**
+ * DACS-1 §6.3.2 per-claim presentation by the presenting claim: the entry
+ * whose `ref` is the exact `presentedBy` bytes, verified under that claim's
+ * key over the same bundle-presentation bytes the SDK reader signs. The
+ * Standard leaves this bare signature's encoding open. Directory and its SDK
+ * adapter accept Base64URL, historical wallet hex and the pinned Standard
+ * vector's padded Base64 (presentationSignatureBytes). The
+ * spelling is signed Listing scope, so the Listing signature fixes it.
+ */
 export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
-  sellerClaim: string,
+  presentedBy: string,
   resolveKey: ResolvePrimaryClaimKey,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
-  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
-  const signature = presentation.signatures.map(record).find((item) =>
-    typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === sellerIdentity);
-  if (!signature) return null;
-  const bundleScope = { ...identity };
-  delete bundleScope.presentation;
-  const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
-  // A per-claim PresentationSignature carries a bare `signature` string, not a
-  // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
-  const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
-  return verifyEd25519(message, sellerClaim, value, resolveKey);
+  const entry = presentation.signatures.map(record).find((item) => item?.ref === presentedBy);
+  const sig = presentationSignatureBytes(entry?.signature);
+  if (!sig) return null;
+  // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
+  // member is bundle content, unlike in contentHash.
+  const message = Buffer.from(
+    `dacs-bundle-presentation:v1:${identityBundleHash(identity as unknown as IdentityBundle)}`,
+    "utf8",
+  );
+  return verifyPrimaryClaimSignature(message, sig, presentedBy, "ed25519", resolveKey);
 }
 
-/** Verify either the current normative Listing or the pinned SDK compatibility profile. */
-export async function verifyListing(
+/**
+ * Verify either a current normative Listing or the SDK's explicit legacy-MVP
+ * read profile. Current artifacts never fall back to legacy interpretation.
+ * Fails closed: an artifact that cannot be canonicalized or hashed (for
+ * example a member with no canonical form, such as JSON 1e400) is invalid.
+ */
+export async function verifyListingResult(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
-): Promise<VerifiedListing | null> {
-  if (raw.signatures !== undefined) return null;
+): Promise<ListingVerificationResult> {
+  try {
+    return await verifyListingArtifact(raw, resolveKey);
+  } catch {
+    return invalid("dacsVersion" in raw ? "NORMATIVE_LISTING_INVALID" : "LEGACY_LISTING_INVALID");
+  }
+}
+
+async function verifyListingArtifact(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<ListingVerificationResult> {
+  if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
   // Select the profile before validating it. A failed current artifact must
   // never acquire the looser legacy contract by adding draft SDK fields.
   if ("dacsVersion" in raw) {
-    const current = currentListing(raw);
-    if (!current) return null;
-    const scope = { ...raw };
-    delete scope.signature;
-    if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
-    if (current.signature.algorithm !== "ed25519") return null;
-    const hash = contentHash(scope);
-    const verifiedSigner = await verifyEd25519(
-      Buffer.from(SEPARATOR + hash, "utf8"), current.signer, canonicalSignatureBytes(current.signature.value), resolveKey,
+    // Validate the exact received bytes, as the pinned SDK reader does at step
+    // 1. CF-2 scheme-case leniency applies to standalone ClaimReference
+    // lookups, never to ClaimReferences inside a signed artifact.
+    if (!isListing(raw)) {
+      return invalid(verificationMethodFailure(raw)
+        ? "VERIFICATION_METHOD_INVALID"
+        : "NORMATIVE_LISTING_INVALID");
+    }
+    if (!withinDirectoryProfile(raw)) return invalid("NORMATIVE_LISTING_INVALID");
+    const listing = raw as unknown as Listing;
+    const signatureVerdict = await verifyComponentSignature(
+      raw,
+      ARTIFACT_SEPARATORS.Listing,
+      {
+        isSignerAuthorized: (_artifact, signature) =>
+          listing.seller.identity.claims.some((claim) =>
+            canonicalSigningIdentity(claim.ref) === canonicalSigningIdentity(signature.signer)),
+        resolvePublicKey: async (signature) => {
+          const resolved = await resolvePrimaryClaimKey(
+            signature.signer,
+            signature.algorithm,
+            resolveKey,
+          );
+          return resolved;
+        },
+        verify: ({ signedBytes, signature, publicKey }) => {
+          const decoded = canonicalSignatureBytes(signature.value);
+          return Boolean(
+            decoded && verifyResolvedPrimaryClaimSignature(
+              signedBytes,
+              decoded,
+              publicKey,
+            ),
+          );
+        },
+      },
     );
-    const seller = record(raw.seller);
-    const identity = record(seller?.identity);
-    const verifiedSeller = identity
-      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey)
-      : null;
-    if (!verifiedSigner || !verifiedSeller) return null;
+    if (signatureVerdict.status !== "valid") {
+      return invalid("LISTING_SIGNATURE_INVALID");
+    }
+    const verifiedSigner = await resolvePrimaryClaimKey(
+      signatureVerdict.signature.signer,
+      signatureVerdict.signature.algorithm,
+      resolveKey,
+    );
+    if (!verifiedSigner) return invalid("LISTING_SIGNATURE_INVALID");
+    const identity = listing.seller.identity as unknown as Record<string, unknown>;
+    const verifiedSeller = await verifyIdentityPresentation(
+      identity,
+      listing.seller.identity.presentedBy,
+      resolveKey,
+    );
+    if (!verifiedSeller) return invalid("IDENTITY_PRESENTATION_INVALID");
+    const scope = stripSignature(raw) as Record<string, unknown>;
     return {
-      listing: raw,
-      scope,
-      contentHash: hash,
-      signer: verifiedSigner.canonicalClaim,
-      sellerClaim: verifiedSeller.canonicalClaim,
-      profile: "dacs-v0.1",
+      ok: true,
+      value: {
+        listing,
+        scope,
+        contentHash: contentHash(scope),
+        signer: verifiedSigner.canonicalClaim,
+        sellerClaim: verifiedSeller.canonicalClaim,
+        profile: "dacs-v0.1",
+      },
     };
   }
 
+  // The historical Directory also wrote a structured envelope. Validate its
+  // exact unsigned legacy body before authenticating the original envelope.
+  const legacyScope = stripSignature(raw);
+  const readable = typeof raw.signature === "object" && isLegacyMvpListing(legacyScope)
+    ? { compatibility: "legacy-mvp" as const, listing: legacyScope }
+    : readListingArtifact(raw);
+  if (!readable || readable.compatibility !== "legacy-mvp") {
+    return invalid("LEGACY_LISTING_INVALID");
+  }
   const scope = stripSignature(raw);
-  if (!isListing(scope)) return null;
-  const listing = scope as unknown as Listing;
+  const listing = readable.listing;
   const signature = raw.signature;
   // Early SDK listings stored only the Ed25519 value. Their signer is still
   // unambiguous because agentId is inside the signed scope and is also checked
@@ -308,25 +287,38 @@ export async function verifyListing(
     s.algorithm !== "ed25519" ||
     typeof s.signer !== "string" ||
     typeof s.value !== "string"
-  ) return null;
+  ) return invalid("LISTING_SIGNATURE_INVALID");
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
-  if (!sig) return null;
-  const hash = contentHash(scope);
+  if (!sig) return invalid("LISTING_SIGNATURE_INVALID");
+  const hash = legacyListingHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,
   );
   const verifiedAgent = await resolvePrimaryClaimKey(listing.agentId, s.algorithm, resolveKey);
-  if (!verifiedSigner || !verifiedAgent || !sameResolvedPrimaryClaim(verifiedSigner, verifiedAgent)) return null;
+  if (!verifiedSigner || !verifiedAgent || !sameResolvedPrimaryClaim(verifiedSigner, verifiedAgent)) {
+    return invalid("LISTING_SIGNATURE_INVALID");
+  }
   return {
-    listing,
-    scope,
-    contentHash: hash,
-    signer: verifiedSigner.canonicalClaim,
-    sellerClaim: verifiedSigner.canonicalClaim,
-    profile: "legacy-sdk-v0.1",
+    ok: true,
+    value: {
+      listing,
+      scope,
+      contentHash: hash,
+      signer: verifiedSigner.canonicalClaim,
+      sellerClaim: verifiedSigner.canonicalClaim,
+      profile: "legacy-sdk-v0.1",
+    },
   };
+}
+
+export async function verifyListing(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<VerifiedListing | null> {
+  const result = await verifyListingResult(raw, resolveKey);
+  return result.ok ? result.value : null;
 }
 
 /**
@@ -334,17 +326,39 @@ export async function verifyListing(
  * out-of-band pre-upgrade inventory can select the old Directory hex importer;
  * artifact fields, timestamps and a failed signature never grant that authority.
  * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
- * Every read still verifies the complete current schema and both signatures.
+ * Every read still verifies the complete current schema, the Listing signature
+ * and the identity presentation. The pin's declared encoding applies to the
+ * Listing signature only; a hex presentation needs no pin.
  */
 export async function verifyStoredListing(
   raw: Record<string, unknown>,
   nativeAddress: string,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
+  const result = await verifyStoredListingResult(raw, nativeAddress, resolveKey);
+  return result.ok ? result.value : null;
+}
+
+/** verifyStoredListing with the admission code of the stored artifact when nothing imports it. */
+export async function verifyStoredListingResult(
+  raw: Record<string, unknown>,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<ListingVerificationResult> {
   const signature = record(raw.signature);
   if (!("dacsVersion" in raw) || canonicalSignatureBytes(signature?.value)) {
-    return verifyListing(raw, resolveKey);
+    return verifyListingResult(raw, resolveKey);
   }
+  const imported = await importPinnedListing(raw, signature, nativeAddress, resolveKey);
+  return imported ? { ok: true, value: imported } : verifyListingResult(raw, resolveKey);
+}
+
+async function importPinnedListing(
+  raw: Record<string, unknown>,
+  signature: Record<string, unknown> | null,
+  nativeAddress: string,
+  resolveKey: ResolvePrimaryClaimKey,
+): Promise<VerifiedListing | null> {
   if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
   const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
   if (!configured || Buffer.byteLength(configured, "utf8") > 65_536) return null;
@@ -399,6 +413,16 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
+/**
+ * RB-2: SDK readers require the exact `presentedBy` bytes, including any
+ * CF-3 advisory parameters, and the CF-4 address derived from them.
+ */
+export function revocationSellerClaim(listing: VerifiedListing): string {
+  return listing.profile === "dacs-v0.1"
+    ? listing.listing.seller.identity.presentedBy
+    : listing.sellerClaim;
+}
+
 /** Per-listing, per-pass candidate bound; each may check cached and current bytes. */
 export const REVOCATION_VERIFICATIONS_PER_PASS = 16;
 
@@ -442,12 +466,13 @@ export async function findValidListingRevocation(
       continue;
     }
     const scope = stripSignature(candidate);
+    const sellerPrimaryClaim = revocationSellerClaim(listing);
     return {
-      sellerPrimaryClaim: listing.sellerClaim,
+      sellerPrimaryClaim,
       listingId: String(scope.listingId),
       listingVersion: expectedVersion,
       listingContentHash: listing.contentHash,
-      logicalAddress: revocationLogicalAddress(listing.sellerClaim, String(scope.listingId), expectedVersion),
+      logicalAddress: revocationLogicalAddress(sellerPrimaryClaim, String(scope.listingId), expectedVersion),
       markerAnchor: { kind: "storage-program", locator: ref },
       markerContentHash: contentHash(scope),
     };
@@ -466,14 +491,26 @@ export async function verifyListingRevocation(
   expectedVersion: number,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
-  const scope = stripSignature(raw);
+  let scope: Record<string, unknown>;
+  let hash: string;
+  try {
+    // The SDK reads only canonical JSON: a member with no canonical form
+    // (e.g. JSON 1e400) can be neither stripped nor signed.
+    scope = stripSignature(raw);
+    hash = contentHash(scope);
+  } catch {
+    return false;
+  }
   if (
-    scope.listingId !== (listing.scope.listingId ?? (listing.listing as Listing).serviceId) ||
+    scope.listingId !== (listing.scope.listingId ?? listing.scope.serviceId) ||
+    // Enforce RB-1's SDK numeric profile even when discovery is bypassed or
+    // the caller supplies an unvalidated expectedVersion. Hashing is not validation.
+    !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
-    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
+    // The pinned SDK's RB-1 isRevocationMarker requires a non-negative safe integer.
+    !Number.isSafeInteger(scope.revokedAt) || Number(scope.revokedAt) < 0
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
@@ -482,16 +519,12 @@ export async function verifyListingRevocation(
     s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
   ) return false;
+  // RB-1 compares signer references, not just their resolved keys. Keep CF-3
+  // parameters from the original Listing envelope for current-profile markers.
+  if (listing.profile === "dacs-v0.1" && s.signer !== listing.listing.signature.signer) return false;
   // A marker is a current-profile artifact whatever the listing's profile: SIG-6 applies.
   const sig = canonicalSignatureBytes(s.value);
   if (!sig) return false;
-  let hash: string;
-  try {
-    hash = contentHash(scope);
-  } catch {
-    // An unknown member with no canonical form (e.g. JSON 1e400) cannot be signed.
-    return false;
-  }
   const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, listing.signer, s.algorithm, resolveKey,

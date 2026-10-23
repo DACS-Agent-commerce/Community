@@ -225,6 +225,29 @@ test("producer resume lookup fails closed when the bounded result page is full",
   }
 });
 
+
+test("native storage reads reject malformed locators before fetching", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return Response.json({ success: true, data: { listingId: "native" }, owner, programName });
+  };
+  try {
+    const address = `stor-${"ab".repeat(20)}`;
+    for (const invalid of ["", address.toUpperCase(), address.slice(0, -1), address + "0", `prefix-${address}`, `stor-${"g".repeat(40)}`, `${address}/../other`]) {
+      assert.deepEqual(await readAnchorResult(invalid), { status: "absent" }, invalid);
+    }
+    assert.equal(calls.length, 0);
+    const valid = await readAnchorResult(address);
+    assert.equal(valid.status, "present");
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].endsWith(`/storage-program/${address}`));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("a storage read separates a definitive answer from a transport failure (RB-6)", async () => {
   const at = "stor-4444444444444444444444444444444444444444";
   const body = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });

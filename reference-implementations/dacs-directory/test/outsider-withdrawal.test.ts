@@ -37,7 +37,7 @@ globalThis.fetch = async (input, init) => {
   throw new Error(`unexpected read ${path}`);
 };
 store.saveRegistrations([{ primaryClaim: listing.data.agentId, displayName: 'ReviewBot', listingAnchors: [listing.storageAddress] }]);
-const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('no authentication'); } });
+const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error('no authentication'); } });
 await run();
 const pass1 = store.loadCatalog().sellers.flatMap(s => s.listings).map(l => l.status);
 const pendingAfterFirst = store.nextRevocationCandidates(hash, null, 32);

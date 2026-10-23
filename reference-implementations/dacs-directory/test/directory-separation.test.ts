@@ -32,7 +32,7 @@ test("package scripts, Railway, and CI carry no gateway configuration", () => {
   for (const [name, command] of Object.entries(scripts)) {
     assert.doesNotMatch(`${name} ${command}`, GATEWAY, name);
   }
-  assert.equal(scripts["test:e2e"], "playwright test e2e/home.spec.ts e2e/register.spec.ts");
+  assert.equal(scripts["test:e2e"], "playwright test e2e/home.spec.ts e2e/register.spec.ts && playwright test --config=playwright.hash.config.ts --project=chromium");
   assert.doesNotMatch(read("railway.json"), GATEWAY);
   assert.doesNotMatch(read("playwright.config.ts"), GATEWAY);
   assert.doesNotMatch(read("../../.github/workflows/dacs-directory-ci.yml"), GATEWAY);

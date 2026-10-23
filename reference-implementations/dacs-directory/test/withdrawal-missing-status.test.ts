@@ -22,11 +22,11 @@ test('only a complete signed index entry can clear an authenticated incomplete w
     value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
   const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
-    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('hex') }] } };
+    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
   const scope = { dacsVersion: '1', listingVersion: 1, listingId: 'svc', requiredCapabilities: ['SR-2'],
     seller: { displayName: 'Service', identity },
     offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
-      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json' } },
+      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
     buyerRequirement: { requirementVersion: '1', required: [] },
     pipeline: [{ kind: 'negotiate-fixed-price' }, { kind: 'commit-agreement' }, { kind: 'deliver-attested-payload' }],
     pricing: { kind: 'fixed', price: { amount: '1', currency: 'DEM' } },
@@ -74,7 +74,7 @@ test('only a complete signed index entry can clear an authenticated incomplete w
         const body = url.endsWith('agent.json') ? card : raw; return { raw: body, body: JSON.parse(body) };
       } });
       assert.ok(!('error' in agent)); assert.equal(agent.withdrawalAuthenticated, true);
-      await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
+      await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
         crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
       assert.equal(store.loadCatalog().sellers.flatMap(s => s.listings).some(activeOffer), expectedActive, name);
       assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), !expectedActive, name);

@@ -26,7 +26,7 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
   const identityScope = { bundleVersion: "1", presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: claim,
     signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`),
-      privateKeyFromSeed(seed))).toString("hex") }] } };
+      privateKeyFromSeed(seed))).toString("base64url") }] } };
   const cases = ["missing binding", "malformed binding", "wrong tuple", "unread marker", "tampered marker",
     "missing status", "malformed active", "conflicting rows", "reversed conflicting rows", "conflicting hashes", "active control", "revoked control", "active mirror control"];
   for (const [i, name] of cases.entries()) await t.test(name, async () => {
@@ -34,7 +34,7 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
     const scope = { dacsVersion: "1", listingVersion: 1, listingId, requiredCapabilities: ["SR-2"],
       seller: { displayName: "Service", identity },
       offering: { title: "Service", description: "Service", category: "services.other", tags: [],
-        deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+        deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
       buyerRequirement: { requirementVersion: "1", required: [] },
       pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-attested-payload" }],
       pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } }, terms: {}, validity: { notBefore: 1 } };
@@ -79,7 +79,7 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
     };
     try {
       store.saveRegistrations([]); store.saveDomains(["seller.example"]);
-      await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+      await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
         crawlWellKnown: async () => ({ agents, errors: [] }) });
       const response = await GET(new NextRequest("https://directory.example/api/dacs/listings"));
       assert.equal(response.status, 200);

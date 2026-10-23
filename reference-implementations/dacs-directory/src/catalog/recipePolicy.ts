@@ -2,7 +2,7 @@ import { resolveDemosPrimaryClaimKey, resolvePrimaryClaimKey, sameResolvedPrimar
 
 /** Closed VerificationMethod registry at the DACS-2 source revision in SPEC_PIN. */
 export const VERIFICATION_METHODS = ["verifiable-credential", "tlsnotary", "zktls", "consensus-backed-proxy",
-  "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed"] as const;
+  "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed", "demos-gcr-domain"] as const;
 export const isVerificationMethod = (value: unknown): value is typeof VERIFICATION_METHODS[number] =>
   typeof value === "string" && VERIFICATION_METHODS.some((method) => method === value);
 

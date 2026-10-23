@@ -4,18 +4,22 @@
  * derived only from chain-verified bundles; re-derivable client-side).
  */
 import { NextRequest, NextResponse } from "next/server";
-import { discoveryListing } from "@/src/catalog/discovery";
+import { discoveryListing, MAX_CLAIM_QUERY_BYTES } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { canonicalDemosAgentClaim } from "@/src/catalog/claimRef";
+import { withDirectoryTransactionReadiness } from "@/src/catalog/inspection";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ primaryClaimRef: string }> },
 ) {
-  const { primaryClaimRef } = await params;
-  const raw = decodeURIComponent(primaryClaimRef);
+  // Next has already decoded the path segment; CF-2 parameter escapes are data.
+  const { primaryClaimRef: raw } = await params;
+  if (Buffer.byteLength(raw, "utf8") > MAX_CLAIM_QUERY_BYTES) {
+    return NextResponse.json({ error: "primaryClaim exceeds 1024 bytes" }, { status: 400 });
+  }
   // CF-2: the `did` scheme token is case-insensitive on read; canonicalise it
   // before matching. Non-canonical key material stays raw and simply misses.
   const claim = canonicalDemosAgentClaim(raw) ?? raw;
@@ -23,7 +27,7 @@ export async function GET(
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
   const origin = requestBaseUrl(req);
   return catalogJson(req, {
-    listings: seller.listings.filter(discoveryListing),
+    listings: seller.listings.filter(discoveryListing).map(withDirectoryTransactionReadiness),
     identity: seller.identityBundle ?? {
       profile: "legacy-sdk-v0.1",
       primaryClaim: seller.primaryClaim,

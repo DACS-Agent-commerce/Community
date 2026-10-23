@@ -122,9 +122,20 @@ export interface ListingSummary {
   catalogObservedAt: number;
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
+  /**
+   * Catalog admission is not buyer/session admission. A buyer must dereference
+   * the signed artifact and run the current SDK reader with its own policy and
+   * runtime dependencies before transacting.
+   */
+  transactionReadiness?: DirectoryTransactionReadiness;
   reputationHint?: ReputationHint;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
+}
+
+export interface DirectoryTransactionReadiness {
+  disposition: "unassessed";
+  reason: string;
 }
 
 export interface ReachabilityHint {
@@ -191,6 +202,8 @@ export interface DealRecord extends RegisteredDeal {
   signatureVerified: boolean;
   /** Referenced-artifact integrity (agreement/evidence/vet hash-checks). */
   refsVerified: boolean;
+  /** A disclosed reader limitation; never a substitute for a verification verdict. */
+  verificationLimitation?: "legacy-vet-unsupported";
   outcome?: string;
   finalisedAt?: number;
   verifiedAt: number;
@@ -203,6 +216,8 @@ export interface DealRecord extends RegisteredDeal {
   reputationEligible?: boolean;
   /** Established ST-10 policy cancellation; neutral in fault denominators. */
   cancellationNeutral?: boolean;
+  /** Authenticated absolute attribution from a current FaultAttestationBundle. */
+  faultedParty?: "buyer" | "seller" | "orchestrator" | "none";
   /** Consensus-observed SR-2 write time, preferred to producer wall-clock. */
   anchorTimestamp?: number;
   /** Verified agreement price; only completed sessions contribute to volume. */
@@ -259,6 +274,8 @@ export interface Catalog {
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
+  /** Deployment chain identity that produced this cursor and derived state. */
+  chainIdentity?: string;
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;

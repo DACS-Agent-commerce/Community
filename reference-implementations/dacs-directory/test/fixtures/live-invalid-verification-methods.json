@@ -1,0 +1,20 @@
+[
+  {
+    "listingId": "audit-negotiator-x402",
+    "listingVersion": 3,
+    "locator": "stor-77bbb76304a3809858786ac816f693db4ebdc238",
+    "verificationMethod": "self-signed"
+  },
+  {
+    "listingId": "oracle-data-x402",
+    "listingVersion": 3,
+    "locator": "stor-4b7765d9077b5be93b4538541245e95f9bfff4fc",
+    "verificationMethod": "seller-signature-source-attestation-and-request-hash"
+  },
+  {
+    "listingId": "dd-research-x402",
+    "listingVersion": 2,
+    "locator": "stor-624fae262d7ad2b809b1fc1ec56b421e4e46d35e",
+    "verificationMethod": "seller-signature-cited-source-attestations-and-request-hash"
+  }
+]

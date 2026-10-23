@@ -1,8 +1,15 @@
 import type {
   DirectoryInspectionAffordance,
   DirectoryServiceMaturity,
+  DirectoryTransactionReadiness,
   ListingSummary,
 } from "./types.js";
+import { sellerIdentity } from "./discovery.js";
+
+export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
+  disposition: "unassessed",
+  reason: "The Directory authenticated this catalog candidate but did not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. Run the current SDK Listing reader before starting a session.",
+});
 
 export type DirectoryServiceProfile = {
   profileKind: "directory-service-profile";
@@ -22,6 +29,7 @@ export type DirectoryServiceProfile = {
     noLivePaymentClaim: true;
     reason: string;
   };
+  transactionReadiness: DirectoryTransactionReadiness;
   service: {
     title: string;
     category: string;
@@ -61,34 +69,44 @@ const limitations: DirectoryServiceProfile["limitations"] = [
 
 const encode = encodeURIComponent;
 
-export function servicePath(listing: ListingSummary): string {
-  return `/service/${encode(listing.seller.primaryClaim)}/${encode(listing.listingId)}/${listing.version}`;
+export function servicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/service/${encode(identity)}/${encode(listing.listingId)}/${listing.version}`;
 }
 
-export function listingJsonPath(listing: ListingSummary): string {
-  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+export function listingJsonPath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 
-export function inspectServicePath(listing: ListingSummary): string {
-  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(listing.seller.primaryClaim)}`;
+export function inspectServicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+  return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 
 export function inspectServiceUrl(origin: string, listing: ListingSummary): string {
   return `${origin}${inspectServicePath(listing)}`;
 }
 
-export function directoryInspectionAffordance(listing: ListingSummary): DirectoryInspectionAffordance {
+export function directoryInspectionAffordance(listing: ListingSummary, identity?: string): DirectoryInspectionAffordance {
   return {
     artifactType: "directory-service-profile",
     maturity: "listed",
-    href: inspectServicePath(listing),
+    href: inspectServicePath(listing, identity),
   };
 }
 
-export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T): T {
+/**
+ * The SDK establishes transaction readiness only through its ordered Listing
+ * reader (`isVerifiedListingAdmission`), which this Directory never runs. Every
+ * public projection carries the Directory's own disposition and never
+ * republishes a stored one.
+ */
+export function withDirectoryTransactionReadiness<T extends ListingSummary>(listing: T): T {
+  return { ...listing, transactionReadiness: DIRECTORY_TRANSACTION_READINESS };
+}
+
+export function withDirectoryInspectionAffordance<T extends ListingSummary>(listing: T, identity?: string): T {
   return {
-    ...listing,
-    inspection: directoryInspectionAffordance(listing),
+    ...withDirectoryTransactionReadiness(listing),
+    inspection: directoryInspectionAffordance(listing, identity),
   };
 }
 
@@ -109,8 +127,9 @@ export function buildDirectoryServiceProfile(origin: string, listing: ListingSum
       maturity: "listed",
       noReputationClaim: true,
       noLivePaymentClaim: true,
-      reason: "Directory observed a listing contract; sample receipts, strict bundle history, and live payment evidence require separate verifier adapters.",
+      reason: "Directory authenticated a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
     },
+    transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     service: {
       title: listing.offering.title,
       category: listing.offering.category,

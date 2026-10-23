@@ -11,6 +11,23 @@ interface Status {
   syncedToTx: number;
   chainLatestTx: number | null;
   txsBehind: number | null;
+  nodeDeployment?: { ok: boolean; reason?: string; unavailable?: boolean };
+  indexer?: {
+    lastRun?: { status: "running" | "complete" | "failed" } | null;
+    listingRejectionDiagnostics?: {
+      total: number;
+      publicTotal: number;
+      items: Array<{
+        locator: string;
+        listingId?: string;
+        listingVersion?: number;
+        code: string;
+        message: string;
+        guidance: string;
+        publicNotice: boolean;
+      }>;
+    };
+  };
 }
 
 function ago(ts: number): string {
@@ -38,28 +55,58 @@ export default function CatalogStatus() {
     return () => clearInterval(t);
   }, []);
 
-  if (!status || status.generatedAt === 0) return null;
+  if (!status) return null;
+
+  const unavailable = status.nodeDeployment?.ok === false && status.nodeDeployment.unavailable === true;
+  const mismatch = status.nodeDeployment?.ok === false && !unavailable;
+  const failedRefresh = status.indexer?.lastRun?.status === "failed";
+  const warning = mismatch || failedRefresh || unavailable;
+  if (status.generatedAt === 0 && !warning) return null;
 
   const behind = status.txsBehind;
   const inSync = behind !== null && behind === 0;
-  const cls = behind === null ? "" : inSync ? "ok" : "warn";
-  const label = behind === null
+  const cls = warning ? "warn" : behind === null ? "" : inSync ? "ok" : "warn";
+  const label = mismatch ? "Indexing blocked: chain mismatch"
+    : failedRefresh ? "Indexing blocked: last refresh failed"
+    : unavailable ? "Chain status unavailable" : behind === null
       ? `synced to tx ${status.syncedToTx.toLocaleString()}`
       : inSync
         ? "in sync with chain"
         : `${behind.toLocaleString()} tx${behind === 1 ? "" : "s"} behind chain`;
 
+  const rejected = status.indexer?.listingRejectionDiagnostics;
   return (
-    <span
-      className={`sync-chip ${cls}`}
-      role="status"
-      aria-live="polite"
-      title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
-        status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
-      } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
-    >
-      <span className="sync-dot" />
-      {label} · indexed {ago(status.generatedAt)}
-    </span>
+    <div className="catalog-status">
+      <span
+        className={`sync-chip ${cls}`}
+        role="status"
+        aria-label="Catalog indexing status"
+        aria-live="polite"
+        title={mismatch || unavailable ? status.nodeDeployment?.reason : failedRefresh
+          ? "The latest catalog refresh failed. The operator can retry it."
+          : `Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
+          status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
+        } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
+      >
+        <span className="sync-dot" />
+        {label} · {status.generatedAt > 0 ? `indexed ${ago(status.generatedAt)}` : "awaiting initial index"}
+      </span>
+      {rejected && rejected.publicTotal > 0 && (
+        <details className="listing-rejection-notice">
+          <summary>{rejected.publicTotal.toLocaleString()} owner-submitted listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
+          <p>These diagnostics describe the latest indexing pass for owner-signed registrations. Check the registration's storage pointers and declared content hashes, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
+          <ul>
+            {rejected.items.filter((item) => item.publicNotice).map((item) => (
+              <li key={`${item.locator}:${item.code}`}>
+                <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
+                <span>{item.message}</span>
+                <span>{item.guidance}</span>
+                <code>{item.code}</code>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }

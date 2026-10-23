@@ -1,5 +1,6 @@
 /** GET /api/dacs/inspect-service/{listingId}/{version} — verifier-ready Directory profile envelope. */
 import { NextRequest, NextResponse } from "next/server";
+import { MAX_CLAIM_QUERY_BYTES, sellerIdentity } from "@/src/catalog/discovery";
 import { catalogJson } from "@/src/catalog/http";
 import {
   buildDirectoryServiceInspectionEnvelope,
@@ -15,12 +16,17 @@ export async function GET(
 ) {
   const { listingId, version } = await params;
   const requestedSeller = req.nextUrl.searchParams.get("seller")?.trim();
+  if (requestedSeller && Buffer.byteLength(requestedSeller, "utf8") > MAX_CLAIM_QUERY_BYTES) {
+    return NextResponse.json({ error: "seller exceeds 1024 bytes" }, { status: 400 });
+  }
   if (!requestedSeller) {
     return NextResponse.json({ error: "seller is required" }, { status: 400 });
   }
-  const hit = loadCatalog()
-    .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && l.seller.primaryClaim === requestedSeller);
+  const requestedIdentity = requestedSeller ? sellerIdentity(requestedSeller) : undefined;
+  const hit = loadCatalog().sellers
+    .filter((seller) => !requestedIdentity || seller.primaryClaim === requestedIdentity)
+    .flatMap((seller) => seller.listings)
+    .find((listing) => listing.listingId === listingId && String(listing.version) === version);
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
 
   const origin = requestBaseUrl(req);

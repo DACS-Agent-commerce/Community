@@ -39,6 +39,8 @@ export interface AnchorRecord {
   data: Record<string, unknown>;
   owner?: string;
   programName?: string;
+  storageAddress?: string;
+  metadata?: Record<string, unknown>;
   /** Node-enforced access metadata; payload fields cannot substitute for this. */
   acl?: unknown;
 }
@@ -48,6 +50,9 @@ export interface AnchorRecord {
  * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * DEMOS-MAPPING §A.2 gives an ordinary storage `not found` the CORE SR-2
+ * disposition `indeterminate` too, so a caller whose verdict would rest on
+ * absence treats `absent` from a well-formed locator as unavailable.
  */
 export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
@@ -78,7 +83,10 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
     }
   }
   if (!res.ok) return { status: "unavailable" };
-  let json: { success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown };
+  let json: {
+    success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown;
+    storageAddress?: string; metadata?: Record<string, unknown>;
+  };
   try {
     json = (await storageResponseJson(res)) as typeof json;
   } catch {
@@ -88,7 +96,17 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   const data = json.data;
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
   if (boundedJson(data) === null) return { status: "unavailable" };
-  return { status: "present", record: { data: data as Record<string, unknown>, owner: json.owner, programName: json.programName, acl: json.acl } };
+  return {
+    status: "present",
+    record: {
+      data: data as Record<string, unknown>,
+      owner: json.owner,
+      programName: json.programName,
+      acl: json.acl,
+      storageAddress: json.storageAddress,
+      metadata: json.metadata,
+    },
+  };
 }
 
 export async function readAnchorRecord(address: string): Promise<AnchorRecord | null> {
@@ -223,12 +241,20 @@ export async function resolveOwnedAnchorByName(
         data?: Record<string, unknown>;
         owner?: string;
         programName?: string;
+        storageAddress?: string;
+        metadata?: Record<string, unknown>;
       };
       if (
         body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
         boundedJson(body.data) !== null && body.programName === programName
       ) {
-        record = { data: body.data, owner: body.owner, programName: body.programName };
+        record = {
+          data: body.data,
+          owner: body.owner,
+          programName: body.programName,
+          storageAddress: body.storageAddress,
+          metadata: body.metadata,
+        };
       }
     } catch { /* classified below */ }
     if (!record) {

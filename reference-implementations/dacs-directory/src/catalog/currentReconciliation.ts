@@ -40,9 +40,17 @@ export function currentBundleCopiesDiverge(
 ): boolean {
   const buyerType = buyerBundle.faultBundleVersion === "1" ? "fault" : buyerBundle.bundleVersion === "1" ? "legacy" : "unknown";
   const sellerType = sellerBundle.faultBundleVersion === "1" ? "fault" : sellerBundle.bundleVersion === "1" ? "legacy" : "unknown";
+  // Fault bundles name the absolute role at fault. When that role is the
+  // orchestrator, both buyer and seller legitimately report a counterparty
+  // failure/abort; perspective-flipping either would invent a contradiction.
+  const faultClass = (outcome: unknown) => outcome === "failed-perm" || outcome === "failed-counterparty" ? "failure"
+    : outcome === "aborted-by-self" || outcome === "aborted-by-other" ? "abort" : outcome;
+  const outcomesDiverge = buyerType === "fault"
+    ? faultClass(buyerBundle.outcome) !== faultClass(sellerBundle.outcome)
+    : flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome);
   return buyerType !== sellerType ||
     (buyerType === "fault" && buyerBundle.faultedParty !== sellerBundle.faultedParty) ||
-    flipOutcome(String(buyerBundle.outcome)) !== String(sellerBundle.outcome) ||
+    outcomesDiverge ||
     phaseSummariesDiverge(buyerBundle.phaseSummary, sellerBundle.phaseSummary);
 }
 
@@ -93,5 +101,40 @@ export function reconcileCurrentCopies(
     refsVerified,
     sellerOutcome,
     selectedLocator,
+  };
+}
+
+/** Legacy references may be checked only after authenticating this exact copy. */
+export function legacyCopyCanVerifyRefs(
+  signaturesOk: boolean,
+  bindingOk: boolean,
+  anchoredByRole: unknown,
+  expectedRole: "buyer" | "seller",
+): boolean {
+  return signaturesOk && bindingOk && anchoredByRole === expectedRole;
+}
+
+/** Keep the two-copy and terminal-outcome gates independent of SDK reference support. */
+export function reconcileLegacyCopies<T extends { refsOk: boolean; bundle?: { outcome?: string } }>(
+  buyerCopy: T,
+  sellerCopy: T | null,
+) {
+  const divergent = Boolean(
+    buyerCopy.refsOk && sellerCopy?.refsOk && buyerCopy.bundle && sellerCopy.bundle &&
+    currentBundleCopiesDiverge(
+      buyerCopy.bundle as unknown as Record<string, unknown>,
+      sellerCopy.bundle as unknown as Record<string, unknown>,
+    ),
+  );
+  const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
+  const sellerOutcome = authoritative === sellerCopy
+    ? authoritative.bundle?.outcome : flipOutcome(authoritative.bundle?.outcome);
+  const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
+  return {
+    authoritative,
+    refsVerified,
+    sellerOutcome,
+    reputationEligible: refsVerified && currentOutcomes.has(sellerOutcome ?? ""),
   };
 }

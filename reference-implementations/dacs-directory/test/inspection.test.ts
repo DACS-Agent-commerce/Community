@@ -1,3 +1,4 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
@@ -77,9 +78,12 @@ test("directory service profile envelope is listed-only and does not claim sourc
   assert.equal(envelope.artifact.listing.version, 1);
   assert.equal(envelope.artifact.listing.seller, "did:demos:agent:directory-sample-demo");
   assert.equal(envelope.artifact.maturityProfile.maturity, "listed");
+  assert.match(envelope.artifact.maturityProfile.reason, /separate verifier adapters/);
   assert.equal(envelope.maturity, envelope.artifact.maturityProfile.maturity);
   assert.equal(envelope.artifact.maturityProfile.noReputationClaim, true);
   assert.equal(envelope.artifact.maturityProfile.noLivePaymentClaim, true);
+  assert.equal(envelope.artifact.transactionReadiness.disposition, "unassessed");
+  assert.match(envelope.artifact.transactionReadiness.reason, /current SDK Listing reader/);
   assert.deepEqual(envelope.artifact.limitations, [
     "roster maturity hint",
     "not reputation evidence",
@@ -96,5 +100,36 @@ test("listing discovery can add the inspection affordance without changing the s
   assert.equal(withInspection.anchor.locator, listing.anchor.locator);
   assert.equal(withInspection.inspection?.artifactType, "directory-service-profile");
   assert.equal(withInspection.inspection?.href, inspectServicePath(listing));
+  assert.equal(withInspection.transactionReadiness?.disposition, "unassessed");
   assert.equal(listing.inspection, undefined);
+});
+
+test("inspection preserves all service fields and canonical seller links with either artifact profile", () => {
+  const seller = `did:demos:agent:${"ab".repeat(32)}`;
+  const encodedSeller = `did%3Ademos%3Aagent%3A${"ab".repeat(32)}`;
+  for (const explicit of [true, false]) {
+    const candidate = structuredClone(listing);
+    candidate.listingId = "service/name";
+    candidate.seller.primaryClaim = `${seller}?channel=directory`;
+    if (!explicit) {
+      delete candidate.artifactProfile;
+      delete candidate.offering.rails;
+      delete candidate.offering.delivery;
+      delete candidate.offering.negotiation;
+    }
+    const envelope = buildDirectoryServiceInspectionEnvelope("https://directory.example", candidate);
+    assert.equal(envelope.artifact.listing.artifactProfile, explicit ? "dacs-v0.1" : "legacy-sdk-v0.1");
+    assert.equal(envelope.artifact.listing.seller, `${seller}?channel=directory`, "signed reference bytes are retained");
+    assert.deepEqual(envelope.artifact.service, {
+      title: "Dependency upgrade plan", category: "services.dependency-upgrade", tags: ["dependencies", "upgrade"],
+      rails: explicit ? ["pay-x402"] : [], delivery: explicit ? ["deliver-storage-program"] : [],
+      negotiation: explicit ? ["negotiate-fixed-price"] : [],
+    });
+    assert.deepEqual(envelope.artifact.links, {
+      listingJson: `https://directory.example/api/dacs/listings/service%2Fname/1?seller=${encodedSeller}`,
+      servicePage: `https://directory.example/service/${encodedSeller}/service%2Fname/1`,
+    });
+    assert.equal(envelope.source.url,
+      `https://directory.example/api/dacs/inspect-service/service%2Fname/1?seller=${encodedSeller}`);
+  }
 });
