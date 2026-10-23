@@ -8,16 +8,16 @@ import { type Obj, dids, maps, sign, vector, graphAt, registeredDeal } from "./f
 
 test("signed fault copies reconcile all six outcomes and orchestrator attribution", async () => {
   const cases = [
-    ["completed", "completed", "none", 1, 1, 0],
-    ["failed-substrate", "failed-substrate", "none", 0, null, null],
-    ["failed-perm", "failed-counterparty", "buyer", 0, 0, 1],
-    ["failed-counterparty", "failed-perm", "seller", 0, 0, 0],
-    ["aborted-by-self", "aborted-by-other", "buyer", 0, 0, 1],
-    ["aborted-by-other", "aborted-by-self", "seller", 0, 0, 0],
-    ["failed-counterparty", "failed-counterparty", "orchestrator", 0, null, null],
-    ["aborted-by-other", "aborted-by-other", "orchestrator", 0, null, null],
+    ["completed", "completed", "none", 1],
+    ["failed-substrate", "failed-substrate", "none", 0],
+    ["failed-perm", "failed-counterparty", "buyer", 0],
+    ["failed-counterparty", "failed-perm", "seller", 0],
+    ["aborted-by-self", "aborted-by-other", "buyer", 0],
+    ["aborted-by-other", "aborted-by-self", "seller", 0],
+    ["failed-counterparty", "failed-counterparty", "orchestrator", 0],
+    ["aborted-by-other", "aborted-by-other", "orchestrator", 0],
   ] as const;
-  for (const [index, [buyerOutcome, sellerOutcome, faultedParty, completed, rate, faultRate]] of cases.entries()) {
+  for (const [index, [buyerOutcome, sellerOutcome, faultedParty, completed]] of cases.entries()) {
     const jobId = `signed-fault-${index}`;
     const fixture = await vector(jobId, index * 10);
     for (const [role, outcome, raw, at] of [
@@ -47,8 +47,9 @@ test("signed fault copies reconcile all six outcomes and orchestrator attributio
     const reputation = deriveSellerReputation([record], 0, 200);
     assert.equal(reputation.bundleCount, 1);
     assert.equal(reputation.completed, completed);
-    assert.equal(reputation.completionRate, rate);
-    assert.equal(reputation.counterpartyFaultRate, faultRate);
+    // TP-1: testnet completion and fault rates are unavailable for every outcome.
+    assert.equal(reputation.completionRate, null);
+    assert.equal(reputation.counterpartyFaultRate, null);
     const fallback = reconcileCurrentCopies(deal, dids[1], buyer, null);
     assert.equal(fallback.sellerOutcome, sellerOutcome);
     assert.equal(fallback.selectedLocator, fixture.locators.buyer);

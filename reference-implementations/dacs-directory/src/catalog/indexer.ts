@@ -66,6 +66,8 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
+import { countableDeals, inCategory, settlementClaims, SETTLEMENT_PROJECTION_VERSION } from "./settlementUniqueness.js";
+import { observedOutcomesLabel, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetrics.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
@@ -406,7 +408,13 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, {
+      read: readAnchor, resolveListing,
+      readEvidenceAnchor: async (address) => {
+        const anchored = await readAnchorRecord(address);
+        return anchored ? { data: anchored.data, logicalAddress: anchored.metadata?.logicalAddress } : null;
+      },
+    });
     const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
@@ -501,13 +509,14 @@ export async function indexRegistration(
         ratedAt: Number(rating.ratedAt),
         contentHash: authoritative!.artifacts.find((artifact) => artifact.raw === rating)?.contentHash ?? "",
       })).filter((rating) => (rating.targetRole === "buyer" || rating.targetRole === "seller") && Number.isFinite(rating.ratedAt));
-      const settlementTxIds = (authoritative?.artifacts ?? []).filter((artifact) => artifact.kind === "evidence")
-        .flatMap((artifact) => {
-          const refs = Array.isArray(artifact.raw.paymentTxRefs) ? artifact.raw.paymentTxRefs : [];
-          const phaseIndex = Number(artifact.raw.phaseIndex ?? 0);
-          return refs.map((ref) => typeof ref === "string" ? ref : String((ref as Record<string, unknown>)?.txId ?? (ref as Record<string, unknown>)?.id ?? ""))
-            .filter(Boolean).map((id) => ({ id, observedAt: Number(artifact.raw.observedAt), phaseIndex }));
-        });
+      const { settlementTxIds, projected } = settlementClaims((authoritative?.artifacts ?? [])
+        .filter((artifact) => artifact.kind === "evidence"), {
+        jobId: authoritative?.bundle.jobId,
+        railId: agreementRail(authoritative?.agreement),
+        railRegistryVersion: authoritative?.bundle.railRegistryVersion,
+        phaseSummary: authoritative?.bundle.phaseSummary,
+        pipeline: authoritative?.listing?.pipeline,
+      });
       const cancellation = [sellerOk ? sellerGraph?.bundle.cancellation : undefined, buyerOk ? buyerGraph.bundle.cancellation : undefined]
         .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
       const cancellationNeutral = isNeutralCancellation(
@@ -519,14 +528,14 @@ export async function indexRegistration(
         outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
         anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
         bundleContentHash: authoritative?.bundleContentHash,
-        reputationEligible: refsVerified,
+        reputationEligible: refsVerified && projected,
         cancellationNeutral,
         faultedParty: authoritative?.bundle.faultBundleVersion === "1"
           ? authoritative.bundle.faultedParty as DealRecord["faultedParty"] : undefined,
         finalisedAt: typeof authoritative?.bundle.finalisedAt === "number" ? authoritative.bundle.finalisedAt : undefined,
         anchorTimestamp: artifactAnchorTime(selectedLocator),
         agreementPrice: agreementPrice(authoritative?.agreement) ?? undefined,
-        ratings, settlementTxIds,
+        ratings, settlementTxIds, settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION,
         category: typeof (authoritative?.listing?.offering as Record<string, unknown> | undefined)?.category === "string"
           ? (authoritative!.listing!.offering as Record<string, unknown>).category as string : undefined,
         verifiedAt: now,
@@ -593,6 +602,14 @@ export async function indexRegistration(
     );
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
+    const { settlementTxIds, projected } = settlementClaims(authoritative.resolvedArtifacts
+      .filter((artifact) => artifact.kind === "dacs-4-evidence"), {
+      jobId: bundle?.jobId,
+      railRegistryVersion: selectedRaw?.railRegistryVersion,
+      railId: agreementRail(authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-3-agreement")?.raw),
+      phaseSummary: bundle?.phaseSummary,
+      pipeline: authoritative.resolvedArtifacts.find((artifact) => artifact.kind === "dacs-1-listing")?.raw.pipeline,
+    });
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,
@@ -605,11 +622,13 @@ export async function indexRegistration(
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
       bundleContentHash: bundle && signedBundleScope ? legacyListingHash(signedBundleScope) : undefined,
-      reputationEligible,
+      reputationEligible: reputationEligible && projected,
       cancellationNeutral,
       faultedParty: undefined,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),
+      settlementTxIds,
+      settlementProjectionVersion: SETTLEMENT_PROJECTION_VERSION,
       category: bundleCategory(bundle, categoriesByListing),
       verifiedAt: now,
     });
@@ -627,23 +646,21 @@ export async function indexRegistration(
   const deals = dedupeVerifiedDeals(dealCandidates);
 
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
-  const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
-  const reputation = deriveSellerReputation(deals, 0, now);
-  const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
+  const reputation = deriveSellerReputation(deals, windowStart, windowEnd);
+  // Listing hints count the same SB-2-filtered records as the seller reputation.
+  const counted = countableDeals(deals, windowStart, windowEnd);
   const listingsWithHint = listings.map((l) => ({
     ...l,
     reputationHint: (() => {
-      const categoryDeals = counted.filter(
-        (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
-      );
-      const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral && d.faultedParty !== "orchestrator").length;
+      const categoryDeals = counted.deals.filter((d) => inCategory(d, l.offering.category));
+      const withheldRecordCount = counted.withheldDeals.filter((d) => inCategory(d, l.offering.category)).length;
       return {
         categoryScope: l.offering.category,
-        completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
-        averageSellerRating: deriveSellerReputation(categoryDeals, windowStart, windowEnd).averageSellerRating ?? null,
+        withheldRecordCount,
+        ...UNAVAILABLE_TESTNET_METRICS,
+        observedOutcomesLabel: observedOutcomesLabel(categoryDeals.length, withheldRecordCount),
         bundleCount: categoryDeals.length,
         windowStart,
         windowEnd,

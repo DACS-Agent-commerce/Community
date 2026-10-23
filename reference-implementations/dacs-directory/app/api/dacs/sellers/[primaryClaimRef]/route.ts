@@ -1,7 +1,6 @@
 /**
  * GET /api/dacs/sellers/{primaryClaimRef} — §6.3.6 seller view:
- * listings + catalog-cached identity (CCI badges) + reputation (per DACS-5,
- * derived only from chain-verified bundles; re-derivable client-side).
+ * Listings, identity, observed history and unavailable testnet metrics.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { discoveryListing } from "@/src/catalog/discovery";
@@ -33,9 +32,9 @@ export async function GET(
       limitation: "GCR identity links are not fresh DACS-2 verifiedBy results.",
     },
     reputation: {
-      profile: "dacs-5-scalar-derivation-v1",
+      profile: "TP-1",
       ...seller.reputation,
-      limitation: "Two-sided reconciliation, perspective/fault metrics, neutral exclusions, resolved ratings, and exact-decimal volume are applied over chain-verified bundles. averageBuyerRating is intentionally null (these records are seller-scoped). Completeness is best-effort: no oracle guarantees every relevant bundle is present.",
+      limitation: "Completion verification unavailable under TP-1. Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion; the catalog may be incomplete. Individual evidence remains available for inspection.",
     },
     deals: seller.deals,
   }, {

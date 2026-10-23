@@ -7,6 +7,7 @@ import { ChipGroup, CciChip } from "@/src/components/Badge";
 import { railLabel, deliveryLabel, negotiationLabel, tierMeta } from "@/src/components/labels";
 import { activeOffer } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
+import { CHECKED_BUNDLES_LABEL, COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "@/src/catalog/testnetMetricPolicy";
 
 export const dynamic = "force-dynamic";
 const EXPLORER = "https://explorer.demos.sh";
@@ -95,9 +96,9 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
       </p>
 
       <div className="stat-row">
-        <div className="stat"><div className="n">{seller.reputation.completed}/{seller.reputation.totalAgreements}</div><div className="l">strict bundles completed</div></div>
+        <div className="stat"><div className="l">{COMPLETION_VERIFICATION_UNAVAILABLE}</div><div className="l">{observedOutcomesLabel(seller.reputation.totalAgreements, seller.reputation.withheldRecordCount)}</div></div>
         <div className="stat"><div className="n">{activeListingCount}</div><div className="l">active listing{activeListingCount === 1 ? "" : "s"}</div></div>
-        <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">chain-verified bundles</div></div>
+        <div className="stat"><div className="n">{seller.deals.filter((d) => d.refsVerified).length}</div><div className="l">{CHECKED_BUNDLES_LABEL}</div></div>
       </div>
 
       <div className="section">
@@ -165,7 +166,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
         <div className="card table-scroll" role="region" aria-label="Deal ledger" tabIndex={0} style={{ padding: 0 }}>
           <table>
             <thead>
-              <tr><th>Deal</th><th>Rail</th><th>Completed</th><th>Catalog check</th><th></th></tr>
+              <tr><th>Deal</th><th>Rail</th><th>Observed outcome</th><th>Catalog check</th><th></th></tr>
             </thead>
             <tbody>
               {[...seller.deals].sort((a, b) => (b.finalisedAt ?? 0) - (a.finalisedAt ?? 0)).map((d) => (
@@ -175,7 +176,7 @@ export default async function Seller({ params }: { params: Promise<{ claim: stri
                     <div className="meta">{d.finalisedAt ? new Date(d.finalisedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—"}</div>
                   </td>
                   <td><span className="badge rail">{d.rail}</span></td>
-                  <td>{d.outcome === "completed" ? "✓" : (d.outcome ?? "—")}</td>
+                  <td>{d.outcome ?? "—"}</td>
                   <td>
                     <span className={`badge ${d.refsVerified ? "ok" : "err"}`}>
                       {d.refsVerified ? "sig + refs verified" : d.signatureVerified ? "sig only" : "unverified"}

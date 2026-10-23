@@ -22,16 +22,16 @@ test("fault reconciliation uses absolute attribution for every outcome and buyer
   // Independent expected buyer/seller outcomes and absolute attribution. In
   // orchestrator cases both counterparties report the same relative outcome.
   const cases = [
-    ["completed", "completed", "none", 1, 1, 0],
-    ["failed-substrate", "failed-substrate", "none", 0, null, null],
-    ["failed-perm", "failed-counterparty", "buyer", 0, 0, 1],
-    ["failed-counterparty", "failed-perm", "seller", 0, 0, 0],
-    ["aborted-by-self", "aborted-by-other", "buyer", 0, 0, 1],
-    ["aborted-by-other", "aborted-by-self", "seller", 0, 0, 0],
-    ["failed-counterparty", "failed-counterparty", "orchestrator", 0, null, null],
-    ["aborted-by-other", "aborted-by-other", "orchestrator", 0, null, null],
+    ["completed", "completed", "none", 1],
+    ["failed-substrate", "failed-substrate", "none", 0],
+    ["failed-perm", "failed-counterparty", "buyer", 0],
+    ["failed-counterparty", "failed-perm", "seller", 0],
+    ["aborted-by-self", "aborted-by-other", "buyer", 0],
+    ["aborted-by-other", "aborted-by-self", "seller", 0],
+    ["failed-counterparty", "failed-counterparty", "orchestrator", 0],
+    ["aborted-by-other", "aborted-by-other", "orchestrator", 0],
   ] as const;
-  for (const [buyerOutcome, sellerOutcome, faultedParty, completed, rate, faultRate] of cases) {
+  for (const [buyerOutcome, sellerOutcome, faultedParty, completed] of cases) {
     const graph = (role: "buyer" | "seller", outcome: string): EvidenceGraph => ({
       profile: "dacs-v0.1", ok: true, signaturesVerified: true, refsVerified: true,
       bundleContentHash: `${role}-hash`, artifacts: [], ratings: [],
@@ -55,8 +55,9 @@ test("fault reconciliation uses absolute attribution for every outcome and buyer
     const reputation = deriveSellerReputation([record], 0, 200);
     assert.equal(reputation.bundleCount, 1);
     assert.equal(reputation.completed, completed);
-    assert.equal(reputation.completionRate, rate);
-    assert.equal(reputation.counterpartyFaultRate, faultRate);
+    // TP-1: testnet completion and fault rates are unavailable for every outcome.
+    assert.equal(reputation.completionRate, null);
+    assert.equal(reputation.counterpartyFaultRate, null);
     for (const unavailable of [null, { ...sellerGraph, ok: false }]) {
       const fallback = reconcileCurrentCopies(deal, seller, buyerGraph, unavailable);
       assert.equal(fallback.buyerOk, true);
@@ -120,7 +121,7 @@ test("absolute-fault copies that disagree on faultedParty or outcome class are a
   assert.equal(agreed.refsVerified, true);
 });
 
-test("orchestrator faults remain in bundle counts but not in buyer/seller fault denominators", () => {
+test("orchestrator faults remain in bundle counts while testnet fault denominators are unavailable", () => {
   const base = { ...deal, signatureVerified: true, refsVerified: true, reputationEligible: true,
     finalisedAt: 100, verifiedAt: 100 };
   const reputation = deriveSellerReputation([
@@ -130,9 +131,9 @@ test("orchestrator faults remain in bundle counts but not in buyer/seller fault 
   ], 0, 200);
   assert.equal(reputation.bundleCount, 3);
   assert.equal(reputation.completed, 1);
-  assert.equal(reputation.completionRate, 1);
-  assert.equal(reputation.counterpartyAdjustedCompletionRate, 1);
-  assert.equal(reputation.counterpartyFaultRate, 0);
+  assert.equal(reputation.completionRate, null);
+  assert.equal(reputation.counterpartyAdjustedCompletionRate, null);
+  assert.equal(reputation.counterpartyFaultRate, null);
 });
 
 test("ordinary bundle pairs reconcile perspective-relative outcomes, never just outcome classes", () => {

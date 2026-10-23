@@ -160,6 +160,10 @@ export interface DirectoryInspectionAffordance {
 /** §6.3.6 ReputationHint — advisory; derived, never authoritative. */
 export interface ReputationHint {
   categoryScope: string;
+  metricsUnavailableReason?: string;
+  observedOutcomesLabel?: string;
+  withheldRecordCount?: number;
+  metricsProfile?: "TP-1";
   completionRate: number | null;
   averageSellerRating?: number | null;
   bundleCount: number;
@@ -172,7 +176,9 @@ export interface VerifiedRating {
   rater: string;
   target: string;
   targetRole: "buyer" | "seller";
-  value: number;
+  /** Null in public testnet projections; inspect the individual source evidence. */
+  value: number | null;
+  metricsUnavailableReason?: string;
   ratedAt: number;
   contentHash: string;
 }
@@ -226,6 +232,8 @@ export interface DealRecord extends RegisteredDeal {
   ratings?: VerifiedRating[];
   /** Settlement ids used for the SB-2 cross-job uniqueness gate. */
   settlementTxIds?: Array<{ id: string; observedAt: number; phaseIndex: number }>;
+  /** Version of the verified settlement projection; absent summaries need reindexing. */
+  settlementProjectionVersion?: number;
 }
 
 export interface SellerRecord {
@@ -247,6 +255,14 @@ export interface SellerRecord {
   listings: ListingSummary[];
   deals: DealRecord[];
   reputation: {
+    metricsUnavailableReason?: string;
+    observedOutcomesLabel?: string;
+    withheldRecordCount?: number;
+    metricsProfile?: "TP-1";
+    completedLabel?: string;
+    totalAgreementsLabel?: string;
+    observedTransactionalVolumeLabel?: string;
+    transactionCountByCurrencyLabel?: string;
     completed: number;
     bundleCount?: number;
     totalAgreements: number;

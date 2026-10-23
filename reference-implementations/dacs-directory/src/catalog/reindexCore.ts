@@ -1,3 +1,4 @@
+import { rebuildCatalogObservations } from "./testnetMetrics.js";
 /**
  * Full reindex, callable: incremental chain scan to the tip, §6.3.5 domain
  * crawl, then re-verify every registration (submitted + discovered) against
@@ -24,11 +25,11 @@ import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnown
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
-  loadCatalog,
   loadDomains,
   loadFixtureSeeds,
   loadRegistrations,
   loadScanState,
+  loadStoredCatalog,
   admitRevocationCandidates,
   retainListingRevocation,
   retainedListingRevocation,
@@ -106,7 +107,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
   }
-  const prior = loadCatalog();
+  const prior = loadStoredCatalog();
 
   // Nothing from a node outside the pinned chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.
@@ -469,7 +470,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     saveScanState(state);
 
     pruneListingRejections(catalogSellers.map((seller) => seller.primaryClaim));
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    saveCatalog(rebuildCatalogObservations({ catalogVersion: "1", generatedAt, sellers: catalogSellers }));
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 

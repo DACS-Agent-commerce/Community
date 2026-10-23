@@ -1,4 +1,5 @@
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { createHash } from "node:crypto";
+import { contentHash, paymentEvidenceAddress } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../../src/catalog/evidenceGraph.js";
 import { logicalBundleAddress } from "../../src/catalog/bundleBinding.js";
@@ -9,6 +10,8 @@ export const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32,
 export const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 export const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 export const maps = new Map<string, Obj>();
+// Node metadata is untrusted JSON, including non-string logicalAddress values.
+export const evidenceAddresses = new Map<string, unknown>();
 export const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" | "rating" | "bundle" | "verify-result" | "composite", signer: number, party = false) => {
   const hash = artifactHash(raw, kind);
   const prefixes = { listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:", rating: "dacs-rating:v1:", bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:" };
@@ -25,44 +28,50 @@ export const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-export async function vector(jobId = "job-1", offset = 0) {
+/** A distinct, canonical Demos transaction hash per job. */
+export const demosTxHash = (jobId: string) => createHash("sha256").update(jobId).digest("hex");
+
+export async function vector(jobId = "0009NBCEE23QWAN075F29Q1AEV", offset = 0, paymentTxRefs: unknown[] = [{ kind: "demos", txHash: demosTxHash(jobId) }], rail = "pay-dem", evidencePhase = rail, phaseIndex = 2, sellerIndex = 1) {
   maps.clear();
+  const railId = ({ "pay-dem": "demos-native:DEM", "pay-evm-erc20": "evm-erc20:8453:USDC",
+    "pay-solana-spl": "solana-spl:mainnet:USDC", "pay-x402": "x402:default" } as Record<string, string>)[rail] ?? rail;
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
-    seller: { identity: { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1, claims: [{ ref: dids[1] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
+    seller: { identity: { bundleVersion: "1", presentedBy: dids[sellerIndex], presentedAt: 1, claims: [{ ref: dids[sellerIndex] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: rail, parameters: { rail: railId } }, { kind: "deliver-attested-payload" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId }], terms: {}, validity: { notBefore: 1 },
   };
   // Listing verifier requires a presentation signature for the seller claim.
   const identity = (listingScope.seller as Obj).identity as Obj;
   const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
-  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
-  (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
-  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
+  const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[sellerIndex]))).toString("base64url");
+  (identity.presentation as Obj).signatures = [{ ref: dids[sellerIndex], signature: identitySig }];
+  const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", sellerIndex) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[sellerIndex] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "pay-dem" },
+      rail: { railId },
     } };
-  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", 1, true)] }; maps.set(at(2), agreement);
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs: [`tx-${jobId}`], observedAt: 100 };
-  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", 1) }; maps.set(at(3), evidence);
-  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[1], targetRole: "seller", value: 5, ratedAt: 110 };
+  const agreement: Obj = { ...agreementScope, signatures: [await sign(agreementScope, "agreement", 0, true), await sign(agreementScope, "agreement", sellerIndex, true)] }; maps.set(at(2), agreement);
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: evidencePhase, outcome: "success", paymentTxRefs, paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
+  const evidence: Obj = { ...evidenceScope, signature: await sign(evidenceScope, "evidence", sellerIndex) }; maps.set(at(3), evidence);
+  evidenceAddresses.set(at(3), paymentEvidenceAddress(jobId, railId, phaseIndex));
+  const ratingScope: Obj = { ratingVersion: "1", jobId, rater: dids[0], target: dids[sellerIndex], targetRole: "seller", value: 5, ratedAt: 110 };
   const rating: Obj = { ...ratingScope, signature: await sign(ratingScope, "rating", 0) }; maps.set(at(4), rating);
   const bundleScope: Obj = { bundleVersion: "1", jobId, outcome: "completed", listingRef,
     agreementRef: ref(at(2), agreement, "agreement"), parties: [
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
-      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[1] },
+      { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[sellerIndex] },
     ],
     phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
-  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", 1, true)];
+  const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", sellerIndex, true)];
   const buyerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "buyer" }; maps.set(at(5), buyerBundle);
   const sellerBundle: Obj = { ...bundleScope, signatures, anchoredByRole: "seller" }; maps.set(at(6), sellerBundle);
   return {
@@ -123,7 +132,7 @@ export async function installAgreement(
   fixture.sellerBundle = await installBundle(fixture.sellerBundle, "seller");
 }
 
-export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
+export async function payeeBoundVector(jobId = "005J5EPZZ9TY1GDBK93GTS6RAR", offset = 0) {
   const fixture = await vector(jobId, offset);
   const listingScope = signedScope(fixture.listing, "listing");
   listingScope.pipeline = (listingScope.pipeline as Obj[]).map((phase) =>
@@ -141,8 +150,8 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
       price: { amount: "1.25", currency: "DEM" },
-      rail: { railId: "pay-dem" },
-      payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
+      rail: { railId: "demos-native:DEM" },
+      payoutBindings: [{ railId: "demos-native:DEM", phaseIndex: 2, payeeAddress: dids[1] }],
     },
   };
 

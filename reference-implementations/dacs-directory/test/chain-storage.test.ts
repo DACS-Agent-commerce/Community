@@ -103,7 +103,7 @@ test("the read-only node contract probe compares both search paths and the stora
   const { probeNodeContract } = await import("../src/catalog/nodeContract.js");
   const originalFetch = globalThis.fetch;
   const node = (nodeCall: unknown, gcr: unknown, notFound = Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }),
-    knownProgram = Response.json({ success: true, programName, owner, data: {} })) =>
+    knownProgram = Response.json({ success: true, programName, owner, data: {}, metadata: null })) =>
     async (input: unknown, init?: RequestInit) => {
       assert.ok(init?.signal, "every read has a deadline");
       if (init?.method !== "POST") return String(input).endsWith(`stor-${"0".repeat(40)}`)
@@ -116,7 +116,8 @@ test("the read-only node contract probe compares both search paths and the stora
   try {
     const verdict = async (fetcher: ReturnType<typeof node>) => {
       globalThis.fetch = fetcher as typeof fetch;
-      const { rpc: _, observedAt: __, ...report } = await probeNodeContract("https://node.example/", programName);
+      const { rpc: _, observedAt: __, storageMetadata: _metadata, anchorMetadataMatches: _anchor, build: _build,
+        ...report } = await probeNodeContract("https://node.example/", programName);
       return report;
     };
     assert.deepEqual(await verdict(node(found, found)),
@@ -337,7 +338,7 @@ test("node deployment probe refuses failed HTTP even with a plausible successful
     if (String(input).endsWith(`stor-${"0".repeat(40)}`)) {
       return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
     }
-    return Response.json({ success: true, programName, owner, data: { present: true } }, { status: readStatus });
+    return Response.json({ success: true, programName, owner, data: { present: true }, metadata: null }, { status: readStatus });
   };
   try {
     assert.equal((await probeNodeContract("https://node.example", programName)).ok, true,

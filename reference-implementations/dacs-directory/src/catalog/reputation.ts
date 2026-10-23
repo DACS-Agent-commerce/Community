@@ -1,4 +1,6 @@
 import type { DealRecord, SellerRecord } from "./types.js";
+import { countableDeals, type CountableDeals, type SettlementExclusions } from "./settlementUniqueness.js";
+import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetricPolicy.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -6,11 +8,6 @@ import type { DealRecord, SellerRecord } from "./types.js";
 // bytes directly to implement the specified ordering.
 const byteOrder = (a: string, b: string): number =>
   Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-
-const CURRENT_OUTCOMES = new Set([
-  "completed", "failed-perm", "failed-counterparty", "failed-substrate",
-  "aborted-by-self", "aborted-by-other",
-]);
 
 export function flipOutcome(outcome: string | undefined): string | undefined {
   if (outcome === "aborted-by-self") return "aborted-by-other";
@@ -40,47 +37,19 @@ export function isNeutralCancellation(
 }
 
 /**
- * DACS-5 scalar derivation over already signature/reference-verified,
- * seller-perspective records. Reconciliation and divergence exclusion happen
- * before this function; unresolved ratings/volume intentionally remain absent.
+ * Observed counts and evidence references over seller-perspective records.
+ * Reconciliation and divergence exclusion happen before this function.
+ * Testnet completion, fault rates and numeric reputation remain unavailable.
  */
 export function deriveSellerReputation(
   deals: DealRecord[],
   windowStart = 0,
   windowEnd = Date.now(),
+  excluded?: SettlementExclusions,
+  counted?: CountableDeals,
 ): SellerRecord["reputation"] {
-  const eligible = deals.filter((deal) =>
-    deal.refsVerified && deal.reputationEligible &&
-    CURRENT_OUTCOMES.has(deal.sellerOutcome ?? ""),
-  );
-  // A determinism receipt declares one timestamp basis for its entire input
-  // set. Use SR-2 anchor time only when it is available for every eligible
-  // record; otherwise fall back to finalisedAt uniformly and exclude records
-  // that cannot be evaluated on that honest basis.
-  const useAnchorTimestamps = eligible.length > 0 &&
-    eligible.every((deal) => typeof deal.anchorTimestamp === "number");
-  const timestampOf = (deal: DealRecord) => useAnchorTimestamps
-    ? deal.anchorTimestamp
-    : deal.finalisedAt;
-  let scoped = eligible.filter((deal) => {
-    const timestamp = timestampOf(deal);
-    return typeof timestamp === "number" && timestamp >= windowStart && timestamp <= windowEnd;
-  });
-  // SB-2: a settlement transaction reused across jobs contributes once, at
-  // its earliest evidence observation. Deterministic jobId breaks exact ties.
-  const settlementOwner = new Map<string, DealRecord>();
-  for (const deal of scoped) for (const tx of deal.settlementTxIds ?? []) {
-    const prior = settlementOwner.get(tx.id);
-    const priorTime = prior?.settlementTxIds?.find((candidate) => candidate.id === tx.id)?.observedAt ?? Infinity;
-    if (!prior || tx.observedAt < priorTime || (tx.observedAt === priorTime && deal.jobId < prior.jobId)) settlementOwner.set(tx.id, deal);
-  }
-  scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
+  const { deals: scoped, withheldDeals, useAnchorTimestamps } = counted ?? countableDeals(deals, windowStart, windowEnd, excluded);
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
-  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral || deal.faultedParty === "orchestrator").length;
-  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral && deal.faultedParty !== "orchestrator" &&
-    (deal.sellerOutcome === "failed-counterparty" || deal.sellerOutcome === "aborted-by-other")).length;
-  const partyFaultDenominator = scoped.length - neutral;
-  const blameDenominator = partyFaultDenominator - counterpartyFault;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,
     id: deal.jobId,
@@ -90,14 +59,6 @@ export function deriveSellerReputation(
       locator: deal.anchoredByRole === "buyer" ? deal.buyerBundleRef : deal.sellerBundleRef ?? deal.buyerBundleRef,
     },
   })).sort((a, b) => byteOrder(a.contentHash, b.contentHash));
-  const ratingByDirection = new Map<string, NonNullable<DealRecord["ratings"]>[number]>();
-  for (const deal of scoped) for (const rating of deal.ratings ?? []) {
-    if (rating.target.toLowerCase() !== deal.owners.seller.toLowerCase() || rating.rater.toLowerCase() === rating.target.toLowerCase()) continue;
-    const key = `${rating.rater.toLowerCase()}\n${deal.jobId}\n${rating.targetRole}`;
-    const prior = ratingByDirection.get(key);
-    if (!prior || rating.ratedAt > prior.ratedAt || (rating.ratedAt === prior.ratedAt && rating.contentHash > prior.contentHash)) ratingByDirection.set(key, rating);
-  }
-  const sellerRatings = [...ratingByDirection.values()].filter((rating) => rating.targetRole === "seller").map((rating) => rating.value);
   const completedWithPrice = scoped.filter((deal) => deal.sellerOutcome === "completed" && deal.agreementPrice);
   const amounts = new Map<string, string[]>();
   for (const deal of completedWithPrice) {
@@ -117,13 +78,10 @@ export function deriveSellerReputation(
     completed,
     bundleCount: scoped.length,
     totalAgreements: scoped.length,
-    completionRate: partyFaultDenominator > 0 ? completed / partyFaultDenominator : null,
-    counterpartyAdjustedCompletionRate: blameDenominator > 0 ? completed / blameDenominator : null,
-    counterpartyFaultRate: partyFaultDenominator > 0 ? counterpartyFault / partyFaultDenominator : null,
-    // This catalog record is seller-scoped. Buyer-side sessions are not part
-    // of its input set, so surfacing a buyer rating here would invent signal.
-    averageBuyerRating: null,
-    averageSellerRating: sellerRatings.length ? sellerRatings.reduce((a, b) => a + b, 0) / sellerRatings.length : null,
+    ...UNAVAILABLE_TESTNET_METRICS,
+    ...OBSERVED_REPUTATION_COUNTS,
+    withheldRecordCount: withheldDeals.length,
+    observedOutcomesLabel: observedOutcomesLabel(scoped.length, withheldDeals.length),
     observedTransactionalVolume,
     transactionCountByCurrency,
     bundleRefs,

@@ -16,18 +16,22 @@ name and (when owner-signed) the "owner-registered" badge — it is never a gate
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
-The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
-checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
+Completion verification unavailable: TP-1 testnet catalog projections publish completion and
+fault rates and numeric reputation scores as `null`, with a reason. Counts are labelled
+as observed outcomes, not verified completion. Rate and score filters and ranking return
+400. Individual evidence inspection remains available. Full metrics return under
+a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
+while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Catalog API | DACS-1 §6.3.6 | Listing filters excluding TP-1 rate/score filters, plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
 | Seller publication | DACS-1 §6.3.4 | The browser publisher is omitted from this release. `/register` explains discovery-pointer submission and offers read-only recovery of saved anchors. Publication through another client requires verified rail authority (LP-6) and a verified finalized AnchorReceipt (LP-1). The internal builder retains these gates; `confirm-listing` requires a transaction hash and reports only an unauthenticated node observation, never a receipt. `POST /api/dacs/register` accepts bounded pointer sets; the indexer independently authenticates each anchor. |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Observed history | DACS-5 §10.4–§10.5 | Bundle references, labelled observed counts, individual evidence, exact-decimal volume and time windows are kept. Completion and fault rates and numeric reputation scores are unavailable on testnet |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -63,7 +67,9 @@ two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its li
 uses the early SDK's compact signature encoding; the verifier accepts that encoding
 only after checking the same Ed25519 signature, signed scope, agent key, and anchor owner
 as current structured signature envelopes. Historical deals are displayed, but only
-strictly party-bound bundles with verified references contribute to reputation.
+strictly party-bound bundles with verified references and supported settlement projections contribute to labelled observed counts.
+The pinned SDK session writer omits the logical-address metadata needed to project
+paid completions; those deals stay in history and are disclosed as withheld records.
 
 Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
 and re-verifies everything against chain each pass.
@@ -391,6 +397,9 @@ code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow 
 shim over JSON-owned values, WHATWG-subset `node:net` and `node:url` shims, and
 base64url-patched Buffer).
 
+The layout uses `next/font/local` with exact, integrity-pinned font packages.
+Production builds and served pages use those bundled fonts without a font-service request.
+
 ## Honest limitations (MVP)
 
 - **The artifact proxy is a byte ferry**: browsers can't reach the Demos RPC directly
@@ -462,6 +471,47 @@ the publisher as buyer and attributes supplier history to the agreement seller.
 The catalog profile also refuses APR-1 `pay-alternative` pipelines, which the pinned
 SDK reader accepts.
 
+Observed-history processing retains eligible volume, settlement uniqueness, anchor-time
+windowing and evidence references. Seller reputation and listing hints publish
+`withheldRecordCount` for retained evidence omitted from their counts; a positive
+value explicitly labels the counts as incomplete. Completion and fault rates and
+numeric reputation scores remain unavailable during testnet.
+
+The Node no-rate regression tests use an isolated populated catalog, including
+aborted outcomes, old numeric metrics and missing listing hints. They check the API,
+rendered homepage, discovery, service detail and seller evidence, plus the discovery
+text and refusal of old filters, including bracketed query keys. Run `npm test`.
+
+TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commit:
+`minCompletionRate` and `minRating` return 400, and `completionRate` remains null
+even when `bundleCount` is positive. [`docs/TP-1.md`](./docs/TP-1.md) defines TP-1
+and declares these as open `nonconforming` deviations in the Standard's
+`ImplementationDeviation` shape. `metricsProfile: "TP-1"`,
+`metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
+restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
+document `2.0.0`. A cached listing with no hint, or one the pinned SDK reader would
+reject, still has null metrics and uses the catalog snapshot window. Every served
+hint's observed count is rebuilt from the retained category records the seller
+reputation counts, after the DACS-4 SB-2 settlement-collision exclusion that
+`docs/TP-1.md` describes. The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
+`completed` and `totalAgreements` for compatibility, with explicit observed-count
+labels. These fields describe a counted subset, not the seller's complete history,
+and must not be divided into a completion rate. `withheldRecordCount` counts
+excluded evidence records in the same category/window (including duplicates and
+undated records), not failed deals. The pinned SDK's payment-evidence writer
+omits `metadata.logicalAddress`, so its paid completions and amounts are withheld
+while earlier aborts may count; ten such completions and one early abort publish
+`completed: 0`, `totalAgreements: 1`, `withheldRecordCount: 10` and an explicit
+incomplete-count label. Currency totals include only the counted priced completed
+outcomes and do not establish completion or settlement.
+
+The public projection is cached per exact persisted catalog, with fresh copies
+for callers and invalidation on writes from other processes. Eligibility is
+prepared once per seller and category counts are reused per window. Health checks
+read only the stored snapshot date. `/discover` ignores unrelated query names
+such as `utm_source`, `fbclid`, `gclid` and `ref`, while still refusing rate, score
+and ranking requests; the JSON listings API refuses every undocumented name.
+
 **Upstream source contracts.** The Directory records these source revisions:
 
 - **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation at
@@ -503,10 +553,22 @@ headers without wallet authentication, as required by the pinned middleware cont
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
 and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
 and withholds new publication until a complete search contract is available.
-`npm run check:node -- <exact program name>` is a read-only probe (no
-transactions) that reports the storage not-found answer and both search paths, and fails
+`npm run check:node -- <exact program name> [known SDK logical address]` is a read-only probe (no
+transactions) that reports the storage not-found answer, both search paths, metadata
+shape and the node's self-reported build, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one
-matching public program. Its output is dated runtime evidence, not a pin. Run it when the
+matching public program with object or null metadata. Without a logical address,
+the report has `scope: "generic-read"`; a successful diagnostic exits 3 and makes
+no SDK-anchor claim. For a known SDK-written listing or bound-repository
+anchor with logical-address metadata, pass its logical address too: the report
+has `scope: "sdk-anchor"`, and exit 0 requires matching
+`metadata.logicalAddress`, `programName === logicalToStorageProgramName(logicalAddress)`
+and a reported build. The probe checks the bounded set of exact-name candidates
+until one fresh reply satisfies every check. A failed observation exits 1;
+a missing program-name argument exits 2. The pinned SDK's session-runtime
+payment-evidence writer does not include logical-address metadata, so those
+anchors cannot satisfy this metadata check. This checks the read contract without authenticating the
+metadata writer or attesting a deployment. Its output is dated runtime evidence, not a pin. Run it when the
 `DEMOS_RPC` deployment changes.
 
 ## License

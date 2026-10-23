@@ -6,6 +6,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import { noRateCatalog, noRateClaim } from "./fixtures/no-rate-catalog.js";
 
 // POST /api/dacs/index-now writes the public catalog, so it is held to the
 // same node pin as reindexAll (scan-robustness.test.ts).
@@ -101,4 +102,26 @@ test("index-now requires the pinned chain and treats build drift as a warning", 
     assert.equal(Boolean(body.nodeBuildWarning), nodeVersion !== cleanBuild);
     assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
   }
+});
+
+test("index-now preserves another seller's stored ratings while public TP-1 reads hide them", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
+  const catalog = noRateCatalog();
+  const sourceRatings = structuredClone(catalog.sellers[0].deals.map((deal) => deal.ratings));
+  store.saveCatalog(catalog);
+  assert.equal(store.loadCatalog().sellers[0].deals[0].ratings![0].value, null);
+
+  const response = await indexNow();
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).listings, 1);
+  const stored = store.loadStoredCatalog();
+  assert.equal(stored.sellers.length, 2, "the newly indexed seller was saved alongside the prior seller");
+  assert.ok(stored.sellers.some((record) => record.primaryClaim === seller));
+  const preserved = stored.sellers.find((record) => record.primaryClaim === noRateClaim)!;
+  assert.deepEqual(preserved.deals.map((deal) => deal.ratings), sourceRatings,
+    "the write must retain the source ratings, including their signed evidence coordinates");
+  const published = store.loadCatalog().sellers.find((record) => record.primaryClaim === noRateClaim)!;
+  assert.equal(published.reputation.averageSellerRating, null);
+  assert.ok(published.deals.every((deal) => deal.ratings!.every((rating) => rating.value === null)));
 });

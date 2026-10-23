@@ -41,8 +41,8 @@ const PREFIXES: Record<string, string> = {
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
-  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
-  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer, kind === "listing" ? "base64url" : "hex");
+  // Current Listings and evidence carry CORE §B.7 SIG-6 base64url.
+  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer, kind === "listing" || kind === "evidence" ? "base64url" : "hex");
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: ArtifactKind, extra: Obj = {}) => ({
@@ -83,7 +83,7 @@ const withMember = (value: unknown, member: string) => JSON.stringify(value).rep
 const withSignatureMember = (value: unknown, member: string) => JSON.stringify(value).replace(/}}$/, `,"futureField":${member}}}`);
 
 // Stubbed node: `storage` maps locator → raw `data` JSON text (plus optional name/owner).
-interface StoredProgram { data: string; name?: string; owner?: unknown }
+interface StoredProgram { data: string; name?: string; owner?: unknown; logicalAddress?: string }
 let storage: Record<string, StoredProgram> = {};
 let transactions: Obj[] = [];
 let reads = new Map<string, number>();
@@ -98,7 +98,7 @@ globalThis.fetch = async (input, init) => {
     reads.set(at, count);
     const owner = JSON.stringify(entry.owner ?? ownerOf(seller));
     return new Response(
-      `{"success":true,"owner":${owner},"programName":${JSON.stringify(entry.name ?? "opaque")},"data":${reread?.(at, count) ?? entry.data}}`,
+      `{"success":true,"owner":${owner},"programName":${JSON.stringify(entry.name ?? "opaque")},"metadata":{"logicalAddress":${JSON.stringify(entry.logicalAddress ?? "")}},"data":${reread?.(at, count) ?? entry.data}}`,
       { headers: { "content-type": "application/json" } },
     );
   }
@@ -278,7 +278,7 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const buyerBundle = { data: JSON.stringify({ bundleVersion: "1", jobId: "job-attribution", parties: [], anchoredByRole: "buyer" }), owner: ownerOf(buyer) };
   const scope = { agreementVersion: "1", jobId: "job-attribution", derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "demos-native:DEM" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
   const program = (sellerClaim: string, member?: string) => {
     const raw = sellerClaim === seller ? validAgreement : { seller: sellerClaim };
@@ -340,15 +340,15 @@ test("current evidence graph fails closed on malformed bundles without hashing t
 });
 
 // Current-profile deal: listing, agreement, evidence and both bundle copies with BundleBindings.
-async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown[] = [`tx-${jobId}`]) {
+async function currentDeal(jobId: string, offset: number, phaseIndex?: unknown) {
   const at = (n: number) => locator(offset + n);
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
-    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
-    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
+    pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-attested-payload" }],
+    pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "demos-native:DEM" }], terms: {}, validity: { notBefore: 1 },
   };
   const identity = (listingRaw.seller as Obj).identity as Obj;
   const identityScope = { ...identity };
@@ -358,10 +358,10 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
     agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "demos-native:DEM" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
-  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
+  const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", ...(phaseIndex === undefined ? {} : { phaseIndex }), outcome: "success", paymentTxRefs: [{ kind: "demos", txHash: contentHash({ jobId }) }], paymentAmount: { amount: "1.25", currency: "DEM" }, settlementFinality: { model: "bft-final", finalityObservedAt: 100 }, observedAt: 100 };
   const evidence = { ...evidenceScope, signature: await signArtifact(evidenceScope, "evidence", 1) };
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
@@ -376,7 +376,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     listingAnchor: at(1),
     programs: {
       [at(1)]: { data: JSON.stringify(currentListing) }, [at(2)]: { data: JSON.stringify(agreement) },
-      [at(3)]: { data: JSON.stringify(evidence) }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
+      [at(3)]: { data: JSON.stringify(evidence), logicalAddress: `dacs4:payment:${jobId}:demos-native%3ADEM:2` }, [at(5)]: { data: JSON.stringify(buyerCopy) }, [at(6)]: { data: JSON.stringify(sellerCopy) },
     },
     deal: { jobId, rail: "pay-dem", buyerBundleRef: at(5), sellerBundleRef: at(6), owners: { buyer, seller } } as RegisteredDeal,
     bindings: [
@@ -386,10 +386,10 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   };
 }
 
-test("malformed bundles and a deal that cannot be summarized stay unverified while a later deal verifies", async () => {
-  // Signed evidence whose transaction id converts to no primitive: the graph verifies, the deal summary throws.
-  const poisoned = await currentDeal("job-poisoned", 100, [{ txId: { toString: 1 } }]);
-  const valid = await currentDeal("job-valid", 200);
+test("malformed bundles and forbidden evidence stay unverified while a later deal verifies", async () => {
+  // The forbidden legacy phaseIndex field must be rejected before projection.
+  const poisoned = await currentDeal("01KTY8ZJ01CW7KSECW3FS6PQPK", 100, { toString: 1 });
+  const valid = await currentDeal("01KTY8ZJ00CW7KSECW3FS6PQPK", 200);
   const legacyBundle = locator(61);
   const currentBundle = locator(62);
   const currentBinding = await signedBinding("job-current-malformed", "buyer", currentBundle, "c".repeat(64), 0);
@@ -412,7 +412,7 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   const record = await indexRegistration(registration, undefined, offline);
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
-  for (const jobId of ["job-legacy-malformed", "job-current-malformed", "job-poisoned"]) {
+  for (const jobId of ["job-legacy-malformed", "job-current-malformed", "01KTY8ZJ01CW7KSECW3FS6PQPK"]) {
     assert.equal(byJob.get(jobId)?.signatureVerified, false, jobId);
     assert.equal(byJob.get(jobId)?.refsVerified, false, jobId);
     assert.equal(byJob.get(jobId)?.reputationEligible, false, jobId);
@@ -420,14 +420,14 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   }
   // The legacy verifier itself returns the unverified record; it is not the per-deal fallback.
   assert.equal(byJob.get("job-legacy-malformed")?.cancellationNeutral, false);
-  assert.equal(byJob.get("job-valid")?.refsVerified, true);
+  assert.equal(byJob.get("01KTY8ZJ00CW7KSECW3FS6PQPK")?.refsVerified, true);
   assert.equal(record.reputation.bundleCount, 1);
   resetIndex([registration], 45);
   await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
-    assert.equal(run.omitted_deals, 1, "the failed summary is counted in operator diagnostics");
+    assert.equal(run.omitted_deals, 0, "forbidden evidence is rejected by the graph before summary processing");
   } finally { db.close(); }
 });
 

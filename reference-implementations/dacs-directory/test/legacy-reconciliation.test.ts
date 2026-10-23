@@ -60,17 +60,17 @@ test("legacy authority selects the verified seller copy and reports seller-relat
   assert.equal(one.reputationEligible, false);
 });
 
-test("all six agreeing terminal outcomes are eligible with independent reputation denominators", () => {
+test("all six agreeing terminal outcomes are eligible with testnet rates unavailable", () => {
   const outcomes = [
-    ["completed", "completed", 1, 1, 1, 0],
-    ["failed-counterparty", "failed-perm", 0, 0, 0, 0],
-    ["failed-perm", "failed-counterparty", 0, 0, null, 1],
-    ["failed-substrate", "failed-substrate", 0, null, null, null],
-    ["aborted-by-other", "aborted-by-self", 0, 0, 0, 0],
-    ["aborted-by-self", "aborted-by-other", 0, 0, null, 1],
+    ["completed", "completed", 1],
+    ["failed-counterparty", "failed-perm", 0],
+    ["failed-perm", "failed-counterparty", 0],
+    ["failed-substrate", "failed-substrate", 0],
+    ["aborted-by-other", "aborted-by-self", 0],
+    ["aborted-by-self", "aborted-by-other", 0],
   ] as const;
   const deals: DealRecord[] = [];
-  for (const [buyerOutcome, sellerOutcome, completed, rate, adjusted, faultRate] of outcomes) {
+  for (const [buyerOutcome, sellerOutcome, completed] of outcomes) {
     const buyer = copy(true, buyerOutcome);
     const seller = copy(true, sellerOutcome);
     const result = reconcileLegacyCopies(buyer, seller);
@@ -87,12 +87,12 @@ test("all six agreeing terminal outcomes are eligible with independent reputatio
     assert.deepEqual({ count: reputation.bundleCount, agreements: reputation.totalAgreements,
       completed: reputation.completed, rate: reputation.completionRate,
       adjusted: reputation.counterpartyAdjustedCompletionRate, faultRate: reputation.counterpartyFaultRate },
-    { count: 1, agreements: 1, completed, rate, adjusted, faultRate }, sellerOutcome);
+    { count: 1, agreements: 1, completed, rate: null, adjusted: null, faultRate: null }, sellerOutcome);
   }
   const all = deriveSellerReputation(deals, 0, 200);
   assert.equal(all.bundleCount, 6);
   assert.equal(all.completed, 1);
-  assert.equal(all.completionRate, 1 / 5);
-  assert.equal(all.counterpartyAdjustedCompletionRate, 1 / 3);
-  assert.equal(all.counterpartyFaultRate, 2 / 5);
+  assert.equal(all.completionRate, null);
+  assert.equal(all.counterpartyAdjustedCompletionRate, null);
+  assert.equal(all.counterpartyFaultRate, null);
 });
