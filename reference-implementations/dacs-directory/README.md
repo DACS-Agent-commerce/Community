@@ -539,10 +539,15 @@ and withholds new publication until a complete search contract is available.
 transactions) that reports the storage not-found answer, both search paths, metadata
 shape and the node's self-reported build, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one
-matching public program with object or null metadata. For a known SDK-written
-anchor, pass its logical address too: the probe requires matching
+matching public program with object or null metadata. Without a logical address,
+the report has `scope: "generic-read"`; a successful diagnostic exits 2 and makes
+no SDK-anchor claim. For a known SDK-written listing or bound-repository
+anchor with logical-address metadata, pass its logical address too: the report
+has `scope: "sdk-anchor"`, and exit 0 requires matching
 `metadata.logicalAddress`, `programName === logicalToStorageProgramName(logicalAddress)`
-and a reported build. This checks the read contract without authenticating the
+and a reported build. A failed observation exits 1. The pinned SDK's session-runtime
+payment-evidence writer does not include logical-address metadata, so those
+anchors cannot satisfy this metadata check. This checks the read contract without authenticating the
 metadata writer or attesting a deployment. Its output is dated runtime evidence, not a pin. Run it when the
 `DEMOS_RPC` deployment changes.
 

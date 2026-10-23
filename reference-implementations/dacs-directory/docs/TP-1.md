@@ -96,6 +96,13 @@ manifest; this Directory publishes no manifest.
 ]
 ```
 
+The pinned SDK's session runtime writes payment-evidence anchors without
+`metadata.logicalAddress`. The Directory therefore retains those paid deals
+as history but excludes them from observed counts, amounts and listing hints.
+Fixtures with logical-address metadata describe the supported metadata-bearing
+path, rather than the pinned SDK session writer's output. A successful reindex
+cannot fill metadata that the source anchor never contained.
+
 Settlement uniqueness (SB-1, SB-2) applies to the records counted in seller
 reputation and in listing hints:
 

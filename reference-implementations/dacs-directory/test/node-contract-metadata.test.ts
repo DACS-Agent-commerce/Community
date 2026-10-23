@@ -158,3 +158,50 @@ test("node contract probe binds an internally consistent SDK anchor to the reque
     globalThis.fetch = originalFetch;
   }
 });
+
+test("node contract probe refuses self-consistent empty and padded addresses with every other check successful", async (t) => {
+  const validAddress = paymentEvidenceAddress("01J8ME0SXKQ4T9V2RC5HJ6WX7D", "demos-native:DEM", 2);
+  const storageAddress = `stor-${"1".repeat(40)}`;
+  const commit = "12".repeat(20);
+  for (const [label, logicalAddress, accepted] of [
+    ["empty address", "", false],
+    ["padded address", ` \t${validAddress}\n `, false],
+    ["canonical address", validAddress, true],
+  ] as const) {
+    await t.test(label, async () => {
+      // Map the same input the caller expects, including its whitespace. A
+      // different expectation or name would mask the independent format check.
+      const programName = logicalToStorageProgramName(logicalAddress);
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input, init) => {
+        assert.ok(init?.signal, "every node reply has a deadline");
+        if (init?.method === "POST") {
+          const request = JSON.parse(String(init.body));
+          if (request.params[0].message === "getNetworkInfo") {
+            return Response.json({ result: 200, response: { nodeVersion: { commit, dirty: false } } });
+          }
+          return Response.json({ result: 200, response: [{ storageAddress, programName }] });
+        }
+        if (String(input).endsWith(`stor-${"0".repeat(40)}`)) {
+          return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+        }
+        assert.equal(String(input), `https://node.example/storage-program/${storageAddress}`);
+        return Response.json({ success: true, programName, metadata: { logicalAddress },
+          owner: `0x${"34".repeat(32)}`, data: { observed: true } });
+      };
+      try {
+        const report = await probeNodeContract("https://node.example", programName, logicalAddress);
+        assert.equal(report.storageNotFound, true);
+        assert.equal(report.nodeCallSearch, "supported");
+        assert.equal(report.gcrRoutineSearch, "supported");
+        assert.equal(report.searchesAgree, true);
+        assert.equal(report.build, commit);
+        assert.equal(report.storageMetadata, true);
+        assert.equal(report.anchorMetadataMatches, accepted);
+        assert.equal(report.ok, accepted);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
