@@ -245,7 +245,7 @@ export async function indexRegistration(
         reg.primaryClaim,
         "DECLARED_CONTENT_HASH_MISMATCH",
         listingDiagnosticCoordinates(verified.scope),
-        ownerRegistered,
+        reg.authenticatedHashDeclarations?.includes(anchor) === true,
       );
       continue;
     }

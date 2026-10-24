@@ -3,7 +3,8 @@
 // pinned commit builds to. Each regular file contributes "<sha256>  <path>\n"
 // in byte order of its POSIX relative path; the digest is the sha256 of those
 // lines. Setup's own top-level `.dacs-sdk-*` files are excluded, and any other
-// entry type (a symlink, for example) is refused.
+// entry type (a symlink, for example) and any name containing a line break are
+// refused.
 //
 // usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]
 import { createHash } from "node:crypto";
@@ -15,6 +16,8 @@ export function distManifest(root) {
   const files = [];
   const walk = (directory, prefix) => {
     for (const name of readdirSync(directory)) {
+      // A line break in a name could make one file's manifest line read as two.
+      if (/[\r\n]/.test(name)) throw new Error(`${JSON.stringify(name)} contains a line break`);
       const path = join(directory, name);
       const relative = prefix ? `${prefix}/${name}` : name;
       const entry = lstatSync(path);

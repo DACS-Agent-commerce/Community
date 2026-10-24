@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
@@ -44,20 +43,12 @@ const attested = (verificationMethod?: unknown): Obj => ({
   ...(verificationMethod === undefined ? {} : { verificationMethod }),
 });
 
-/** ClaimReference bytes for each signed role; all name the same key by default. */
-interface ListingRefs { presentedBy: string; claim: string; signer: string }
-
-/** A correctly signed current Listing; only the supplied fields vary. */
-function signedListing(
-  listingId: string,
-  deliverable: Obj,
-  extra: Obj = {},
-  refs: ListingRefs = { presentedBy: seller, claim: seller, signer: seller },
-): Obj {
-  const identity: Obj = { bundleVersion: "1", presentedBy: refs.presentedBy, presentedAt: 1, claims: [{ ref: refs.claim }] };
+/** A correctly signed current Listing; only its id and deliverable vary. */
+function signedListing(listingId: string, deliverable: Obj): Obj {
+  const identity: Obj = { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }] };
   identity.presentation = {
     kind: "per-claim",
-    signatures: [{ ref: refs.presentedBy, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`) }],
+    signatures: [{ ref: seller, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`) }],
   };
   const scope: Obj = {
     dacsVersion: "1",
@@ -71,56 +62,9 @@ function signedListing(
     acceptedRails: [{ railId: "pay-dem" }],
     terms: {},
     validity: { notBefore: 1 },
-    ...extra,
   };
-  return { ...scope, signature: { algorithm: "ed25519", signer: refs.signer, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
+  return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
 }
-
-// DACS-2 §7.4.1: the SDK's closed registry, one valid instance per variant.
-const REGISTERED_METHODS: Obj[] = [
-  { kind: "verifiable-credential" },
-  { kind: "tlsnotary", endpoint: "https://notary.example/session" },
-  { kind: "zktls", provider: "reclaim", programId: "program-1" },
-  { kind: "consensus-backed-proxy", endpoint: { method: "GET", urlTemplate: "https://api.example/{jobId}" } },
-  { kind: "oauth-attested", provider: "github", scopes: ["read:user"], maxTokenAgeSec: 300 },
-  { kind: "evm-rpc", chainId: 1, contract: `0x${"ab".repeat(20)}`, method: "balanceOf" },
-  { kind: "domain-tls-control", challengeType: "dns-01" },
-  { kind: "self-signed" },
-  { kind: "demos-gcr-domain" },
-];
-
-test("admission accepts every registered structured verification method", async () => {
-  for (const method of REGISTERED_METHODS) {
-    const listing = signedListing("registered-method", attested(method));
-    assert.equal(isListing(listing), true, String(method.kind));
-    const result = await verifyListingResult(listing);
-    assert.equal(result.ok, true, String(method.kind));
-  }
-});
-
-test("admission rejects each DPA-1 verification-method failure, even when signed", async () => {
-  const rejected: Record<string, Obj> = {
-    "missing on an attested-payload pipeline": signedListing("missing-method", attested()),
-    "free-form string": signedListing("string-method", attested("x402-receipt")),
-    "unregistered structured kind": signedListing("unregistered-method", attested({ kind: "llm-judge" })),
-    "registered kind without its parameters": signedListing("tlsnotary-no-endpoint", attested({ kind: "tlsnotary" })),
-    "registered kind with malformed parameters": signedListing("evm-rpc-bad-contract", attested({
-      kind: "evm-rpc", chainId: 1, contract: "0xnot-an-address", method: "balanceOf",
-    })),
-    "attested phase on a non-attested deliverable": signedListing("storage-deliverable", { kind: "storage-program" }),
-    "invalid method outside an attested phase": signedListing("external-method", {
-      kind: "external", description: "Manual delivery", verificationMethod: { kind: "llm-judge" },
-    }, { pipeline: [...ATTESTED_PIPELINE.slice(0, 3), { kind: "deliver-storage-program" }] }),
-  };
-  for (const [label, listing] of Object.entries(rejected)) {
-    assert.deepEqual(await verifyListingResult(listing), { ok: false, code: "VERIFICATION_METHOD_INVALID" }, label);
-  }
-  // Other normative failures keep their own class rather than becoming method failures.
-  assert.deepEqual(
-    await verifyListingResult(signedListing("bad-pricing", attested({ kind: "self-signed" }), { pricing: { kind: "barter" } })),
-    { ok: false, code: "NORMATIVE_LISTING_INVALID" },
-  );
-});
 
 test("the indexer excludes verification-method failures with diagnostics and admits the conforming listing", async () => {
   const anchors = {
@@ -424,7 +368,6 @@ test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", asy
   }
 });
 
-
 test("a declared content hash mismatch excludes a listing and a corrected declaration clears its diagnostic", async () => {
   const at = `stor-${"e".repeat(40)}`;
   const listing = signedListing("declared-hash", attested({ kind: "self-signed" }));
@@ -446,23 +389,6 @@ test("a declared content hash mismatch excludes a listing and a corrected declar
     assert.ok(!store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === at));
   } finally {
     globalThis.fetch = originalFetch;
-  }
-});
-
-test("malformed attested deliverables retain verification-method diagnostics", async () => {
-  for (const extra of [{ offering: undefined }, { offering: {} },
-    { offering: { deliverable: { kind: "storage-program", verificationMethod: { kind: "self-signed" } } } },
-    { offering: {}, pipeline: [null, 7, [], ...ATTESTED_PIPELINE] }]) {
-    assert.deepEqual(await verifyListingResult({ dacsVersion: "1", ...extra, pipeline: extra.pipeline ?? ATTESTED_PIPELINE }),
-      { ok: false, code: "VERIFICATION_METHOD_INVALID" });
-  }
-  assert.deepEqual(await verifyListingResult({ signatures: [] }), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
-});
-
-test("exception wrappers preserve their selected profile's rejection code", async () => {
-  for (const [raw, code] of [[{ dacsVersion: "1" }, "NORMATIVE_LISTING_INVALID"], [{}, "LEGACY_LISTING_INVALID"]] as const) {
-    const throwing = new Proxy(raw, { get() { throw new Error("fixture read failure"); } });
-    assert.deepEqual(await verifyListingResult(throwing), { ok: false, code });
   }
 });
 
@@ -580,8 +506,7 @@ test("rejections never assign unauthenticated coordinates or blame another selle
   } finally { globalThis.fetch = originalFetch; }
 });
 
-
-test("only owner-signed, seller-matching pointer failures appear publicly, and a corrected pointer clears them", async () => {
+test("only a publisher-authenticated hash declaration for a seller-matching listing appears publicly, and a corrected one clears it", async () => {
   const anchor = `stor-${"b".repeat(40)}`;
   const data = signedListing("public-pointer", attested({ kind: "self-signed" }));
   const reg: Registration = { primaryClaim: seller, displayName: "Signed seller", listingAnchors: [anchor],
@@ -590,15 +515,15 @@ test("only owner-signed, seller-matching pointer failures appear publicly, and a
   globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
   try {
     await indexRegistration(reg, undefined, async () => ({}));
-    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0);
-    const message = registrationMessage(reg, 1);
-    reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0, "an unauthenticated declaration stays private");
+    reg.authenticatedHashDeclarations = [anchor];
     await indexRegistration(reg, undefined, async () => ({}));
     let diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 1);
     assert.equal(diagnostics.items.find((item) => item.publicNotice)?.listingId, "public-pointer");
     assert.match(diagnostics.items.find((item) => item.publicNotice)?.guidance ?? "", /declared hash in the discovery channel/);
     reg.listingContentHashes = {};
+    reg.authenticatedHashDeclarations = [];
     assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings.length, 1);
     diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 0);

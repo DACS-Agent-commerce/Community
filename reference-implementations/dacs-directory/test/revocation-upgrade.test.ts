@@ -35,7 +35,7 @@ const seeded = new Database(dbPath);
 // Exact old candidate schema, which recorded unavailable reads as rejected.
 seeded.exec(`
   CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
-  INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0);
+  INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0), ('listing-admission-schema-version','1',0);
   CREATE TABLE revocation_candidates (
     listing_hash TEXT NOT NULL, locator TEXT NOT NULL, owner TEXT, content_hash TEXT,
     seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator)
@@ -50,7 +50,11 @@ seeded.prepare("INSERT INTO kv_state VALUES ('catalog',?,0)").run(JSON.stringify
   catalogVersion: "1", generatedAt: 100, sellers: [{ primaryClaim: claim, deals: [], listings: [
     { listingId: "upgrade", contentHash: hash, status: "active" },
     { listingId: "unaffected", contentHash: otherHash, status: "active" },
-    { listingId: "revoked", contentHash: revokedHash, status: "revoked", revocationBinding: { markerContentHash: "f".repeat(64) } },
+    { listingId: "revoked", version: 1, contentHash: revokedHash, status: "revoked", revocationBinding: {
+      sellerPrimaryClaim: claim, listingId: "revoked", listingVersion: 1, listingContentHash: revokedHash,
+      logicalAddress: `dacs1-revoked:${encodeURIComponent(claim)}:revoked:v1`,
+      markerAnchor: { kind: "storage-program", locator: at("5") }, markerContentHash: "f".repeat(64),
+    } },
   ] }],
 }));
 seeded.close();
