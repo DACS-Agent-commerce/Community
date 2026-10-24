@@ -707,10 +707,12 @@ test("a Listing presented by an unqualified claim is summarised", async () => {
   assert.equal(record.deals[0].refsVerified, true);
 });
 
-test("a Listing presented by an unqualified claim with a mixed-case scheme is summarised", async () => {
+test("a Listing presented by a claim with a mixed-case scheme is not admitted", async () => {
+  // CF-2 scheme-case leniency applies to standalone ClaimReference lookups; the SDK's
+  // Listing reader validates the signed bytes exactly, so there is nothing to summarise.
   const record = await indexSellerDeal(`DID:${dids[1].slice("did:".length)}`, "mixed-case-job", 120);
-  assert.equal(record.listings.length, 1);
-  assert.equal(record.deals[0].refsVerified, true);
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].refsVerified, false);
 });
 
 test("a Listing presented by a qualified claim is summarised under the exact presentedBy and backs its deal evidence", async () => {
