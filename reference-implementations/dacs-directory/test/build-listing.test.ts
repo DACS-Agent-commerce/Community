@@ -481,7 +481,7 @@ test("publisher prepares no transaction unless the node is the pinned deployment
       ["another commit", { nodeVersion: { ...cleanBuild, commit: "f".repeat(40) }, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /is not pinned/],
       ["no build identity", { nodeVersion: {}, chain: PINNED_DEMOS_CHAIN_IDENTITY }, 409, /reports no build identity/],
       ["another chain", { nodeVersion: cleanBuild, chain: "aa".repeat(32) }, 409, /not the pinned chain/],
-      ["unreadable node", { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY, down: true }, 503, /could not read the Demos node/],
+      ["unreadable node", { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY, down: true }, 503, /could not read the Demos node's build and chain \(getNetworkInfo transport failed\)/],
     ] as const) {
       node = state;
       const signature = await listingSignature();
@@ -725,6 +725,8 @@ test("publisher prepares no transaction unless the account nonce is read within 
     ["unreachable node", () => { throw new TypeError("fetch failed"); }, /could not be reached/],
     ["oversized reply", () => Response.json({ result: 200, response: 0, padding: "x".repeat(MAX_NONCE_REPLY_BYTES) }), /byte limit/],
     ["non-JSON reply", () => new Response("not json"), /not valid JSON/],
+    ["body stalls after the headers", () => new Response(new ReadableStream({ pull() { throw new DOMException("The operation timed out", "TimeoutError"); } })), /did not answer in time/],
+    ["reply without a body", () => new Response(null), /could not be read/],
     ["error result", () => Response.json({ result: 500, response: 0 }), /result 500/],
     ["null nonce", () => Response.json({ result: 200, response: null }), /invalid account nonce/],
     ["missing nonce", () => Response.json({ result: 200 }), /invalid account nonce/],
@@ -804,6 +806,51 @@ test("browser publisher refuses attested payloads before asking for a wallet sig
   const body = await response.json() as { error: string; identityMessage?: string };
   assert.match(body.error, /cannot prove.*production capability/i);
   assert.equal(body.identityMessage, undefined);
+});
+
+test("a signed retry that names its version resolves it after the catalog has indexed it", async () => {
+  const store = await import("../src/catalog/store.js");
+  const input = { ...base, serviceId: "replay-after-index" };
+  let published: { anchorAddress: string; programName: string; listing: Record<string, unknown> } | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    if (init?.method === "POST") {
+      const message = JSON.parse(String(init.body)).params?.[0]?.message;
+      return Response.json({ result: 200, response: message !== "searchStoragePrograms" ? 0
+        : published ? [{ storageAddress: published.anchorAddress, programName: published.programName }] : [] });
+    }
+    return published && String(url).endsWith(published.anchorAddress)
+      ? Response.json({ success: true, data: published.listing, owner: `0x${keyHex}`, programName: published.programName })
+      : new Response(null, { status: 404 });
+  };
+  try {
+    const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+    assert.equal(identity.listingVersion, 1, "the first response names the version to carry through the retries");
+    const authenticated = { ...input, listingVersion: identity.listingVersion,
+      identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+    const preview = await (await POST(request(authenticated))).json() as { message: string };
+    const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
+    const built = await (await POST(request(signed))).json() as NonNullable<typeof published> & { tx: unknown };
+    assert.ok(built.tx, "the first signed request prepares the write");
+    published = built;
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim, displayName: base.name, listings: [{
+      listingId: input.serviceId, version: 1, anchor: { kind: "storage-program", locator: built.anchorAddress } }] }] } as never);
+
+    const retried = await (await POST(request(signed))).json() as { exists: boolean; tx: unknown; anchorAddress: string };
+    assert.equal(retried.exists, true, "the indexed version is resolved, not renumbered");
+    assert.equal(retried.tx, null);
+    assert.equal(retried.anchorAddress, built.anchorAddress);
+    for (const listingVersion of [0, 3, 1.5, "1"]) {
+      const refused = await POST(request({ ...signed, listingVersion }));
+      assert.equal(refused.status, 400, `listingVersion ${JSON.stringify(listingVersion)}`);
+      assert.match((await refused.json() as { error: string }).error, /listingVersion must be/);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
+  }
 });
 
 /** Answer only the explicitly modelled read RPCs, never contact a node. */

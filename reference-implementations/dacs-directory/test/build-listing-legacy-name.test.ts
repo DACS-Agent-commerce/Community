@@ -156,3 +156,34 @@ test("a legacy program name for another version leaves this version free to publ
     },
   );
 });
+
+test("an unreadable legacy-name lookup withholds the create transaction", async () => {
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const finalInput = { ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
+  let legacyDown = false;
+  const nonceReads: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    if (init?.method !== "POST") return new Response(null, { status: 404 });
+    const call = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> }).params?.[0];
+    if (call?.message === "getAddressNonce") nonceReads.push(call.message);
+    if (call?.message === "searchStoragePrograms" && legacyDown && call.data?.query === legacyProgramName(1)) {
+      return new Response("unavailable", { status: 503 });
+    }
+    return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try {
+    const preview = await (await POST(request(finalInput))).json() as { message: string };
+    legacyDown = true;
+    const response = await POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
+    assert.equal(response.status, 503);
+    const body = await response.json() as Built;
+    assert.match(String(body.error), /could not safely determine whether this listing version already exists/);
+    assert.equal(body.tx, undefined, "a legacy name that cannot be read may still hold this version");
+    assert.deepEqual(nonceReads, [], "no write nonce is requested");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
