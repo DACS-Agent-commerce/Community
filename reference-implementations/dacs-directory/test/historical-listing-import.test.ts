@@ -5,7 +5,8 @@ import { contentHash } from "../src/catalog/canonical.js";
 import { verifyListing, verifyStoredListing } from "../src/catalog/listingVerification.js";
 import { verifyReferencedArtifactSignature } from "../src/catalog/bundlePolicy.js";
 
-const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-nested-phase-metadata.json", import.meta.url), "utf8"));
+// A Listing the pinned SDK reader admits; only its envelope is re-encoded as historical hex below.
+const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-public-storage.json", import.meta.url), "utf8"));
 const at = `stor-${"6".repeat(40)}`;
 const raw = { ...fixture.listing, signature: { ...fixture.listing.signature,
   value: Buffer.from(fixture.listing.signature.value, "base64url").toString("hex") } };

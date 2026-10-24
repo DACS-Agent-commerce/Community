@@ -36,6 +36,9 @@ const summary = (raw: Obj, at: string) => ({
   anchor: { kind: "storage-program", locator: at }, seller: { primaryClaim: seller, displayName: reg.displayName },
   offering: { title: raw.listingId, category: "services.test", tags: [] }, pricing: {}, status: "active", catalogObservedAt: 1,
 });
+// An active version 2 of an offer that also has version 1, and a fixture listing that is no chain admission decision.
+const nextVersion = { ...summary(good, locator(905)), version: 2 };
+const fixtureListing = { ...summary(good, "fixture:desk"), listingId: "fixture-desk", anchor: { kind: "fixture", locator: "fixture:desk" } };
 const withdrawnScope = { ...original, listingId: "withdrawn" };
 const withdrawn = { ...withdrawnScope, signature: await sign(withdrawnScope, "listing", 1) };
 const tombstone = { ...summary(withdrawn, locator(903)), status: "revoked", revocation: {
@@ -49,7 +52,7 @@ const put = seeded.prepare("INSERT INTO kv_state VALUES (?, ?, 0)");
 for (const [key, value] of Object.entries({
   "schema-version": 1, "sr2-anchor-schema-version": 2,
   "catalog": { catalogVersion: "1", generatedAt: 1, sellers: [{ ...reg, cci: [],
-    listings: [summary(bad, locator(901)), summary(good, locator(902)), tombstone],
+    listings: [summary(bad, locator(901)), summary(good, locator(902)), nextVersion, fixtureListing, tombstone],
     reputation: {}, registeredAt: 1, lastIndexedAt: 1 }] },
   "registrations": [reg], "scan-state": { lastSeenTxId: 20, listings: { [locator(902)]: `0x${seller.slice(-64)}` }, deals: {} },
 })) put.run(key, JSON.stringify(value));
@@ -65,11 +68,49 @@ const restart = () => {
   return JSON.parse(child.stdout);
 };
 
+const listedIds = (catalog: { sellers: Array<{ listings: Obj[] }> }) => catalog.sellers[0].listings.map((l) => l.listingId);
+
 test("old active admission decisions stay withheld through restart", async () => {
   const listed = async () => (await (await GET(new NextRequest("https://directory.example/api/dacs/listings"))).json()).listings;
-  assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["withdrawn"]);
-  assert.deepEqual(restart().sellers[0].listings.map((l: Obj) => l.listingId), ["withdrawn"]);
+  assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["fixture-desk", "withdrawn"]);
+  assert.deepEqual(listedIds(restart()), ["fixture-desk", "withdrawn"]);
   assert.deepEqual(store.loadRegistrations(), [reg]);
   assert.equal(store.loadScanState().lastSeenTxId, 20);
   assert.equal(store.loadScanState().listings[locator(902)], `0x${seller.slice(-64)}`);
+});
+
+test("the reset keeps the highest withheld version so the publisher never renumbers it", () => {
+  assert.equal(store.listingVersionFloor(seller, "allowed-second-key"), 2);
+  assert.equal(store.listingVersionFloor(seller, "missing-method"), 1);
+  assert.equal(store.listingVersionFloor(seller, "withdrawn"), 0, "a retained tombstone already carries its version");
+  assert.equal(store.listingVersionFloor(seller, "never-published"), 0);
+});
+
+test("the publisher numbers a new version after the withheld one", async () => {
+  const { POST } = await import("../app/api/dacs/build-listing/route.js");
+  const { NextRequest: Request } = await import("next/server");
+  const call = (body: Obj) => POST(new Request("https://directory.example/api/dacs/build-listing", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+  const base = { claim: seller, serviceId: "allowed-second-key", name: "Upgrade", description: "after the reset",
+    rails: ["demos-native:DEM"], delivery: ["deliver-storage-program"], pricing: { kind: "fixed", amount: "1", currency: "DEM" } };
+  const { identityMessage, identityPresentedAt } = await (await call(base)).json();
+  const identitySignature = Buffer.from(ed25519Sign(Buffer.from(identityMessage, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try {
+    const built = await (await call({ ...base, identityPresentedAt, identitySignature })).json();
+    assert.equal(built.listing.listingVersion, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the reset runs once: a listing saved after it survives the next start", () => {
+  const catalog = store.loadCatalog();
+  const saved = { ...catalog.sellers[0].listings[0], listingId: "saved-after-reset", status: "active" as const };
+  store.saveCatalog({ ...catalog, sellers: [{ ...catalog.sellers[0], listings: [...catalog.sellers[0].listings, saved] }] });
+  assert.deepEqual(listedIds(restart()), ["fixture-desk", "withdrawn", "saved-after-reset"]);
 });

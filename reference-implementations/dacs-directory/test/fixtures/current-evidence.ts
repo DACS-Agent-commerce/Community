@@ -25,13 +25,15 @@ export const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1]) {
+const SELF_SIGNED_DELIVERABLE: Obj = { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } };
+
+export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1], deliverable: Obj = SELF_SIGNED_DELIVERABLE) {
   maps.clear();
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy, presentedAt: 1, claims: [{ ref: presentedBy }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },

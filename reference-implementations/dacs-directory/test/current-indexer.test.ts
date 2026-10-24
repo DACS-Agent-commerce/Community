@@ -702,6 +702,16 @@ test("a Listing presented by a qualified claim has no public summary but still b
   assert.equal(record.deals[0].refsVerified, true);
 });
 
+test("a deal's evidence graph refuses a referenced Listing the SDK reader no longer admits", async () => {
+  // DPA-1: an attested-payload deliverable without a verification method. Historical reads use the same gate;
+  // only an explicit DACS_HISTORICAL_LISTING_IMPORTS pin re-admits an older signature encoding.
+  const fixture = await vector("dpa-1-job", 130, dids[1], { kind: "attested-payload", payloadFormat: "application/json" });
+  assert.equal(await verifyListing(fixture.listing), null);
+  const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+  assert.equal(graph.ok, false);
+  assert.match(String(graph.reason), /listing/i);
+});
+
 test("bindings signed by other parties leave a deal's binding resolution intact", async () => {
   const fixture = await vector("crowded-binding-job", 90);
   const deal = registeredDeal("crowded-binding-job", locator(996), locator(997));

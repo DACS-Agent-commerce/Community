@@ -85,6 +85,10 @@ function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
     (seller?.publicEndpoint === undefined || safePublicEndpoint(seller.publicEndpoint) !== undefined) &&
     (typeof conflictOfLawsRule !== "string" || !conflictOfLawsRule.startsWith("rule-ref:") || /^rule-ref:\S+$/.test(conflictOfLawsRule));
 }
+// The SDK shape check reads the exact received bytes. A ClaimReference whose
+// scheme is not lowercase (`DID:demos:agent:…`) is refused as the SDK reader
+// refuses it, although DACS-1 §6.3.1 lets a parser read the scheme
+// case-insensitively: CF-2 requires signed bytes to carry the lowercase form.
 function currentListing(scope: Record<string, unknown>): {
   signer: string; sellerClaim: string; signature: Record<string, unknown>;
 } | null {

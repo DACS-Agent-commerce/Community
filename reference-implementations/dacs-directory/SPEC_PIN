@@ -79,7 +79,9 @@
 # sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-# conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+# The SDK Listing schema, including DACS-4 section 9.6.3 DPA-1, and the next
+# vector are at d45c0a2, the Standard revision the pinned SDK declares.
+# conformance/vectors/security/listing-preserve-unknown-v0.1.json 987d3661c2c4ce9da3f4e7c57c55c7cda154743c99d1d3ef4ae164e8a5ae77e9
 # conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert

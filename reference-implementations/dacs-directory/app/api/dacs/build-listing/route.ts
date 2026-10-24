@@ -20,7 +20,7 @@ import {
   resolveOwnedAnchorByName,
 } from "@/src/catalog/chain";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
-import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
+import { listingVersionFloor, loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
@@ -94,6 +94,13 @@ export async function POST(req: NextRequest) {
   if (!selectedRail || delivery.length !== 1 || !PUBLISHABLE_DELIVERY.has(delivery[0])) {
     return NextResponse.json({ error: "pick one supported payment rail and one delivery method" }, { status: 400 });
   }
+  // Refused before any wallet signature is requested: no second request can succeed.
+  if (delivery[0] === "deliver-attested-payload") {
+    return NextResponse.json(
+      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
+      { status: 409 },
+    );
+  }
 
   const did = `did:demos:agent:${hex}`;
   const owner = `0x${hex}`;
@@ -105,7 +112,7 @@ export async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  const listingVersion = Math.max(0, ...priorVersions) + 1;
+  const listingVersion = Math.max(0, listingVersionFloor(did, serviceId), ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -177,12 +184,6 @@ export async function POST(req: NextRequest) {
     );
   } catch { /* malformed keys/signatures fail closed */ }
   if (!identityOk) return NextResponse.json({ error: "identity presentation signature is invalid" }, { status: 400 });
-  if (delivery[0] === "deliver-attested-payload") {
-    return NextResponse.json(
-      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
-      { status: 409 },
-    );
-  }
   const pricingTerm = {
     amount,
     currency,

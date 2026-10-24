@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { verifyListing } from "../src/catalog/listingVerification.js";
@@ -72,12 +73,21 @@ function signedCurrentListing(
   };
 }
 
-test("verifyListing canonicalizes mixed-case DID scheme spelling on read", async () => {
+test("verifyListing applies the SDK shape gate to the exact signed bytes, including DID scheme case", async () => {
   const mixedCaseClaim = `DID:demos:agent:${publicKeyHex}`;
-  const verified = await verifyListing(signedCurrentListing({}, mixedCaseClaim));
+  const everyRole = signedCurrentListing({}, mixedCaseClaim);
+  const lowercase = signedCurrentListing();
+  // The signature envelope is outside the signed scope, so this value stays cryptographically valid.
+  const signerOnly = {
+    ...lowercase,
+    signature: { ...(lowercase.signature as Record<string, unknown>), signer: mixedCaseClaim },
+  };
 
-  assert.equal(verified?.signer, claim);
-  assert.equal(verified?.sellerClaim, claim);
+  for (const listing of [everyRole, signerOnly]) {
+    assert.equal(isListing(listing), false, "the pinned SDK reader rejects it at step 1");
+    assert.equal(await verifyListing(listing), null);
+  }
+  assert.equal((await verifyListing(lowercase))?.signer, claim);
 });
 
 test("verifyListing rejects suffix-shaped aliases even when their signatures are valid", async () => {
