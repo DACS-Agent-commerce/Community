@@ -3,7 +3,16 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { dacsXSeparator, ed25519Sign, ed25519Verify, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
-import { verifySignedArtifact } from "../src/sdkVerification.js";
+import * as browserSafeSdk from "@kynesyslabs/dacs";
+import { verifySignedArtifact } from "@kynesyslabs/dacs";
+import { verifyBundleCore as pureVerifyBundleCore } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import { verifySignedArtifact as historicalVerifySignedArtifact } from "../src/sdkVerification.js";
+
+test("the SDK package name resolves to the browser-safe verification seam, not the full SDK barrel", () => {
+  assert.deepEqual(Object.keys(browserSafeSdk).sort(), ["verifyBundleCore", "verifySignedArtifact"]);
+  assert.equal(browserSafeSdk.verifySignedArtifact, historicalVerifySignedArtifact);
+  assert.equal(browserSafeSdk.verifyBundleCore, pureVerifyBundleCore);
+});
 
 test("historical delivery attestations retain NFC member-name hashing and reject changed signed bytes", async () => {
   const seed = new Uint8Array(32).fill(27);

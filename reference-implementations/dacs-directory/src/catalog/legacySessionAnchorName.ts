@@ -3,8 +3,8 @@
  * labelled legacy bundles. These strings are not a current normative SDK API.
  * Preserve the raw job ID used by historical anchors, including vet names:
  * the producer was dacs-sdk 44d8ff2 (`sessionAnchorName` in
- * src/agent/runSessionCore.ts), the SDK this Directory pinned before. The
- * current SDK's percent-encoded names address different anchors.
+ * src/agent/runSessionCore.ts). The names are written out here so a later pin
+ * change cannot change which anchors those bundles are read from.
  */
 export const legacySessionAnchorName = {
   agreement: (jobId: string): string => `dacs3:agreement:${jobId}`,

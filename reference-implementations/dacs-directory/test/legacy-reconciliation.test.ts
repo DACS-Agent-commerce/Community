@@ -46,6 +46,18 @@ test("legacy completion requires two authenticated agreeing copies and a termina
   }
 });
 
+test("legacy completion refuses authenticated copies that carry no bundle", () => {
+  for (const [name, buyer, seller] of [
+    ["neither bundle", { refsOk: true }, { refsOk: true }],
+    ["buyer bundle missing", { refsOk: true }, copy()],
+    ["seller bundle missing", copy(), { refsOk: true }],
+  ] as const) {
+    const result = reconcileLegacyCopies(buyer, seller);
+    assert.equal(result.refsVerified, false, name);
+    assert.equal(result.reputationEligible, false, name);
+  }
+});
+
 test("legacy authority selects the verified seller copy and reports seller-relative outcomes", () => {
   const buyer = copy(true, "aborted-by-self");
   const seller = copy(true, "aborted-by-other");
