@@ -63,6 +63,18 @@ test("legacy bundle verification accepts all historical Listing signature spelli
   }
 });
 
+test("a legacy Listing with no canonical form is not verified instead of throwing", async () => {
+  const { listing } = fixture("hex");
+  assert.ok(await verifyListing(listing));
+  const hostile: Obj[] = [
+    { ...listing, name: "bad\ud800" },
+    { ...listing, future: JSON.parse("1e400") },
+    { ...listing, future: 1.5 },
+    { ...listing, [`bad\ud800`]: "member name" },
+  ];
+  for (const raw of hostile) assert.equal(await verifyListing(raw), null, JSON.stringify(Object.keys(raw)));
+});
+
 test("legacy hashes agree across Listing admission, bundle roots, references and terms", async () => {
   const f = fixture("structured", true);
   const hash = legacyListingHash(stripSignature(f.listing));
