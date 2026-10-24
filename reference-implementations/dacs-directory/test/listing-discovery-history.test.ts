@@ -162,7 +162,7 @@ test("an omitted seller keeps rejection history until its registration leaves th
   t.mock.method(Date, "now", () => now);
   store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
   store.saveDomains([]);
-  const run = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+  const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true }), log: () => {}, resolveIdentities: offline });
   const diagnostic = () => store.indexerDiagnostics({ deadLetterLocator: anchor }).listingRejectionDiagnostics.items[0];
   await run();
   assert.equal(diagnostic()?.firstSeenAt, 1000);

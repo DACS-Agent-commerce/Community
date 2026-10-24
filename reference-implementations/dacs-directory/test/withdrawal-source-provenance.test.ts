@@ -38,7 +38,7 @@ test("standard unsigned indexes introduce independently verified offers without 
     ? Response.json({ result: 200, response: [] }) : Response.json(fixture);
   try {
     store.saveRegistrations([]); store.saveDomains(["seller.example"]);
-    const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+    const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
       crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
     for (const pins of ["{}", "[]", "null", "invalid json", JSON.stringify({ "https://other.example": seller }),
       JSON.stringify({ "https://seller.example": `did:demos:agent:${"a".repeat(64)}` })]) {

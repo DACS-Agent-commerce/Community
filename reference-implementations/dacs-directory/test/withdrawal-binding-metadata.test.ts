@@ -89,7 +89,7 @@ test("verified withdrawal bindings survive incomplete discovery metadata without
     try {
       store.saveRegistrations([]);
       store.saveDomains(["seller.example"]);
-      const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+      const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
         crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
       await run();
       const listings = store.loadCatalog().sellers.flatMap(seller => seller.listings);

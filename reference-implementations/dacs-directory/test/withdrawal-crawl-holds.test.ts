@@ -45,7 +45,7 @@ test("complete pinned crawls become indeterminate on failure, omission and malfo
     const result = await crawl(rows);
     if (!("error" in result)) assert.ok(result.withdrawalHashes?.every(value =>
       typeof value === "string" && /^[0-9a-f]{64}$/.test(value)), "only canonical hashes enter saved withdrawal state");
-    await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+    await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
       crawlWellKnown: async () => "error" in result ? { agents: [], errors: [result] } : { agents: [result], errors: [] } });
     return result;
   };

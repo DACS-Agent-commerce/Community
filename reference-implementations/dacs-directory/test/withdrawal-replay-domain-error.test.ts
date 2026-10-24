@@ -33,7 +33,7 @@ test('v3 completed source revalidation is not blocked by an unrelated failed dom
     const original = globalThis.fetch;
     globalThis.fetch = async (_input, init) => init?.body ? Response.json({ result: 200, response: [] }) : Response.json(fixture);
     try {
-        await reindexAll({ log: () => { }, resolveIdentities: async () => { throw new Error('offline'); },
+        await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => { }, resolveIdentities: async () => { throw new Error('offline'); },
             crawlWellKnown: async () => ({ agents: [{ domain: 'https://legacy.example', seller: legacySeller, listingAnchors: [], activeListingAnchors: [], contentHashes: {}, revocations: [], bundleBindings: [], withdrawalAuthenticated: true, withdrawalHashes: [legacyHash], incompleteWithdrawalHashes: [], withdrawalIndex: { generatedAt: 2, hash: 'f'.repeat(64) } }], errors: [{ domain: 'https://broken.example', error: 'unrelated public domain offline' }] }) });
         const rows = store.loadCatalog().sellers.find(s => s.primaryClaim === seller)?.listings ?? [];
         assert.equal(rows.some(activeOffer), true, `unrelated seller withheld: incomplete=${store.hasIncompleteWellKnownWithdrawal(seller, hash)} rows=${JSON.stringify(rows)}`);

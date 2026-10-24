@@ -68,7 +68,7 @@ const restart = () => {
   return JSON.parse(child.stdout);
 };
 
-test("old active admission decisions stay withheld through restart, then valid artifacts return", async () => {
+test("old active admission decisions stay withheld through restart and failed refresh, then valid artifacts return", async () => {
   assert.deepEqual(await verifyListingResult(bad), { ok: false, code: "VERIFICATION_METHOD_INVALID" });
   assert.equal((await verifyListingResult(good)).ok, true, "a second authorized seller key is allowed");
   const listed = async () => (await (await GET(new NextRequest("https://directory.example/api/dacs/listings"))).json()).listings;
@@ -77,6 +77,8 @@ test("old active admission decisions stay withheld through restart, then valid a
   assert.deepEqual(store.loadRegistrations(), [reg]);
   assert.equal(store.loadScanState().lastSeenTxId, 20);
   assert.equal(store.loadScanState().listings[locator(902)], `0x${seller.slice(-64)}`);
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: async () => ({ ok: false, reason: "offline" }) }), /offline/);
+  assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["withdrawn"]);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const at = String(input).split("/").pop();

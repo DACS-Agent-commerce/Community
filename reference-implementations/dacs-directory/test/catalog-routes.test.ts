@@ -64,7 +64,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: dids[SELLER], value: await sign(`dacs-listing:v1:${contentHash(listingScope)}`, SELLER) } };
+// The SDK's legacy-MVP read profile carries the compact signature value; agentId is the signer.
+const listing = { ...listingScope, signature: await sign(`dacs-listing:v1:${contentHash(listingScope)}`, SELLER) };
 
 const JOB = "catalog-job";
 async function binding(role: "buyer" | "seller", n: number, signer: number): Promise<Obj> {
@@ -100,7 +101,7 @@ const DOMAIN = "93.184.216.34";
 httpsAnswers.set("/.well-known/agent.json", { status: 200, body: JSON.stringify({ name: "A2A-only agent", skills: [{ id: "chat" }] }) });
 store.saveRegistrations([{ primaryClaim: dids[SELLER], displayName: "Route seller", listingAnchors: [locator(1)] }]);
 store.saveDomains([DOMAIN]);
-await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("identity unavailable"); } });
+await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("identity unavailable"); } });
 
 /** A request with no credentials of any kind. */
 const anonymous = (path: string) => new NextRequest(`http://localhost${path}`);
@@ -116,7 +117,7 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
   assert.equal((await detail.json() as Obj).serviceId, "svc");
 
   const seller = await sellerRoute.GET(anonymous(`/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
+    { params: Promise.resolve({ primaryClaimRef: dids[SELLER] }) });
   assert.equal(seller.status, 200);
   assert.equal(((await seller.json() as { listings: Obj[] }).listings).length, 1);
 
@@ -180,7 +181,7 @@ test("well-known binding ingestion preserves all 40 records through reindex and 
   const priorOverflow = bundleBindingOverflowKey("prior-job", "buyer", dids[BUYER]);
   store.saveScanState({ ...priorState, schemaVersion: 10, bundleBindings: { ...priorState.bundleBindings, [jobId]: bindings.slice(0, 5) as never },
     bundleBindingOverflow: [...(priorState.bundleBindingOverflow ?? []), priorOverflow] });
-  await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+  await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => [] });
   assert.ok(store.loadScanState().bundleBindingOverflow?.includes(priorOverflow));
   assert.equal(store.loadScanState().bundleBindings?.[jobId]?.length, 40);
   assert.ok(store.loadScanState().bundleBindingOverflow?.includes(bundleBindingOverflowKey(jobId, "seller", dids[SELLER])));

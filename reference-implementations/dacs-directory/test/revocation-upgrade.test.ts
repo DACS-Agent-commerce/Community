@@ -18,7 +18,7 @@ const identity = { bundleVersion: "1", presentedBy: claim, presentedAt: 1, claim
 const scope = {
   dacsVersion: "1", listingVersion: 1, listingId: "upgrade", seller: { displayName: "seller", identity: {
     ...identity, presentation: { kind: "per-claim", signatures: [{ ref: claim,
-      signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "hex") }] },
+      signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "base64url") }] },
   } },
   offering: { title: "upgrade", description: "upgrade", category: "test", tags: [], deliverable: { kind: "storage-program" } },
   buyerRequirement: { requirementVersion: "1", required: [] },
@@ -36,6 +36,7 @@ const seeded = new Database(dbPath);
 seeded.exec(`
   CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
   INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0);
+  INSERT INTO kv_state VALUES ('listing-admission-schema-version','1',0);
   CREATE TABLE revocation_candidates (
     listing_hash TEXT NOT NULL, locator TEXT NOT NULL, owner TEXT, content_hash TEXT,
     seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator)

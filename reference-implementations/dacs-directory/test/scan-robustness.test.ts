@@ -34,6 +34,8 @@ const dealKey = (jobId: string) => `${ownerOf(buyer)}\n${jobId}`;
 const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+/** The stubbed node stands for the pinned deployment that reindexAll checks first. */
+const pinnedDeployment = async () => ({ ok: true as const });
 
 const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
@@ -137,7 +139,7 @@ const artifactRow = (at: string) => {
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
-const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
 function sql(query: string) {
   const db = new Database(join(dataDirectory, "directory.sqlite"));
   try { return db.prepare(query).all() as Record<string, unknown>[]; } finally { db.close(); }
@@ -180,7 +182,10 @@ test("signature depth sweep bounds whole values and normalizes persisted envelop
   delete scope.signature;
   const extended = { ...scope, signature: { algorithm: "ed25519", signer: buyer,
     value: await signature(contentHash(scope), "dacs-bundle-binding:v1:", 0, "base64url") } };
-  for (const depth of [124, 125, 126, 127, 128, 129, 4096, 4098, 4100]) {
+  // CORE CF-5 admits 128 container levels (dacs-sdk b819b32, in the pin), the signature
+  // envelope included, so a member nested deeper than 126 has no canonical form. 61-64
+  // stay in the sweep: the previous pin (f68fed1) refused everything deeper than 62.
+  for (const depth of [61, 62, 63, 64, 124, 125, 126, 127, 128, 129, 4096, 4098, 4100]) {
     resetIndex([later], 6);
     chain({ [locator(4)]: { data: withSignatureMember(extended, nested(depth)) } }, [locator(4)]);
     await reindex();
@@ -345,6 +350,48 @@ test("omitted binding counts are persisted in scan diagnostics", async () => {
   chain({}); await reindex();
   assert.equal(scanCounts().omitted_bindings, 1);
   assert.equal(scanCounts().omitted_deals, 0);
+});
+
+test("a node outside the pinned deployment fails the pass before the catalog or scan state changes", async () => {
+  resetIndex([later], 13);
+  chain({ [locator(91)]: { data: JSON.stringify(listing) } }, [locator(91)]);
+  const before = store.loadScanState();
+  const runs = () => Number(sql("SELECT COUNT(*) count FROM scan_runs")[0].count);
+  const runsBefore = runs();
+  /** The refused pass is the latest run, failed with its reason, and scanned nothing. */
+  const assertFailedRun = (error: RegExp) => {
+    const run = scanCounts();
+    assert.equal(run.status, "failed");
+    assert.match(String(run.error), error);
+    assert.equal(run.txs_scanned, 0);
+    assert.equal(store.indexerDiagnostics().lastRun?.status, "failed", "the public status shows the refusal");
+  };
+  await assert.rejects(
+    reindexAll({
+      log: () => {},
+      resolveIdentities: offline,
+      nodeDeployment: async () => ({ ok: false, reason: "Demos node serves another chain, not the pinned chain" }),
+    }),
+    /catalog not updated: Demos node serves another chain, not the pinned chain/,
+  );
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
+  assert.equal(runs(), runsBefore + 1);
+  assertFailedRun(/^catalog not updated: Demos node serves another chain, not the pinned chain$/);
+  // A preflight that cannot read the node fails the pass the same way.
+  await assert.rejects(
+    reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: async () => { throw new Error("getNetworkInfo transport failed"); } }),
+    /^Error: catalog not updated: could not read the Demos node's chain: getNetworkInfo transport failed$/,
+  );
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
+  assertFailedRun(/could not read the Demos node's chain/);
+  // Without an injected preflight the pass asks the node itself; this stub has no chain identity.
+  await assert.rejects(reindexAll({ log: () => {}, resolveIdentities: offline }), /catalog not updated: could not read the Demos node's chain/);
+  assert.equal(store.loadCatalog().generatedAt, 13);
+  assert.deepEqual(store.loadScanState(), before);
+  assert.equal(runs(), runsBefore + 3);
+  assertFailedRun(/could not read the Demos node's chain/);
 });
 
 test("a SQLite failure during seller indexing fails the pass and records its status", async () => {

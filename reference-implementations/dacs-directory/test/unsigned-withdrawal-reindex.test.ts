@@ -16,13 +16,14 @@ const { activeOffer } = await import('../src/catalog/discovery.js');
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
-for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (endpoint present: ${domainBound})`, async (t) => {
+for (const [domainBound, suffix] of [[false, ''], [true, ''], [false, '?a=%25'], [true, '?a=%3A']] as const)
+test(`unsigned tombstone full reindex (endpoint present: ${domainBound}, reference: ${suffix || 'plain'})`, async (t) => {
   const seed = new Uint8Array(32).fill(domainBound ? 42 : 41);
   const key = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString('hex');
   const claim = `did:demos:agent:${key}`;
-  const sign = (raw: Record<string, unknown>, prefix: string) => ({ algorithm: 'ed25519', signer: claim,
+  const presentedBy = `${claim}${suffix}`;
+  const sign = (raw: Record<string, unknown>, prefix: string) => ({ algorithm: 'ed25519', signer: presentedBy,
     value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
-  const presentedBy = claim;
   const identityScope = { bundleVersion: '1', presentedBy, presentedAt: 1, claims: [{ ref: presentedBy }] };
   const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: presentedBy,
     signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
@@ -61,8 +62,19 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
   try {
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
     store.saveRegistrations([reg]); store.saveDomains([]);
-    const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
+    const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
       crawlWellKnown: async () => ({ agents: [crawled], errors: [] }) });
+    if (suffix) {
+      store.saveRegistrations([]);
+      store.saveDomains(['seller.example']);
+      readable = true;
+      await run();
+      const discovered = store.loadCatalog().sellers.find(seller => seller.primaryClaim === claim);
+      assert.equal(discovered?.listings[0]?.status, 'revoked', 'unsigned discovery retains the independently verified tombstone');
+      assert.equal(discovered?.listings[0]?.seller.primaryClaim, presentedBy);
+      assert.deepEqual(discovered?.listings[0]?.revocation, binding);
+      return;
+    }
     await run();
     assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true, 'positive control: executable listing is active before discovery');
     const unowned = structuredClone(complete);
@@ -110,6 +122,15 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
     const indexed = store.loadCatalog().sellers[0];
     assert.equal(indexed.listings.length, 1, `expected indexed listing: ${JSON.stringify(indexed)}`);
     assert.equal(indexed.listings.some(activeOffer), false, `unsigned but integrity-consistent revoked record was ignored: ${JSON.stringify(indexed.listings.map(l => l.status))}`);
+    // With no registration or authenticated source, only the verified marker
+    // allows this unsigned discovery row to introduce the Listing tombstone.
+    store.saveRegistrations([]);
+    delete process.env.DACS_WITHDRAWAL_SOURCE_PINS;
+    await run();
+    const discovered = store.loadCatalog().sellers.find(seller => seller.primaryClaim === claim);
+    assert.equal(discovered?.listings[0]?.status, 'revoked');
+    assert.equal(discovered?.listings[0]?.seller.primaryClaim, presentedBy, 'signed reference bytes survive identity matching');
+    assert.deepEqual(discovered?.listings[0]?.revocation, binding);
   } finally { globalThis.fetch = oldFetch; delete process.env.DACS_WITHDRAWAL_SOURCE_PINS; }
 
 });

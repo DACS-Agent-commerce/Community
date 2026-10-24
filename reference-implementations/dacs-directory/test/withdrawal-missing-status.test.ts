@@ -74,7 +74,7 @@ test('only a complete signed index entry can clear an authenticated incomplete w
         const body = url.endsWith('agent.json') ? card : raw; return { raw: body, body: JSON.parse(body) };
       } });
       assert.ok(!('error' in agent)); assert.equal(agent.withdrawalAuthenticated, true);
-      await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
+      await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
         crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
       assert.equal(store.loadCatalog().sellers.flatMap(s => s.listings).some(activeOffer), expectedActive, name);
       assert.equal(store.hasIncompleteWellKnownWithdrawal(claim, verified.contentHash), !expectedActive, name);
