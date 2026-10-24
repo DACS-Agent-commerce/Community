@@ -37,6 +37,17 @@ test("historical delivery attestations retain NFC member-name hashing and reject
   // Current canonical hashing still distinguishes NFC/NFD member names (CF-1).
 });
 
+test("historical adapter resolves to false for scopes with no frozen hash form", async () => {
+  const separator = dacsXSeparator("delivery-attestation") as never;
+  const signature = "ab".repeat(64);
+  let calls = 0;
+  for (const scope of [{ jobId: "x", n: 1.5 }, { jobId: "x", n: 2 ** 53 }, { jobId: "\ud800" }, { jobId: "x", [`\udc00`]: 1 }]) {
+    assert.equal(await verifySignedArtifact({ ...scope, signature }, separator, new Uint8Array(32),
+      () => { calls++; return true; }), false);
+  }
+  assert.equal(calls, 0);
+});
+
 test("historical adapter refuses unsupported signature shapes without invoking verification", async () => {
   const separator = dacsXSeparator("delivery-attestation") as never;
   let calls = 0;
