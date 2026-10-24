@@ -49,18 +49,26 @@ export function unavailableMetricQuery(params: URLSearchParams, surface: "api" |
   // in a filter wrapper's value (`filter=completionRate`). On the strict API
   // all unknown names may supply the rate-specific error; human tracking
   // values such as `utm_campaign=rating` are unrelated to filtering.
-  const metricWord = /completionrate|faultrate|rating|score|trackrecord/;
-  const rankingWord = /^(?:sort|order|rank|direction|dir$)/;
+  const metricWord = /^(?:rate|rating|score|completionrate|faultrate|trackrecord|(?:min|max)(?:completionrate|faultrate|rating|score))$/;
+  const hasMetricWord = (text: string): boolean => {
+    const words = text.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/);
+    return words.some((word) => metricWord.test(word)) || /\btrack record\b/.test(words.join(" "));
+  };
+  const rankingWord = /^(?:sort(?:by|order|key|direction|dir)?|order(?:by|direction)?|rank(?:by|ing)?|direction|dir)$/;
+  const hasRankingWord = (text: string): boolean => text.toLowerCase().replace(/[_-]/g, "")
+    .split(/[[\].]+/).some((word) => rankingWord.test(word));
   const rateReason = `Rate and score filters are unavailable on testnet under TP-1. ${COMPLETION_VERIFICATION_UNAVAILABLE}.`;
   for (const [name, value] of params) {
     if (LISTING_QUERY_PARAMETERS.includes(name)) continue;
+    if (surface === "discovery" && /^utm_/i.test(name)) continue;
     const segments = name.toLowerCase().replace(/[_-]/g, "").split(/[[\].]+/).filter(Boolean);
-    if (metricWord.test(segments.join(""))) return rateReason;
-    if (segments.some((segment) => rankingWord.test(segment))) {
+    if (hasMetricWord(name)) return rateReason;
+    if (hasRankingWord(name)) {
       return "Sorting and ranking are unavailable on testnet under TP-1.";
     }
     const filterWrapper = segments.some((segment) => /^filters?$/.test(segment));
-    if ((surface === "api" || filterWrapper) && metricWord.test(value.toLowerCase().replace(/[_-]/g, ""))) return rateReason;
+    if ((surface === "api" || filterWrapper) && hasMetricWord(value)) return rateReason;
+    if (filterWrapper && hasRankingWord(value)) return "Sorting and ranking are unavailable on testnet under TP-1.";
     if (surface === "discovery") continue;
     return "Unsupported listing query parameter. Only the documented listing filters are accepted; " +
       "rate filters, sorting and ranking are unavailable on testnet under TP-1.";
