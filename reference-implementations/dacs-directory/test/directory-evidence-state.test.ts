@@ -101,3 +101,11 @@ test("keeps fixture and legacy listing evidence visibly distinct", () => {
     { kind: "legacy", label: "legacy SDK listing" },
   );
 });
+
+test("deal presentation exposes the total observation count without a completed count", () => {
+  assert.deepEqual(directoryEvidenceState(listing(), seller(2, 3)).deals, {
+    total: 3,
+    label: "Observed outcomes: 3, not verified",
+    explanation: "Completion verification unavailable",
+  });
+});
