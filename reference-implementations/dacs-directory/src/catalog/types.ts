@@ -18,6 +18,8 @@ export interface Registration {
   authenticatedHashDeclarations?: string[];
   /** The owner signature verified on the registration as stored, before crawl data was merged in; in memory only, never stored. */
   ownerSignatureVerified?: boolean;
+  /** The listing anchors the owner signed, as stored before crawl data was merged in; in memory only, never stored. */
+  ownerSignedAnchors?: string[];
   /** Set when this pass's well-known crawl was incomplete, so absent anchors prove nothing; in memory only, never stored. */
   listingRejectionPruneDeferred?: boolean;
   /**

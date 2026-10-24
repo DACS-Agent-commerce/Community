@@ -237,7 +237,7 @@ index 9a0d7dff..34f5f133 100644
        evidence.check.verdict = "invalid-binding";
      }
 -    if (evidence.check.verdict === "ok" && evidence.value) {
-+    if (evidence.check.verdict === "ok" && evidence.value && !isNormativeGraph && isLegacyMvpGraph && isLegacyMvpAttestationRef(ev)) {
++    if (evidence.check.verdict === "ok" && evidence.value && !isNormativeGraph && isLegacyMvpGraph && isLegacyMvpAttestationRef(ev) && isLegacyMvpSettlementEvidence(evidence.value)) {
 +      evidence.check = attachSignatureCheck(evidence.check, await authenticateLegacyEvidence(evidence.value, bundle, deps));
 +    } else if (evidence.check.verdict === "ok" && evidence.value) {
        let decision: unknown;
