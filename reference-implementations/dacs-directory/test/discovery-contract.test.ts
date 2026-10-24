@@ -217,3 +217,9 @@ test("mixed current rails remain discoverable while alias-only offers are archiv
     assert.equal(activeOffer(listing(rails, "revoked")), false);
   }
 });
+
+test("llms.txt requires the verified Listing disposition before a new session, not just before payment", async () => {
+  const { GET } = await import("../app/llms.txt/route.js");
+  const text = await (await GET()).text();
+  assert.match(text, /verified disposition from the current SDK Listing reader before starting a new session \(DACS-1 LR-3\)/);
+});
