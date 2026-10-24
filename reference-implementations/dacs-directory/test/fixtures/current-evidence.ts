@@ -25,12 +25,12 @@ export const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
 
-export async function vector(jobId = "job-1", offset = 0) {
+export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1]) {
   maps.clear();
   const at = (n: number) => locator(offset + n);
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
-    seller: { identity: { bundleVersion: "1", presentedBy: dids[1], presentedAt: 1, claims: [{ ref: dids[1] }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
+    seller: { identity: { bundleVersion: "1", presentedBy, presentedAt: 1, claims: [{ ref: presentedBy }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
     offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
@@ -40,7 +40,7 @@ export async function vector(jobId = "job-1", offset = 0) {
   const identity = (listingScope.seller as Obj).identity as Obj;
   const identityScope = { ...identity }; delete (identityScope as Obj).presentation;
   const identitySig = Buffer.from(await ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
-  (identity.presentation as Obj).signatures = [{ ref: dids[1], signature: identitySig }];
+  (identity.presentation as Obj).signatures = [{ ref: presentedBy, signature: identitySig }];
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
