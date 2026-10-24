@@ -268,7 +268,7 @@ test("the seed writer keeps stored signed ratings numeric while the public read 
 test("README and contract comments describe TP-1 without promising rate filters or citing an absent file", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.doesNotMatch(readme, /Full normative listing filters/);
-  assert.match(readme, /`minCompletionRate` and `minRating`, which testnet profile TP-1 refuses with 400/);
+  assert.match(readme, /Listing filters excluding TP-1 rate\/score filters/);
   assert.doesNotMatch(readFileSync(new URL("../src/catalog/contracts.ts", import.meta.url), "utf8"), /docs\/TP-1\.md/);
 });
 test("non-rate search and price filtering still work over the same history", async () => {

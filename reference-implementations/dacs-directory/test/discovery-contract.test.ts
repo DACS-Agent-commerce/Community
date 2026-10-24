@@ -116,6 +116,10 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
   assert.deepEqual(required.capabilityRefs, ["directory-catalog-api", "directory-reputation-hints"]);
   assert.deepEqual(required.ruleRefs, ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4"]);
   assert.doesNotMatch(definition, /pinned SDK catalog reader/);
+  assert.equal(typeof required.description, "string");
+  assert.match(required.description as string, /minCompletionRate and minRating return 400 instead of filtering/);
+  assert.match(required.description as string, /completionRate and averageSellerRating are null even when bundleCount is positive/);
+  assert.doesNotMatch(required.description as string, /\bconform/i);
   // Rule 2 lists exactly the manifest's filters.
   const filterList = /^2\. The listings API accepts only the documented listing filters:([\s\S]+?) \(the manifest's/m.exec(definition);
   assert.ok(filterList, "TP-1 Rule 2 must declare the listing filters");
@@ -123,6 +127,17 @@ test("TP-1 is defined in-tree and declares its deviations in the Standard's Impl
   assert.deepEqual(documentedFilters, directoryManifest("https://directory.example").filters);
   assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
   assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
+});
+
+test("README and agent text say rates and ratings are null, other scores are omitted, and hints follow the Directory schema", async () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  assert.doesNotMatch(readme, /pinned SDK (?:catalog )?reader/);
+  assert.doesNotMatch(readme, /reputation scores as `null`/);
+  assert.match(readme, /average buyer and seller ratings as `null`, with a reason, and omit any\s+other score field/);
+  const { GET: getLlms } = await import("../app/llms.txt/route.js");
+  const llms = await (await getLlms()).text();
+  assert.doesNotMatch(llms, /reputation scores are null/);
+  assert.match(llms, /average ratings are null on testnet under TP-1, and other score fields are omitted/);
 });
 
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {

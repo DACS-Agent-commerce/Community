@@ -13,7 +13,8 @@ Live thesis: a Web2 marketplace *asks you to trust its database*. This directory
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
 Completion verification unavailable: TP-1 testnet catalog projections publish completion and
-fault rates and numeric reputation scores as `null`, with a reason. Counts are labelled
+fault rates and the average buyer and seller ratings as `null`, with a reason, and omit any
+other score field. Counts are labelled
 as observed outcomes, not verified completion. Rate and score filters and ranking return
 400. Individual evidence inspection remains available. Full metrics return under
 a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
@@ -350,10 +351,11 @@ and declares these as open `nonconforming` deviations in the Standard's
 `ImplementationDeviation` shape. `metricsProfile: "TP-1"`,
 `metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
 restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
-document `2.0.0`. A cached listing with no hint, or one the pinned SDK reader would
-reject, still has null metrics and uses the catalog snapshot window. Every served
-hint's observed count is rebuilt from the retained category records the seller
-reputation counts. The hint keeps the shape required by the pinned SDK catalog reader. Seller reputation retains
+document `2.0.0`. A cached listing with no hint, or one that fails the Directory's hint
+validation ([`docs/TP-1.md`](./docs/TP-1.md) rule 5), still has null metrics and uses the
+catalog snapshot window. Every served hint's observed count is rebuilt from the retained
+category records the seller reputation counts. The hint follows the Directory's published
+ListingSummary schema. Seller reputation retains
 `completed` and `totalAgreements` for compatibility, with explicit observed-count
 labels. These fields describe a counted subset, not the seller's complete history,
 and must not be divided into a completion rate.
