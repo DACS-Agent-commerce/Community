@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import Ajv2020 from "ajv/dist/2020.js";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { NextRequest } from "next/server";
@@ -89,19 +91,31 @@ test("the TP-1 contract change carries version signals and the exact advertised 
 test("TP-1 is defined in-tree and declares its deviations in the Standard's ImplementationDeviation shape", () => {
   const definition = readFileSync(new URL("../docs/TP-1.md", import.meta.url), "utf8");
   assert.match(definition, /DACS-Standard\/tree\/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091/);
-  const deviations = JSON.parse(/```json\n([\s\S]+?)\n```/.exec(definition)![1]) as Array<Record<string, unknown>>;
-  // DACS-Standard 4bb9e48a conformance/implementation-manifest.schema.json $defs.ruleRef.
-  const ruleRef = /^(?:[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?-?[0-9]+|(?:CORE|DACS-[1-5])-(?:[0-9]+|[A-Z])(?:\.[0-9]+)*)$/;
-  for (const deviation of deviations) {
+  const block = /```json\n([\s\S]+?)\n```/.exec(definition);
+  assert.ok(block, "TP-1 must carry its deviation JSON block");
+  const deviations: unknown = JSON.parse(block[1]);
+  assert.ok(Array.isArray(deviations), "deviations must be an array");
+  assert.ok(deviations.length > 0, "TP-1 must declare its nonconformance");
+  // Exact fixture from DACS-Standard 4bb9e48a, conformance/implementation-manifest.schema.json.
+  const schemaBytes = readFileSync(new URL("./fixtures/dacs-standard/implementation-manifest.schema.json", import.meta.url));
+  assert.equal(createHash("sha256").update(schemaBytes).digest("hex"), "e6dfc82a621737c2a422aa0708e10776f832608255f5bdc77acacbd77aabf805");
+  const standard: { $schema: string; $defs: Record<string, unknown> } = JSON.parse(schemaBytes.toString("utf8"));
+  const validate = new Ajv2020().compile<Record<string, unknown>>({
+    $schema: standard.$schema, $defs: standard.$defs, $ref: "#/$defs/deviation",
+  });
+  let required: Record<string, unknown> | undefined;
+  const entries: unknown[] = deviations;
+  for (const deviation of entries) {
+    assert.ok(validate(deviation), JSON.stringify(validate.errors));
     assert.deepEqual(Object.keys(deviation).sort(), ["capabilityRefs", "description", "effect", "id", "ruleRefs", "status"]);
     assert.equal(deviation.status, "open");
     assert.equal(deviation.effect, "nonconforming");
-    assert.ok(Array.isArray(deviation.ruleRefs) && deviation.ruleRefs.length > 0);
-    for (const reference of deviation.ruleRefs) {
-      assert.equal(typeof reference, "string");
-      assert.match(reference, ruleRef);
-    }
+    if (deviation.id === "tp-1-null-rates-and-refused-rate-filters") required = deviation;
   }
+  assert.ok(required, "TP-1 must retain its null-rate and refused-filter deviation");
+  assert.deepEqual(required.capabilityRefs, ["directory-catalog-api", "directory-reputation-hints"]);
+  assert.deepEqual(required.ruleRefs, ["DACS-1-6.3.6", "DACS-5-10.5.3", "DACS-5-10.5.4"]);
+  assert.doesNotMatch(definition, /pinned SDK catalog reader/);
   // Rule 2 lists exactly the manifest's filters.
   const filterList = /^2\. The listings API accepts only the documented listing filters:([\s\S]+?) \(the manifest's/m.exec(definition);
   assert.ok(filterList, "TP-1 Rule 2 must declare the listing filters");

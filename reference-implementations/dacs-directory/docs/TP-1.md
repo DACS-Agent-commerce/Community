@@ -36,7 +36,7 @@ the source revision named by the retained SPEC_PIN.
 4. Observed counts (`completed`, `totalAgreements`, `bundleCount`), currency
    totals and `bundleRefs` are rebuilt together from eligible retained records,
    labelled as observations that do not establish completion or settlement.
-5. A listing hint keeps the shape the pinned SDK catalog reader requires. A
+5. A listing hint follows this Directory's published schema. A
    missing or malformed cached hint is replaced by one over the listing's
    category and the catalog snapshot window. Its `bundleCount` is always
    rebuilt from the retained records the seller reputation counts
