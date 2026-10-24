@@ -569,6 +569,14 @@ profile are withheld until a successful reindex validates their signed artifacts
 the current reader. Registrations, scan pointers and revoked tombstones are retained;
 a failed refresh does not republish unvalidated offers. Rejection diagnostics
 retain occurrence counts and first-seen timestamps for continuing failures; each seller
-indexing pass prunes failures it no longer observes. Only authenticated, seller-matching artifacts from
-owner-signed registrations can appear in the public pointer notice. Registration binding and
-content-hash diagnostics call for a signed pointer update, not a new Listing ID.
+indexing pass prunes failures it no longer observes, except after a crawl that did not
+complete. Only a publisher-authenticated hash declaration for a seller-matching artifact can
+appear in the public pointer notice. Registration binding and content-hash diagnostics call
+for a corrected pointer or declaration, then a reindex, not a new Listing ID.
+
+**Listings that /register published.** The reader is the pinned SDK Listing shape plus
+this catalog's profile. The identity presentation also accepts the earlier publisher's
+wallet hex and the Standard vector's padded Base64 beside Base64URL; the Listing
+signature stays SIG-6 Base64URL. A string `verificationMethod` is refused, a revocation
+marker needs a non-negative `revokedAt`, and its binding carries the exact `presentedBy`
+(RB-2). `test/listing-verification.test.ts` and `test/revocation-vectors.test.ts` pin them.
