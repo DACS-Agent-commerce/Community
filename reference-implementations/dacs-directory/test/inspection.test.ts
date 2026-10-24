@@ -171,9 +171,18 @@ test("the listing route links the canonical seller identity, and the service pag
   const record = counterpartyEvidenceSellerRecord(1);
   const qualified = { ...record.listings[0], seller: { ...record.listings[0].seller, primaryClaim: `${seller}?channel=directory` } };
   saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ ...record, primaryClaim: seller, listings: [qualified] }] });
-  const response = await listingContractGet(
-    new NextRequest(`https://directory.example${listingJsonPath(qualified)}`),
-    { params: Promise.resolve({ listingId: qualified.listingId, version: String(qualified.version) }) });
+  // A configured public origin wins over the request host, as in CI; pin it so the links are predictable.
+  const configuredOrigin = process.env.NEXT_PUBLIC_DIRECTORY_URL;
+  process.env.NEXT_PUBLIC_DIRECTORY_URL = "https://directory.example";
+  let response: Response;
+  try {
+    response = await listingContractGet(
+      new NextRequest(`https://directory.example${listingJsonPath(qualified)}`),
+      { params: Promise.resolve({ listingId: qualified.listingId, version: String(qualified.version) }) });
+  } finally {
+    if (configuredOrigin === undefined) delete process.env.NEXT_PUBLIC_DIRECTORY_URL;
+    else process.env.NEXT_PUBLIC_DIRECTORY_URL = configuredOrigin;
+  }
   const link = (rel: string) => (response.headers.get("link") ?? "").split(", ")
     .find((entry) => entry.includes(`rel="${rel}"`))?.match(/<([^>]+)>/)?.[1];
   assert.equal(link("alternate"), `https://directory.example${servicePath(qualified)}`);
