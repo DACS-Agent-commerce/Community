@@ -82,6 +82,18 @@ const SELECTION_RULES = new Set(["lowest-price", "highest-price", "first-accepta
 const validSelectionRule = (value: unknown): boolean =>
   typeof value === "string" && (SELECTION_RULES.has(value) || /^rule-ref:[0-9a-f]{64}:\S+$/.test(value));
 
+// NOTE (open-world listing shape): the directory does NOT reject a listing that carries
+// unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
+// fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
+// newer-minor artifact correctly; SIG-5 (preserve-unknown) is the mechanism that makes that
+// safe — a verifier MAY ignore the *meaning* of unknown fields but MUST preserve them (it must
+// not strip them from the signed content). This validator only reads the recognised fields
+// below, so unknown fields are neither indexed nor interpreted, and verifyListing() hashes the
+// whole scope (contentHash) so they remain signature-bound — a field injected after signing
+// still fails the hash. A closed top-level
+// allowlist here would reject every listing produced under the first minor that adds a
+// top-level field, breaking forward compatibility.
+
 function validPriceTerm(value: unknown): boolean {
   const term = record(value);
   return Boolean(term && typeof term.amount === "string" && /^(?:0|[1-9]\d*)(?:\.\d*[1-9])?$/.test(term.amount) &&
@@ -113,18 +125,6 @@ function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
     (seller?.publicEndpoint === undefined || safePublicEndpoint(seller.publicEndpoint) !== undefined) &&
     (typeof conflictOfLawsRule !== "string" || !conflictOfLawsRule.startsWith("rule-ref:") || /^rule-ref:\S+$/.test(conflictOfLawsRule));
 }
-// NOTE (open-world listing shape): the directory does NOT reject a listing that carries
-// unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
-// fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
-// newer-minor artifact correctly; SIG-5 (preserve-unknown) is the mechanism that makes that
-// safe — a verifier MAY ignore the *meaning* of unknown fields but MUST preserve them (it must
-// not strip them from the signed content). This validator only reads the recognised fields
-// below, so unknown fields are neither indexed nor interpreted, and verifyListing() hashes the
-// whole scope (contentHash) so they remain signature-bound — a field injected after signing
-// still fails the hash. A closed top-level
-// allowlist here would reject every listing produced under the first minor that adds a
-// top-level field, breaking forward compatibility.
-
 function verificationMethodFailure(raw: Record<string, unknown>): boolean {
   const offering = record(raw.offering);
   const deliverable = record(offering?.deliverable);
@@ -482,6 +482,11 @@ export async function findValidListingRevocation(
     };
   }
   return null;
+}
+
+/** The title a verified Listing shows in lookups, whichever profile it was read under. */
+export function listingTitle(listing: VerifiedListing): string {
+  return listing.profile === "dacs-v0.1" ? listing.listing.offering.title : listing.listing.name;
 }
 
 export function ownerClaim(owner: string | undefined): string | null {
