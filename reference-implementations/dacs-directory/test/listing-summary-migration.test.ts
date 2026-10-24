@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { discoveryListing } from "../src/catalog/discovery.js";
 import type { Catalog } from "../src/catalog/types.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-listing-summary-migration-"));
@@ -55,6 +56,23 @@ seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog
       version: 1,
       status: "active",
       revocationBinding,
+    }, {
+      listingId: "listing-3",
+      version: 1,
+      contentHash: listingContentHash,
+      status: "revoked",
+      revocationBinding: { markerContentHash: "b".repeat(64) },
+    }, {
+      listingId: "listing-4",
+      version: 1,
+      status: "active",
+      revocation: revocationBinding,
+    }, {
+      listingId: "listing-5",
+      version: 1,
+      contentHash: listingContentHash,
+      status: "revoked",
+      revocationBinding: { ...revocationBinding, listingContentHash: "c".repeat(64) },
     }],
     deals: [],
     reputation: { completed: 0, bundleCount: 0, totalAgreements: 0, completionRate: null },
@@ -88,7 +106,7 @@ test("persisted revocationBinding summaries migrate to normative revocation once
 
 test("startup migrates ready and missing readiness summaries once across restarts", () => {
   const listings = migrated.sellers[0]?.listings;
-  assert.equal(listings?.length, 2);
+  assert.equal(listings?.length, 5);
   for (const listing of listings ?? []) {
     assert.equal(listing.transactionReadiness?.disposition, "unassessed");
     assert.match(listing.transactionReadiness?.reason ?? "", /buyer-local/);
@@ -107,8 +125,19 @@ test("startup migrates ready and missing readiness summaries once across restart
 });
 
 test("an active migrated row drops obsolete revocation evidence while revoked rows retain it", () => {
-  const [revoked, active] = migrated.sellers[0].listings;
+  const [revoked, active, , activeWithRevocation] = migrated.sellers[0].listings;
   assert.deepEqual(revoked.revocation, revocationBinding);
   assert.equal(Object.hasOwn(active, "revocationBinding"), false);
   assert.equal(Object.hasOwn(active, "revocation"), false);
+  assert.equal(Object.hasOwn(activeWithRevocation, "revocation"), false);
+});
+
+test("a revoked row whose old binding is incomplete or names another Listing is not published", () => {
+  const [revoked, , incomplete, , otherListing] = migrated.sellers[0].listings;
+  for (const listing of [incomplete, otherListing]) {
+    assert.equal(listing.status, "revoked");
+    assert.equal(Object.hasOwn(listing, "revocation"), false, listing.listingId);
+    assert.equal(discoveryListing(listing), false, `${listing.listingId} has no tombstone without its normative binding`);
+  }
+  assert.equal(discoveryListing(revoked), true);
 });

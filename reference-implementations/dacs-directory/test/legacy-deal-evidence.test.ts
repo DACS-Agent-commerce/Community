@@ -330,7 +330,7 @@ test("historical hex agreement signatures retain their authenticated read profil
 });
 
 test("legacy vet references read the buyer's historical verifyrecord separately from agreement and evidence", async () => {
-  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered", "invalid-signatures"] as const) {
+  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered", "tampered-agreement", "invalid-signatures"] as const) {
     const jobId = `legacy-vet-${mode}`;
     const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
     const vetScope: Obj = { recordVersion: "1", jobId, evaluatedParty: seller,
@@ -349,6 +349,8 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
     const agreementAt = deriveAnchorAddress(buyer, `dacs3:agreement:${jobId}`);
     assert.equal(new Set([vetAt, evidenceAt, agreementAt]).size, 3);
     storage[evidenceAt] = evidence;
+    // The label says the bundle carries vet records this reader cannot verify; another failed reference does not remove it.
+    if (mode === "tampered-agreement") storage[agreementAt] = { ...storage[agreementAt], expiresAt: "2098-01-01T00:00:00.000Z" };
     const wrongAt = deriveAnchorAddress(buyer, `dacs2:verifyresult:${jobId}`);
     if (mode === "wrong-name") storage[wrongAt] = vet;
     else if (mode !== "missing") storage[vetAt] = mode === "wrong-document" ? evidence
