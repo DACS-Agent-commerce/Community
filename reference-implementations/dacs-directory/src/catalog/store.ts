@@ -470,10 +470,12 @@ const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   }
   return catalog;
 };
+/** The stored catalog evidence, signed ratings included. Writers read this, never `loadCatalog`. */
 export const loadStoredCatalog = (): Catalog => normalizeStoredCatalog(
   getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] }),
 );
 let publicCatalogCache: { storedJson: string; publicJson: string } | undefined;
+/** The public TP-1 projection of the stored catalog (ratings null, rates removed). Never pass it to `saveCatalog`. */
 export const loadCatalog = (): Catalog => {
   // Exact stored bytes detect local and cross-process saves, even when their
   // timestamps coincide. Parse the same snapshot that keys the cache.

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { noRateCatalog, noRateClaim, noRateOutcomes } from "./fixtures/no-rate-catalog.js";
@@ -251,6 +253,23 @@ test("catalog writers read the stored catalog, never the public projection", () 
     assert.match(source, /loadStoredCatalog\(\)/, file);
     assert.doesNotMatch(source, /\bloadCatalog\(/, file);
   }
+});
+test("the seed writer keeps stored signed ratings numeric while the public read hides them", () => {
+  saveCatalog(noRateCatalog());
+  const script = fileURLToPath(new URL("../scripts/seed-counterparty-fixture.ts", import.meta.url));
+  const seeded = spawnSync(process.execPath, ["--import", "tsx", script], {
+    cwd: dirname(dirname(script)), env: { ...process.env, DACS_DIRECTORY_DATA: dataDirectory }, encoding: "utf8",
+  });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const stored = loadStoredCatalog().sellers.find((seller) => seller.primaryClaim === noRateClaim);
+  assert.equal(stored?.deals[0].ratings?.[0].value, 5);
+  assert.equal(loadCatalog().sellers.find((seller) => seller.primaryClaim === noRateClaim)?.deals[0].ratings?.[0].value, null);
+});
+test("README and contract comments describe TP-1 without promising rate filters or citing an absent file", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  assert.doesNotMatch(readme, /Full normative listing filters/);
+  assert.match(readme, /`minCompletionRate` and `minRating`, which testnet profile TP-1 refuses with 400/);
+  assert.doesNotMatch(readFileSync(new URL("../src/catalog/contracts.ts", import.meta.url), "utf8"), /docs\/TP-1\.md/);
 });
 test("non-rate search and price filtering still work over the same history", async () => {
   saveCatalog(noRateCatalog());

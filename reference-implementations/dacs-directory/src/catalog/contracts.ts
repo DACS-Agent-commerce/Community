@@ -12,7 +12,12 @@ const PATTERN_SPACE = "\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f
 const CANONICAL_STRING_PATTERN =
   `^[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f])?$`;
 
-/** The no-rate testnet restriction this Directory applies. See docs/TP-1.md. */
+/**
+ * The no-rate testnet restriction this Directory applies. TP-1 is a Directory-local
+ * profile: completion cannot be verified on testnet, so rates and rating values are
+ * null and the advisory DACS-1 §6.3.6 `minCompletionRate` and `minRating` filters
+ * are refused. The manifest, OpenAPI document and listing schema describe it.
+ */
 export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
 
 export const listingSummarySchema = {
