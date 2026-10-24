@@ -32,6 +32,7 @@ import {
   LIVE_STORAGE_SALT,
   resolveOwnedAnchorByName,
 } from "@/src/catalog/chain";
+import { StorageResponseTooLarge, storageResponseJson } from "@/src/catalog/artifactLimits";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
@@ -52,23 +53,44 @@ import {
 const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
+const NONCE_READ_TIMEOUT_MS = 15_000;
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
+/**
+ * The seller's current account nonce from the node. The reply is byte-bounded
+ * before decoding and the nonce must be a non-negative safe integer below
+ * MAX_SAFE_INTEGER, so the transaction nonce (this plus one) stays exact.
+ * Throws an Error naming the real cause: timeout, unreachable node, HTTP
+ * refusal, oversized or non-JSON reply, node error result or invalid nonce.
+ */
 async function accountNonce(addressHex: string): Promise<number> {
-  const res = await fetch(RPC + "/", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(15_000),
-    body: JSON.stringify({
-      method: "nodeCall",
-      params: [{ type: "nodeCall", message: "getAddressNonce", sender: null, receiver: null, timestamp: null, data: { address: `0x${addressHex}` }, extra: "" }],
-    }),
-  });
-  if (!res.ok) throw new Error("could not fetch account nonce");
-  const json = (await res.json()) as { result?: number; response?: number };
-  if (json?.result !== 200) throw new Error("could not fetch account nonce");
-  const nonce = Number(json.response);
-  if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("node returned an invalid account nonce");
+  let res: Response;
+  try {
+    res = await fetch(RPC + "/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(NONCE_READ_TIMEOUT_MS),
+      body: JSON.stringify({
+        method: "nodeCall",
+        params: [{ type: "nodeCall", message: "getAddressNonce", sender: null, receiver: null, timestamp: null, data: { address: `0x${addressHex}` }, extra: "" }],
+      }),
+    });
+  } catch (error) {
+    throw new Error(error instanceof Error && error.name === "TimeoutError" ? "the node did not answer in time" : "the node could not be reached");
+  }
+  if (!res.ok) throw new Error(`the node answered HTTP ${res.status}`);
+  let json: { result?: unknown; response?: unknown } | null;
+  try {
+    json = await storageResponseJson(res) as typeof json;
+  } catch (error) {
+    throw new Error(error instanceof StorageResponseTooLarge ? "the reply exceeds the byte limit" : "the reply is not valid JSON");
+  }
+  if (json?.result !== 200) throw new Error(`the node returned result ${String(json?.result)}`);
+  const nonce = json.response;
+  if (typeof nonce !== "number" || !Number.isSafeInteger(nonce) || nonce < 0 || nonce >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("the node returned an invalid account nonce");
+  }
   return nonce;
 }
 
@@ -423,7 +445,13 @@ return async function POST(req: NextRequest) {
     if (!deployment.ok) {
       return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
     }
-    const nonce = await accountNonce(hex);
+    let nonce: number;
+    try {
+      nonce = await accountNonce(hex);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : "unknown failure";
+      return NextResponse.json({ error: `could not read the account nonce (${cause}); no transaction was prepared` }, { status: 503 });
+    }
     const txNonce = nonce + 1;
     anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
     const payload = {
