@@ -16,6 +16,10 @@ export interface Registration {
   listingContentHashes?: Record<string, string>;
   /** Anchors whose declared hash came from a publisher-authenticated crawl; in memory only, never stored. */
   authenticatedHashDeclarations?: string[];
+  /** The owner signature verified on the registration as stored, before crawl data was merged in; in memory only, never stored. */
+  ownerSignatureVerified?: boolean;
+  /** Set when this pass's well-known crawl was incomplete, so absent anchors prove nothing; in memory only, never stored. */
+  listingRejectionPruneDeferred?: boolean;
   /**
    * Deals offered as reputation evidence: bundle refs + the anchor owners
    * (needed to resolve owner-scoped referenced-artifact addresses on the real
@@ -206,8 +210,9 @@ export interface DealRecord extends RegisteredDeal {
   refsVerified: boolean;
   /**
    * A disclosed reader limitation; never a substitute for a verification verdict.
-   * "legacy-vet-unsupported": the deal is not verified and its bundle carries vet records, which this
-   * reader cannot verify; the deal's other references may also have failed.
+   * "legacy-vet-unsupported": the deal is not verified and an authenticated, deal-bound copy of its
+   * bundle carries vet records, which this reader cannot verify; the deal's other references may also
+   * have failed, and the other copy may be missing or invalid.
    */
   verificationLimitation?: "legacy-vet-unsupported";
   outcome?: string;
