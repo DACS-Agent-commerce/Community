@@ -50,7 +50,7 @@ seeded.prepare("INSERT INTO kv_state VALUES ('catalog',?,0)").run(JSON.stringify
   catalogVersion: "1", generatedAt: 100, sellers: [{ primaryClaim: claim, deals: [], listings: [
     { listingId: "upgrade", contentHash: hash, status: "active" },
     { listingId: "unaffected", contentHash: otherHash, status: "active" },
-    { listingId: "revoked", version: 1, contentHash: revokedHash, status: "revoked", revocationBinding: {
+    { listingId: "revoked", version: 1, contentHash: revokedHash, status: "revoked", seller: { primaryClaim: claim }, revocationBinding: {
       sellerPrimaryClaim: claim, listingId: "revoked", listingVersion: 1, listingContentHash: revokedHash,
       logicalAddress: `dacs1-revoked:${encodeURIComponent(claim)}:revoked:v1`,
       markerAnchor: { kind: "storage-program", locator: at("5") }, markerContentHash: "f".repeat(64),
