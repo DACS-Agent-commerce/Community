@@ -23,7 +23,7 @@ GET ${base}/api/dacs/listings supports category, repeated tag, credential, prima
 
 artifactProfile=dacs-v0.1 identifies a current structured Listing. artifactProfile=legacy-sdk-v0.1 identifies the pinned SDK compatibility shape. artifactProfile=fixture-listing identifies a local fixture that is not signed or chain-anchored. Treat a missing profile as legacy for backward compatibility. A publicEndpoint, when present, is an advertised engagement route rather than a trust anchor. reachabilityHint is a time-stamped, non-authoritative catalog probe; treat stale hints as unknown and never use them for validity, identity, revocation, or reputation decisions.
 
-transactionReadiness.disposition=unassessed is deliberate: Directory admission authenticates a catalog candidate but does not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. A transacting client must dereference the signed artifact and obtain a verified disposition from the current SDK Listing reader before payment.
+transactionReadiness.disposition=unassessed is deliberate: Directory admission authenticates a catalog candidate but does not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. A transacting client must dereference the signed artifact and obtain a verified disposition from the current SDK Listing reader before starting a new session (DACS-1 LR-3), and so before any payment.
 
 ## Publication diagnostics
 
