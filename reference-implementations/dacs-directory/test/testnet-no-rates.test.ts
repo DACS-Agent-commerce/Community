@@ -265,3 +265,12 @@ test("non-rate search and price filtering still work over the same history", asy
     assertNoNumericMetrics(body);
   }
 });
+
+test("llms discovery text states the TP-1 null-metric and refused-filter contract", async () => {
+  const response = await getLlms();
+  const text = await response.text();
+  assert.match(text, /TP-1/);
+  assert.match(text, /Completion verification unavailable/);
+  assert.match(text, /minCompletionRate.*minRating.*trackRecord/);
+  assert.match(text, /400/);
+});

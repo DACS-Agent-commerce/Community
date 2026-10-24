@@ -86,6 +86,31 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   assert.deepEqual(await response.json(), JSON.parse(JSON.stringify(listingSummarySchema)));
 });
 
+test("TP-1 is defined in-tree and declares its deviations in the Standard's ImplementationDeviation shape", () => {
+  const definition = readFileSync(new URL("../docs/TP-1.md", import.meta.url), "utf8");
+  assert.match(definition, /DACS-Standard\/tree\/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091/);
+  const deviations = JSON.parse(/```json\n([\s\S]+?)\n```/.exec(definition)![1]) as Array<Record<string, unknown>>;
+  // DACS-Standard 4bb9e48a conformance/implementation-manifest.schema.json $defs.ruleRef.
+  const ruleRef = /^(?:[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)?-?[0-9]+|(?:CORE|DACS-[1-5])-(?:[0-9]+|[A-Z])(?:\.[0-9]+)*)$/;
+  for (const deviation of deviations) {
+    assert.deepEqual(Object.keys(deviation).sort(), ["capabilityRefs", "description", "effect", "id", "ruleRefs", "status"]);
+    assert.equal(deviation.status, "open");
+    assert.equal(deviation.effect, "nonconforming");
+    assert.ok(Array.isArray(deviation.ruleRefs) && deviation.ruleRefs.length > 0);
+    for (const reference of deviation.ruleRefs) {
+      assert.equal(typeof reference, "string");
+      assert.match(reference, ruleRef);
+    }
+  }
+  // Rule 2 lists exactly the manifest's filters.
+  const filterList = /^2\. The listings API accepts only the documented listing filters:([\s\S]+?) \(the manifest's/m.exec(definition);
+  assert.ok(filterList, "TP-1 Rule 2 must declare the listing filters");
+  const documentedFilters = [...filterList[1].matchAll(/`([^`]+)`/g)].map((match) => match[1]);
+  assert.deepEqual(documentedFilters, directoryManifest("https://directory.example").filters);
+  assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /\(\.\/docs\/TP-1\.md\)/);
+  assert.doesNotMatch(readFileSync(new URL("../src/catalog/testnetMetrics.ts", import.meta.url), "utf8"), /DEC-11/);
+});
+
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {
   const priorInternal = process.env.DEMOS_RPC;
   const priorPublic = process.env.NEXT_PUBLIC_DEMOS_RPC;
