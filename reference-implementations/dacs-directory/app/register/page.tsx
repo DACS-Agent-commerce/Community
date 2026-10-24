@@ -346,188 +346,27 @@ export default function Register() {
     }
   };
 
-  return (
-    <div className="form-shell">
-      <div className="eyebrow">seller journey</div>
-      <h1 className="h1">List a verifiable service</h1>
-      <p className="sub">Describe the outcome in plain language, preview exactly what buyers and agents will see, then sign and anchor it with your Demos wallet.</p>
-
-      <ol className="form-stepper" aria-label="Listing progress">
-        {SCREENS.map((label, index) => <li key={label} className={index < activeIndex ? "done" : index === activeIndex ? "active" : ""} aria-current={index === activeIndex ? "step" : undefined}>{index + 1}. {label}</li>)}
+  return <section className="section card">
+    <div className="eyebrow">existing chain listings</div>
+    <h1>Submit listing pointers</h1>
+    <p>The browser publisher is unavailable in this release. Publish through a DACS client that verifies rail authority and a finalized anchor receipt.</p>
+    <p>For an existing listing, submit its primary claim and storage addresses to <code>POST /api/dacs/register</code>. The Directory queues discovery hints and independently verifies the chain artifacts during indexing.</p>
+    <p>Submitting pointers does not confirm publication or make a listing active.</p>
+    <Link href="#registration-api" className="btn">Read the registration API</Link>
+    <section id="registration-api" aria-labelledby="registration-api-title">
+      <h2 id="registration-api-title">Registration API</h2>
+      <p>Send JSON with <code>Content-Type: application/json</code>. A minimal pointer set is:</p>
+      <pre>{JSON.stringify({ primaryClaim: "did:demos:agent:<64 lowercase hex>", displayName: "My agent", listingAnchors: ["stor-<40 lowercase hex>"] }, null, 2)}</pre>
+      <p><code>listingAnchors</code> accepts up to 32 addresses. Optional <code>deals</code> (up to 200) carry <code>jobId</code>, <code>rail</code>, <code>buyerBundleRef</code>, optional <code>sellerBundleRef</code> and <code>owners: {"{ buyer, seller }"}</code>. Optional <code>bundleBindings</code> carry up to 256 DACS-5 BB-4 verified bindings.</p>
+      <p>A first submission may be unsigned. Every update to an existing claim requires its owner's Ed25519 signature; unsigned updates return 403. To sign:</p>
+      <ol>
+        <li>POST the unsigned pointer set to <code>/api/dacs/prepare-registration</code>.</li>
+        <li>Sign the exact UTF-8 <code>registration.ownerSignature.message</code> with the key named by <code>primaryClaim</code>. Keep the returned message, signedAt and pointer fields unchanged.</li>
+        <li>Add the signature as <code>registration.ownerSignature.signature</code> (hex or Base64URL), then POST that complete <code>registration</code> to <code>/api/dacs/register</code> within ten minutes.</li>
       </ol>
-
-      {screen === "connect" && (
-        <section className="card" aria-labelledby="connect-heading">
-          <div className="eyebrow">step 1</div>
-          <h2 id="connect-heading" className="card-section-title">Connect the agent&apos;s wallet</h2>
-          <p className="agent-desc">The wallet proves ownership of the listing and anchors it on-chain. The directory never receives your private key.</p>
-          {wallet.address ? (
-            <>
-              <div className="badges"><span className="badge ok">connected</span><span className="badge mono">{wallet.address.slice(0, 22)}…</span></div>
-              {!recoveryLoaded ? (
-                <p className="meta" role="status">Checking this browser for an unfinished publication…</p>
-              ) : pendingPublication?.claim === claim ? (
-                <div className="seller-recovery">
-                  <div>
-                    <span className="eyebrow">unfinished publication</span>
-                    <strong>{pendingPublication.listingId} · version {pendingPublication.listingVersion}</strong>
-                    <code className="recovery-coordinate">{pendingPublication.anchorAddress}</code>
-                  </div>
-                  <p className="note">Resume this exact saved anchor. The directory will verify it again and will not resend its chain transaction.</p>
-                  <button className="btn" type="button" onClick={resumePublication}>Check chain and resume</button>
-                </div>
-              ) : pendingPublication ? (
-                <p className="verdict err" role="alert">This browser has an unfinished listing for a different Demos wallet. Switch to that account in Demos Wallet, then reload this page to recover it.</p>
-              ) : (
-                <button className="btn" type="button" onClick={() => setScreen("describe")}>Continue</button>
-              )}
-            </>
-          ) : wallet.available ? (
-            <button className="btn" type="button" onClick={wallet.connect} disabled={wallet.connecting}>{wallet.connecting ? "Connecting…" : "Connect Demos wallet"}</button>
-          ) : wallet.detecting ? (
-            <p className="meta" role="status">Looking for the wallet extension…</p>
-          ) : (
-            <div className="button-row"><a className="btn" href={WALLET_URL} target="_blank" rel="noreferrer">Install Demos wallet <span aria-hidden>↗</span></a><Link className="btn secondary" href="/how-it-works">Why a wallet?</Link></div>
-          )}
-          {wallet.error && <p className="verdict err" role="alert">{wallet.error}</p>}
-        </section>
-      )}
-
-      {screen === "describe" && (
-        <section className="card" aria-labelledby="describe-heading">
-          <div className="eyebrow">step 2</div>
-          <h2 id="describe-heading" className="card-section-title">Describe the buyer&apos;s outcome</h2>
-          <div className="form-field"><label htmlFor="listing-title">Service title</label><input id="listing-title" className="form-control" required maxLength={200} placeholder="LLM code review for GitHub pull requests" value={name} onChange={(event) => setName(event.target.value)} /></div>
-          <div className="form-field"><label htmlFor="listing-description">What the buyer receives</label><textarea id="listing-description" className="form-control" required maxLength={2000} aria-describedby="description-hint" placeholder="A review posted on your pull request within minutes. Include the price or explain how the agent quotes." value={description} onChange={(event) => setDescription(event.target.value)} /><span id="description-hint" className="field-hint">{description.length}/2000 characters · include price, expected input, output, and timing.</span></div>
-          <div className="form-field"><label htmlFor="service-id">Service ID</label><input id="service-id" className="form-control mono" required maxLength={64} aria-describedby="service-id-hint" placeholder="pr-review" value={serviceId} onChange={(event) => setServiceId(event.target.value)} /><span id="service-id-hint" className="field-hint">Stable machine identifier. It will be saved as <span className="mono">{slug || "your-service-id"}</span>.</span></div>
-          <div className="form-field"><label htmlFor="category">Category</label><select id="category" className="form-control" value={category} onChange={(event) => setCategory(event.target.value)}><option value="services.code-review">Code review</option><option value="services.inference">AI inference</option><option value="services.research">Research</option><option value="data.finance">Financial data</option><option value="data.sports">Sports data</option><option value="services.other">Other service</option></select></div>
-          <div className="form-field"><label htmlFor="tags">Search tags</label><input id="tags" className="form-control" maxLength={527} aria-invalid={tags.length > 0 && !validTags} aria-describedby="tags-hint" placeholder="github, code-review, llm" value={tags} onChange={(event) => setTags(event.target.value)} /><span id="tags-hint" className="field-hint">Optional, comma separated: {tagValues.length}/16 tags; maximum 32 characters each.</span></div>
-          <div className="form-field"><label htmlFor="public-endpoint">Agent endpoint</label><input id="public-endpoint" className="form-control mono" type="url" maxLength={2048} aria-invalid={publicEndpoint.length > 0 && !validEndpoint} aria-describedby="public-endpoint-hint" placeholder="https://agent.example.com/a2a" value={publicEndpoint} onChange={(event) => setPublicEndpoint(event.target.value)} /><span id="public-endpoint-hint" className="field-hint">Optional HTTPS endpoint without embedded credentials.</span></div>
-
-          <fieldset className="form-field"><legend className="form-legend">Pricing model</legend><div className="badges">{PUBLISHABLE_PRICING_KINDS.map((kind) => <button key={kind} type="button" aria-pressed={pricingKind === kind} className={`badge filter ${pricingKind === kind ? "active" : ""}`} onClick={() => setPricingKind(kind)}>{kind === "negotiable" ? "negotiation" : kind}</button>)}</div></fieldset>
-          <div className="choice-grid">
-            <div className="form-field"><label htmlFor="price-amount">{pricingKind === "fixed" ? "Fixed amount" : pricingKind === "negotiable" ? "Negotiation centre" : pricingKind === "auction" ? "Reserve amount" : "Price per unit"}</label><input id="price-amount" className="form-control" required inputMode="decimal" aria-invalid={amount.length > 0 && !validAmount} placeholder="1" value={amount} onChange={(event) => setAmount(event.target.value)} /></div>
-            <div className="form-field"><label htmlFor="price-currency">Currency or asset</label><input id="price-currency" className="form-control mono" required maxLength={32} aria-invalid={currency.length > 0 && !validCurrency} placeholder="DEM or usd-stablecoin" value={currency} onChange={(event) => setCurrency(event.target.value)} /></div>
-            <div className="form-field"><label htmlFor="price-unit">{pricingKind === "metered" ? "Metered unit" : "Unit"}</label><input id="price-unit" className="form-control" maxLength={64} placeholder={pricingKind === "metered" ? "API call" : "per-job"} value={unit} onChange={(event) => setUnit(event.target.value)} /></div>
-          </div>
-          {pricingKind === "metered" && <div className="form-field"><label htmlFor="price-minimum">Minimum total</label><input id="price-minimum" className="form-control" inputMode="decimal" aria-invalid={minTotal.length > 0 && !validMinimum} placeholder="Optional" value={minTotal} onChange={(event) => setMinTotal(event.target.value)} /><span className="field-hint">Optional floor in {currency || "the selected currency"}. The agreement total is the greater of this floor or unit price × whole-unit quantity.</span></div>}
-          {pricingKind === "negotiable" && <div className="choice-grid">
-            <div className="form-field"><label htmlFor="price-min">Maximum discount (%)</label><input id="price-min" className="form-control" type="number" min="0" max="99" value={minPct} onChange={(event) => setMinPct(event.target.value)} /></div>
-            <div className="form-field"><label htmlFor="price-max">Maximum uplift (%)</label><input id="price-max" className="form-control" type="number" min="0" value={maxPct} onChange={(event) => setMaxPct(event.target.value)} /></div>
-          </div>}
-          {pricingKind === "auction" && <div className="form-field"><label htmlFor="selection-rule">Selection rule</label><select id="selection-rule" className="form-control" value={selectionRule} onChange={(event) => setSelectionRule(event.target.value as typeof selectionRule)}><option value="first-acceptable">First acceptable</option><option value="lowest-price">Lowest price</option><option value="highest-price">Highest price</option></select></div>}
-          {pricingKind === "negotiable" && <p className="field-hint">The signed RFQ allows up to 8 turns and a 5-minute session timeout.</p>}
-          {pricingKind === "auction" && <p className="field-hint">The signed sealed-envelope window closes 7 days after publication, followed by a 1-hour reveal window.</p>}
-          {pricingKind === "metered" && <p className="field-hint">Metered listings use deterministic fixed-price acceptance; buyer and seller co-sign the whole-unit quantity and computed total at agreement commit.</p>}
-
-          <fieldset className="form-field"><legend className="form-legend">Payment rail</legend><div className="badges">{PUBLISHABLE_RAIL_OPTIONS.map((option) => <button key={option.railId} type="button" aria-pressed={rails.includes(option.railId)} className={`badge rail filter ${rails.includes(option.railId) ? "active" : ""}`} onClick={() => setRails([option.railId])}>{option.label}</button>)}</div><span className="field-hint">{selectedRail?.availability === "operator_gated" ? "AP2 is operator-gated in v0.1 and requires Stripe provider onboarding; the listing records that rail without claiming it is publicly live." : "The selected rail becomes the signed payment step and accepted rail."}</span></fieldset>
-          <fieldset className="form-field"><legend className="form-legend">Delivery type</legend><div className="choice-grid">{DELIVERY_OPTIONS.map((option) => <label key={option.id} className="choice-card"><input type="radio" name="delivery" value={option.id} checked={delivery === option.id} onChange={() => setDelivery(option.id)} /><span><strong>{option.label}</strong><span className="field-hint" style={{ display: "block" }}>{option.hint}</span></span></label>)}</div></fieldset>
-
-          <p id="listing-readiness" className={`form-readiness ${validDescription ? "ready" : ""}`}>
-            {validDescription ? "Ready for review." : <><strong>Before review:</strong> {validationIssues.join(" · ")}.</>}
-          </p>
-          <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("connect")}>Back</button><button className="btn" type="button" aria-describedby="listing-readiness" disabled={!validDescription} onClick={() => setScreen("review")}>Review listing</button></div>
-        </section>
-      )}
-
-      {screen === "review" && (
-        <section className="card" aria-labelledby="review-heading">
-          <div className="eyebrow">step 3</div>
-          <h2 id="review-heading" className="card-section-title">Review before signing</h2>
-          <p className="agent-desc">This is the service card buyers will discover. The technical identifiers below become part of the signed artifact.</p>
-          <div className="card service-card" style={{ background: "var(--bg-subtle)" }}>
-            <div className="service-card-topline"><span className="eyebrow">{category.replaceAll(".", " / ")}</span><span className="badge ok">will be signed</span></div>
-            <h3>{name}</h3><p className="agent-desc">{description}</p>
-            <div className="service-facts"><div><span>pricing</span><strong>{amount} {currency}{unit ? pricingKind === "metered" ? ` per ${unit}` : ` · ${unit}` : ""}{pricingKind === "metered" && minTotal ? ` · ${minTotal} minimum` : ""}</strong></div><div><span>model</span><strong>{pricingKind}{pricingKind === "negotiable" ? ` (-${minPct}% / +${maxPct}%)` : pricingKind === "auction" ? ` · ${selectionRule}` : ""}</strong></div></div>
-            <div className="badges">{rails.map((value) => <span className="badge rail" key={value}>{PUBLISHABLE_RAIL_OPTIONS.find((option) => option.railId === value)?.label ?? value}</span>)}<span className="badge">{DELIVERY_OPTIONS.find((option) => option.id === delivery)?.label}</span></div>
-            <p className="meta mono">{slug} · {claim}</p>
-          </div>
-          <details className="technical-disclosure">
-            <summary>Preview the machine-readable listing</summary>
-            <pre className="artifact">{JSON.stringify({
-              dacsVersion: "1", listingId: slug, listingVersion: "assigned at publish",
-              seller: { identity: "separately signed IdentityBundle", displayName: name.trim(), publicEndpoint: publicEndpoint || undefined },
-              offering: { title: name.trim(), description: description.trim(), category, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean), deliverable: delivery.replace("deliver-", "") },
-              buyerRequirement: { requirementVersion: "1", required: [] },
-              pricing: pricingPreview, acceptedRails: selectedRail ? [{ railId: selectedRail.railId }] : [],
-              pipeline: selectedRail ? [
-                { kind: negotiationPhase },
-                { kind: "commit-agreement" },
-                { kind: selectedRail.phaseKind, parameters: { rail: selectedRail.railId } },
-                { kind: delivery },
-              ] : [],
-            }, null, 2)}</pre>
-          </details>
-          <p className="wallet-approval-note"><strong>For a new listing, expect four wallet approvals:</strong> seller identity, listing signature, on-chain transaction, and directory registration. The directory never receives your private key.</p>
-          <div className="button-row"><button className="btn secondary" type="button" onClick={() => setScreen("describe")}>Edit details</button><button className="btn" type="button" onClick={publish}>Sign and publish</button></div>
-        </section>
-      )}
-
-      {(screen === "publish" || screen === "done") && (
-        <section className="card" aria-labelledby="publish-heading">
-          <div className="eyebrow">step 4</div>
-          <h2 id="publish-heading" className="card-section-title">Publish on-chain</h2>
-          <ul className="progress-list" aria-live="polite">
-            <Progress label="Build the current DACS listing" state={progressState(publishStep, "building", failedAt)} />
-            <Progress label="Sign identity and listing" state={progressState(publishStep, "signing", failedAt)} />
-            <Progress label="Anchor it on-chain" state={progressState(publishStep, "anchoring", failedAt)} />
-            <Progress label="Verify the listing from chain" state={progressState(publishStep, "confirming", failedAt)} />
-            <Progress label="Register the catalog pointer" state={progressState(publishStep, "registering", failedAt)} />
-          </ul>
-          {status && <p className={publishStep === "failed" ? "verdict err" : publishStep === "complete" ? "verdict ok" : "note"} role={publishStep === "failed" ? "alert" : "status"}>{status}</p>}
-          {publishStep === "failed" && pendingPublication ? (
-            <div className="button-row"><button className="btn" type="button" onClick={resumePublication}>{pendingPublication.stage === "registering" ? "Retry directory registration" : "Check chain and resume"}</button></div>
-          ) : publishStep === "failed" ? (
-            <div className="button-row"><button className="btn" type="button" onClick={publish}>Retry publish</button><button className="btn secondary" type="button" onClick={() => setScreen("review")}>Review details</button></div>
-          ) : null}
-          {screen === "done" && profileUrl && <div className="button-row"><Link className="btn" href={profileUrl}>View seller profile</Link><Link className="btn secondary" href="/discover">Browse directory</Link></div>}
-        </section>
-      )}
-
-      {screen === "done" && <WellKnownFiles claim={claim} />}
-    </div>
-  );
-}
-
-type ProgressState = "waiting" | "current" | "complete" | "failed";
-
-function progressState(current: PublishStep, target: PublishStep, failedAt: PublishStep | null): ProgressState {
-  const order: PublishStep[] = ["idle", "building", "signing", "anchoring", "confirming", "registering", "complete"];
-  if (current === "failed" && failedAt) {
-    const failedIndex = order.indexOf(failedAt);
-    const targetIndex = order.indexOf(target);
-    return targetIndex < failedIndex ? "complete" : targetIndex === failedIndex ? "failed" : "waiting";
-  }
-  const currentIndex = order.indexOf(current);
-  const targetIndex = order.indexOf(target);
-  return currentIndex > targetIndex ? "complete" : currentIndex === targetIndex ? "current" : "waiting";
-}
-
-function Progress({ label, state }: { label: string; state: ProgressState }) {
-  return <li className={state}><span aria-hidden>{state === "complete" ? "✓" : state === "current" ? "●" : state === "failed" ? "✗" : "○"}</span>{label}</li>;
-}
-
-function WellKnownFiles({ claim }: { claim: string | null }) {
-  const [domain, setDomain] = useState("");
-  const [files, setFiles] = useState<Record<string, string> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const generate = async () => {
-    if (!claim) return;
-    setBusy(true); setError(null); setFiles(null);
-    const response = await fetch(`/api/dacs/wellknown-files?claim=${encodeURIComponent(claim)}&domain=${encodeURIComponent(domain.trim())}`);
-    const body = await response.json();
-    if (!response.ok) setError(body.error); else setFiles(body.files);
-    setBusy(false);
-  };
-  return (
-    <section className="card" style={{ marginTop: 16 }} aria-labelledby="domain-heading">
-      <div className="eyebrow">optional</div><h2 id="domain-heading" className="card-section-title">Publish discovery files on your domain</h2>
-      <p className="agent-desc">This makes the same listing independently discoverable from your agent&apos;s own domain.</p>
-      <div className="form-field"><label htmlFor="agent-domain">Agent domain</label><input id="agent-domain" className="form-control mono" placeholder="agent.example.com" value={domain} onChange={(event) => setDomain(event.target.value)} /></div>
-      <button className="btn" type="button" onClick={generate} disabled={busy || !claim || !domain.trim()}>{busy ? "Generating…" : "Generate .well-known files"}</button>
-      {error && <p className="verdict err" role="alert">{error}</p>}
-      {files && Object.entries(files).map(([path, content]) => <details className="technical-disclosure" key={path}><summary className="mono">{path}</summary><pre className="artifact">{content}</pre></details>)}
+      <p>A successful response has <code>ok: true, queued: true</code>. Invalid or stale signatures return 400. The next indexing pass independently verifies each anchor.</p>
+      <h3>Generate .well-known files</h3>
+      <p>GET <code>/api/dacs/wellknown-files?claim=&lt;primaryClaim&gt;&amp;domain=&lt;hostname&gt;</code> for an indexed seller. Host both returned files byte for byte, then POST <code>{'{"domain":"agent.example"}'}</code> to <code>/api/dacs/register-domain</code>.</p>
     </section>
-  );
+  </section>;
 }
