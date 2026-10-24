@@ -16,8 +16,7 @@ seeded.exec(`
     value_json TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   );
-  INSERT INTO kv_state(key,value_json,updated_at) VALUES ('schema-version','1',0);
-  INSERT INTO kv_state(key,value_json,updated_at) VALUES ('listing-admission-schema-version','1',0);
+  INSERT INTO kv_state(key,value_json,updated_at) VALUES ('schema-version','1',0), ('listing-admission-schema-version','1',0);
   CREATE TABLE artifacts (
     locator TEXT PRIMARY KEY,
     kind TEXT NOT NULL,

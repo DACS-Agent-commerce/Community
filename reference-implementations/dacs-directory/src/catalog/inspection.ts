@@ -8,7 +8,7 @@ import { sellerIdentity } from "./discovery.js";
 
 export const DIRECTORY_TRANSACTION_READINESS: DirectoryTransactionReadiness = Object.freeze({
   disposition: "unassessed",
-  reason: "The Directory authenticated this catalog candidate but did not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. Run the current SDK Listing reader before starting a session.",
+  reason: "The Directory did not assess transaction readiness: buyer-local revocation, rail-authority, payload-capability, and delegated signer-control policy were not executed for this catalog entry.",
 });
 
 export type DirectoryServiceProfile = {
