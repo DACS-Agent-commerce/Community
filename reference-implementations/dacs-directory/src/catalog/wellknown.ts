@@ -61,16 +61,28 @@ interface ListingIndex {
   }>;
 }
 
+/**
+ * RB-2: a binding is complete for one Listing tuple only when it names that seller, the
+ * logical address derived from it, and a well-formed marker anchor and hash.
+ */
+export function bindsListingTuple(
+  binding: unknown, seller: string, tuple: { listingId: string; version: number; contentHash: string },
+): binding is RevocationBinding {
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
+  const candidate = binding as Partial<RevocationBinding>;
+  return candidate.sellerPrimaryClaim === seller &&
+    candidate.listingId === tuple.listingId && candidate.listingVersion === tuple.version &&
+    candidate.listingContentHash === tuple.contentHash &&
+    candidate.logicalAddress === revocationLogicalAddress(seller, tuple.listingId, tuple.version) &&
+    candidate.markerAnchor?.kind === "storage-program" && typeof candidate.markerAnchor.locator === "string" &&
+    /^stor-[0-9a-f]{40}$/.test(candidate.markerAnchor.locator) && typeof candidate.markerContentHash === "string" &&
+    /^[0-9a-f]{64}$/.test(candidate.markerContentHash);
+}
+
 /** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
-  const hash = entry.contentHash.toLowerCase();
-  const binding = entry.revocation;
-  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
-    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
-    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
-    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
-    /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
+  const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
+  return bindsListingTuple(entry.revocation, seller, tuple) ? entry.revocation : null;
 }
 
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
