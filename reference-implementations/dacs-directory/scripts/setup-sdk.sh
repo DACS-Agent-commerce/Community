@@ -26,9 +26,10 @@ git_with_sdk_auth() {
 # The DACS Standard revision the pinned SDK declares (package.json
 # dacs.standardRevision); the Directory implements the profile in SPEC_PIN.
 STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
-SDK_PATCH_SHA256="a85f66106b723e1e074f943dc6606d4bec75410ab3e8bcfac8a6e161a838a725"
-SDK_REV_MARKER="vendor/dacs-sdk/dist/.dacs-sdk-revision"
-SDK_MANIFEST="vendor/dacs-sdk/dist/.dacs-sdk-manifest"
+SDK_PATCH_SHA256="11f1594a3d1b4c60effdb24690d844890a23f1283a42107e728ecfa68bfa955e"
+# The markers sit beside dist, not in it: the digest covers every file in dist.
+SDK_REV_MARKER="vendor/dacs-sdk/.dacs-sdk-revision"
+SDK_MANIFEST="vendor/dacs-sdk/.dacs-sdk-manifest"
 # scripts/sdk-dist-digest.mjs over the dist that SDK_REV builds to (`npm ci`
 # then `npm run build` and sdk-compat-output.mjs on the pinned Node release).
 # A packaged or freshly built
@@ -80,9 +81,9 @@ else
     echo "dacs-sdk compatibility patch digest mismatch" >&2
     exit 1
   fi
-  # tsc never deletes stale output, so build into an empty dist (this also
-  # clears the marker and manifest).
-  rm -rf vendor/dacs-sdk/dist
+  # tsc never deletes stale output, so build into an empty dist; the old
+  # marker and manifest describe the old dist and go with it.
+  rm -rf vendor/dacs-sdk/dist "$SDK_REV_MARKER" "$SDK_MANIFEST"
   # The SDK lockfile at SDK_REV is enforced, so its demosdk and crypto dependencies are the pinned ones.
   (
     cd vendor/dacs-sdk
