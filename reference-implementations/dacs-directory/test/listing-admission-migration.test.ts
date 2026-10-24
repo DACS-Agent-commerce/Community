@@ -79,6 +79,17 @@ const restart = () => {
 
 const listedIds = (catalog: { sellers: Array<{ listings: Obj[] }> }) => catalog.sellers[0].listings.map((l) => l.listingId);
 
+// First: the next test saves a reindexed catalog over the seeded one.
+test("the reset withholds cached deal verdicts and the reputation counted from them until a reindex", async () => {
+  const { GET: getSeller } = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+  const publicSeller = async () => (await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/x"),
+    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(seller) }) })).json();
+  for (const view of [await publicSeller(), restart().sellers[0]]) {
+    assert.deepEqual((view.deals as Obj[]).map((deal) => [deal.jobId, deal.refsVerified, deal.reputationEligible]), [["job-cached", false, false]]);
+    assert.equal(view.reputation.completed, 0);
+  }
+});
+
 test("old active admission decisions stay withheld through restart, then valid artifacts return", async () => {
   assert.deepEqual(await verifyListingResult(bad), { ok: false, code: "VERIFICATION_METHOD_INVALID" });
   assert.equal((await verifyListingResult(good)).ok, true, "a second authorized seller key is allowed");
@@ -103,16 +114,6 @@ test("old active admission decisions stay withheld through restart, then valid a
     assert.deepEqual(restart().sellers[0].listings.map((l: Obj) => l.listingId), ["allowed-second-key", "withdrawn"]);
     assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["allowed-second-key", "withdrawn"]);
   } finally { globalThis.fetch = originalFetch; }
-});
-
-test("the reset withholds cached deal verdicts and the reputation counted from them until a reindex", async () => {
-  const { GET: getSeller } = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
-  const publicSeller = async () => (await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/x"),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(seller) }) })).json();
-  for (const view of [await publicSeller(), restart().sellers[0]]) {
-    assert.deepEqual((view.deals as Obj[]).map((deal) => [deal.jobId, deal.refsVerified, deal.reputationEligible]), [["job-cached", false, false]]);
-    assert.equal(view.reputation.completed, 0);
-  }
 });
 
 test("the reset keeps the highest withheld version so the publisher never renumbers it", () => {

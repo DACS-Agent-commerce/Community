@@ -142,6 +142,8 @@ export async function indexRegistration(
   const ownerRegistered = reg.ownerSignatureVerified ?? (reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
     : false);
+  // Only an anchor the owner signed is the owner's pointer; the crawl may add others.
+  const ownerSignedAnchors = new Set(reg.ownerSignedAnchors ?? reg.listingAnchors);
   const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
@@ -209,7 +211,7 @@ export async function indexRegistration(
         reg.primaryClaim,
         bindingRejection,
         bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
-        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING",
+        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING" && ownerSignedAnchors.has(anchor),
       );
       continue;
     }

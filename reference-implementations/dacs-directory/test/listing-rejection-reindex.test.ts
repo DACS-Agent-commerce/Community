@@ -101,3 +101,16 @@ test("an owner-signed registration keeps its public owner-mismatch notice after 
   assert.equal(notice?.code, "OWNER_CLAIM_BINDING");
   assert.equal(notice?.publicNotice, true, "the signature is checked on the registration as the owner signed it");
 });
+
+test("an owner-signed registration does not publish an owner-mismatch notice for an anchor only the crawl added", async () => {
+  const { locators } = await vector("crawl-only-owner-job", 350);
+  const stored = registration([]);
+  const message = registrationMessage(stored, 1);
+  const signature = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+  saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
+  saveDomains(["seller.example"]);
+  await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), false)], false), `0x${"f".repeat(64)}`);
+  const notice = diagnostics().find((item) => item.locator === locators.listing);
+  assert.equal(notice?.code, "OWNER_CLAIM_BINDING");
+  assert.equal(notice?.publicNotice, false, "the owner never signed this pointer");
+});
