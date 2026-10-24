@@ -1,4 +1,5 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
@@ -120,11 +121,15 @@ export const deadLetterDiagnosticSchema = {
 export const listingRejectionDiagnosticSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
+  required: ["locator", "code", "message", "publicNotice", "guidance", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
-    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    listingId: { type: "string", pattern: "^[A-Za-z0-9._~-]{1,128}$" },
+    listingVersion: { type: "integer", minimum: 1 },
+    code: { enum: LISTING_REJECTION_CODES },
+    message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
+    publicNotice: { type: "boolean" },
+    guidance: { type: "string", description: "Public-safe recovery guidance for the failed admission." },
     occurrences: { type: "integer", minimum: 1 },
     firstSeenAt: { type: "integer", minimum: 0 },
     lastSeenAt: { type: "integer", minimum: 0 },
@@ -200,9 +205,10 @@ export const catalogStatusSchema = {
         },
         listingRejectionDiagnostics: {
           type: "object",
-          required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
+          required: ["scope", "total", "publicTotal", "byCode", "query", "returned", "hasMore", "items"],
           properties: {
-            scope: { const: "listing-registration-binding" },
+            scope: { const: "listing-admission" },
+            publicTotal: { type: "integer", minimum: 0 },
             total: { type: "integer", minimum: 0 },
             byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
             query: {

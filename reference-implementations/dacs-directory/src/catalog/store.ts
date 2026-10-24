@@ -9,8 +9,17 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
-import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import {
+  LISTING_REJECTION_MESSAGES,
+  LISTING_REJECTION_GUIDANCE,
+  type ListingDiagnosticCoordinates,
+  type ListingRejectionCode,
+} from "./listingAdmission.js";
+
+export type { ListingRejectionCode } from "./listingAdmission.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -119,6 +128,8 @@ db.exec(`
     locator TEXT NOT NULL,
     registration_claim TEXT NOT NULL,
     reason_code TEXT NOT NULL,
+    listing_id TEXT,
+    listing_version INTEGER,
     occurrences INTEGER NOT NULL DEFAULT 1,
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
@@ -149,6 +160,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS revocation_candidates_owner_idx
     ON revocation_candidates(listing_hash, owner, seq) WHERE state = 'pending';
 `);
+
+// BEGIN IMMEDIATE serializes the read-then-DDL upgrade across app/indexer
+// processes. A deferred transaction can let both readers observe the old
+// schema and then fail one upgrader immediately with SQLITE_BUSY.
+db.transaction(() => {
+  const listingRejectionColumns = new Set(
+    (db.prepare("PRAGMA table_info(listing_rejections)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!listingRejectionColumns.has("listing_id")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_id TEXT");
+  }
+  if (!listingRejectionColumns.has("listing_version")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
+  }
+  if (!listingRejectionColumns.has("public_notice")) {
+    // Earlier coordinates were not authenticated; never promote them to notices.
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN public_notice INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE listing_rejections SET listing_id = NULL, listing_version = NULL");
+  }
+}).immediate();
 
 // Add internal omission counters without changing the public diagnostic projection.
 db.transaction(() => {
@@ -210,7 +241,9 @@ const setJson = db.transaction((key: string, value: unknown) => {
     .run(key, JSON.stringify(value), Date.now());
 });
 
-// One-time, atomic migration. Legacy files remain as rollback snapshots.
+// One-time, atomic migrations. Legacy files remain as rollback snapshots.
+// Every read-then-write migration starts IMMEDIATE so concurrent fresh
+// processes queue before observing state instead of racing a DEFERRED upgrade.
 if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db.transaction(() => {
   setJson("catalog", readLegacy<Catalog>(LEGACY.catalog, { catalogVersion: "1", generatedAt: 0, sellers: [] }));
   setJson("registrations", readLegacy<Registration[]>(LEGACY.registrations, []));
@@ -218,7 +251,7 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("domains", readLegacy<string[]>(LEGACY.domains, []));
   setJson("fixtures", readLegacy<FixtureSeed[]>(LEGACY.fixtures, []));
   setJson("schema-version", 1);
-})();
+}).immediate();
 
 // Every persisted anchor time written before this migration came from the
 // transaction's producer-controlled timestamp. Remove both the artifact rows
@@ -243,7 +276,7 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
     }),
   });
   setJson("sr2-anchor-schema-version", 2);
-})();
+}).immediate();
 
 // Early Directory builds exposed the internal name `revocationBinding` in
 // ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
@@ -604,7 +637,8 @@ export const finishWithdrawalCarriageReplay = db.transaction((): void => {
 /** Called only after the indexer verifies the listing's signature and chain owner. */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
   withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
-    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
+    // RB-2 bindings name the exact presentedBy, CF-3 advisory parameters included.
+    (source.bindings ?? []).filter((binding) => sellerIdentity(binding.sellerPrimaryClaim) === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 
 /** Continue bounded discovery work across passes, even across process restarts. */
@@ -839,28 +873,65 @@ export function pruneFailureHistory(now = Date.now(), batch = 500): number {
 export const failureHistorySize = (): number =>
   (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
-export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
-
 export function recordListingRejection(
   locator: string,
   registrationClaim: string,
   code: ListingRejectionCode,
+  coordinates?: ListingDiagnosticCoordinates,
+  publicNotice = false,
 ): void {
   const now = Date.now();
   db.prepare(`INSERT INTO listing_rejections(
-      locator,registration_claim,reason_code,occurrences,first_seen_at,last_seen_at
-    ) VALUES (?,?,?,1,?,?)
+      locator,registration_claim,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,?,?,?,1,?,?)
     ON CONFLICT(locator,registration_claim) DO UPDATE SET
       reason_code=excluded.reason_code,
+      listing_id=excluded.listing_id,
+      listing_version=excluded.listing_version,
+      public_notice=excluded.public_notice,
       occurrences=listing_rejections.occurrences+1,
       last_seen_at=excluded.last_seen_at`)
-    .run(locator, registrationClaim.toLowerCase(), code, now, now);
+    .run(
+      locator,
+      registrationClaim.toLowerCase(),
+      code,
+      coordinates?.listingId ?? null,
+      coordinates?.listingVersion ?? null,
+      publicNotice && coordinates ? 1 : 0,
+      now,
+      now,
+    );
 }
 
 export function clearListingRejection(locator: string, registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
 }
+
+/** Clear all diagnostics when a seller leaves the registration set. */
+export function clearRegistrationListingRejections(registrationClaim: string): void {
+  db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
+}
+
+/** Keep continuing failures' history, then remove failures not observed this pass. */
+export const pruneRegistrationListingRejections = db.transaction((
+  registrationClaim: string,
+  currentRejections: ReadonlySet<string>,
+): void => {
+  const claim = registrationClaim.toLowerCase();
+  const rows = db.prepare("SELECT locator FROM listing_rejections WHERE registration_claim = ?")
+    .all(claim) as Array<{ locator: string }>;
+  for (const { locator } of rows) {
+    if (!currentRejections.has(locator)) clearListingRejection(locator, claim);
+  }
+});
+
+export const pruneListingRejections = db.transaction((claims: string[]): void => {
+  const keep = new Set(claims.map((claim) => claim.toLowerCase()));
+  for (const row of db.prepare("SELECT DISTINCT registration_claim FROM listing_rejections").all() as Array<{ registration_claim: string }>) {
+    if (!keep.has(row.registration_claim)) clearRegistrationListingRejections(row.registration_claim);
+  }
+});
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
@@ -920,8 +991,12 @@ export interface PublicDeadLetterDiagnostic {
 
 export interface PublicListingRejectionDiagnostic {
   locator: string;
+  listingId?: string;
+  listingVersion?: number;
+  publicNotice: boolean;
   code: ListingRejectionCode;
   message: string;
+  guidance: string;
   occurrences: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -960,8 +1035,9 @@ export interface IndexerDiagnostics {
     items: PublicDeadLetterDiagnostic[];
   };
   listingRejectionDiagnostics: {
-    scope: "listing-registration-binding";
+    scope: "listing-admission";
     total: number;
+    publicTotal: number;
     byCode: Record<string, number>;
     query: { locator: string | null; limit: number };
     returned: number;
@@ -978,16 +1054,14 @@ interface DeadLetterRow {
 
 interface ListingRejectionRow {
   locator: string;
+  listing_id: string | null;
+  listing_version: number | null;
+  public_notice: number;
   reason_code: ListingRejectionCode;
   occurrences: number;
   first_seen_at: number;
   last_seen_at: number;
 }
-
-const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
-  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
-  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
-};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]
@@ -1047,17 +1121,22 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
   ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
   const listingWhere = locator ? " WHERE locator = ?" : "";
-  const listingStatement = db.prepare(`SELECT locator,reason_code,occurrences,first_seen_at,last_seen_at
+  const publicTotal = (db.prepare("SELECT COUNT(*) count FROM listing_rejections WHERE public_notice = 1").get() as { count: number }).count;
+  const listingStatement = db.prepare(`SELECT locator,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
     FROM listing_rejections${listingWhere}
-    ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
+    ORDER BY public_notice DESC, last_seen_at DESC, locator ASC LIMIT ?`);
   const listingRows = (locator
     ? listingStatement.all(locator, limit + 1)
     : listingStatement.all(limit + 1)) as ListingRejectionRow[];
   const listingHasMore = listingRows.length > limit;
   const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
     locator: row.locator,
+    publicNotice: row.public_notice === 1,
+    ...(row.listing_id ? { listingId: row.listing_id } : {}),
+    ...(row.listing_version !== null ? { listingVersion: row.listing_version } : {}),
     code: row.reason_code,
     message: LISTING_REJECTION_MESSAGES[row.reason_code],
+    guidance: LISTING_REJECTION_GUIDANCE[row.reason_code],
     occurrences: row.occurrences,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
@@ -1071,8 +1150,9 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
     },
     listingRejectionDiagnostics: {
-      scope: "listing-registration-binding",
+      scope: "listing-admission",
       total: listingRejectionTotal,
+      publicTotal,
       byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
       query: { locator: locator ?? null, limit },
       returned: listingItems.length,

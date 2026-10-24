@@ -34,10 +34,12 @@ import {
   findValidListingRevocation,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  verifyStoredListing,
+  revocationSellerClaim,
+  verifyStoredListingResult,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import { listingDiagnosticCoordinates } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -45,6 +47,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  pruneRegistrationListingRejections,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
@@ -137,6 +140,10 @@ export async function indexRegistration(
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
+  const ownerRegistered = reg.ownerSignature
+    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
+    : false;
+  const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -173,10 +180,23 @@ export async function indexRegistration(
   const { verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
-    if (!anchored) continue;
-    // A listing with no canonical form throws while hashing; skip it like any invalid one.
-    const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
-    if (!verified) continue;
+    if (!anchored) {
+      // An unread anchor cannot clear an earlier rejection or reset its history.
+      rejectedListingAnchors.add(anchor);
+      continue;
+    }
+    // Fails closed: a listing with no canonical form is rejected like any invalid one.
+    const verification = await verifyStoredListingResult(anchored.data, anchor);
+    if (!verification.ok) {
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        verification.code,
+      );
+      continue;
+    }
+    const verified = verification.value;
     const { scope } = verified;
     if (verified.profile === "dacs-v0.1" &&
         (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
@@ -186,12 +206,29 @@ export async function indexRegistration(
       reg.primaryClaim,
     );
     if (bindingRejection) {
-      recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        bindingRejection,
+        bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING",
+      );
+      continue;
+    }
+    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
+    if (declaredHash && declaredHash !== verified.contentHash) {
+      rejectedListingAnchors.add(anchor);
+      recordListingRejection(
+        anchor,
+        reg.primaryClaim,
+        "DECLARED_CONTENT_HASH_MISMATCH",
+        listingDiagnosticCoordinates(verified.scope),
+        ownerRegistered,
+      );
       continue;
     }
     clearListingRejection(anchor, reg.primaryClaim);
-    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    if (declaredHash && declaredHash !== verified.contentHash) continue;
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
     if (!listingId) continue;
@@ -297,6 +334,8 @@ export async function indexRegistration(
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
+
+  pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
@@ -581,9 +620,6 @@ export async function indexRegistration(
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
   // submission-time replay gate only — the cryptographic binding must hold).
-  const ownerRegistered = reg.ownerSignature
-    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false;
   const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
   const identityTier = identityTiers.includes("institutional") ? "institutional"
     : identityTiers.includes("verified") ? "verified" : "self-declared";

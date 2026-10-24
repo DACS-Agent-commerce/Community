@@ -1,3 +1,4 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -111,17 +112,28 @@ test("storage cause diagnostics are actionable without claiming DACS absence", (
 test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
   const target = locator("7");
   const claim = `did:demos:agent:${"7".repeat(64)}`;
-  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
-  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING");
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING", {
+    listingId: "seller-service",
+    listingVersion: 3,
+  });
+  store.recordListingRejection(target, claim, "OWNER_CLAIM_BINDING", {
+    listingId: "seller-service",
+    listingVersion: 3,
+  });
 
   const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target });
+  assert.equal(diagnostics.listingRejectionDiagnostics.scope, "listing-admission");
   assert.equal(diagnostics.listingRejectionDiagnostics.total, 1);
   assert.equal(diagnostics.listingRejectionDiagnostics.returned, 1);
   assert.equal(diagnostics.listingRejectionDiagnostics.byCode.OWNER_CLAIM_BINDING, 1);
   assert.deepEqual(diagnostics.listingRejectionDiagnostics.items[0], {
     locator: target,
+    listingId: "seller-service",
+    listingVersion: 3,
+    publicNotice: false,
     code: "OWNER_CLAIM_BINDING",
     message: "The listing anchor owner does not match the registration claim.",
+    guidance: "Correct the registration's storage pointer to an anchor owned by the seller.",
     occurrences: 2,
     firstSeenAt: diagnostics.listingRejectionDiagnostics.items[0].firstSeenAt,
     lastSeenAt: diagnostics.listingRejectionDiagnostics.items[0].lastSeenAt,
@@ -130,6 +142,20 @@ test("listing binding rejections are persistent, public-safe, filterable, and re
 
   store.clearListingRejection(target, claim);
   assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).listingRejectionDiagnostics.returned, 0);
+});
+
+test("normative listing admission failures expose stable public-safe diagnostics", () => {
+  const target = locator("8");
+  const claim = `did:demos:agent:${"8".repeat(64)}`;
+  store.recordListingRejection(target, claim, "VERIFICATION_METHOD_INVALID");
+
+  const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target })
+    .listingRejectionDiagnostics;
+  assert.equal(diagnostics.scope, "listing-admission");
+  assert.equal(diagnostics.byCode.VERIFICATION_METHOD_INVALID, 1);
+  assert.equal(diagnostics.items[0].code, "VERIFICATION_METHOD_INVALID");
+  assert.match(diagnostics.items[0].message, /registered structured variant/);
+  assert.doesNotMatch(JSON.stringify(diagnostics), new RegExp(claim));
 });
 
 test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cursors", () => {

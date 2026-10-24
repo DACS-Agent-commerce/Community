@@ -56,6 +56,9 @@ for (const [key, value] of Object.entries({
 seeded.close();
 
 const store = await import("../src/catalog/store.js");
+const { indexRegistration } = await import("../src/catalog/indexer.js");
+const { reindexAll } = await import("../src/catalog/reindexCore.js");
+const { verifyListingResult } = await import("../src/catalog/listingVerification.js");
 const { GET } = await import("../app/api/dacs/listings/route.js");
 const restart = () => {
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
@@ -65,11 +68,28 @@ const restart = () => {
   return JSON.parse(child.stdout);
 };
 
-test("old active admission decisions stay withheld through restart", async () => {
+test("old active admission decisions stay withheld through restart, then valid artifacts return", async () => {
+  assert.deepEqual(await verifyListingResult(bad), { ok: false, code: "VERIFICATION_METHOD_INVALID" });
+  assert.equal((await verifyListingResult(good)).ok, true, "a second authorized seller key is allowed");
   const listed = async () => (await (await GET(new NextRequest("https://directory.example/api/dacs/listings"))).json()).listings;
   assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["withdrawn"]);
   assert.deepEqual(restart().sellers[0].listings.map((l: Obj) => l.listingId), ["withdrawn"]);
   assert.deepEqual(store.loadRegistrations(), [reg]);
   assert.equal(store.loadScanState().lastSeenTxId, 20);
   assert.equal(store.loadScanState().listings[locator(902)], `0x${seller.slice(-64)}`);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const at = String(input).split("/").pop();
+    const data = at === locator(901) ? bad : at === locator(902) ? good : null;
+    return data ? Response.json({ success: true, owner: `0x${seller.slice(-64)}`, data }) : new Response(null, { status: 503 });
+  };
+  try {
+    const record = await indexRegistration(reg, store.loadCatalog().sellers[0], async () => { throw new Error("offline"); });
+    assert.deepEqual(record.listings.map((l) => l.listingId), ["allowed-second-key"]);
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.byCode.VERIFICATION_METHOD_INVALID, 1);
+    record.listings.push(store.loadCatalog().sellers[0].listings[0]);
+    store.saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [record] });
+    assert.deepEqual(restart().sellers[0].listings.map((l: Obj) => l.listingId), ["allowed-second-key", "withdrawn"]);
+    assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["allowed-second-key", "withdrawn"]);
+  } finally { globalThis.fetch = originalFetch; }
 });

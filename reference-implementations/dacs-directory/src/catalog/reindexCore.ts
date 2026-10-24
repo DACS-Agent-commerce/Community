@@ -42,6 +42,7 @@ import {
   clearChainDerivedArtifacts,
   recordArtifact,
   pruneFailureHistory,
+  pruneListingRejections,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -440,6 +441,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
+    pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
