@@ -18,8 +18,7 @@ import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-rail-registry-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
-const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
-const POST = createBuildListingPost();
+const { POST } = await import("../app/api/dacs/build-listing/route.js");
 test.after(() => rmSync(dataDir, { recursive: true, force: true }));
 
 // An independent copy of DACS-4 §9.4.2 at the pinned Standard revision; the
@@ -103,6 +102,34 @@ test("/register refuses an unverified rail before any signature; a signed-snapsh
       assert.equal(refusal.tx, undefined, option.railId);
       assert.equal(rpcCalls, 0, option.railId);
 
+      const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
+      const signedPost = createBuildListingPost(signedRailSnapshot);
+      let preview: {
+        listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
+        railResolution: { disposition: string; reason: string; authorityBasis: string };
+      };
+      const identity = await (await signedPost(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+      const response = await signedPost(request({
+        ...base,
+        identityPresentedAt: identity.identityPresentedAt,
+        identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
+      }));
+      assert.equal(response.status, 200, option.railId);
+      preview = await response.json() as typeof preview;
+      assert.deepEqual(preview.listing.acceptedRails, [{ railId: option.railId }]);
+      assert.deepEqual(preview.listing.pipeline.find((phase) => phase.kind === option.phaseKind)?.parameters, { rail: option.railId });
+      assert.equal(preview.railResolution.disposition, "verified", option.railId);
+      assert.equal(preview.railResolution.authorityBasis, "pa1-in-code", option.railId);
+      // Every LRR check passes against the Standard's own table except the missing snapshot signature.
+      const independent = resolveAgainstStandard(preview.listing);
+      assert.equal(independent.disposition, "indeterminate", `${option.railId}: ${independent.reason}`);
+      assert.equal(independent.reason, "pa1-definition-unverifiable", option.railId);
+      // The handler name the Directory used to emit as a rail ID is not in the registry.
+      const handlerAsRail = resolveAgainstStandard({
+        pipeline: [{ kind: option.phaseKind, parameters: { rail: option.phaseKind } }],
+        acceptedRails: [{ railId: option.phaseKind }],
+      });
+      assert.equal(handlerAsRail.disposition, "rejected", option.phaseKind);
     }
   } finally {
     globalThis.fetch = originalFetch;
