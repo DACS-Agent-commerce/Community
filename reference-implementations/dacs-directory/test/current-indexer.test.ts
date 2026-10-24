@@ -15,9 +15,8 @@ import {
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
-import { registrationMessage } from "../src/catalog/registrationSig.js";
-import type { BundleBinding, DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
+import { DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
+import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
 
 import { type Obj, seeds, dids, locator, maps, sign, ref, vector, bindingFor, installAgreement,
   payeeBoundVector, graphAt, registeredDeal } from "./fixtures/current-evidence.js";
@@ -665,6 +664,51 @@ test("indexer resolves current copies through BundleBindings rather than submitt
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+async function indexSellerDeal(presentedBy: string, jobId: string, offset: number) {
+  const fixture = await vector(jobId, offset, presentedBy);
+  const deal = registeredDeal(jobId, locator(offset + 98), locator(offset + 99));
+  const bundleBindings = [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      : { success: false }), { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  try {
+    return await indexRegistration({ primaryClaim: dids[1], displayName: "seller",
+      listingAnchors: [fixture.locators.listing], deals: [deal], bundleBindings },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("a Listing presented by an unqualified claim is summarised", async () => {
+  const record = await indexSellerDeal(dids[1], "unqualified-job", 100);
+  assert.equal(record.listings.length, 1);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
+test("a Listing presented by a qualified claim has no public summary but still backs its deal evidence", async () => {
+  const record = await indexSellerDeal(`${dids[1]}?channel=directory`, "qualified-job", 110);
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
+test("a deal's evidence graph refuses a referenced Listing the SDK reader no longer admits", async () => {
+  // DPA-1: an attested-payload deliverable without a verification method. Historical reads use the same gate;
+  // only an explicit DACS_HISTORICAL_LISTING_IMPORTS pin re-admits an older signature encoding.
+  const fixture = await vector("dpa-1-job", 130, dids[1], { kind: "attested-payload", payloadFormat: "application/json" });
+  assert.equal(await verifyListing(fixture.listing), null);
+  const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
+  assert.equal(graph.ok, false);
+  assert.match(String(graph.reason), /listing/i);
 });
 
 test("bindings signed by other parties leave a deal's binding resolution intact", async () => {
