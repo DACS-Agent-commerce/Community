@@ -162,7 +162,7 @@ test("every node: name a client component reaches is exported by its browser shi
   assert.ok(entries.some((file) => file.endsWith("src/components/VerifyDeal.tsx")), "VerifyDeal is a client entry");
   const { faults, reached } = clientBundleFaults(entries, await loadShimExports());
   // The walk does reach the SDK verification code the browser runs.
-  for (const file of ["src/catalog/listingVerification.ts", "vendor/dacs-sdk/dist/crypto/ed25519.js"]) {
+  for (const file of ["src/catalog/listingVerification.ts", "vendor/dacs-sdk/dist/identity/bundle.js", "vendor/dacs-sdk/dist/crypto/ed25519.js"]) {
     assert.ok(reached.has(join(ROOT, file)), `${file} is client-reachable`);
   }
   assert.deepEqual(faults, []);

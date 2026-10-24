@@ -11,6 +11,7 @@ import {
   type VerifiedListing,
 } from "../src/catalog/listingVerification.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
+import type { LegacyMvpListing, Listing } from "@kynesyslabs/dacs/artifacts";
 
 // DACS-1 RB-1..RB-6 against the pinned revocation-binding vectors (SPEC_PIN), then RB-4's tuple
 // checks against markers that are validly signed, so only the tuple rule can reject them.
@@ -27,8 +28,11 @@ const vectors = JSON.parse(readFileSync(new URL("./fixtures/dacs-standard/revoca
 const { fixtures } = vectors;
 const vectorKeys: ResolvePrimaryClaimKey = async (claim, algorithm) => vectors.publicKeys[claim] && algorithm === "ed25519"
   ? { canonicalClaim: claim, algorithm, publicKey: Uint8Array.from(Buffer.from(vectors.publicKeys[claim], "base64url")) } : null;
+/** A verified current Listing as RB-2 reads it: its id and exact `presentedBy` bytes. */
+const currentListing = (listingId: string, presentedBy: string) =>
+  ({ listingId, seller: { identity: { presentedBy } }, signature: { signer: presentedBy } }) as unknown as Listing;
 const vectorListing: VerifiedListing = {
-  listing: { listingId: fixtures.listing.listingId }, scope: { listingId: fixtures.listing.listingId },
+  listing: currentListing(fixtures.listing.listingId, fixtures.listing.sellerPrimaryClaim), scope: { listingId: fixtures.listing.listingId },
   contentHash: fixtures.listing.listingContentHash, signer: fixtures.listing.signer, sellerClaim: fixtures.listing.sellerPrimaryClaim, profile: "dacs-v0.1",
 };
 /** Reader-surface checks (well-known index integrity, catalog freshness, a received tombstone) that a producer never consumes. */
@@ -74,7 +78,7 @@ const otherSeed = Uint8Array.from(Buffer.alloc(32, 84));
 const didOf = (from: Uint8Array) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(from))).toString("hex")}`;
 const listingHash = "c".repeat(64);
 const listing: VerifiedListing = {
-  listing: { listingId: "svc" }, scope: { listingId: "svc" }, contentHash: listingHash, signer: didOf(seed), sellerClaim: didOf(seed), profile: "dacs-v0.1",
+  listing: currentListing("svc", didOf(seed)), scope: { listingId: "svc" }, contentHash: listingHash, signer: didOf(seed), sellerClaim: didOf(seed), profile: "dacs-v0.1",
 };
 const signed = async (scope: Obj, key = seed, envelope: Obj = {}) => ({
   ...scope,
@@ -84,7 +88,7 @@ const signed = async (scope: Obj, key = seed, envelope: Obj = {}) => ({
 
 test("RB-4: a validly signed marker revokes only the exact listing tuple, signed by the listing's own signer", async () => {
   const tuple = { listingId: "svc", listingVersion: 2, listingContentHash: listingHash, revokedAt: 1 };
-  const verdict = async (marker: Obj, expectedVersion = 2, against = listing) => verifyListingRevocation(marker, against, expectedVersion);
+  const verdict = async (marker: Obj, expectedVersion = 2, against: VerifiedListing = listing) => verifyListingRevocation(marker, against, expectedVersion);
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
   assert.equal(await verdict(await signed({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER })), true, "the largest safe integer is in range");
@@ -120,7 +124,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   };
   assert.deepEqual(rejected, Object.fromEntries(Object.keys(rejected).map((name) => [name, false])));
   // A legacy listing names its id as serviceId.
-  const legacy: VerifiedListing = { ...listing, scope: {}, listing: { serviceId: "svc" }, profile: "legacy-sdk-v0.1" };
+  const legacy: VerifiedListing = { ...listing, scope: { serviceId: "svc" }, listing: { serviceId: "svc" } as unknown as LegacyMvpListing, profile: "legacy-sdk-v0.1" };
   assert.equal(await verdict(await signed(tuple), 2, legacy), true);
   assert.equal(await verdict(await signed({ ...tuple, listingId: "other" }), 2, legacy), false);
 });

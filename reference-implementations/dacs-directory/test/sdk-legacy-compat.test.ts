@@ -78,7 +78,6 @@ test("legacy hashes agree across Listing admission, bundle roots, references and
 
 test("LR-2 measures canonical bytes without the Listing signature", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-public-storage.json", import.meta.url), "utf8")).listing;
-  fixture.pipeline = fixture.pipeline.map(({ kind }: { kind: string }) => ({ kind }));
   const scope = { ...stripSignature(fixture), padding: "" };
   const size = Buffer.byteLength(canonicalize(scope));
   for (const bytes of [16_384, 16_385]) {
