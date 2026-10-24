@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { validateRecipeResult, type RecipePolicy } from "../src/catalog/recipePolicy.js";
+import { VERIFICATION_METHODS, validateRecipeResult, type RecipePolicy } from "../src/catalog/recipePolicy.js";
 
 const signer = `did:demos:agent:${"a".repeat(64)}`;
 const policy: RecipePolicy = { scheme: "lei", recipeVersion: 1, methods: ["verifiable-credential"], availability: "live",
@@ -22,6 +23,15 @@ test("recipe admission selects exact version, allowed method and authenticated t
   assert.equal(await check({ ...raw, signature: { signer, algorithm: "unknown" } }), null);
   assert.equal(await validateRecipeResult(raw, async () => { throw new Error("unavailable"); }), null);
   assert.equal(await validateRecipeResult(raw, async () => policy, async () => { throw new Error("key resolver unavailable"); }), null);
+});
+
+test("SPEC_PIN and the registry comment describe the nine-method registry the code accepts", () => {
+  const pin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/catalog/recipePolicy.ts", import.meta.url), "utf8");
+  assert.equal(VERIFICATION_METHODS.length, 9);
+  assert.match(pin, /nine-kind DACS-2 VerificationMethod registry/);
+  assert.doesNotMatch(pin, /eight-kind/);
+  for (const text of [pin, source]) assert.match(text, /demos-gcr-domain/);
 });
 
 test("recipe admission enforces the pinned closed method registry before operator narrowing", async () => {

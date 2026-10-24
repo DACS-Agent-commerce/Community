@@ -3,11 +3,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { GET as inspectServiceGet } from "../app/api/dacs/inspect-service/[listingId]/[version]/route.js";
+import { GET as listingContractGet } from "../app/api/dacs/listings/[listingId]/[version]/route.js";
+import { counterpartyEvidenceSellerRecord } from "../src/catalog/counterpartyEvidence.js";
+import { saveCatalog } from "../src/catalog/store.js";
 
 import {
   buildDirectoryServiceInspectionEnvelope,
   directoryInspectionAffordance,
   inspectServicePath,
+  listingJsonPath,
   withDirectoryInspectionAffordance,
 } from "../src/catalog/inspection.js";
 import type { ListingSummary } from "../src/catalog/types.js";
@@ -83,7 +87,7 @@ test("directory service profile envelope is listed-only and does not claim sourc
   assert.equal(envelope.artifact.maturityProfile.noReputationClaim, true);
   assert.equal(envelope.artifact.maturityProfile.noLivePaymentClaim, true);
   assert.equal(envelope.artifact.transactionReadiness.disposition, "unassessed");
-  assert.match(envelope.artifact.transactionReadiness.reason, /current SDK Listing reader/);
+  assert.match(envelope.artifact.transactionReadiness.reason, /buyer-local/);
   assert.deepEqual(envelope.artifact.limitations, [
     "roster maturity hint",
     "not reputation evidence",
@@ -132,4 +136,27 @@ test("inspection preserves all service fields and canonical seller links with ei
     assert.equal(envelope.source.url,
       `https://directory.example/api/dacs/inspect-service/service%2Fname/1?seller=${encodedSeller}`);
   }
+});
+
+test("both listing routes resolve the canonical seller link of a summary whose claim carries parameters", async () => {
+  const seller = `did:demos:agent:${"ab".repeat(32)}`;
+  const record = counterpartyEvidenceSellerRecord(1);
+  const qualified = { ...record.listings[0], seller: { ...record.listings[0].seller, primaryClaim: `${seller}?channel=directory` } };
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ ...record, primaryClaim: seller, listings: [qualified] }] });
+  const params = Promise.resolve({ listingId: qualified.listingId, version: String(qualified.version) });
+  assert.match(inspectServicePath(qualified), new RegExp(`seller=${encodeURIComponent(seller)}$`));
+  for (const [get, href] of [[inspectServiceGet, inspectServicePath(qualified)], [listingContractGet, listingJsonPath(qualified)]] as const) {
+    const response = await get(new NextRequest(`https://directory.example${href}`), { params });
+    assert.equal(response.status, 200, href);
+  }
+  const exact = await inspectServiceGet(
+    new NextRequest(`https://directory.example/api/dacs/inspect-service/${qualified.listingId}/${qualified.version}?seller=${encodeURIComponent(qualified.seller.primaryClaim)}`), { params });
+  assert.equal(exact.status, 200, "the exact stored claim still finds it");
+});
+
+test("the readiness reason makes no authentication claim, so it holds for an unsigned fixture listing too", () => {
+  const fixture = counterpartyEvidenceSellerRecord(0).listings[0];
+  assert.equal(fixture.artifactProfile, "fixture-listing");
+  assert.equal(fixture.transactionReadiness?.disposition, "unassessed");
+  assert.doesNotMatch(fixture.transactionReadiness?.reason ?? "", /authenticated|SDK/);
 });
