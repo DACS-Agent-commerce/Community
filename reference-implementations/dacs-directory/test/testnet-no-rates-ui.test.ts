@@ -59,6 +59,10 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
   saveCatalog(noRateCatalog());
   const seller = renderToStaticMarkup(await SellerPage({ params: Promise.resolve({ claim: noRateClaim }) }));
   assertNoRates(seller);
+  const ledger = /<tbody>(.*?)<\/tbody>/.exec(seller);
+  assert.ok(ledger, "seller renders its deal ledger");
+  assert.doesNotMatch(ledger[1], /✓/);
+  assert.match(ledger[1], /<td>completed<\/td>/);
   assert.match(seller, /aborted-by-self/);
   assert.match(seller, /aborted-by-other/);
   assert.match(seller, /signature-checked bundles; not counted as outcomes/);
@@ -68,6 +72,7 @@ test("rendered seller and service pages preserve aborted evidence and labelled c
     seller: noRateClaim, listingId: "observed-history", version: "1",
   }) }));
   assertNoRates(service);
+  assert.match(service, /<li><span class="check">–<\/span><div><strong>Completion verification unavailable/);
   assert.match(service, /Inspect service/);
   assert.match(service, /View signed listing artifact/);
 });
