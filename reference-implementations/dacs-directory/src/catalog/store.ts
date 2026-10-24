@@ -327,9 +327,10 @@ if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction((
 
 // Cached admission decisions predate the current Listing reader (including
 // DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.
-// Withhold active summaries until a successful reindex authenticates them with
-// this reader. Keep registration/scan pointers and authenticated tombstones so
-// outages cannot restore stale offers or erase withdrawal history. Fixture
+// Withhold active summaries, and the deal verdicts that relied on them, until
+// a successful reindex authenticates them with this reader. Keep
+// registration/scan pointers and authenticated tombstones so outages cannot
+// restore stale offers or erase withdrawal history. Fixture
 // listings are not chain admission decisions and stay. The highest withheld
 // version of each Listing is kept privately so the publisher still numbers a
 // new version after it. Bump this version whenever a reader change invalidates
@@ -350,9 +351,19 @@ db.transaction(() => {
     floors[key] = Math.max(floors[key] ?? 0, listing.version);
   }
   setJson(LISTING_VERSION_FLOORS_KEY, floors);
-  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
-    ...seller, listings: seller.listings.filter(retained),
-  })) });
+  // A deal's verdict was reached with a Listing reader that no longer applies,
+  // and a deal does not record which Listing it was checked against. When any
+  // active summary is withheld, every cached verdict is withheld too and the
+  // reputation counted from them is recomputed.
+  const withheld = catalog.sellers.some((seller) => seller.listings.some((listing) => !retained(listing)));
+  const windowEnd = catalog.generatedAt || Date.now();
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    const deals = withheld
+      ? (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }))
+      : seller.deals;
+    return { ...seller, deals, listings: seller.listings.filter(retained),
+      reputation: withheld ? deriveSellerReputation(deals, 0, windowEnd) : seller.reputation };
+  }) });
   setJson("listing-admission-schema-version", 1);
 }).immediate();
 

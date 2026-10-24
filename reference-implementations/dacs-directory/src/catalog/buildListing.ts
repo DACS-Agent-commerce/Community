@@ -418,6 +418,14 @@ return async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
+  // A version slot is write-once: a listed version the name lookup cannot find
+  // is not free, so no second create may be prepared for it.
+  if (resolution.status === "absent" && priorVersions.includes(listingVersion)) {
+    return NextResponse.json(
+      { error: "the catalog already lists this version, but its program was not found under this producer's names; retry once the name index has caught up, or choose a new Service ID" },
+      { status: 409 },
+    );
+  }
 
   let anchorAddress: string;
   let publishedListing: Record<string, unknown> = listing;
