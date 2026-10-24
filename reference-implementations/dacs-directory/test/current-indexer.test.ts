@@ -16,8 +16,8 @@ import {
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
-import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
+import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
+import type { DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 import { type Obj, seeds, dids, locator, maps, sign, ref, vector, bindingFor, installAgreement,
   payeeBoundVector, graphAt, registeredDeal } from "./fixtures/current-evidence.js";
