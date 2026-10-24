@@ -152,7 +152,7 @@ test("a reindex returns only the old offers that pass the current reader", async
     return data ? Response.json({ success: true, owner, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
-    await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+    await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
       crawlWellKnown: async () => ({ agents: [], errors: [] }) });
   } finally {
     globalThis.fetch = originalFetch;
