@@ -515,22 +515,6 @@ test("publisher rejects a metered listing without its deterministic unit", async
   assert.match(String((await response.json()).error), /metered pricing needs a unit/);
 });
 
-test("browser publisher refuses attested payloads without seller-runtime production capability", async () => {
-  const identityResponse = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
-  const identitySignature = Buffer.from(
-    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
-  ).toString("hex");
-  const response = await POST(request({
-    ...base,
-    delivery: ["deliver-attested-payload"],
-    identityPresentedAt: identity.identityPresentedAt,
-    identitySignature,
-  }));
-  assert.equal(response.status, 409);
-  assert.match(String((await response.json()).error), /cannot prove.*production capability/i);
-});
-
 test("publisher refuses a new write when existing-publication lookup is indeterminate", async () => {
   const identityResponse = await POST(request(base));
   const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
@@ -707,5 +691,119 @@ test("publication rejects lone high/low surrogate keys and values and accepts a 
 
 const walletSignature = (message: string, key = privateKey) =>
   Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), key)).toString("hex");
+
+/**
+ * Run the staged calls (identity, preview, signed) for `input`, returning the final response, or the
+ * preview's when it already ends the flow (a recovered or refused occupied version has no message to sign).
+ */
+async function publishAs(input: Record<string, unknown>, key = privateKey): Promise<Response> {
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number };
+  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage, key) };
+  const previewResponse = await POST(request(authenticated));
+  const preview = await previewResponse.clone().json() as { message?: string };
+  if (preview.message === undefined) return previewResponse;
+  return POST(request({ ...authenticated, listingSignature: walletSignature(preview.message, key) }));
+}
+
+const MAX_NONCE_REPLY_BYTES = 1024 * 1024;
+
+test("publisher prepares no transaction unless the account nonce is read within its bounds", async (t) => {
+  let nonceReply: () => Response | Promise<Response> = () => Response.json({ result: 200, response: 0 });
+  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    const call = init?.body ? JSON.parse(String(init.body)).params?.[0]?.message : null;
+    return call === "getAddressNonce" ? nonceReply() : Response.json({ result: 200, response: [] });
+  });
+  const input = { ...base, serviceId: "nonce-bounds" };
+  const allowed = await publishAs(input);
+  assert.equal(allowed.status, 200);
+  assert.equal((await allowed.json() as { tx: { content: { nonce: number } } }).tx.content.nonce, 1, "allowed control: a valid nonce releases the transaction");
+  for (const [name, reply, error] of [
+    ["node refusal", () => new Response("unavailable", { status: 503 }), /HTTP 503/],
+    ["node timeout", () => { throw new DOMException("The operation timed out", "TimeoutError"); }, /did not answer in time/],
+    ["unreachable node", () => { throw new TypeError("fetch failed"); }, /could not be reached/],
+    ["oversized reply", () => Response.json({ result: 200, response: 0, padding: "x".repeat(MAX_NONCE_REPLY_BYTES) }), /byte limit/],
+    ["non-JSON reply", () => new Response("not json"), /not valid JSON/],
+    ["error result", () => Response.json({ result: 500, response: 0 }), /result 500/],
+    ["null nonce", () => Response.json({ result: 200, response: null }), /invalid account nonce/],
+    ["missing nonce", () => Response.json({ result: 200 }), /invalid account nonce/],
+    ["string nonce", () => Response.json({ result: 200, response: "7" }), /invalid account nonce/],
+    ["negative nonce", () => Response.json({ result: 200, response: -1 }), /invalid account nonce/],
+    ["fractional nonce", () => Response.json({ result: 200, response: 1.5 }), /invalid account nonce/],
+    ["overflowing nonce", () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER }), /invalid account nonce/],
+  ] as const) {
+    nonceReply = reply;
+    const response = await publishAs(input);
+    assert.equal(response.status, 503, name);
+    const body = await response.json() as { error?: string; tx?: unknown; listing?: unknown };
+    assert.match(String(body.error), error, name);
+    assert.match(String(body.error), /no transaction was prepared/, name);
+    assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
+    assert.equal(body.listing, undefined, name);
+  }
+});
+
+test("publisher refuses to recover an occupied program that holds another seller, listing or version", async (t) => {
+  const otherSeed = Uint8Array.from(Buffer.alloc(32, 15));
+  const otherKey = privateKeyFromSeed(otherSeed);
+  const otherHex = Buffer.from(rawPublicKey(publicKeyFromSeed(otherSeed))).toString("hex");
+  let occupied: { address: string; name: string; data: Record<string, unknown>; owner: string } | undefined;
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    if (init?.method === "POST") {
+      const rpc = JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> };
+      return Response.json({
+        result: 200,
+        response: rpc.params?.[0]?.message !== "searchStoragePrograms" ? 0
+          : occupied && rpc.params[0].data?.query === occupied.name ? [{ storageAddress: occupied.address, programName: occupied.name }] : [],
+      });
+    }
+    return occupied && String(input).endsWith(occupied.address)
+      ? Response.json({ success: true, data: occupied.data, owner: occupied.owner, programName: occupied.name })
+      : new Response(null, { status: 404 });
+  });
+  const input = { ...base, serviceId: "occupied-recovery" };
+  const own = await (await publishAs(input)).json() as { listing: Record<string, unknown>; anchorAddress: string; programName: string };
+  const otherListing = (await (await publishAs({ ...input, serviceId: "another-listing" })).json() as { listing: Record<string, unknown> }).listing;
+  const otherSeller = (await (await publishAs({ ...input, claim: `did:demos:agent:${otherHex}` }, otherKey)).json() as { listing: Record<string, unknown> }).listing;
+  const unsigned = { ...own.listing };
+  delete unsigned.signature;
+  const nextVersion = { ...unsigned, listingVersion: 2 };
+  const nextVersionSignature = ed25519Sign(Buffer.from(`dacs-listing:v1:${contentHash(nextVersion)}`, "utf8"), privateKey);
+  const signedNextVersion = {
+    ...nextVersion,
+    signature: { ...(own.listing.signature as Record<string, unknown>), value: Buffer.from(nextVersionSignature).toString("base64url") },
+  };
+  const occupy = (data: Record<string, unknown>) => {
+    occupied = { address: own.anchorAddress, name: own.programName, data, owner: `0x${keyHex}` };
+  };
+  occupy(own.listing);
+  const recovered = await publishAs(input);
+  assert.equal(recovered.status, 200, "allowed control: this seller's own version is recovered");
+  assert.equal((await recovered.json() as { exists: boolean }).exists, true);
+  for (const [name, data] of [
+    ["another listing ID", otherListing],
+    ["another seller", otherSeller],
+    ["another version", signedNextVersion],
+  ] as const) {
+    occupy(data);
+    const response = await publishAs(input);
+    assert.equal(response.status, 409, name);
+    const body = await response.json() as { error?: string; tx?: unknown; listing?: unknown };
+    assert.match(String(body.error), /choose a new Service ID/, name);
+    assert.equal(body.tx, undefined, name);
+    assert.equal(body.listing, undefined, name);
+  }
+});
+
+test("browser publisher refuses attested payloads before asking for a wallet signature", async () => {
+  const response = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
+  assert.equal(response.status, 409);
+  const body = await response.json() as { error: string; identityMessage?: string };
+  assert.match(body.error, /cannot prove.*production capability/i);
+  assert.equal(body.identityMessage, undefined);
+});
 
 /** Answer only the explicitly modelled read RPCs, never contact a node. */

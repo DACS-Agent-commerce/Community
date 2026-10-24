@@ -65,12 +65,12 @@ const record = (value: unknown): Record<string, unknown> | null =>
 
 // Directory catalog profile: the rules this catalog keeps on top of the pinned
 // SDK reader's isListing. They only ever refuse, and run after isListing has
-// accepted the artifact (with the pinned compatibility patch). These rules
-// never admit a Listing isListing refuses. They are not the whole reader: the identity presentation also
-// accepts main's hex signature spelling, which the SDK's presentation
-// verifier refuses (README, "Listings that /register published"). Procurement remains outside this reader profile until reconciliation
-// can resolve the publisher as buyer and attribute supplier history to the
-// agreement seller.
+// accepted the artifact (with the pinned compatibility patch). They are not
+// the whole reader: the identity presentation also accepts the earlier
+// publisher's wallet hex and padded Base64 (README, "Listings that /register
+// published"). Procurement remains outside this reader profile until
+// reconciliation can resolve the publisher as buyer and attribute supplier
+// history to the agreement seller.
 const PHASES = new Set([
   "vet-credentials", "negotiate-fixed-price", "negotiate-rfq", "negotiate-sealed-envelope",
   "commit-agreement", "commit-payee-bound-agreement",
@@ -145,8 +145,9 @@ function invalid(
 
 /**
  * DACS-1 §6.3.2 per-claim presentation by the presenting claim: the entry
- * whose `ref` is the exact `presentedBy` bytes, verified under that claim's
- * key over the same bundle-presentation bytes the SDK reader signs. The
+ * whose `ref` has the CF-3 identity of `presentedBy` (advisory parameters do
+ * not matter), verified under that claim's key over the same
+ * bundle-presentation bytes the SDK reader signs. The
  * Standard leaves this bare signature's encoding open. Directory and its SDK
  * adapter accept Base64URL, historical wallet hex and the pinned Standard
  * vector's padded Base64 (presentationSignatureBytes). The
@@ -159,7 +160,9 @@ export async function verifyIdentityPresentation(
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
-  const entry = presentation.signatures.map(record).find((item) => item?.ref === presentedBy);
+  const presenter = canonicalSigningIdentity(presentedBy);
+  const entry = presentation.signatures.map(record).find((item) =>
+    typeof item?.ref === "string" && canonicalSigningIdentity(item.ref) === presenter);
   const sig = presentationSignatureBytes(entry?.signature);
   if (!sig) return null;
   // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
@@ -182,7 +185,10 @@ export async function verifyListingResult(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<ListingVerificationResult> {
   try {
-    return await verifyListingArtifact(raw, resolveKey);
+    // Own the artifact before any await. A key resolver runs caller code that
+    // can mutate `raw`; the verified hash, scope and returned Listing must be
+    // the bytes that were checked.
+    return await verifyListingArtifact(structuredClone(raw), resolveKey);
   } catch {
     return invalid("dacsVersion" in raw ? "NORMATIVE_LISTING_INVALID" : "LEGACY_LISTING_INVALID");
   }
@@ -206,6 +212,8 @@ async function verifyListingArtifact(
     }
     if (!withinDirectoryProfile(raw)) return invalid("NORMATIVE_LISTING_INVALID");
     const listing = raw as unknown as Listing;
+    // The key that verified the signature is the signer; it is never looked up again.
+    const verifiedKey: { signer?: ResolvedPrimaryClaimKey } = {};
     const signatureVerdict = await verifyComponentSignature(
       raw,
       ARTIFACT_SEPARATORS.Listing,
@@ -219,6 +227,7 @@ async function verifyListingArtifact(
             signature.algorithm,
             resolveKey,
           );
+          if (resolved) verifiedKey.signer = resolved;
           return resolved;
         },
         verify: ({ signedBytes, signature, publicKey }) => {
@@ -233,15 +242,10 @@ async function verifyListingArtifact(
         },
       },
     );
-    if (signatureVerdict.status !== "valid") {
+    const verifiedSigner = verifiedKey.signer;
+    if (signatureVerdict.status !== "valid" || !verifiedSigner) {
       return invalid("LISTING_SIGNATURE_INVALID");
     }
-    const verifiedSigner = await resolvePrimaryClaimKey(
-      signatureVerdict.signature.signer,
-      signatureVerdict.signature.algorithm,
-      resolveKey,
-    );
-    if (!verifiedSigner) return invalid("LISTING_SIGNATURE_INVALID");
     const identity = listing.seller.identity as unknown as Record<string, unknown>;
     const verifiedSeller = await verifyIdentityPresentation(
       identity,
