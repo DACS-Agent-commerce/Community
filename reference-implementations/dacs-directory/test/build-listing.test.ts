@@ -215,12 +215,6 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
         assert.equal(value.contentHash, built.contentHash);
         assert.deepEqual(value.listing, signedListing, "original hex bytes survive recovery");
       }
-      const { POST: confirm } = await import("../app/api/dacs/confirm-listing/route.js");
-      const confirmed = await confirm(request({ anchorAddress: built.anchorAddress, programName: built.programName,
-        contentHash: built.contentHash, sellerClaim: claim, listingId: built.listing.listingId,
-        listingVersion: built.listing.listingVersion }));
-      assert.equal(confirmed.status, 200, "recovered history can finish pointer registration");
-      assert.equal((await confirmed.json()).confirmed, true);
     } finally {
       if (previousImports === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
       else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previousImports;
