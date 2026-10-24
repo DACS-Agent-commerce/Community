@@ -127,7 +127,7 @@ export function buildDirectoryServiceProfile(origin: string, listing: ListingSum
       maturity: "listed",
       noReputationClaim: true,
       noLivePaymentClaim: true,
-      reason: "Directory authenticated a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
+      reason: "Directory listed a catalog candidate; sample receipts, strict bundle history, buyer-local Listing admission, and live payment evidence require separate verifier adapters.",
     },
     transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     service: {
