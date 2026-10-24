@@ -28,6 +28,8 @@ export function registerLegacyListingHashCases(
         const collisionPreimage = colliding.map(([, value]) => `"é":"${value}"`).join(",");
         assert.equal(legacyListingHash(scope), digest(`{${sortedPreimage},${collisionPreimage}}`));
         // Current canonicalization preserves the original, distinct member names.
+        assert.match(canonicalize(scope), /"é":"decomposed"/);
+        assert.match(canonicalize(scope), /"é":"composed"/);
       }
     }
   });
@@ -42,6 +44,7 @@ export function registerLegacyListingHashCases(
       const scope = { nested: [value] };
       assert.equal(legacyListingHash(scope), digest(`{"nested":[${value}]}`));
     }
+    assert.equal(canonicalize({ nested: [0.5] }), '{"nested":[0.5]}');
   });
 
   test("historical NFC-equal members keep insertion order across separate sorting runs", () => {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
+// First: the store must open in a fresh directory, never the checkout's data/.
+import "./fixtures/isolated-data-dir.js";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import {
@@ -33,7 +35,8 @@ import {
 import { addRevocationCandidate, isListingRevocationCandidate } from "../src/catalog/scan.js";
 import { deriveSellerReputation, flipOutcome } from "../src/catalog/reputation.js";
 import type { Catalog, DealRecord, SellerRecord } from "../src/catalog/types.js";
-import type { BundleVerification } from "../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import type { BundleVerification } from "@kynesyslabs/dacs";
+import type { LegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 
 const seed = Uint8Array.from(Buffer.alloc(32, 7));
 const did = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`;
@@ -135,7 +138,14 @@ test("listing verification accepts a current structured listing and verifies its
   assert.equal(await verifyListing({ ...unsafeScope, signature: { algorithm: "ed25519", signer: did, value: unsafeValue } }), null);
 });
 
-function result(outcome: string, signatures: BundleVerification["signatures"]): BundleVerification {
+type LegacyBundleVerification = Omit<BundleVerification, "bundle"> & {
+  bundle: LegacyMvpAttestationBundle;
+};
+
+function result(
+  outcome: string,
+  signatures: BundleVerification["signatures"],
+): LegacyBundleVerification {
   return {
     ok: true,
     fullyVerified: signatures.every((s) => s.verdict === "valid"),
@@ -370,10 +380,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     ...evidenceScope,
     signature: await signature("dacs-evidence:v1:", evidenceScope, did, seed),
   };
-  const signedListing = {
-    ...listing,
-    signature: await signature("dacs-listing:v1:", listing, did, seed),
-  };
+  const listingSignature = await signature("dacs-listing:v1:", listing, did, seed);
+  const signedListing = { ...listing, signature: listingSignature.value };
   const verification = result("completed", [
     { party: buyerDid, verdict: "valid" },
     { party: did, verdict: "valid" },
@@ -408,7 +416,7 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
   assert.equal(await refsPassStrictPolicy(verification, artifacts), true);
 
   const substituted = structuredClone(verification);
-  substituted.bundle!.agreementRef.kind = "dacs-2-verifyresult";
+  substituted.bundle.agreementRef!.kind = "dacs-2-verifyresult";
   substituted.refs[0].kind = "dacs-2-verifyresult";
   assert.equal(await refsPassStrictPolicy(substituted, [
     { ...artifacts[0], kind: "dacs-2-verifyresult" },
@@ -424,8 +432,8 @@ test("strict ref policy binds positional kinds, hashes, and unique references", 
     artifacts[0], artifacts[1], artifacts[1], artifacts[2],
   ]), false);
 
-  const unsupported = structuredClone(verification) as BundleVerification & {
-    bundle: NonNullable<BundleVerification["bundle"]> & { ratingRefs: unknown[] };
+  const unsupported = structuredClone(verification) as LegacyBundleVerification & {
+    bundle: LegacyMvpAttestationBundle & { ratingRefs: unknown[] };
   };
   unsupported.bundle.ratingRefs = [{ kind: "dacs-5-rating", id: "rating-j", contentHash: "f".repeat(64) }];
   assert.equal(await refsPassStrictPolicy(unsupported, artifacts), false);

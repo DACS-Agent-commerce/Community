@@ -26,7 +26,7 @@ test("recipe admission selects exact version, allowed method and authenticated t
 
 test("recipe admission enforces the pinned closed method registry before operator narrowing", async () => {
   const methods = ["verifiable-credential", "tlsnotary", "zktls", "consensus-backed-proxy",
-    "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed"];
+    "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed", "demos-gcr-domain"];
   for (const method of methods) {
     const configured = { ...policy, methods: [method] };
     assert.deepEqual(await validateRecipeResult({ ...raw, method }, async () => configured), configured, method);

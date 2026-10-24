@@ -5,7 +5,7 @@
  * known deals. Registration becomes "confirm what we found", not data entry.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { isListing } from "@kynesyslabs/dacs/artifacts";
+import { isLegacyMvpListing as isListing } from "@kynesyslabs/dacs/artifacts";
 import { stripSignature } from "../../../../src/catalog/canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";

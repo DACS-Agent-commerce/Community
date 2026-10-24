@@ -141,12 +141,13 @@ export const indexerScanRunSchema = {
 export const catalogStatusSchema = {
   type: "object",
   required: [
-    "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "legacyVetUnsupportedDeals", "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
     generatedAt: { type: "integer" },
+    legacyVetUnsupportedDeals: { type: "integer", minimum: 0, description: "Cached count of legacy deals excluded from reputation because session-bound composite vet verification is unsupported." },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },

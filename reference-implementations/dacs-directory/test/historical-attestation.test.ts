@@ -26,6 +26,7 @@ test("historical delivery attestations retain NFC member-name hashing and reject
     }
   }
   // Current canonical hashing still distinguishes NFC/NFD member names (CF-1).
+  assert.notEqual(contentHash({ "e\u0301": 1 }), contentHash({ "é": 1 }));
 });
 
 test("historical adapter refuses unsupported signature shapes without invoking verification", async () => {

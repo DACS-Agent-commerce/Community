@@ -1,5 +1,6 @@
+import { legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
+import { isLegacyMvpListing as isListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -312,7 +313,7 @@ export async function verifyListing(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return null;
-  const hash = contentHash(scope);
+  const hash = legacyListingHash(scope);
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,
@@ -466,14 +467,15 @@ export async function verifyListingRevocation(
   expectedVersion: number,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
-  const scope = stripSignature(raw);
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return false; }
   if (
     scope.listingId !== (listing.scope.listingId ?? (listing.listing as Listing).serviceId) ||
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
-    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
+    // Preserve the historical reader's integer domain until the strict RB-1 reader activates.
+    !Number.isSafeInteger(scope.revokedAt)
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
