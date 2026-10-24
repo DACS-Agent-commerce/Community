@@ -3,8 +3,10 @@ const record = (value: unknown): Record<string, unknown> | null =>
 
 /** Select by reference format before verification; failures never select another reader. */
 export function usesCurrentBundleProfile(raw: Record<string, unknown> | null): boolean {
-  if (!raw || (raw.bundleVersion !== "1" && raw.faultBundleVersion !== "1")) return false;
-  if (raw.faultBundleVersion === "1") return true;
+  if (!raw) return false;
+  // Fault fields exist only in the current profile; any value, even an unsupported one, is refused there.
+  if (Object.hasOwn(raw, "faultBundleVersion") || Object.hasOwn(raw, "faultedParty")) return true;
+  if (raw.bundleVersion !== "1") return false;
   const refs = [raw.agreementRef,
     ...(Array.isArray(raw.vetRecords) ? raw.vetRecords : []),
     ...(Array.isArray(raw.settlementEvidence) ? raw.settlementEvidence : []),

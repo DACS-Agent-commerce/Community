@@ -108,6 +108,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       ? await verifyOwnerSignature(parsed.value, { ignoreFreshness: true }).catch(() => false)
       : false;
     regs.push({ ...parsed.value, ownerSignatureVerified,
+      ownerSignedAnchors: ownerSignatureVerified ? [...parsed.value.listingAnchors] : [],
       ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
