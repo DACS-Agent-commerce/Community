@@ -695,9 +695,9 @@ test("a Listing presented by an unqualified claim is summarised", async () => {
   assert.equal(record.deals[0].refsVerified, true);
 });
 
-test("a Listing presented by a qualified claim has no public summary but still backs its deal evidence", async () => {
+test("a Listing presented by a qualified claim is summarised under the exact presentedBy and backs its deal evidence", async () => {
   const record = await indexSellerDeal(`${dids[1]}?channel=directory`, "qualified-job", 110);
-  assert.deepEqual(record.listings, []);
+  assert.deepEqual(record.listings.map((listing) => listing.seller.primaryClaim), [`${dids[1]}?channel=directory`]);
   assert.equal(record.deals[0].refsVerified, true);
 });
 

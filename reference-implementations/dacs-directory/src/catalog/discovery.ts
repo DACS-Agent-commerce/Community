@@ -2,9 +2,9 @@ import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { Catalog, ListingSummary, SellerRecord } from "./types.js";
 
 /**
- * CF-3 identity of a ClaimReference: its scheme and identifier, with advisory
- * parameters dropped. Listing links carry it, and the listing routes match a
- * summary's seller by it, so a primaryClaim with parameters still resolves.
+ * A current summary's `seller.primaryClaim` carries the listing's exact
+ * `presentedBy` bytes (§6.3.6 / RB-2), CF-3 parameters included; seller
+ * records, lookups and links use its parameter-free CF-3 identity.
  */
 export const sellerIdentity = (claim: string): string => canonicalDemosAgentClaim(claim) ?? claim;
 
