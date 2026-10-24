@@ -330,8 +330,11 @@ test("historical hex agreement signatures retain their authenticated read profil
 });
 
 test("legacy vet references read the buyer's historical verifyrecord separately from agreement and evidence", async () => {
-  for (const mode of ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered", "tampered-agreement", "invalid-signatures"] as const) {
-    const jobId = `legacy-vet-${mode}`;
+  const modes = ["well-shaped", "missing", "wrong-document", "wrong-name", "tampered", "tampered-agreement", "invalid-signatures"] as const;
+  // The limitation belongs to the deal, not to whichever copy supplies its metadata: it survives a missing buyer copy.
+  for (const [mode, sellerCopyOnly] of modes.flatMap((mode) => [[mode, false], [mode, true]] as const)) {
+    const jobId = `legacy-vet-${mode}${sellerCopyOnly ? "-seller-only" : ""}`;
+    const copies = sellerCopyOnly ? 1 : 2;
     const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
     const vetScope: Obj = { recordVersion: "1", jobId, evaluatedParty: seller,
       bundleHash: "a".repeat(64), requirementHash: "b".repeat(64), generatedAt: 1700000000000,
@@ -365,22 +368,24 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
         (storage[at].signatures as Obj[]).forEach(signature => { signature.value = "invalid"; });
       }
     }
+    if (sellerCopyOnly) delete storage[deal.buyerBundleRef];
     const record = await indexed(deal);
-    assert.equal(reads.get(vetAt), 2, `${mode}: each copy reads buyer-owned dacs2:verifyrecord`);
+    assert.equal(reads.get(vetAt), copies, `${mode}: each copy reads buyer-owned dacs2:verifyrecord`);
     assert.equal(reads.get(wrongAt) ?? 0, 0, "no alternate name can substitute for the historical producer name");
-    assert.equal(reads.get(agreementAt), 2, "agreement dispatch remains separate");
-    assert.equal(reads.get(evidenceAt), 2, "evidence dispatch remains separate");
-    assert.equal(record.deals[0].signatureVerified, mode !== "invalid-signatures", mode);
+    assert.equal(reads.get(agreementAt), copies, "agreement dispatch remains separate");
+    assert.equal(reads.get(evidenceAt), copies, "evidence dispatch remains separate");
+    // Without a refs-verified seller copy the buyer copy is selected, and a missing one has no signature verdict.
+    assert.equal(record.deals[0].signatureVerified, mode !== "invalid-signatures" && !sellerCopyOnly, jobId);
     // This release has no authenticated session recipe/composite adapter. A
     // shaped and signed record alone cannot establish a completed vet graph.
     assert.equal(record.deals[0].refsVerified, false, mode);
     assert.equal(record.deals[0].reputationEligible, false, mode);
-    assert.equal(record.deals[0].verificationLimitation, mode === "invalid-signatures" ? undefined : "legacy-vet-unsupported", mode);
+    assert.equal(record.deals[0].verificationLimitation, mode === "invalid-signatures" ? undefined : "legacy-vet-unsupported", jobId);
     assert.equal(record.reputation.bundleCount, 0, mode);
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [record] });
     const { GET } = await import("../app/api/dacs/status/route.js");
     const status = await (await GET(new NextRequest("https://directory.test/api/dacs/status"))).json();
-    assert.equal(status.legacyVetUnsupportedDeals, mode === "invalid-signatures" ? 0 : 1, "two copies contribute one diagnostic deal");
+    assert.equal(status.legacyVetUnsupportedDeals, mode === "invalid-signatures" ? 0 : 1, "the copies contribute one diagnostic deal");
   }
 });
 
