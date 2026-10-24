@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +40,7 @@ function signMessage(message: string): string {
 function signedCurrentListing(
   extra: Record<string, unknown> = {},
   signingClaim = claim,
+  hashScope: (scope: Record<string, unknown>) => string = contentHash,
 ): Record<string, unknown> {
   const identity: Record<string, unknown> = {
     bundleVersion: "1",
@@ -88,7 +90,7 @@ function signedCurrentListing(
     signature: {
       algorithm: "ed25519",
       signer: signingClaim,
-      value: signMessage(`dacs-listing:v1:${contentHash(scope)}`),
+      value: signMessage(`dacs-listing:v1:${hashScope(scope)}`),
     },
   };
 }
@@ -655,6 +657,17 @@ test("negotiable bounds and metered units retain their independent schema types"
   }
 });
 
+/** Canonical JSON text written without the SDK: members sorted by key, strings escaped by JSON.stringify. */
+function handBuiltCanonicalText(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(handBuiltCanonicalText).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const members = value as Record<string, unknown>;
+    return `{${Object.keys(members).sort().map((key) => `${JSON.stringify(key)}:${handBuiltCanonicalText(members[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+const handBuiltHash = (scope: Record<string, unknown>) => createHash("sha256").update(handBuiltCanonicalText(scope)).digest("hex");
+
 test("shared canonicalization and listing verification reject lone surrogates in signed keys and values", async () => {
   const guarded = await import("../src/catalog/canonical.js");
   for (const surrogate of ["\ud800", "\udfff"]) {
@@ -664,7 +677,8 @@ test("shared canonicalization and listing verification reject lone surrogates in
       }
       // The pinned SDK cannot canonicalize, so cannot sign, these bytes; the Directory reader refuses them too.
       assert.throws(() => signedCurrentListing(extra), /not stable canonical JSON|surrogate/);
-      const raw = { ...signedCurrentListing(), ...extra };
+      // An older SDK could sign over a hand-built canonical text; the Directory reader must still refuse that.
+      const raw = signedCurrentListing(extra, claim, handBuiltHash);
       assert.deepEqual(await verifyListingResult(raw), { ok: false, code: "NORMATIVE_LISTING_INVALID" });
     }
   }

@@ -86,6 +86,14 @@ const signed = async (scope: Obj, key = seed, envelope: Obj = {}) => ({
     value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(key))).toString("base64url") },
 });
 
+/** A marker signed over the JCS text a producer would emit, without the SDK canonicalizer. */
+async function signedOverJcsText(scope: Obj): Promise<Obj> {
+  const jcs = JSON.stringify(Object.fromEntries(Object.entries(scope).sort(([a], [b]) => a < b ? -1 : 1)));
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
+    privateKeyFromSeed(seed))).toString("base64url");
+  return { ...scope, signature: { algorithm: "ed25519", signer: didOf(seed), value } };
+}
+
 test("RB-4: a validly signed marker revokes only the exact listing tuple, signed by the listing's own signer", async () => {
   const tuple = { listingId: "svc", listingVersion: 2, listingContentHash: listingHash, revokedAt: 1 };
   const verdict = async (marker: Obj, expectedVersion = 2, against: VerifiedListing = listing) => verifyListingRevocation(marker, against, expectedVersion);
@@ -107,13 +115,9 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "a listing signed by someone else": await verdict(await signed(tuple), 2, { ...listing, signer: didOf(otherSeed) }),
     // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
     // producer would emit. The canonicalizer may reject it before the explicit magnitude check.
-    "a revokedAt beyond the safe-integer range": await (async () => {
-      const unsafe: Obj = { ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 };
-      const jcs = JSON.stringify(Object.fromEntries(Object.entries(unsafe).sort(([a], [b]) => a < b ? -1 : 1)));
-      const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
-        privateKeyFromSeed(seed))).toString("base64url");
-      return verdict({ ...unsafe, signature: { algorithm: "ed25519", signer: didOf(seed), value } });
-    })(),
+    "a revokedAt beyond the safe-integer range": await verdict(await signedOverJcsText({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 })),
+    // The SDK hashes a fractional number, but the marker's integer-only domain refuses it.
+    "a fractional revokedAt": await verdict(await signedOverJcsText({ ...tuple, revokedAt: 1.5 })),
     "no signature": await verdict({ ...tuple }),
     "a signature list": await verdict({ ...tuple, signature: [(await signed(tuple)).signature] }),
     "a bare signature string": await verdict({ ...tuple, signature: (await signed(tuple)).signature.value }),
