@@ -119,7 +119,8 @@ export function reconcileLegacyCopies<T extends { refsOk: boolean; bundle?: { ou
     ),
   );
   const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
-  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
+  const bothBundlesPresent = Boolean(buyerCopy.bundle && sellerCopy?.bundle);
+  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && bothBundlesPresent && !divergent;
   const sellerOutcome = authoritative === sellerCopy
     ? authoritative.bundle?.outcome : flipOutcome(authoritative.bundle?.outcome);
   const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
