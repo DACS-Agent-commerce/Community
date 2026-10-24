@@ -34,7 +34,7 @@ SDK_MANIFEST="vendor/dacs-sdk/.dacs-sdk-manifest"
 # then `npm run build` and sdk-compat-output.mjs on the pinned Node release).
 # A packaged or freshly built
 # dist is accepted only with exactly these bytes.
-SDK_DIST_SHA256="28fadba6574e34840f42c9436ca98a91ff25fc0ab6b2606b538be6023400ef72"
+SDK_DIST_SHA256="3f6b6d5882f8196f694ff7ef2a6ab6ef1b620450789c3aa1ce6145c1d319cef6"
 
 require_standard_revision() {
   local declared
