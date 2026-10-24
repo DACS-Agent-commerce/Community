@@ -853,4 +853,37 @@ test("a signed retry that names its version resolves it after the catalog has in
   }
 });
 
+test("a signed retry for a version the catalog lists but the chain lookup cannot find prepares no second create", async () => {
+  const store = await import("../src/catalog/store.js");
+  const input = { ...base, serviceId: "listed-but-not-found" };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    if (init?.method !== "POST") return new Response(null, { status: 404 });
+    const message = JSON.parse(String(init.body)).params?.[0]?.message;
+    return Response.json({ result: 200, response: message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try {
+    const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+    const authenticated = { ...input, listingVersion: identity.listingVersion,
+      identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+    const preview = await (await POST(request(authenticated))).json() as { message: string };
+    const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
+    assert.ok(((await (await POST(request(signed))).json()) as { tx: unknown }).tx, "with no catalog row the write is prepared");
+
+    // The catalog now lists that version at an anchor this producer's names do not resolve.
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim, displayName: base.name, listings: [{
+      listingId: input.serviceId, version: identity.listingVersion, anchor: { kind: "storage-program", locator: "stor-other-anchor" } }] }] } as never);
+    const retried = await POST(request(signed));
+    assert.equal(retried.status, 409);
+    const body = await retried.json() as { error: string; tx?: unknown };
+    assert.match(body.error, /already lists this version/);
+    assert.equal(body.tx, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
+  }
+});
+
 /** Answer only the explicitly modelled read RPCs, never contact a node. */

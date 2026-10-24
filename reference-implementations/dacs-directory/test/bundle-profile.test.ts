@@ -38,3 +38,11 @@ test("current and mixed reference formats never fall back to legacy on malformed
     { faultBundleVersion: "1", agreementRef: legacy },
   ]) assert.equal(usesCurrentBundleProfile(raw), true, JSON.stringify(raw));
 });
+
+test("fault fields select current whatever their value, so mixed bundles never reach the historical reader", () => {
+  for (const raw of [
+    { bundleVersion: "1", faultBundleVersion: "2", agreementRef: legacy },
+    { bundleVersion: "1", faultedParty: "buyer", agreementRef: legacy },
+    { bundleVersion: "1", faultBundleVersion: null, faultedParty: null, agreementRef: legacy },
+  ]) assert.equal(usesCurrentBundleProfile(raw), true, JSON.stringify(raw));
+});
