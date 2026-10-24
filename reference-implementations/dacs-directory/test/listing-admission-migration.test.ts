@@ -60,7 +60,6 @@ seeded.close();
 
 const store = await import("../src/catalog/store.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
-const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { verifyListingResult } = await import("../src/catalog/listingVerification.js");
 const { GET } = await import("../app/api/dacs/listings/route.js");
 const restart = () => {
