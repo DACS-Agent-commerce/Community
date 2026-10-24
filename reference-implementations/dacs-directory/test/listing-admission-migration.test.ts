@@ -46,13 +46,16 @@ const tombstone = { ...summary(withdrawn, locator(903)), status: "revoked", revo
   logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:withdrawn:v1`,
   markerAnchor: { kind: "storage-program", locator: locator(904) }, markerContentHash: "a".repeat(64),
 } };
+// Rows from before any shape guarantee: no anchor at all, and an unusable version.
+const anchorless = { contentHash: "c".repeat(64), status: "active" };
+const unnumbered = { ...summary(good, locator(906)), listingId: "unnumbered", version: "one" };
 const seeded = new Database(join(directory, "directory.sqlite"));
 seeded.exec("CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
 const put = seeded.prepare("INSERT INTO kv_state VALUES (?, ?, 0)");
 for (const [key, value] of Object.entries({
   "schema-version": 1, "sr2-anchor-schema-version": 2,
   "catalog": { catalogVersion: "1", generatedAt: 1, sellers: [{ ...reg, cci: [],
-    listings: [summary(bad, locator(901)), summary(good, locator(902)), nextVersion, fixtureListing, tombstone],
+    listings: [summary(bad, locator(901)), summary(good, locator(902)), nextVersion, fixtureListing, tombstone, anchorless, unnumbered],
     reputation: {}, registeredAt: 1, lastIndexedAt: 1 }] },
   "registrations": [reg], "scan-state": { lastSeenTxId: 20, listings: { [locator(902)]: `0x${seller.slice(-64)}` }, deals: {} },
 })) put.run(key, JSON.stringify(value));
@@ -103,6 +106,7 @@ test("the reset keeps the highest withheld version so the publisher never renumb
   assert.equal(store.listingVersionFloor(seller, "missing-method"), 1);
   assert.equal(store.listingVersionFloor(seller, "withdrawn"), 0, "a retained tombstone already carries its version");
   assert.equal(store.listingVersionFloor(seller, "never-published"), 0);
+  assert.equal(store.listingVersionFloor(seller, "unnumbered"), 0, "an unusable version records no floor");
 });
 
 test("the publisher numbers a new version after the withheld one", async () => {
@@ -132,4 +136,26 @@ test("the reset runs once: a listing saved after it survives the next start", ()
   const saved = { ...catalog.sellers[0].listings[0], listingId: "saved-after-reset", status: "active" as const };
   store.saveCatalog({ ...catalog, sellers: [{ ...catalog.sellers[0], listings: [...catalog.sellers[0].listings, saved] }] });
   assert.deepEqual(listedIds(restart()), ["allowed-second-key", "withdrawn", "saved-after-reset"]);
+});
+
+test("a reindex returns only the old offers that pass the current reader", async () => {
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const owner = `0x${seller.slice(-64)}`;
+  const stored = new Map<string, Obj>([[locator(901), bad], [locator(902), good]]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.body) return Response.json({ result: 200, response: [] });
+    const data = stored.get(String(input).split("/").pop() ?? "");
+    return data ? Response.json({ success: true, owner, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  };
+  try {
+    await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+      crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const returned = (catalog: ReturnType<typeof store.loadCatalog>) =>
+    catalog.sellers[0].listings.filter((l) => l.status === "active" && l.anchor.kind !== "fixture").map((l) => l.listingId);
+  assert.deepEqual(returned(store.loadCatalog()), ["allowed-second-key"]);
+  assert.deepEqual(returned(restart()), ["allowed-second-key"]);
 });
