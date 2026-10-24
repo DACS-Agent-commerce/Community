@@ -19,8 +19,9 @@ export interface ListingDiagnosticCoordinates {
 
 /**
  * A current Listing declares its version; only the legacy `serviceId` shape
- * defaults to version 1. A missing or malformed version must not be filled in,
- * or a rejection would be shown against another valid version.
+ * defaults to version 1, and only when `listingVersion` is absent. A missing
+ * or malformed version must not be filled in, or a rejection would be shown
+ * against another valid version.
  */
 function boundedCoordinates(listingId: string, version: unknown): ListingDiagnosticCoordinates | undefined {
   // DACS-1 Listing schema: URL-safe ASCII, at most 128 characters.
@@ -32,15 +33,22 @@ function boundedCoordinates(listingId: string, version: unknown): ListingDiagnos
 
 /**
  * Project bounded coordinates only after the caller authenticates the artifact
- * and its seller. Returns `undefined` when the identifier or version is
- * missing, malformed or outside the Listing schema's bounds.
+ * and its seller. The profile is selected the way `verifyListing` selects it:
+ * an artifact with `dacsVersion` is a current Listing (`listingId`,
+ * `listingVersion`); any other is the legacy SDK shape (`serviceId`, optional
+ * `listingVersion`), whose extra members are never read. Returns `undefined`
+ * when the identifier or version is missing, malformed or outside the Listing
+ * schema's bounds.
  */
 export function listingDiagnosticCoordinates(
   raw: Record<string, unknown>,
 ): ListingDiagnosticCoordinates | undefined {
-  if (typeof raw.listingId === "string") return boundedCoordinates(raw.listingId, raw.listingVersion);
-  if (typeof raw.serviceId === "string") return boundedCoordinates(raw.serviceId, raw.listingVersion ?? raw.version ?? 1);
-  return undefined;
+  if ("dacsVersion" in raw) {
+    return typeof raw.listingId === "string" ? boundedCoordinates(raw.listingId, raw.listingVersion) : undefined;
+  }
+  return typeof raw.serviceId === "string"
+    ? boundedCoordinates(raw.serviceId, raw.listingVersion === undefined ? 1 : raw.listingVersion)
+    : undefined;
 }
 
 export const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {

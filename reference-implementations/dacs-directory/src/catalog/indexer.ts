@@ -40,7 +40,7 @@ import {
 } from "./listingVerification.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import { listingDiagnosticCoordinates } from "./listingAdmission.js";
-import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { canonicalDemosAgentClaim, canonicalDemosAgentReference } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
@@ -576,9 +576,10 @@ export async function indexRegistration(
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const refsOk = verification && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole)
-        ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
+      const authenticated = Boolean(verification) && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole);
+      const refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
+      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts,
+        carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
@@ -604,7 +605,7 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
-      verificationLimitation: !strictRefsVerified && authoritative.signaturesOk && bundle?.vetRecords.length
+      verificationLimitation: !strictRefsVerified && (buyerCopy.carriesVetRecords || sellerCopy?.carriesVetRecords)
         ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
