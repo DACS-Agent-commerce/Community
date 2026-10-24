@@ -82,8 +82,9 @@ const listedIds = (catalog: { sellers: Array<{ listings: Obj[] }> }) => catalog.
 // First: the next test saves a reindexed catalog over the seeded one.
 test("the reset withholds cached deal verdicts and the reputation counted from them until a reindex", async () => {
   const { GET: getSeller } = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+  // The route receives the already-decoded path segment.
   const publicSeller = async () => (await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/x"),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(seller) }) })).json();
+    { params: Promise.resolve({ primaryClaimRef: seller }) })).json();
   for (const view of [await publicSeller(), restart().sellers[0]]) {
     assert.deepEqual((view.deals as Obj[]).map((deal) => [deal.jobId, deal.refsVerified, deal.reputationEligible]), [["job-cached", false, false]]);
     assert.equal(view.reputation.completed, 0);
