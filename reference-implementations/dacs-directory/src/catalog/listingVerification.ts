@@ -11,7 +11,7 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes, presentationSignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -123,8 +123,9 @@ export async function verifyIdentityPresentation(
   delete bundleScope.presentation;
   const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
   // A per-claim PresentationSignature carries a bare `signature` string, not a
-  // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
-  const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
+  // SIG-6 envelope `value`; read it exactly as the SDK reader does (the
+  // Directory's publisher writes the wallet's hex).
+  const value = presentationSignatureBytes(signature.signature);
   return verifyEd25519(message, sellerClaim, value, resolveKey);
 }
 
@@ -163,7 +164,8 @@ export async function verifyListing(
     };
   }
 
-  const scope = stripSignature(raw);
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return null; }
   if (!isListing(scope)) return null;
   const listing = scope as unknown as Listing;
   const signature = raw.signature;
@@ -183,7 +185,8 @@ export async function verifyListing(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return null;
-  const hash = legacyListingHash(scope);
+  let hash: string;
+  try { hash = legacyListingHash(scope); } catch { return null; }
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,
@@ -344,8 +347,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // Preserve the historical reader's integer domain until the strict RB-1 reader activates.
-    !Number.isSafeInteger(scope.revokedAt)
+    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
+    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
