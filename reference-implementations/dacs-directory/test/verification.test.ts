@@ -650,10 +650,10 @@ test("standalone revocation verifier bounds a signed revokedAt to the CORE numer
   // DACS-1 types revokedAt as a number and CORE §B.2 bounds only its magnitude.
   assert.deepEqual(await outcome(-1), { candidate: true, verified: true });
   assert.deepEqual(await outcome(-Number.MAX_SAFE_INTEGER), { candidate: true, verified: true });
+  // The pinned SDK canonicalizes fractions, so a validly signed fractional marker still withdraws the Listing.
+  assert.deepEqual(await outcome(1791480684902.5), { candidate: true, verified: true });
   const rejected = { candidate: false, verified: false };
   assert.deepEqual({
-    // A valid marker, but the pinned SDK canonicalizer has no form for a fraction (SIG-3).
-    fraction: await outcome(1791480684902.5),
     nan: await outcome(Number.NaN),
     infinity: await outcome(Number.POSITIVE_INFINITY),
     aboveMaxSafeInteger: await outcome(Number.MAX_SAFE_INTEGER + 1),
@@ -661,7 +661,6 @@ test("standalone revocation verifier bounds a signed revokedAt to the CORE numer
     // Canonicalizable, so only the type check rejects it.
     numericString: await outcome("1791480684902"),
   }, {
-    fraction: { candidate: true, verified: false },
     nan: rejected,
     infinity: rejected,
     aboveMaxSafeInteger: rejected,

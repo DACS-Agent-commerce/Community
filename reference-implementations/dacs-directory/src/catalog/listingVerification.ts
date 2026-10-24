@@ -293,7 +293,8 @@ export async function verifyListing(
     };
   }
 
-  const scope = stripSignature(raw);
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return null; }
   if (!isListing(scope)) return null;
   const listing = scope as unknown as Listing;
   const signature = raw.signature;
@@ -313,7 +314,8 @@ export async function verifyListing(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return null;
-  const hash = legacyListingHash(scope);
+  let hash: string;
+  try { hash = legacyListingHash(scope); } catch { return null; }
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,
@@ -474,8 +476,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // Preserve the historical reader's integer domain until the strict RB-1 reader activates.
-    !Number.isSafeInteger(scope.revokedAt)
+    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
+    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
