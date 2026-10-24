@@ -707,6 +707,12 @@ test("a Listing presented by an unqualified claim is summarised", async () => {
   assert.equal(record.deals[0].refsVerified, true);
 });
 
+test("a Listing presented by an unqualified claim with a mixed-case scheme is summarised", async () => {
+  const record = await indexSellerDeal(`DID:${dids[1].slice("did:".length)}`, "mixed-case-job", 120);
+  assert.equal(record.listings.length, 1);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
 test("a Listing presented by a qualified claim is summarised under the exact presentedBy and backs its deal evidence", async () => {
   const record = await indexSellerDeal(`${dids[1]}?channel=directory`, "qualified-job", 110);
   assert.deepEqual(record.listings.map((listing) => listing.seller.primaryClaim), [`${dids[1]}?channel=directory`]);
