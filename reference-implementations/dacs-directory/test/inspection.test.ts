@@ -6,12 +6,15 @@ import { GET as inspectServiceGet } from "../app/api/dacs/inspect-service/[listi
 import { GET as listingContractGet } from "../app/api/dacs/listings/[listingId]/[version]/route.js";
 import { counterpartyEvidenceSellerRecord } from "../src/catalog/counterpartyEvidence.js";
 import { saveCatalog } from "../src/catalog/store.js";
+import { generateMetadata as serviceMetadata } from "../app/service/[seller]/[listingId]/[version]/page.js";
 
 import {
   buildDirectoryServiceInspectionEnvelope,
+  buildDirectoryServiceProfile,
   directoryInspectionAffordance,
   inspectServicePath,
   listingJsonPath,
+  servicePath,
   withDirectoryInspectionAffordance,
 } from "../src/catalog/inspection.js";
 import type { ListingSummary } from "../src/catalog/types.js";
@@ -159,4 +162,26 @@ test("the readiness reason makes no authentication claim, so it holds for an uns
   assert.equal(fixture.artifactProfile, "fixture-listing");
   assert.equal(fixture.transactionReadiness?.disposition, "unassessed");
   assert.doesNotMatch(fixture.transactionReadiness?.reason ?? "", /authenticated|SDK/);
+  const profile = buildDirectoryServiceProfile("https://directory.example", fixture);
+  assert.doesNotMatch(profile.maturityProfile.reason, /authenticated/, "the maturity reason makes no authentication claim either");
+});
+
+test("the listing route links the canonical seller identity, and the service page resolves that link", async () => {
+  const seller = `did:demos:agent:${"ab".repeat(32)}`;
+  const record = counterpartyEvidenceSellerRecord(1);
+  const qualified = { ...record.listings[0], seller: { ...record.listings[0].seller, primaryClaim: `${seller}?channel=directory` } };
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ ...record, primaryClaim: seller, listings: [qualified] }] });
+  const response = await listingContractGet(
+    new NextRequest(`https://directory.example${listingJsonPath(qualified)}`),
+    { params: Promise.resolve({ listingId: qualified.listingId, version: String(qualified.version) }) });
+  const link = (rel: string) => (response.headers.get("link") ?? "").split(", ")
+    .find((entry) => entry.includes(`rel="${rel}"`))?.match(/<([^>]+)>/)?.[1];
+  assert.equal(link("alternate"), `https://directory.example${servicePath(qualified)}`);
+  assert.equal(link("seller"), `https://directory.example/api/dacs/sellers/${encodeURIComponent(seller)}`);
+  const page = await serviceMetadata({ params: Promise.resolve({
+    seller: encodeURIComponent(seller), listingId: qualified.listingId, version: String(qualified.version) }) });
+  assert.equal(page.title, qualified.offering.title);
+  const alsoQualified = await serviceMetadata({ params: Promise.resolve({
+    seller: encodeURIComponent(`${seller}?channel=directory`), listingId: qualified.listingId, version: String(qualified.version) }) });
+  assert.equal(alsoQualified.title, qualified.offering.title, "a link built from the exact stored claim still resolves");
 });
