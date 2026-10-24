@@ -96,6 +96,9 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
   assert.equal(await verdict(await signed({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER })), true, "the largest safe integer is in range");
+  // CORE §B.2 permits fractional numbers within the magnitude bound, so a withdrawal is not ignored for one.
+  assert.equal(await verdict(await signed({ ...tuple, revokedAt: 1.5 })), true, "a fractional revokedAt is in range");
+  assert.equal(await verdict(await signedOverJcsText({ ...tuple, revokedAt: 1.5 })), true, "the JCS text of a fractional revokedAt verifies");
   const rejected: Record<string, boolean> = {
     "another listingId": await verdict(await signed({ ...tuple, listingId: "svc-2" })),
     "another listingVersion": await verdict(await signed({ ...tuple, listingVersion: 3 })),
@@ -111,8 +114,6 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
     // producer would emit. The canonicalizer may reject it before the explicit magnitude check.
     "a revokedAt beyond the safe-integer range": await verdict(await signedOverJcsText({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 })),
-    // The SDK hashes a fractional number, but the marker's integer-only domain refuses it.
-    "a fractional revokedAt": await verdict(await signedOverJcsText({ ...tuple, revokedAt: 1.5 })),
     "no signature": await verdict({ ...tuple }),
     "a signature list": await verdict({ ...tuple, signature: [(await signed(tuple)).signature] }),
     "a bare signature string": await verdict({ ...tuple, signature: (await signed(tuple)).signature.value }),
