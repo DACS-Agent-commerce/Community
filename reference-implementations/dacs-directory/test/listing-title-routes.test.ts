@@ -73,3 +73,23 @@ test("derive returns the title of a verified current and of a verified legacy Li
   maps.set(currentAt, { ...stored, offering: { ...(stored.offering as Obj), title: "changed after signing" } });
   assert.deepEqual(await titleOf("svc"), { address: currentAt, found: true, valid: false, ownedByClaim: false, title: null });
 });
+
+test("lookup skips a stored Listing that is not stable canonical JSON instead of failing the lookup", async () => {
+  const { currentAt, legacyAt } = await seedAnchors();
+  const hostileAt = locator(702);
+  saveScanState({ ...loadScanState(), listings: { [hostileAt]: ownerAddress, [currentAt]: ownerAddress, [legacyAt]: ownerAddress } });
+  // 1e400 parses to Infinity, which the SDK refuses to canonicalize.
+  const hostileBody = `{"success":true,"owner":"${ownerAddress}","programName":"dacs:test","data":${JSON.stringify(legacyScope).replace(/\}$/, ',"future":1e400}')}}`;
+  const response = await withChainReads(async () => {
+    const chainReads = globalThis.fetch;
+    globalThis.fetch = async (input) => String(input).split("/").pop() === hostileAt
+      ? new Response(hostileBody, { headers: { "content-type": "application/json" } })
+      : chainReads(input);
+    return lookup(new NextRequest(`https://directory.example/api/dacs/lookup?claim=${dids[1]}`));
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json() as { listings: unknown }).listings, [
+    { address: currentAt, title: "test" },
+    { address: legacyAt, title: legacyScope.name },
+  ]);
+});
