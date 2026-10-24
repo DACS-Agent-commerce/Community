@@ -22,6 +22,7 @@ const { saveCatalog } = await import("../src/catalog/store.js");
 const { default: SellerPage } = await import("../app/seller/[claim]/page.js");
 const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
 const { default: DiscoverPage } = await import("../app/discover/page.js");
+const { default: HowItWorksPage } = await import("../app/how-it-works/page.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 const router = { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} };
@@ -109,4 +110,10 @@ test("the verify page's outcome badge is a neutral observation, never a success 
   const source = readFileSync(new URL("../app/verify/page.tsx", import.meta.url), "utf8");
   assert.match(source, /<ObservedOutcomeBadge outcome=\{loaded\.outcome\} \/>/);
   assert.doesNotMatch(source, /outcome === "completed"/);
+});
+
+test("the how-it-works page says the pages omit rates, not that the whole Directory has none", () => {
+  const html = renderToStaticMarkup(React.createElement(HowItWorksPage));
+  assert.match(html, /These pages do not show completion or fault rates or numeric reputation scores/);
+  assert.doesNotMatch(html, /scores are unavailable on testnet/);
 });

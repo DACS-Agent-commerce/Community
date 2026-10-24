@@ -91,6 +91,18 @@ test("discovery ignores unrelated words and tracking names including metric word
   }
 });
 
+test("discovery refuses every rate, score and ordering spelling, not only camelCase", () => {
+  for (const query of [
+    "averagesellerrating=5", "AVERAGESELLERRATING=5", "averagebuyerrating=5", "counterpartyfaultrate=1",
+    "counterpartyadjustedcompletionrate=1", "ratings=5", "minRatings=4", "scores=1", "maxrate=1", "minrate=1",
+    "sortField=price", "sorting=price", "orderField=price", "order_dir=asc", "orderDir=asc", "sortDesc=1",
+    "filter=order%20by", "filter=sort_by",
+  ]) {
+    const reason = unavailableMetricQuery(new URLSearchParams(query), "discovery");
+    assert.match(reason ?? "", /^(?:Rate and score filters|Sorting and ranking) are unavailable/, query);
+  }
+});
+
 test("discovery refuses metrics and ranking including filter wrapper values", () => {
   for (const query of ["trackRecord=90", "min_rating=4", "completion.rate=1", "filter=completionRate", "filters=rating", "sort=x", "filter=sort", "filter=rank", "filters=orderBy", "filters[sort]=price"]) {
     const reason = unavailableMetricQuery(new URLSearchParams(query), "discovery");

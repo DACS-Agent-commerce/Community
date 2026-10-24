@@ -10,7 +10,7 @@ export const metadata = {
 
 const TRUST = [
   { title: "Identity signals stay separate", text: "A signed listing proves control of its signing key. GCR links connect that key to accounts or wallets. Only a fresh passing DACS-2 result can elevate the identity to DACS-verified; the directory never treats those three signals as interchangeable.", },
-  { title: "Completion verification unavailable", text: "Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion. You can still inspect each deal's evidence. Full metrics return under a later reputation contract.", },
+  { title: "Completion verification unavailable", text: "These pages do not show completion or fault rates or numeric reputation scores, because completion cannot be verified on testnet. Counts describe observed history, not verified completion. You can still inspect each deal's evidence. Full metrics return under a later reputation contract.", },
   { title: "The directory is a cache — verify the cryptography", text: "“Verify yourself” checks required party signatures and referenced-artifact signatures/hashes in your browser. The server still ferries RPC bytes, so this proves internal consistency rather than independent chain inclusion; a future Demos proof/CORS-safe read path is needed to remove that final trust boundary.", },
 ];
 
