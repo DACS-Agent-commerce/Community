@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { homeCatalogSummary } from "@/src/components/home-hero-state";
 import { loadCatalog } from "@/src/catalog/store";
+import { CHECKED_BUNDLES_LABEL } from "@/src/catalog/testnetMetricPolicy";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +60,7 @@ export default function Home() {
           </div>
           <div>
             <strong>{summary.verifiedDeals}</strong>
-            <span>verified deal graphs</span>
+            <span>{CHECKED_BUNDLES_LABEL}</span>
           </div>
           <div>
             <strong>{summary.freshness.value}</strong>
