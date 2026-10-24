@@ -341,6 +341,75 @@ test("admission authorizes the signer by CF-3 identity, ignoring advisory ClaimR
   }
 });
 
+test("the indexer publishes current-SDK listings under the registered identity and drops expired ones", async () => {
+  const anchors = {
+    [`stor-${"a".repeat(40)}`]: payAlternative("indexed-pay-alternative"),
+    [`stor-${"b".repeat(40)}`]: nestedListing(128),
+    [`stor-${"c".repeat(40)}`]: signedListing("indexed-advisory", attested({ kind: "self-signed" }), {}, {
+      presentedBy: advisory, claim: advisory, signer: advisory,
+    }),
+    [`stor-${"d".repeat(40)}`]: signedListing("indexed-expired", attested({ kind: "self-signed" }), {
+      validity: { notBefore: 1, notAfter: 2 },
+    }),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = anchors[String(input).split("/").pop() ?? ""];
+    return data
+      ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data })
+      : new Response(null, { status: 404 });
+  };
+  try {
+    const record = await indexRegistration(
+      { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: Object.keys(anchors) },
+      undefined,
+      async () => { throw new Error("identity unavailable"); },
+    );
+    assert.deepEqual(
+      record.listings.map((listing) => listing.listingId).sort(),
+      ["depth-128", "indexed-advisory"],
+    );
+    // The seller record is keyed by the registered CF-3 identity; each §6.3.6
+    // summary carries its listing's exact `presentedBy` bytes (RB-2).
+    assert.equal(record.primaryClaim, seller);
+    for (const listing of record.listings) {
+      assert.equal(listing.status, "active", listing.listingId);
+      assert.equal(
+        listing.seller.primaryClaim,
+        listing.listingId === "indexed-advisory" ? advisory : seller,
+        listing.listingId,
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the indexer withholds a signed Listing until its notBefore, then publishes it", async (t) => {
+  // DACS-1 reader step 3: a Listing is not effective before validity.notBefore.
+  const notBefore = Date.now() + 24 * 60 * 60 * 1000;
+  const anchor = `stor-${"e".repeat(40)}`;
+  const listing = signedListing("indexed-future", attested({ kind: "self-signed" }), { validity: { notBefore } });
+  assert.equal(isListing(listing), true);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => String(input).endsWith(`/${anchor}`)
+    ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: listing })
+    : new Response(null, { status: 404 });
+  const index = () => indexRegistration(
+    { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: [anchor] },
+    undefined,
+    async () => { throw new Error("identity unavailable"); },
+  );
+  try {
+    assert.deepEqual((await index()).listings, []);
+    t.mock.method(Date, "now", () => notBefore);
+    const effective = await index();
+    assert.deepEqual(effective.listings.map((summary) => [summary.listingId, summary.status]), [["indexed-future", "active"]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
   const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
   const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");
@@ -451,6 +520,38 @@ test("diagnostic pruning keeps current sellers case-insensitively and removes de
   assert.equal(items.some((item) => item.locator === dropAt), false);
   store.clearRegistrationListingRejections(seller);
 });
+
+test("missing candidate owners and restored withdrawal sources without bindings are empty", async () => {
+  assert.equal(store.isOwnerRevocationCandidate("a".repeat(64), `stor-${"f".repeat(40)}`, `0x${keyHex}`), false);
+  const { default: Database } = await import("better-sqlite3");
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  const previous = db.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string } | undefined;
+  try {
+    db.prepare("INSERT OR REPLACE INTO kv_state(key,value_json,updated_at) VALUES ('withdrawal-sources',?,1)")
+      .run(JSON.stringify([{ domain: "restored.example", seller, hashes: [], incomplete: [], provenance: "publisher-signature" }]));
+    assert.deepEqual(store.boundWellKnownRevocations(seller, "a".repeat(64), "listing", 1), []);
+  } finally {
+    if (previous) db.prepare("UPDATE kv_state SET value_json=? WHERE key='withdrawal-sources'").run(previous.value_json);
+    else db.prepare("DELETE FROM kv_state WHERE key='withdrawal-sources'").run();
+    db.close();
+  }
+});
+
+test("legacy numeric-looking validity strings do not become current-profile numeric windows", async () => {
+  const scope = { agentId: seller, serviceId: "legacy-window", name: "Legacy", description: "Historical validity extension",
+    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
+    supportedDelivery: ["deliver-storage-program"], validity: { notBefore: "9007199254740991", notAfter: "1" } };
+  const data = { ...scope, signature: Buffer.from(sign(`dacs-listing:v1:${contentHash(scope)}`), "base64url").toString("hex") };
+  assert.equal((await verifyListingResult(data)).ok, true);
+  const anchor = `stor-${"9".repeat(40)}`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
+  try {
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "Legacy", listingAnchors: [anchor] }, undefined, async () => ({}));
+    assert.deepEqual(record.listings.map((item) => [item.listingId, item.status]), [["legacy-window", "active"]]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 
 test("rejections never assign unauthenticated coordinates or blame another seller; latest pointers replace stale diagnostics", async () => {
   const anchor = `stor-${"a".repeat(40)}`;

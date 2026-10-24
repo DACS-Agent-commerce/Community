@@ -11,6 +11,7 @@ import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVe
 import {
   indexRegistration,
   listingBindingRejection,
+  listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
@@ -68,6 +69,15 @@ test("listing binding compares canonical §6.3.1 forms, not lowercased strings",
   );
   // A registration stored in a legacy non-canonical form never binds.
   assert.equal(listingBindingRejection(dids[1], owner, `0x${hexTail}`), "SELLER_CLAIM_BINDING");
+});
+
+test("listing discovery enforces both edges of the signed validity window", () => {
+  const now = 1_000;
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: now + 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now } }, now), true);
+  assert.equal(listingIsCurrentlyEffective({ validity: { notBefore: 1, notAfter: now - 1 } }, now), false);
+  assert.equal(listingIsCurrentlyEffective({}, now), true, "explicit legacy Listings have no validity field");
 });
 
 function dealRecord(
@@ -929,6 +939,157 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
     "trusted signer comparison uses its resolved canonical identity",
   );
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
+});
+
+/** Index the seller's registration over the fixture's stubbed storage. */
+async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: Partial<Registration> = {}, resolveRecipe?: (scheme: string, version: number) => Promise<RecipePolicy | null>) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data } : { success: false }),
+      { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  try {
+    return await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], ...extra },
+      undefined, async () => { throw new Error("identity unavailable"); }, resolveRecipe);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("completed deals remain verifiable after their Listing expires out of discovery", async (t) => {
+  const fixture = await vector("listing-expiry-job", 2100);
+  const notAfter = 200;
+  let now = notAfter - 1;
+  t.mock.method(Date, "now", () => now);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.validity = { notBefore: 1, notAfter };
+  fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  const deal = registeredDeal("listing-expiry-job", fixture.locators.buyer, fixture.locators.seller);
+  const registration: Registration = {
+    primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal],
+    bundleBindings: [
+      await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+      await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+    ],
+  };
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return Response.json(data ? { success: true, owner: `0x${dids[1].slice(-64)}`, data } : { success: false },
+      { status: data ? 200 : 404 });
+  });
+  const resolveIdentities = async () => { throw new Error("identity unavailable"); };
+  const before = await indexRegistration(registration, undefined, resolveIdentities);
+  assert.equal(before.listings.length, 1);
+  assert.equal(before.listings[0].contentHash, listingRef.contentHash);
+  assert.equal(before.deals[0].refsVerified, true);
+  assert.equal(before.deals[0].finalisedAt, 120, "the deal completed before Listing expiry");
+
+  now = notAfter + 1;
+  const after = await indexRegistration(registration, before, resolveIdentities);
+  assert.deepEqual(after.listings, [], "expired Listings must leave the discoverable catalog");
+  for (const record of [before, after]) {
+    assert.equal(record.deals.length, 1);
+    assert.equal(record.deals[0].refsVerified, true, "expiry must preserve historical reference verification");
+    assert.equal(record.deals[0].signatureVerified, true);
+    assert.equal(record.deals[0].reputationEligible, true);
+    assert.equal(record.deals[0].outcome, "completed");
+    assert.equal(record.deals[0].category, "services.test");
+    assert.equal(record.deals[0].bundleContentHash, artifactHash(fixture.sellerBundle, "bundle"));
+    assert.equal(record.reputation.bundleCount, 1);
+    assert.equal(record.reputation.completed, 1);
+  }
+});
+
+test("not-yet-effective Listings cannot authenticate completed deal history", async (t) => {
+  const fixture = await vector("future-listing-job", 2120);
+  t.mock.method(Date, "now", () => 1000);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.validity = { notBefore: 2000 };
+  fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  const deal = registeredDeal("future-listing-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+  assert.equal(record.reputation.averageSellerRating, null);
+  assert.deepEqual(record.reputation.observedTransactionalVolume, []);
+});
+
+test("a readable invalid owner marker differs from an unavailable owner marker", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const fixture = await vector("marker-output", 600);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "owner-marker-output";
+  fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const markerAt = locator(610);
+  admitRevocationCandidates(artifactHash(fixture.listing, "listing"), [{ locator: markerAt,
+    owner: `0x${dids[1].slice(-64)}`, contentHash: "c".repeat(64) }]);
+  assert.equal((await indexFixture(fixture)).listings.length, 0, "unreadable owner evidence is indeterminate");
+  // Retry backoff must expire so this pass actually reads the repaired bytes.
+  now += 61_000;
+  maps.set(markerAt, { revocationVersion: "1", signature: "invalid" });
+  const record = await indexFixture(fixture);
+  assert.equal(record.listings.length, 1, "a readable rejected candidate does not withhold an active listing");
+  assert.equal(record.listings[0].status, "active");
+});
+
+test("seller format probes route both signed current discriminators without retrying legacy", async () => {
+  for (const fault of [false, true]) for (const malformed of [false, true]) {
+    const fixture = await vector(`format-probe-${fault}-${malformed}`, 620);
+    const scope = signedScope(fixture.sellerBundle, "bundle");
+    if (fault) {
+      delete scope.bundleVersion;
+      scope.faultBundleVersion = "1";
+      scope.faultedParty = "none";
+    }
+    if (malformed) scope.phaseSummary = [{ index: 2, kind: "settle", outcome: "banana" }];
+    maps.set(fixture.locators.seller, { ...scope,
+      signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)], anchoredByRole: "seller" });
+    const reads = new Map<string, number>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const at = String(input).split("/").pop() ?? "";
+      const count = (reads.get(at) ?? 0) + 1;
+      reads.set(at, count);
+      const data = at === fixture.locators.buyer && count === 1 ? null : maps.get(at);
+      return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data })
+        : new Response(null, { status: 503 });
+    };
+    try {
+      const deal = registeredDeal(`format-probe-${fault}-${malformed}`, fixture.locators.buyer, fixture.locators.seller);
+      const record = await indexRegistration({ primaryClaim: dids[1], displayName: "Seller",
+        listingAnchors: [fixture.locators.listing], deals: [deal] }, undefined, async () => ({}));
+      assert.equal(reads.get(fixture.locators.buyer), 1, "no legacy root retry after the seller probe");
+      assert.equal(reads.get(fixture.locators.seller), 1);
+      assert.equal(record.deals.length, 1);
+      assert.equal(record.deals[0].signatureVerified, false);
+      assert.equal(record.deals[0].refsVerified, false);
+      assert.equal(record.deals[0].reputationEligible, false);
+      assert.equal(record.deals[0].outcome, undefined);
+      assert.equal(record.deals[0].anchoredByRole, undefined);
+      assert.equal(record.reputation.bundleCount, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
 });
 
 test("fixed-price negotiation of a negotiable band requires the exact decimal center and currency", async () => {

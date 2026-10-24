@@ -48,6 +48,7 @@ import {
   artifactAnchorTime,
   clearListingRejection,
   pruneRegistrationListingRejections,
+  isOwnerRevocationCandidate,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
@@ -103,9 +104,17 @@ const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
-/** Missing or unavailable current bytes cannot reject an older candidate (RB-5/6). */
-async function readRevocationCandidate(locator: string): Promise<Record<string, unknown> | null> {
+/**
+ * Missing or unavailable current bytes cannot reject an older candidate (RB-5/6).
+ * Every read that yields no artifact, a storage `not found` included, is noted
+ * in `unavailable`.
+ */
+async function readRevocationCandidate(
+  locator: string,
+  unavailable: Set<string>,
+): Promise<Record<string, unknown> | null> {
   const read = await readAnchorResult(locator);
+  if (read.status === "absent" || read.status === "unavailable") unavailable.add(locator);
   return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
 }
 
@@ -123,6 +132,20 @@ export function listingBindingRejection(
   }
   if (ownerClaim(anchorOwner) !== expected) return "OWNER_CLAIM_BINDING";
   return null;
+}
+
+/** DACS-1 reader step 3: only currently effective Listings are discoverable. */
+export function listingIsCurrentlyEffective(
+  scope: Record<string, unknown>,
+  now: number,
+): boolean {
+  const validity = scope.validity && typeof scope.validity === "object" && !Array.isArray(scope.validity)
+    ? scope.validity as { notBefore?: unknown; notAfter?: unknown }
+    : undefined;
+  if (!validity) return true; // Explicit legacy profile has no validity window.
+  if (typeof validity.notBefore === "number" && now < validity.notBefore) return false;
+  if (typeof validity.notAfter === "number" && now > validity.notAfter) return false;
+  return true;
 }
 
 /**
@@ -234,10 +257,14 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    // DACS-1 validation step 3: notBefore ≤ now ≤ notAfter (if set).
-    const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
-    if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
-    if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
+    // DACS-1 §6.3.4 reader step 3: future terms cannot authenticate deal history.
+    const validity = scope.validity as { notBefore?: unknown } | undefined;
+    if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
+    const presentation = listingPresentation(scope);
+    // Historical deals retain authenticated terms and category after expiry or revocation.
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+    categoriesByListing.set(listingId, presentation.category);
+    if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
     // those anchored by the listing's own owner first. Only one batch is ever selected.
@@ -249,10 +276,12 @@ export async function indexRegistration(
     const carriedBindings = boundWellKnownRevocations(reg.primaryClaim, verified.contentHash, listingId, version);
     admitWellKnownRevocationCandidates(verified.contentHash, carriedBindings.map((binding) => binding.markerAnchor.locator));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
+    const knownMarkers = (verifiedRevocations[verified.contentHash] ?? []).slice(0, limit);
+    const unavailableMarkers = new Set<string>();
     const readMarkers = new Map<string, Record<string, unknown>>();
     const found = await findValidListingRevocation(
       [
-        ...(verifiedRevocations[verified.contentHash] ?? []).slice(0, limit),
+        ...knownMarkers,
         ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
       ],
       verified,
@@ -268,7 +297,7 @@ export async function indexRegistration(
       async (locator) => {
         // Cached invalid bytes cannot adjudicate either a repaired marker or
         // its current source binding, even if only its signature has changed.
-        const marker = await readRevocationCandidate(locator);
+        const marker = await readRevocationCandidate(locator, unavailableMarkers);
         if (marker) readMarkers.set(locator, marker);
         return marker;
       },
@@ -286,18 +315,23 @@ export async function indexRegistration(
       listing.contentHash === verified.contentHash)?.revocation ?? null;
     // Raw chain hints have no withdrawal authority. Only an authenticated source
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
+    // SDK readers also take a fresh `active` summary without a binding as
+    // established revocation absence, so a marker the node could not serve
+    // (including a storage `not found`, which DEMOS-MAPPING §A.2 makes
+    // indeterminate) holds the listing when it was verified before or the
+    // listing owner anchored it. Anyone can anchor other candidates, so an
+    // outage on those cannot hold it.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
-      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ? "indeterminate" : "absent";
-    const presentation = listingPresentation(scope);
+      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
+        [...unavailableMarkers].some((ref) => knownMarkers.includes(ref) ||
+          isOwnerRevocationCandidate(verified.contentHash, ref, anchored.owner ?? null))
+        ? "indeterminate" : "absent";
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
       identityBundle = signedSeller.identity as Record<string, unknown>;
       identityBundles.push(identityBundle);
     }
-    // Past sessions still verify against the listing whatever its revocation state.
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
-    categoriesByListing.set(listingId, presentation.category);
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
