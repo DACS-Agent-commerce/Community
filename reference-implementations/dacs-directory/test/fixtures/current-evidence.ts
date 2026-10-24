@@ -5,7 +5,7 @@ import { logicalBundleAddress } from "../../src/catalog/bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "../../src/catalog/types.js";
 
 export type Obj = Record<string, unknown>;
-export const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
+export const seeds = [11, 12].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
 export const dids = seeds.map((seed) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex")}`);
 export const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 export const maps = new Map<string, Obj>();
@@ -31,7 +31,7 @@ export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1])
   const listingScope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy, presentedAt: 1, claims: [{ ref: presentedBy }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },

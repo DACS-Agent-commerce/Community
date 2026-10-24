@@ -34,10 +34,13 @@ export async function GET(req: NextRequest) {
   for (const l of seller.listings) {
     const raw = await readAnchor(l.anchor.locator);
     if (!raw) continue;
+    let listingContentHash: string;
+    // Stored programs are mutable; one with no canonical form must not fail the whole index.
+    try { listingContentHash = contentHash(stripSignature(raw)); } catch { continue; }
     entries.push({
       listingId: l.listingId,
       version: l.version,
-      contentHash: contentHash(stripSignature(raw)),
+      contentHash: listingContentHash,
       anchor: { kind: "storage-program", locator: l.anchor.locator },
       summary: {
         title: l.offering.title,
