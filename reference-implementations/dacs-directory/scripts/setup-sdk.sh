@@ -47,4 +47,4 @@ echo "setup complete — npm run index (seed/refresh catalog), then npm run dev"
 # scripts/dacs-sdk-compat.patch is built against exactly this dacs-sdk revision, not the SDK_REV
 # above; `git apply --check` succeeds there and fails on SDK_REV.
 SDK_PATCH_BASE_REV="3904d704fb540e6e1d7dd502a0be29f20569c92d"
-SDK_PATCH_SHA256="d3e3086b05ec391f5bd4f4177d6a36713757b2435ac8a0c0b3d3fab64202c0d4"
+SDK_PATCH_SHA256="a85f66106b723e1e074f943dc6606d4bec75410ab3e8bcfac8a6e161a838a725"
