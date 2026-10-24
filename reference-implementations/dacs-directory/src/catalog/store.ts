@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
-import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import { bindsListingTuple, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import {
@@ -283,10 +284,9 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 // A binding is promoted only when it is complete and names this very Listing;
 // a revoked row without one stays out of discovery until a reindex rebuilds it.
 const bindsListing = (binding: Partial<RevocationBinding> | undefined, listing: ListingSummary): binding is RevocationBinding =>
-  typeof binding?.sellerPrimaryClaim === "string" && typeof binding.logicalAddress === "string" &&
-  typeof binding.markerAnchor?.locator === "string" && typeof binding.markerContentHash === "string" &&
-  binding.listingId === listing.listingId && binding.listingVersion === listing.version &&
-  binding.listingContentHash === listing.contentHash;
+  typeof binding?.sellerPrimaryClaim === "string" && typeof listing.seller?.primaryClaim === "string" &&
+  sellerIdentity(binding.sellerPrimaryClaim) === sellerIdentity(listing.seller.primaryClaim) &&
+  bindsListingTuple(binding, binding.sellerPrimaryClaim, { listingId: listing.listingId, version: listing.version, contentHash: listing.contentHash });
 if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
   type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
@@ -340,9 +340,12 @@ db.transaction(() => {
   if (getJson("listing-admission-schema-version", 0) >= 1) return;
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
   const floors = getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {});
+  // Persisted rows predate any shape guarantee: a row without an anchor is
+  // withheld like any other unauthenticated one, never a reason to stop startup.
   const retained = (listing: ListingSummary): boolean =>
-    listing.status === "revoked" || listing.anchor.kind === "fixture";
+    listing.status === "revoked" || listing.anchor?.kind === "fixture";
   for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => !retained(entry))) {
+    if (typeof listing.listingId !== "string" || !Number.isSafeInteger(listing.version) || listing.version < 1) continue;
     const key = listingVersionFloorKey(seller.primaryClaim, listing.listingId);
     floors[key] = Math.max(floors[key] ?? 0, listing.version);
   }
