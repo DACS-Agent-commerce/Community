@@ -198,8 +198,6 @@ export async function indexRegistration(
     }
     const verified = verification.value;
     const { scope } = verified;
-    if (verified.profile === "dacs-v0.1" &&
-        (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
       anchored.owner,
@@ -282,7 +280,7 @@ export async function indexRegistration(
       if (marker) retainListingRevocation(found, marker);
     }
     const retained = retainedListingRevocation(verified.contentHash);
-    const boundRetained = retained?.sellerPrimaryClaim === verified.sellerClaim && retained.listingId === listingId &&
+    const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
     const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
@@ -308,7 +306,14 @@ export async function indexRegistration(
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
-      seller: { primaryClaim: reg.primaryClaim, displayName: reg.displayName },
+      // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
+      // match the revocation binding against, the exact `presentedBy` bytes.
+      seller: {
+        primaryClaim: verified.profile === "dacs-v0.1"
+          ? verified.listing.seller.identity.presentedBy
+          : reg.primaryClaim,
+        displayName: reg.displayName,
+      },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {

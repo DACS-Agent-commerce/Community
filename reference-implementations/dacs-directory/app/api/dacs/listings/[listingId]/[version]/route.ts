@@ -6,6 +6,7 @@ import {
   readCounterpartyEvidenceFixtureAnchor,
   verifyCounterpartyEvidenceFixtureListing,
 } from "@/src/catalog/counterpartyEvidence";
+import { MAX_CLAIM_QUERY_BYTES, sellerIdentity } from "@/src/catalog/discovery";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
 import { inspectServicePath } from "@/src/catalog/inspection";
@@ -17,10 +18,15 @@ export async function GET(
 ) {
   const { listingId, version } = await params;
   const requestedSeller = req.nextUrl.searchParams.get("seller");
+  if (requestedSeller && Buffer.byteLength(requestedSeller, "utf8") > MAX_CLAIM_QUERY_BYTES) {
+    return NextResponse.json({ error: "seller exceeds 1024 bytes" }, { status: 400 });
+  }
   const origin = requestBaseUrl(req);
-  const hit = loadCatalog()
-    .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
+  const requestedIdentity = requestedSeller ? sellerIdentity(requestedSeller) : undefined;
+  const hit = loadCatalog().sellers
+    .filter((seller) => !requestedIdentity || seller.primaryClaim === requestedIdentity)
+    .flatMap((seller) => seller.listings)
+    .find((listing) => listing.listingId === listingId && String(listing.version) === version);
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
   if (hit.anchor.kind === "fixture") {
     const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
@@ -30,8 +36,8 @@ export async function GET(
     return catalogJson(req, fixture, {
       lastModified: hit.catalogObservedAt,
       links: [
-        { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
-        { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+        { href: `${origin}/service/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+        { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
         { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
       ],
     });
@@ -51,8 +57,8 @@ export async function GET(
   return catalogJson(req, raw, {
     lastModified: hit.catalogObservedAt,
     links: [
-      { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
-      { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+      { href: `${origin}/service/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+      { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
       { href: `${origin}${inspectServicePath(hit)}`, rel: "service-inspection", type: "application/json" },
       { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],

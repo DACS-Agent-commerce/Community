@@ -13,9 +13,12 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * lists anchors it doesn't own is caught by the indexer (listing.agentId
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
+import { isRevocationBinding } from "@kynesyslabs/dacs/artifacts";
 import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { sellerIdentity } from "./discovery.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
@@ -61,13 +64,19 @@ interface ListingIndex {
   }>;
 }
 
-/** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
+/**
+ * A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete.
+ * RB-2: the binding carries the Listing's exact `presentedBy` bytes, which may hold CF-3
+ * advisory parameters, so identity is the canonical claim and the address derives from the
+ * binding's own claim; ingest compares those bytes with the verified Listing.
+ */
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
   const hash = entry.contentHash.toLowerCase();
   const binding = entry.revocation;
-  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
+  // The SDK's RB-2 isRevocationBinding shape, then this index's exact tuple.
+  return isRevocationBinding(binding) && sellerIdentity(binding.sellerPrimaryClaim) === seller &&
     binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
+    binding.logicalAddress === revocationLogicalAddress(binding.sellerPrimaryClaim, entry.listingId, Number(entry.version)) &&
     binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
     /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
     /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
@@ -77,9 +86,11 @@ function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[num
 export function listingIndexEntryIsComplete(value: unknown, seller: string): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const entry = value as NonNullable<ListingIndex["listings"]>[number];
-  const hash = typeof entry.contentHash === "string" ? entry.contentHash.toLowerCase() : null;
+  // §6.3.5 rows carry lowercase hex and a DACS-1 URL-safe listingId.
+  const hash = typeof entry.contentHash === "string" && /^[0-9a-f]{64}$/.test(entry.contentHash) ? entry.contentHash : null;
   const summary = entry.summary;
-  if (typeof entry.listingId !== "string" || !entry.listingId || !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
+  if (typeof entry.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(entry.listingId) ||
+      !Number.isSafeInteger(entry.version) || Number(entry.version) < 1 ||
       !hash || !/^[0-9a-f]{64}$/.test(hash) || !entry.anchor || typeof entry.anchor !== "object" || Array.isArray(entry.anchor) ||
       entry.anchor.kind !== "storage-program" ||
       typeof entry.anchor.locator !== "string" || !/^stor-[0-9a-f]{40}$/.test(entry.anchor.locator)) return false;
@@ -165,12 +176,14 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
     return { domain, error: `indexHash mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)` };
   }
 
-  const idx = index.body as ListingIndex;
-  if (!idx || typeof idx !== "object" || idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
+  const idx = index.body && typeof index.body === "object" && !Array.isArray(index.body)
+    ? index.body as ListingIndex : null;
+  if (!idx || idx.indexVersion !== "1" || !Number.isSafeInteger(idx.generatedAt) || Number(idx.generatedAt) <= 0) {
     return { domain, error: "listings.json has an invalid version or generatedAt" };
   }
-  const seller = idx.seller;
-  if (typeof seller !== "string" || !/^did:demos:agent:[0-9a-fA-F]{64}$/.test(seller)) {
+  const seller = typeof idx.seller === "string" && /^did:demos:agent:[0-9a-fA-F]{64}$/.test(idx.seller)
+    ? canonicalDemosAgentClaim(idx.seller) : null;
+  if (!seller) {
     return { domain, error: "listings.json has no canonical Demos seller claim" };
   }
   if (!Array.isArray(idx.listings) || idx.listings.length > 200) {
