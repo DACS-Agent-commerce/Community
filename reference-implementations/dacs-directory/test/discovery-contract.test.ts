@@ -27,7 +27,10 @@ test("public navigation never sends visitors to the private SDK repository", () 
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     assert.doesNotMatch(source, /github\.com\/DACS-Agent-commerce\/dacs-sdk/);
-    assert.match(source, /DACS-Standard\/blob\/main\/docs\/builders-guide\.md/);
+    // Normative links name the Standard revision the pinned SDK declares, never mutable main.
+    assert.match(source, /DACS-Standard\/blob\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20\/docs\/builders-guide\.md/);
+    assert.match(source, /DACS-Standard\/tree\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"/);
+    assert.doesNotMatch(source, /DACS-Standard\/(?:blob|tree)\/main/);
   }
 });
 
