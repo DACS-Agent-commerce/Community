@@ -49,6 +49,10 @@ const tombstone = { ...summary(withdrawn, locator(903)), status: "revoked", revo
 // Rows from before any shape guarantee: no anchor at all, and an unusable version.
 const anchorless = { contentHash: "c".repeat(64), status: "active" };
 const unnumbered = { ...summary(good, locator(906)), listingId: "unnumbered", version: "one" };
+// A deal whose cached verdict was reached with the old Listing reader, and the reputation counted from it.
+const cachedDeal = { jobId: "job-cached", rail: "demos-native:DEM", buyerBundleRef: locator(907), sellerBundleRef: locator(908),
+  owners: { buyer: dids[0], seller }, signatureVerified: true, refsVerified: true, reputationEligible: true,
+  outcome: "completed", sellerOutcome: "completed", finalisedAt: 1, verifiedAt: 1 };
 const seeded = new Database(join(directory, "directory.sqlite"));
 seeded.exec("CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
 const put = seeded.prepare("INSERT INTO kv_state VALUES (?, ?, 0)");
@@ -56,7 +60,7 @@ for (const [key, value] of Object.entries({
   "schema-version": 1, "sr2-anchor-schema-version": 2,
   "catalog": { catalogVersion: "1", generatedAt: 1, sellers: [{ ...reg, cci: [],
     listings: [summary(bad, locator(901)), summary(good, locator(902)), nextVersion, fixtureListing, tombstone, anchorless, unnumbered],
-    reputation: {}, registeredAt: 1, lastIndexedAt: 1 }] },
+    deals: [cachedDeal], reputation: { completed: 1, totalAgreements: 1, completionRate: 1 }, registeredAt: 1, lastIndexedAt: 1 }] },
   "registrations": [reg], "scan-state": { lastSeenTxId: 20, listings: { [locator(902)]: `0x${seller.slice(-64)}` }, deals: {} },
 })) put.run(key, JSON.stringify(value));
 seeded.close();
@@ -80,6 +84,16 @@ test("old active admission decisions stay withheld through restart", async () =>
   assert.deepEqual(store.loadRegistrations(), [reg]);
   assert.equal(store.loadScanState().lastSeenTxId, 20);
   assert.equal(store.loadScanState().listings[locator(902)], `0x${seller.slice(-64)}`);
+});
+
+test("the reset withholds cached deal verdicts and the reputation counted from them until a reindex", async () => {
+  const { GET: getSeller } = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
+  const publicSeller = async () => (await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/x"),
+    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(seller) }) })).json();
+  for (const view of [await publicSeller(), restart().sellers[0]]) {
+    assert.deepEqual((view.deals as Obj[]).map((deal) => [deal.jobId, deal.refsVerified, deal.reputationEligible]), [["job-cached", false, false]]);
+    assert.equal(view.reputation.completed, 0);
+  }
 });
 
 test("the reset keeps the highest withheld version so the publisher never renumbers it", () => {
