@@ -46,10 +46,14 @@ function listing(change: (scope: Obj) => void = () => {}, options: { signer?: nu
     acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
   };
   change(scope);
-  if (options.envelope === null) return scope;
+  // The SDK refuses to hash `undefined` members, so a case that clears a member omits it from the wire form.
+  const wire: Obj = JSON.parse(JSON.stringify(scope));
+  if (options.envelope === null) return wire;
   const signer = options.signer ?? 0;
-  return { ...scope, signature: { algorithm: "ed25519", signer: dids[signer], value: sign(`dacs-listing:v1:${contentHash(scope)}`, signer), ...options.envelope } };
+  return { ...wire, signature: { algorithm: "ed25519", signer: dids[signer], value: sign(`dacs-listing:v1:${contentHash(wire)}`, signer), ...options.envelope } };
 }
+/** The signed scope of a listing; the SDK refuses to hash a scope whose signature is an `undefined` member. */
+const withoutSignature = (signed: Obj): Obj => { const { signature: _signature, ...scope } = signed; return scope; };
 const at = (scope: Obj, path: string) => path.split(".").reduce<Obj>((node, key) => node[key] as Obj, scope);
 const set = (path: string, value: unknown) => (scope: Obj) => {
   const keys = path.split("."); const last = keys.pop()!;
@@ -336,8 +340,9 @@ test("the indexer publishes a verified listing only when it is readable, bound t
     missing: `stor-${"f".repeat(40)}`,
   };
   // A draft SDK listing named only by serviceId and without a version is version 1.
-  const { listingVersion: _, ...unversioned } = legacyScope;
-  const unversionedAt = anchor(9, { ...unversioned, serviceId: "unversioned", listingId: undefined, signature: legacyValue(0, { ...unversioned, serviceId: "unversioned", listingId: undefined }) });
+  const { listingVersion: _, listingId: __, ...unversioned } = legacyScope;
+  const unversionedScope = { ...unversioned, serviceId: "unversioned" };
+  const unversionedAt = anchor(9, { ...unversionedScope, signature: legacyValue(0, unversionedScope) });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const entry = stored[String(input).split("/").pop() ?? ""];
@@ -346,7 +351,7 @@ test("the indexer publishes a verified listing only when it is readable, bound t
   try {
     const record = await indexRegistration({
       primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [...Object.values(anchors), unversionedAt],
-      listingContentHashes: { [anchors.pinned]: `sha256-${contentHash({ ...pinned, signature: undefined })}`, [anchors.mispinned]: "0".repeat(64) },
+      listingContentHashes: { [anchors.pinned]: `sha256-${contentHash(withoutSignature(pinned))}`, [anchors.mispinned]: "0".repeat(64) },
     }, undefined, async () => { throw new Error("identity unavailable"); });
     const published = Object.fromEntries(record.listings.map((entry) => [entry.listingId, entry]));
     assert.deepEqual(Object.keys(published).sort(), ["current", "legacy", "pinned", "published", "unversioned"]);
@@ -400,7 +405,7 @@ test("further listing rules: band floor, step order, claim binding and every-mem
 test("RB-3 retention carries forward only this listing version's own revoked record and binding", async () => {
   const at = `stor-${"c1".padStart(40, "0")}`;
   const current = listing((scope) => { scope.listingId = "retained"; });
-  const hash = contentHash({ ...current, signature: undefined });
+  const hash = contentHash(withoutSignature(current));
   const binding = { sellerPrimaryClaim: dids[0], listingId: "retained", listingVersion: 1, listingContentHash: hash,
     logicalAddress: `dacs1-revoked:${dids[0].replace(/:/g, "%3A")}:retained:v1`, markerAnchor: { kind: "storage-program", locator: `stor-${"d1".padStart(40, "0")}` }, markerContentHash: "e".repeat(64) };
   const prior = (listings: Obj[]) => ({ primaryClaim: dids[0], displayName: "Rules desk", identityTier: "self-declared", cci: [], listings, deals: [] } as never);
