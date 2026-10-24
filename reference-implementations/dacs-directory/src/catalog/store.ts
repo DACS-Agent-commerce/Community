@@ -259,9 +259,12 @@ db.transaction(() => {
   if (getJson("listing-admission-schema-version", 0) >= 1) return;
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
   const floors = getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {});
+  // Persisted rows predate any shape guarantee: a row without an anchor is
+  // withheld like any other unauthenticated one, never a reason to stop startup.
   const retained = (listing: ListingSummary): boolean =>
-    listing.status === "revoked" || listing.anchor.kind === "fixture";
+    listing.status === "revoked" || listing.anchor?.kind === "fixture";
   for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => !retained(entry))) {
+    if (typeof listing.listingId !== "string" || !Number.isSafeInteger(listing.version) || listing.version < 1) continue;
     const key = listingVersionFloorKey(seller.primaryClaim, listing.listingId);
     floors[key] = Math.max(floors[key] ?? 0, listing.version);
   }
