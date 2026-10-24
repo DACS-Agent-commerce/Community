@@ -39,6 +39,8 @@ test("a stored listing with no canonical form is left out of the hosted index in
     assert.equal(response.status, 200);
     const files = (await response.json()).files as Record<string, string>;
     const listed = JSON.parse(files["/.well-known/dacs/listings.json"]).listings;
-    assert.deepEqual(listed.map((entry: { listingId: string }) => entry.listingId), ["svc-2"]);
+    // The route publishes only Listings that verify: the unhashable one is left out without failing
+    // the route, and so is the stand-in that is not a signed Listing.
+    assert.deepEqual(listed, []);
   } finally { globalThis.fetch = original; }
 });
