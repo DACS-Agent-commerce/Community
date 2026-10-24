@@ -11,7 +11,7 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes } from "./signatureValue.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes, presentationSignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -253,8 +253,9 @@ export async function verifyIdentityPresentation(
   delete bundleScope.presentation;
   const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
   // A per-claim PresentationSignature carries a bare `signature` string, not a
-  // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
-  const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
+  // SIG-6 envelope `value`; read it exactly as the SDK reader does (the
+  // Directory's publisher writes the wallet's hex).
+  const value = presentationSignatureBytes(signature.signature);
   return verifyEd25519(message, sellerClaim, value, resolveKey);
 }
 

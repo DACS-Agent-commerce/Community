@@ -22,6 +22,7 @@ function signedCurrentListing(
   extra: Record<string, unknown> = {},
   signingClaim = claim,
   hashScope: (scope: Record<string, unknown>) => string = contentHash,
+  spellPresentationSignature: (base64url: string) => string = (base64url) => base64url,
 ): Record<string, unknown> {
   const identity: Record<string, unknown> = {
     bundleVersion: "1", presentedAt: 1, presentedBy: signingClaim,
@@ -31,7 +32,7 @@ function signedCurrentListing(
     kind: "per-claim",
     signatures: [{
       ref: signingClaim,
-      signature: signMessage(`dacs-bundle-presentation:v1:${contentHash(identity)}`),
+      signature: spellPresentationSignature(signMessage(`dacs-bundle-presentation:v1:${contentHash(identity)}`)),
     }],
   };
 
@@ -80,6 +81,29 @@ test("verifyListing canonicalizes mixed-case DID scheme spelling on read", async
 
   assert.equal(verified?.signer, claim);
   assert.equal(verified?.sellerClaim, claim);
+});
+
+test("verifyListing reads the presentation signature with the SDK reader's spellings only", async () => {
+  const bytes = (base64url: string) => Buffer.from(base64url, "base64url");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const accepted: Record<string, (base64url: string) => string> = {
+    "unpadded Base64URL": (base64url) => base64url,
+    "128 hex digits": (base64url) => bytes(base64url).toString("hex"),
+    "padded standard Base64": (base64url) => bytes(base64url).toString("base64"),
+  };
+  const refused: Record<string, (base64url: string) => string> = {
+    "0x-prefixed hex": (base64url) => `0x${bytes(base64url).toString("hex")}`,
+    "Base64URL with a line break": (base64url) => `${base64url.slice(0, 40)}\n${base64url.slice(40)}`,
+    // The last character carries four unused bits; the next alphabet character decodes to the same bytes.
+    "Base64URL with non-zero residual bits": (base64url) =>
+      base64url.slice(0, -1) + alphabet[alphabet.indexOf(base64url.slice(-1)) + 1],
+  };
+  for (const [name, spell] of Object.entries(accepted)) {
+    assert.ok(await verifyListing(signedCurrentListing({}, claim, contentHash, spell)), name);
+  }
+  for (const [name, spell] of Object.entries(refused)) {
+    assert.equal(await verifyListing(signedCurrentListing({}, claim, contentHash, spell)), null, name);
+  }
 });
 
 test("verifyListing rejects suffix-shaped aliases even when their signatures are valid", async () => {
