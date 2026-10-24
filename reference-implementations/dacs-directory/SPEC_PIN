@@ -95,8 +95,8 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # pinned Node transformer after the SDK TypeScript build.
 # Directory compatibility retains zero retentionYears; §6.3.4 declares a number
 # without a positive-only rule, while the unpatched SDK requires a positive integer.
-# conformance/vectors/security/signature-value-encoding-v0.1.json
-# sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+# conformance/vectors/security/signature-value-encoding-v0.1.json (at d45c0a2)
+# sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
 # The SDK Listing schema, including DACS-4 section 9.6.3 DPA-1, and the next
