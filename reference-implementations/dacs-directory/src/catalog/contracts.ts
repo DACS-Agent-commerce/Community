@@ -3,7 +3,7 @@ import { LISTING_QUERY_PARAMETERS } from "./testnetMetricPolicy.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
-// Unix milliseconds and counts the pinned SDK catalog reader accepts.
+// Local Directory constraint: non-negative safe integer counts and Unix milliseconds.
 const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
 
 // ECMAScript `\s` outside the control range, spelled out so that validators

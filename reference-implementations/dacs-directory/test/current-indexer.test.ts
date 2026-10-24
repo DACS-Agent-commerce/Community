@@ -11,6 +11,7 @@ import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catal
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
+import { UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel } from "../src/catalog/testnetMetricPolicy.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 
@@ -819,6 +820,16 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
     assert.equal(record.deals[0].rail, "pay-dem");
     assert.equal(record.reputation.bundleCount, 1);
+    const hint = record.listings[0].reputationHint;
+    assert.ok(hint, "indexer stores a listing hint before public projection");
+    for (const [key, value] of Object.entries(UNAVAILABLE_TESTNET_METRICS)) {
+      assert.equal(hint[key as keyof typeof hint], value, key);
+    }
+    const categoryDeals = record.deals.filter((item) => item.refsVerified && item.reputationEligible &&
+      (item.category === record.listings[0].offering.category || item.category?.startsWith(record.listings[0].offering.category + ".")));
+    assert.equal(hint.bundleCount, categoryDeals.length);
+    assert.equal(hint.observedOutcomesLabel, observedOutcomesLabel(categoryDeals.length));
+    assert.equal(record.deals[0].ratings?.[0].value, 5, "stored signed rating evidence stays numeric");
   } finally {
     globalThis.fetch = originalFetch;
   }
