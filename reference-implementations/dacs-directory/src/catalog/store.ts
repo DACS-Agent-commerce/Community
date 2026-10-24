@@ -248,6 +248,13 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 // Early Directory builds exposed the internal name `revocationBinding` in
 // ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
 // every public surface and restart path now emits the normative wire field.
+// A binding is promoted only when it is complete and names this very Listing;
+// a revoked row without one stays out of discovery until a reindex rebuilds it.
+const bindsListing = (binding: Partial<RevocationBinding> | undefined, listing: ListingSummary): binding is RevocationBinding =>
+  typeof binding?.sellerPrimaryClaim === "string" && typeof binding.logicalAddress === "string" &&
+  typeof binding.markerAnchor?.locator === "string" && typeof binding.markerContentHash === "string" &&
+  binding.listingId === listing.listingId && binding.listingVersion === listing.version &&
+  binding.listingContentHash === listing.contentHash;
 if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
   type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
@@ -256,9 +263,8 @@ if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(
     sellers: catalog.sellers.map((seller) => ({
       ...seller,
       listings: seller.listings.map((listing) => {
-        const legacy = listing as LegacyListingSummary;
-        const { revocationBinding, ...current } = legacy;
-        const revocation = current.revocation ?? revocationBinding;
+        const { revocationBinding, revocation: stored, ...current } = listing as LegacyListingSummary;
+        const revocation = [stored, revocationBinding].find((binding) => bindsListing(binding, listing));
         return {
           ...current,
           ...(current.status === "revoked" && revocation ? { revocation } : {}),
