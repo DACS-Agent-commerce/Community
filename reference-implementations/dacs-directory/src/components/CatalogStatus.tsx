@@ -6,6 +6,20 @@
  */
 import { useEffect, useState } from "react";
 
+export interface ListingRejectionDiagnostics {
+  total: number;
+  publicTotal: number;
+  items: Array<{
+    locator: string;
+    listingId?: string;
+    listingVersion?: number;
+    code: string;
+    message: string;
+    guidance: string;
+    publicNotice: boolean;
+  }>;
+}
+
 interface Status {
   generatedAt: number;
   syncedToTx: number;
@@ -13,20 +27,41 @@ interface Status {
   txsBehind: number | null;
   indexer?: {
     lastRun?: { status: "running" | "complete" | "failed" } | null;
-    listingRejectionDiagnostics?: {
-      total: number;
-      publicTotal: number;
-      items: Array<{
-        locator: string;
-        listingId?: string;
-        listingVersion?: number;
-        code: string;
-        message: string;
-        guidance: string;
-        publicNotice: boolean;
-      }>;
-    };
-  };}
+    listingRejectionDiagnostics?: ListingRejectionDiagnostics;
+  };
+}
+
+/** The most diagnostics one status reply lists. */
+const MAX_DIAGNOSTICS_LIMIT = 100;
+
+/** Owner-signed listing pointer failures; says how many exist when the status reply lists fewer. */
+export function ListingRejectionNotice({ rejected }: { rejected: ListingRejectionDiagnostics }) {
+  const notices = rejected.items.filter((item) => item.publicNotice);
+  if (rejected.publicTotal === 0) return null;
+  return (
+    <details className="listing-rejection-notice">
+      <summary>{rejected.publicTotal.toLocaleString()} owner-submitted listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
+      <p>These diagnostics describe the latest indexing pass for owner-signed registrations and publisher-authenticated hash declarations. Check the registration's storage pointers and the content hashes your discovery index declares, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
+      <ul>
+        {notices.map((item) => (
+          <li key={`${item.locator}:${item.code}`}>
+            <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
+            <span>{item.message}</span>
+            <span>{item.guidance}</span>
+            <code>{item.code}</code>
+          </li>
+        ))}
+      </ul>
+      {notices.length < rejected.publicTotal && (
+        <p className="listing-rejection-truncated">
+          Showing {notices.length.toLocaleString()} of {rejected.publicTotal.toLocaleString()}.{" "}
+          <a href={`/api/dacs/status?deadLetterLimit=${MAX_DIAGNOSTICS_LIMIT}`}>List up to {MAX_DIAGNOSTICS_LIMIT}</a>, or look up one
+          pointer with <code>?locator=</code>.
+        </p>
+      )}
+    </details>
+  );
+}
 
 function ago(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -77,22 +112,7 @@ export default function CatalogStatus() {
       <span className="sync-dot" />
       {label} · indexed {ago(status.generatedAt)}
     </span>
-      {rejected && rejected.publicTotal > 0 && (
-        <details className="listing-rejection-notice">
-          <summary>{rejected.publicTotal.toLocaleString()} owner-submitted listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
-          <p>These diagnostics describe the latest indexing pass for owner-signed registrations. Check the registration's storage pointers and declared content hashes, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
-          <ul>
-            {rejected.items.filter((item) => item.publicNotice).map((item) => (
-              <li key={`${item.locator}:${item.code}`}>
-                <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
-                <span>{item.message}</span>
-                <span>{item.guidance}</span>
-                <code>{item.code}</code>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      {rejected && <ListingRejectionNotice rejected={rejected} />}
     </div>
   );
 }

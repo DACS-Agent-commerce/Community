@@ -17,21 +17,30 @@ export interface ListingDiagnosticCoordinates {
   listingVersion: number;
 }
 
-/** Project bounded coordinates only after the caller authenticates the artifact and its seller. */
+/**
+ * A current Listing declares its version; only the legacy `serviceId` shape
+ * defaults to version 1. A missing or malformed version must not be filled in,
+ * or a rejection would be shown against another valid version.
+ */
+function boundedCoordinates(listingId: string, version: unknown): ListingDiagnosticCoordinates | undefined {
+  // DACS-1 Listing schema: URL-safe ASCII, at most 128 characters.
+  return /^[A-Za-z0-9._~-]{1,128}$/.test(listingId) && typeof version === "number" &&
+      Number.isSafeInteger(version) && version >= 1
+    ? { listingId, listingVersion: version }
+    : undefined;
+}
+
+/**
+ * Project bounded coordinates only after the caller authenticates the artifact
+ * and its seller. Returns `undefined` when the identifier or version is
+ * missing, malformed or outside the Listing schema's bounds.
+ */
 export function listingDiagnosticCoordinates(
   raw: Record<string, unknown>,
 ): ListingDiagnosticCoordinates | undefined {
-  const listingId = typeof raw.listingId === "string"
-    ? raw.listingId
-    : typeof raw.serviceId === "string"
-      ? raw.serviceId
-      : undefined;
-  const version = raw.listingVersion ?? raw.version ?? 1;
-  // DACS-1 Listing schema: URL-safe ASCII, at most 128 characters.
-  return listingId && /^[A-Za-z0-9._~-]{1,128}$/.test(listingId) &&
-      Number.isSafeInteger(version) && Number(version) >= 1
-    ? { listingId, listingVersion: Number(version) }
-    : undefined;
+  if (typeof raw.listingId === "string") return boundedCoordinates(raw.listingId, raw.listingVersion);
+  if (typeof raw.serviceId === "string") return boundedCoordinates(raw.serviceId, raw.version ?? 1);
+  return undefined;
 }
 
 export const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
@@ -49,8 +58,8 @@ export const LISTING_REJECTION_GUIDANCE: Record<ListingRejectionCode, string> = 
   SELLER_CLAIM_BINDING: "Use pointers belonging to the registration's seller. This rejection does not change another seller's listing.",
   OWNER_CLAIM_BINDING: "Correct the registration's storage pointer to an anchor owned by the seller.",
   DECLARED_CONTENT_HASH_MISMATCH: "Correct the declared hash in the discovery channel, such as the hosted listings index, then reindex.",
-  NORMATIVE_LISTING_INVALID: "This historical candidate remains rejected. Corrected replacement terms need a new Listing ID; no action is required for an archived offer.",
-  VERIFICATION_METHOD_INVALID: "This historical candidate remains rejected. A replacement needs a structured verification method and a new Listing ID; no action is required for an archived offer.",
+  NORMATIVE_LISTING_INVALID: "This historical candidate remains rejected. Corrected replacement terms need a new signed Listing version or a new Listing ID; no action is required for an archived offer.",
+  VERIFICATION_METHOD_INVALID: "This historical candidate remains rejected. A replacement needs a structured verification method in a new signed Listing version or under a new Listing ID; no action is required for an archived offer.",
   LISTING_SIGNATURE_INVALID: "Check the original anchor and signature encoding. This diagnostic does not identify an authenticated listing.",
   IDENTITY_PRESENTATION_INVALID: "Check the original identity presentation. This diagnostic does not identify an authenticated seller.",
   LEGACY_LISTING_INVALID: "Check the storage pointer and original artifact format. This diagnostic does not identify an authenticated listing.",

@@ -345,8 +345,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    let crawlIncomplete = false;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
+      crawlIncomplete = crawl.errors.length > 0;
       for (const e of crawl.errors) {
         let domain: string;
         try { domain = normalizeSubmittedDomain(e.domain); }
@@ -373,6 +375,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
               reg.listingContentHashes ??= {};
               reg.listingContentHashes[anchor] = declaredHash;
             }
+          }
+          // An authenticated publisher's declaration also binds anchors the registration already names.
+          const authenticatedHash = wellKnownWithdrawalProvenance(agent) ? agent.contentHashes[anchor] : undefined;
+          if (authenticatedHash) {
+            reg.listingContentHashes ??= {};
+            reg.listingContentHashes[anchor] = authenticatedHash;
+            reg.authenticatedHashDeclarations = [...new Set([...(reg.authenticatedHashDeclarations ?? []), anchor])];
           }
         }
         reg.wellKnownDomains = [...new Set([...(reg.wellKnownDomains ?? []), agent.domain])];
@@ -442,7 +451,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
+    // A failed crawl hides the sellers only it discovers; absence from an incomplete pass is not removal.
+    if (!crawlIncomplete) pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });

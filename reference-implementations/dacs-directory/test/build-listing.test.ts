@@ -338,19 +338,10 @@ test("publication rejects lone high/low surrogate keys and values and accepts a 
   assert.ok((await response.json()).identityMessage);
 });
 
-test("browser publisher refuses attested payloads without seller-runtime production capability", async () => {
-  const identityResponse = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
-  const identitySignature = Buffer.from(
-    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
-  ).toString("hex");
-  const response = await POST(request({
-    ...base,
-    delivery: ["deliver-attested-payload"],
-    identityPresentedAt: identity.identityPresentedAt,
-    identitySignature,
-  }));
+test("browser publisher refuses attested payloads before asking for a wallet signature", async () => {
+  const response = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
   assert.equal(response.status, 409);
-  assert.match(String((await response.json()).error), /cannot prove.*production capability/i);
+  const body = await response.json() as { error: string; identityMessage?: string };
+  assert.match(body.error, /cannot prove.*production capability/i);
+  assert.equal(body.identityMessage, undefined);
 });
-

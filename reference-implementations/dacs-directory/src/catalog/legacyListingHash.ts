@@ -2,9 +2,10 @@ import { assertValidUnicode, canonicalize, sha256Hex } from "./canonical.js";
 
 /**
  * Frozen SDK 44d8ff2 artifact hash profile, shared by Listings and historical
- * delivery attestations. That draft NFC-normalized member
- * names before sorting as well as string values. Current Listings continue to
- * use the pinned SDK's member-name-preserving canonicalizer.
+ * delivery attestations. That draft NFC-normalized member names before sorting
+ * as well as string values, and refuses numbers that are not safe integers.
+ * It is written out here, independent of the pinned SDK, so a pin change
+ * cannot move a historical hash.
  */
 export function legacyListingHash(scope: Record<string, unknown>): string {
   assertValidUnicode(scope);
