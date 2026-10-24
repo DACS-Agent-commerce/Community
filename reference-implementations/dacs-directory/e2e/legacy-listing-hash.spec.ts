@@ -1,19 +1,22 @@
 import { expect, test } from "@playwright/test";
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
+import { BROWSER_BUFFER_PROVISION, BROWSER_SHIM_FILES } from "../src/shims/browser-shim-files.mjs";
+
+const BUFFER_PROVISION_MODULE = "browser-buffer-provision";
 
 let browserScript: string;
 test.beforeAll(async () => {
-  // Bundle the real reader and its production crypto shim, rather than copying
-  // canonicalization into the test or sorting fixtures in the Node runner.
+  // Bundle the real reader with the shim files and Buffer provision that
+  // next.config.mjs applies to the production browser bundle (one shared
+  // table), rather than copying canonicalization into the test or sorting
+  // fixtures in the Node runner.
   const result = await build({
     stdin: {
       contents: `
-        import { Buffer } from "buffer";
         import { legacyListingHash } from "./src/catalog/legacyListingHash.js";
         import { canonicalize } from "./src/catalog/canonical.js";
         import { registerLegacyListingHashCases } from "./test/fixtures/legacy-listing-hash-cases.js";
-        globalThis.Buffer = Buffer;
         export function run() {
           const names = [];
           const assert = {
@@ -40,11 +43,20 @@ test.beforeAll(async () => {
     platform: "browser",
     format: "iife",
     globalName: "HistoricalHashRegression",
+    // Like webpack's ProvidePlugin, a free `Buffer` in any module is bound to the
+    // provided export at module scope instead of being assigned to the global later.
+    inject: [BUFFER_PROVISION_MODULE],
     plugins: [{
       name: "production-browser-shims",
       setup(builder) {
-        builder.onResolve({ filter: /^node:(crypto|util|net|url)$/ }, ({ path }) => ({
-          path: fileURLToPath(new URL(`../src/shims/${path.replace(":", "-")}.ts`, import.meta.url)),
+        builder.onResolve({ filter: /^node:/ }, ({ path }) => {
+          const shimFile = (BROWSER_SHIM_FILES as Record<string, string | undefined>)[path];
+          return shimFile ? { path: fileURLToPath(new URL(`../src/shims/${shimFile}`, import.meta.url)) } : undefined;
+        });
+        builder.onResolve({ filter: new RegExp(`^${BUFFER_PROVISION_MODULE}$`) }, ({ path }) => ({ path, namespace: BUFFER_PROVISION_MODULE }));
+        builder.onLoad({ filter: /.*/, namespace: BUFFER_PROVISION_MODULE }, () => ({
+          contents: `export { ${BROWSER_BUFFER_PROVISION[1]} } from "${BROWSER_BUFFER_PROVISION[0]}";`,
+          resolveDir: fileURLToPath(new URL("..", import.meta.url)),
         }));
       },
     }],

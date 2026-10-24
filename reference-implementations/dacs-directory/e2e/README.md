@@ -21,7 +21,9 @@ test data; it refuses to reuse a server with another configuration.
 
 Historical artifact hashing also runs the shared Node preimage, null/undefined,
 NFC collision and long-sort-run cases in Chromium as part of `npm run test:e2e`.
-This check uses the real reader and production crypto shim without a server.
+This check bundles the real reader with esbuild, using the same shim files and `Buffer`
+provision as `next.config.mjs` (both read `src/shims/browser-shim-files.mjs`), without a
+server. It is not the webpack build itself.
 To check all three Playwright engines independently:
 
 ```bash

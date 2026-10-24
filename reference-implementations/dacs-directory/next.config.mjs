@@ -1,3 +1,5 @@
+import { BROWSER_BUFFER_PROVISION, BROWSER_SHIM_FILES } from "./src/shims/browser-shim-files.mjs";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   serverExternalPackages: ["better-sqlite3"],
@@ -16,32 +18,20 @@ const nextConfig = {
     };
     if (!isServer) {
       config.resolve.fallback = { ...config.resolve.fallback, buffer: "buffer" };
-      // The SDK's pure verify chain imports node:crypto — swap in the @noble
-      // shim so the SAME verification code runs in the browser (verify-only).
+      // The SDK's pure verify chain imports node:crypto, node:util and, for the
+      // ClaimReference parser (CORE B.1 CF-2) `domain:` hostname check,
+      // node:net and node:url. Swap in the shims (@noble for crypto, the
+      // WHATWG subset for net/url) so the SAME verification code runs in the
+      // browser (verify-only).
+      for (const [specifier, shimFile] of Object.entries(BROWSER_SHIM_FILES)) {
+        config.plugins.push(
+          new webpack.NormalModuleReplacementPlugin(new RegExp(`^${specifier}$`), (resource) => {
+            resource.request = new URL(`./src/shims/${shimFile}`, import.meta.url).pathname;
+          }),
+        );
+      }
       config.plugins.push(
-        new webpack.NormalModuleReplacementPlugin(/^node:crypto$/, (resource) => {
-          resource.request = new URL("./src/shims/node-crypto.ts", import.meta.url).pathname;
-        }),
-      );
-      config.plugins.push(
-        new webpack.NormalModuleReplacementPlugin(/^node:util$/, (resource) => {
-          resource.request = new URL("./src/shims/node-util.ts", import.meta.url).pathname;
-        }),
-      );
-      // The SDK's ClaimReference parser (CORE B.1 CF-2) checks `domain:`
-      // hostnames with node:net/node:url; the shims are the WHATWG subset.
-      config.plugins.push(
-        new webpack.NormalModuleReplacementPlugin(/^node:net$/, (resource) => {
-          resource.request = new URL("./src/shims/node-net.ts", import.meta.url).pathname;
-        }),
-      );
-      config.plugins.push(
-        new webpack.NormalModuleReplacementPlugin(/^node:url$/, (resource) => {
-          resource.request = new URL("./src/shims/node-url.ts", import.meta.url).pathname;
-        }),
-      );
-      config.plugins.push(
-        new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] }),
+        new webpack.ProvidePlugin({ Buffer: [...BROWSER_BUFFER_PROVISION] }),
       );
     }
     return config;
