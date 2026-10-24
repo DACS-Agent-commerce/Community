@@ -667,6 +667,41 @@ test("indexer resolves current copies through BundleBindings rather than submitt
   }
 });
 
+async function indexSellerDeal(presentedBy: string, jobId: string, offset: number) {
+  const fixture = await vector(jobId, offset, presentedBy);
+  const deal = registeredDeal(jobId, locator(offset + 98), locator(offset + 99));
+  const bundleBindings = [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = maps.get(String(input).split("/").pop() ?? "");
+    return new Response(JSON.stringify(data
+      ? { success: true, owner: `0x${dids[1].slice(-64)}`, programName: "dacs:test", data }
+      : { success: false }), { status: data ? 200 : 404, headers: { "content-type": "application/json" } });
+  };
+  try {
+    return await indexRegistration({ primaryClaim: dids[1], displayName: "seller",
+      listingAnchors: [fixture.locators.listing], deals: [deal], bundleBindings },
+    undefined, async () => { throw new Error("identity unavailable"); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("a Listing presented by an unqualified claim is summarised", async () => {
+  const record = await indexSellerDeal(dids[1], "unqualified-job", 100);
+  assert.equal(record.listings.length, 1);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
+test("a Listing presented by a qualified claim has no public summary but still backs its deal evidence", async () => {
+  const record = await indexSellerDeal(`${dids[1]}?channel=directory`, "qualified-job", 110);
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
 test("bindings signed by other parties leave a deal's binding resolution intact", async () => {
   const fixture = await vector("crowded-binding-job", 90);
   const deal = registeredDeal("crowded-binding-job", locator(996), locator(997));
