@@ -15,6 +15,7 @@ import {
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "../src/catalog/inspection.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
 import type { DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
@@ -701,6 +702,13 @@ async function indexSellerDeal(presentedBy: string, jobId: string, offset: numbe
 
 test("a Listing presented by an unqualified claim is summarised", async () => {
   const record = await indexSellerDeal(dids[1], "unqualified-job", 100);
+  assert.equal(record.listings.length, 1);
+  assert.deepEqual(record.listings[0].transactionReadiness, DIRECTORY_TRANSACTION_READINESS, "the stored summary carries the unassessed disposition");
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
+test("a Listing presented by an unqualified claim with a mixed-case scheme is summarised", async () => {
+  const record = await indexSellerDeal(`DID:${dids[1].slice("did:".length)}`, "mixed-case-job", 120);
   assert.equal(record.listings.length, 1);
   assert.equal(record.deals[0].refsVerified, true);
 });

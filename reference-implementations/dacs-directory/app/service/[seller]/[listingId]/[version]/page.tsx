@@ -6,7 +6,7 @@ import CopyText from "@/src/components/CopyText";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "@/src/components/labels";
 import { inspectServicePath } from "@/src/catalog/inspection";
 import { isCounterpartyEvidenceDemoListing } from "@/src/catalog/counterpartyEvidence";
-import { activeOffer } from "@/src/catalog/discovery";
+import { activeOffer, sellerIdentity } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { safeJsonLd } from "@/src/components/structuredData";
 import { directoryEvidenceState } from "@/src/components/directory-evidence-state";
@@ -19,7 +19,7 @@ function findService(sellerClaim: string, listingId: string, version: string) {
   const claim = decodeURIComponent(sellerClaim);
   const id = decodeURIComponent(listingId);
   for (const seller of loadCatalog().sellers) {
-    if (seller.primaryClaim !== claim) continue;
+    if (sellerIdentity(seller.primaryClaim) !== sellerIdentity(claim)) continue;
     const listing = seller.listings.find((candidate) => candidate.listingId === id && String(candidate.version) === version);
     if (listing) return { seller, listing };
   }
