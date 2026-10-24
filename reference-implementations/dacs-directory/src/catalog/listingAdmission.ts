@@ -39,7 +39,7 @@ export function listingDiagnosticCoordinates(
   raw: Record<string, unknown>,
 ): ListingDiagnosticCoordinates | undefined {
   if (typeof raw.listingId === "string") return boundedCoordinates(raw.listingId, raw.listingVersion);
-  if (typeof raw.serviceId === "string") return boundedCoordinates(raw.serviceId, raw.version ?? 1);
+  if (typeof raw.serviceId === "string") return boundedCoordinates(raw.serviceId, raw.listingVersion ?? raw.version ?? 1);
   return undefined;
 }
 

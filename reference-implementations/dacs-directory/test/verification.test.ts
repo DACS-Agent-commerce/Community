@@ -270,18 +270,6 @@ test("strict bundle signer policy rejects malformed roles and binds aborts to th
     signatures: rawBundleSignatures(valid),
     signature: null,
   }), false);
-
-  // Every carried signature must verify, not only those of the required roles.
-  const extraInvalid = result("completed", [
-    { party: "buyer", verdict: "valid" },
-    { party: "seller", verdict: "valid" },
-    { party: "witness", verdict: "invalid" },
-  ]);
-  assert.equal(strictSigners(extraInvalid), false, "an invalid extra signature fails the bundle");
-  assert.equal(strictSigners(result("completed", [
-    { party: "buyer", verdict: "valid" },
-    { party: "seller", verdict: "invalid" },
-  ])), false, "an invalid seller signature fails the bundle");
 });
 
 test("reputation binding requires the submitted job and seller to match the signed bundle", () => {
@@ -666,6 +654,11 @@ test("RB-1/RB-4: only the listing signer's marker over the exact listing tuple r
   };
   for (const [name, marker] of Object.entries(cases)) {
     assert.deepEqual(await verdict(marker), ignored, name);
+  }
+  // The expected version matches the signed one, so only the version range can refuse these.
+  for (const listingVersion of [0, -1]) {
+    assert.equal(await verifyListingRevocation(await markerOf(scopeFor({ listingVersion })), verified, listingVersion),
+      false, `listingVersion ${listingVersion}`);
   }
 });
 

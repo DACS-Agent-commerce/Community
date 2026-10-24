@@ -9,7 +9,7 @@ import {
 import { MAX_CLAIM_QUERY_BYTES, sellerIdentity } from "@/src/catalog/discovery";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { catalogJson } from "@/src/catalog/http";
-import { inspectServicePath } from "@/src/catalog/inspection";
+import { inspectServicePath, servicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(
@@ -36,7 +36,7 @@ export async function GET(
     return catalogJson(req, fixture, {
       lastModified: hit.catalogObservedAt,
       links: [
-        { href: `${origin}/service/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+        { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
         { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
         { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
       ],
@@ -57,7 +57,7 @@ export async function GET(
   return catalogJson(req, raw, {
     lastModified: hit.catalogObservedAt,
     links: [
-      { href: `${origin}/service/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
+      { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
       { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
       { href: `${origin}${inspectServicePath(hit)}`, rel: "service-inspection", type: "application/json" },
       { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },

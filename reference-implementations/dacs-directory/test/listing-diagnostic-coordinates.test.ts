@@ -19,6 +19,10 @@ test("diagnostic coordinates read the legacy serviceId and default its version t
   assert.deepEqual(coordinates({ serviceId: "legacy" }), { listingId: "legacy", listingVersion: 1 });
 });
 
+test("a legacy listing that declares listingVersion keeps it in its coordinates", () => {
+  assert.deepEqual(coordinates({ serviceId: "legacy", listingVersion: 3 }), { listingId: "legacy", listingVersion: 3 });
+});
+
 test("a current listingId without a valid listingVersion has no coordinates", () => {
   for (const raw of [
     { listingId: "a" },
