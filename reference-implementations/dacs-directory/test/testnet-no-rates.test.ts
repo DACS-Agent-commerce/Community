@@ -164,7 +164,7 @@ async function listingPageHint(fixture: ReturnType<typeof noRateCatalog>) {
   return { page, hint: page.listings[0].reputationHint };
 }
 
-test("cached hints the SDK reader would reject fall back to the synthesized hint", async () => {
+test("cached hints outside the Directory contract fall back to the synthesized hint", async () => {
   const malformed: Record<string, (hint: Record<string, unknown>) => void> = {
     "missing bundleCount": (hint) => { delete hint.bundleCount; },
     "non-prefix scope": (hint) => { hint.categoryScope = "services.tes"; },
@@ -203,7 +203,7 @@ test("a cached scope that is a prefix but not a canonical string falls back to t
   for (const scope of ["services ", " services", "services\t.test", "a\u0007b", "a\u007fb", ""]) assert.doesNotMatch(scope, pattern, JSON.stringify(scope));
   for (const scope of ["services .test", "services.test", "s"]) assert.match(scope, pattern, scope);
 });
-test("the published hint schema matches emitted hints and requires every field the pinned SDK reader requires", async () => {
+test("the published Directory hint schema matches emitted hints and local validation constraints", async () => {
   const schema = listingSummarySchema.properties.reputationHint;
   const properties = schema.properties as Record<string, { type?: string; const?: unknown; minimum?: number; maximum?: number; minLength?: number; pattern?: string }>;
   const { page, hint } = await listingPageHint(noRateCatalog());

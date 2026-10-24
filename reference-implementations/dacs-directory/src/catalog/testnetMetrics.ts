@@ -9,14 +9,14 @@ export * from "./testnetMetricPolicy.js";
 const isSafeUint = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
-// The pinned SDK reader's canonical string: non-empty, trimmed, NFC, no C0 controls or DEL.
+// Directory hint scopes use non-empty, trimmed NFC text without C0 controls or DEL.
 const isCanonicalString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value === value.trim() &&
   value === value.normalize("NFC") && !/[\u0000-\u001f\u007f]/.test(value);
 
-// The pinned SDK catalog reader marks a whole page malformed when one hint
-// fails its DACS-1 §6.3.6 shape check, so a cached hint is reused only when it
-// passes the same check (the rate fields are always replaced with null).
+// Reuse cached scope/window metadata only when it satisfies this Directory
+// contract. The scope relationship comes from DACS-1 §6.3.6; safe integer
+// timestamps and canonical text are local validation choices, not SDK requirements.
 function isServableCachedHint(hint: ReputationHint | undefined, category: string): hint is ReputationHint {
   return Boolean(hint) && isCanonicalString(hint!.categoryScope) &&
     (category === hint!.categoryScope || category.startsWith(`${hint!.categoryScope}.`)) &&
@@ -32,7 +32,7 @@ function withoutMetricKeys<T extends object>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([key]) => !UNAVAILABLE_METRIC_KEY.test(key))) as T;
 }
 
-function listingObservationHint(listing: ListingSummary, generatedAt: number, deals: DealRecord[]): ReputationHint {
+function listingObservationHint(listing: ListingSummary, generatedAt: number, deals: DealRecord[], counts: Map<string, number>): ReputationHint {
   const category = listing.offering?.category ?? "";
   const hint = isServableCachedHint(listing.reputationHint, category) ? listing.reputationHint : {
     categoryScope: category,
@@ -40,8 +40,13 @@ function listingObservationHint(listing: ListingSummary, generatedAt: number, de
     windowEnd: generatedAt,
     computedAt: generatedAt,
   };
-  const categoryDeals = deals.filter((deal) => deal.category === hint.categoryScope || Boolean(deal.category?.startsWith(hint.categoryScope + ".")));
-  const bundleCount = deriveSellerReputation(categoryDeals, hint.windowStart, hint.windowEnd).bundleCount ?? 0;
+  const scopeKey = JSON.stringify([hint.categoryScope, hint.windowStart, hint.windowEnd]);
+  let bundleCount = counts.get(scopeKey);
+  if (bundleCount === undefined) {
+    const categoryDeals = deals.filter((deal) => deal.category === hint.categoryScope || Boolean(deal.category?.startsWith(hint.categoryScope + ".")));
+    bundleCount = deriveSellerReputation(categoryDeals, hint.windowStart, hint.windowEnd).bundleCount ?? 0;
+    counts.set(scopeKey, bundleCount);
+  }
   return {
     categoryScope: hint.categoryScope,
     bundleCount,
@@ -56,13 +61,16 @@ function listingObservationHint(listing: ListingSummary, generatedAt: number, de
 export function projectTestnetCatalog(catalog: Catalog): Catalog {
   const observed = {
     ...catalog,
-    sellers: catalog.sellers.map((seller) => ({
-      ...seller,
-      reputation: deriveSellerReputation(seller.deals ?? [], seller.reputation?.windowStart ?? 0, seller.reputation?.windowEnd ?? catalog.generatedAt),
-      listings: (seller.listings ?? []).map((listing) => ({
-        ...listing, reputationHint: listingObservationHint(listing, catalog.generatedAt, seller.deals ?? []),
-      })),
-    })),
+    sellers: catalog.sellers.map((seller) => {
+      const counts = new Map<string, number>();
+      return {
+        ...seller,
+        reputation: deriveSellerReputation(seller.deals ?? [], seller.reputation?.windowStart ?? 0, seller.reputation?.windowEnd ?? catalog.generatedAt),
+        listings: (seller.listings ?? []).map((listing) => ({
+          ...listing, reputationHint: listingObservationHint(listing, catalog.generatedAt, seller.deals ?? [], counts),
+        })),
+      };
+    }),
   };
   return {
     ...observed,
