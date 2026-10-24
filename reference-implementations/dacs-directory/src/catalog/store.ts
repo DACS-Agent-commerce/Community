@@ -9,7 +9,6 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
-import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import {
@@ -281,6 +280,13 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 // Early Directory builds exposed the internal name `revocationBinding` in
 // ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
 // every public surface and restart path now emits the normative wire field.
+// A binding is promoted only when it is complete and names this very Listing;
+// a revoked row without one stays out of discovery until a reindex rebuilds it.
+const bindsListing = (binding: Partial<RevocationBinding> | undefined, listing: ListingSummary): binding is RevocationBinding =>
+  typeof binding?.sellerPrimaryClaim === "string" && typeof binding.logicalAddress === "string" &&
+  typeof binding.markerAnchor?.locator === "string" && typeof binding.markerContentHash === "string" &&
+  binding.listingId === listing.listingId && binding.listingVersion === listing.version &&
+  binding.listingContentHash === listing.contentHash;
 if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
   type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
@@ -289,9 +295,8 @@ if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(
     sellers: catalog.sellers.map((seller) => ({
       ...seller,
       listings: seller.listings.map((listing) => {
-        const legacy = listing as LegacyListingSummary;
-        const { revocationBinding, ...current } = legacy;
-        const revocation = current.revocation ?? revocationBinding;
+        const { revocationBinding, revocation: stored, ...current } = listing as LegacyListingSummary;
+        const revocation = [stored, revocationBinding].find((binding) => bindsListing(binding, listing));
         return {
           ...current,
           ...(current.status === "revoked" && revocation ? { revocation } : {}),
@@ -324,16 +329,36 @@ if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction((
 // DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.
 // Withhold active summaries until a successful reindex authenticates them with
 // this reader. Keep registration/scan pointers and authenticated tombstones so
-// outages cannot restore stale offers or erase withdrawal history. Bump this
-// version whenever a reader change invalidates earlier admission decisions.
+// outages cannot restore stale offers or erase withdrawal history. Fixture
+// listings are not chain admission decisions and stay. The highest withheld
+// version of each Listing is kept privately so the publisher still numbers a
+// new version after it. Bump this version whenever a reader change invalidates
+// earlier admission decisions.
+const LISTING_VERSION_FLOORS_KEY = "listing-version-floors";
+const listingVersionFloorKey = (seller: string, listingId: string): string => `${seller}\n${listingId}`;
 db.transaction(() => {
   if (getJson("listing-admission-schema-version", 0) >= 1) return;
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  const floors = getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {});
+  const retained = (listing: ListingSummary): boolean =>
+    listing.status === "revoked" || listing.anchor.kind === "fixture";
+  for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => !retained(entry))) {
+    const key = listingVersionFloorKey(seller.primaryClaim, listing.listingId);
+    floors[key] = Math.max(floors[key] ?? 0, listing.version);
+  }
+  setJson(LISTING_VERSION_FLOORS_KEY, floors);
   setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
-    ...seller, listings: seller.listings.filter((listing) => listing.status === "revoked"),
+    ...seller, listings: seller.listings.filter(retained),
   })) });
   setJson("listing-admission-schema-version", 1);
 }).immediate();
+
+/**
+ * The highest version of a seller's Listing that a past admission reset
+ * withheld from the catalog, or 0. The publisher numbers new versions after it.
+ */
+export const listingVersionFloor = (seller: string, listingId: string): number =>
+  getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {})[listingVersionFloorKey(seller, listingId)] ?? 0;
 
 // Earlier releases persisted unreadable (403/404) candidates as rejected without
 // a trustworthy reason. Reverify those decisions once, and withhold affected
@@ -644,8 +669,7 @@ export const finishWithdrawalCarriageReplay = db.transaction((): void => {
 /** Called only after the indexer verifies the listing's signature and chain owner. */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
   withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
-    // RB-2 bindings name the exact presentedBy, CF-3 advisory parameters included.
-    (source.bindings ?? []).filter((binding) => sellerIdentity(binding.sellerPrimaryClaim) === seller &&
+    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 
 /** Continue bounded discovery work across passes, even across process restarts. */
