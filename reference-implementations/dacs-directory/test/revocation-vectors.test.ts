@@ -100,6 +100,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "another listingContentHash": await verdict(await signed({ ...tuple, listingContentHash: "d".repeat(64) })),
     "a listingContentHash that is not a string": await verdict(await signed({ ...tuple, listingContentHash: 7 })),
     "a revokedAt that is not a number": await verdict(await signed({ ...tuple, revokedAt: "1" })),
+    "a negative revokedAt": await verdict(await signed({ ...tuple, revokedAt: -1 })),
     "another key's signature": await verdict(await signed(tuple, otherSeed)),
     "an envelope naming another signer": await verdict(await signed(tuple, seed, { signer: didOf(otherSeed) })),
     "a non-Ed25519 algorithm": await verdict(await signed(tuple, seed, { algorithm: "ecdsa-secp256k1" })),

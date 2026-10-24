@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { isListing, readListingArtifact } from "@kynesyslabs/dacs/artifacts";
-import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { identityBundleHash } from "@kynesyslabs/dacs/identity";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import {
@@ -419,8 +419,9 @@ test("admission reads the identity presentation: exact presentedBy entry, base64
     "raw hex over other bytes": [(message) => ({ ref: claim, signature: signatureBytes(`${message}0`).toString("hex") }), false, false],
     "0x-prefixed hex": [(message) => ({ ref: claim, signature: `0x${signatureBytes(message).toString("hex")}` }), false, false],
     "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), true, true],
-    // Same CF-3 identity, other bytes: SDK readers select the entry by exact `ref`.
-    "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), false, false],
+    // CF-3: advisory parameters do not change the identity, so the entry still belongs to presentedBy.
+    "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), true, true],
+    "another claim as the entry ref": [(message) => ({ ref: `did:demos:agent:${"ab".repeat(32)}`, signature: signatureBytes(message).toString("base64url") }), false, false],
   };
   for (const [label, [entry, sdkAccepted, accepted]] of Object.entries(cases)) {
     const identity: Record<string, unknown> = {
@@ -719,20 +720,32 @@ test("neither legacy signature envelope bypasses the schema gate on authenticall
   }
 });
 
-test("a resolver unavailable on the second signature lookup retains the signature rejection code", async () => {
+test("the Listing signer is the key that verified the signature, not a later lookup", async () => {
   const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
-  for (const throws of [false, true]) {
-    let calls = 0;
-    const result = await verifyListingResult(signedCurrentListing(), async (ref, algorithm) => {
-      if (++calls === 1) return resolveDemosPrimaryClaimKey(ref, algorithm);
-      if (throws) throw new Error("key temporarily unavailable");
-      return null;
-    });
-    assert.equal(calls, 2);
-    assert.deepEqual(result, { ok: false, code: "LISTING_SIGNATURE_INVALID" });
-  }
+  let calls = 0;
+  const result = await verifyListingResult(signedCurrentListing(), async (ref, algorithm) => {
+    const resolved = await resolveDemosPrimaryClaimKey(ref, algorithm);
+    // A later answer would carry another canonical claim for the same key.
+    return resolved && ++calls > 1 ? { ...resolved, canonicalClaim: `did:demos:agent:${"f".repeat(64)}` } : resolved;
+  });
+  assert.equal(calls, 2, "one lookup for the signature and one for the presentation");
+  assert.ok(result.ok);
+  assert.equal(result.value.signer, claim);
 });
 
+test("a key resolver that changes the Listing during verification cannot authenticate the change", async () => {
+  const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
+  const listing = signedCurrentListing();
+  const signedTitle = (listing.offering as Record<string, unknown>).title;
+  const signedHash = contentHash(stripSignature(listing));
+  const result = await verifyListingResult(listing, async (ref, algorithm) => {
+    (listing.offering as Record<string, unknown>).title = "UNSIGNED TAMPER";
+    return resolveDemosPrimaryClaimKey(ref, algorithm);
+  });
+  assert.ok(result.ok);
+  assert.equal((result.value.scope.offering as Record<string, unknown>).title, signedTitle);
+  assert.equal(result.value.contentHash, signedHash);
+});
 
 test("legacy Listing hashing preserves draft NFC member-name semantics without changing current Listings", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
