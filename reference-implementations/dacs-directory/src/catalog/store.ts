@@ -244,6 +244,21 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   setJson("sr2-anchor-schema-version", 2);
 })();
 
+// Cached admission decisions predate the current Listing reader (including
+// DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.
+// Withhold active summaries until a successful reindex authenticates them with
+// this reader. Keep registration/scan pointers and authenticated tombstones so
+// outages cannot restore stale offers or erase withdrawal history. Bump this
+// version whenever a reader change invalidates earlier admission decisions.
+db.transaction(() => {
+  if (getJson("listing-admission-schema-version", 0) >= 1) return;
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
+    ...seller, listings: seller.listings.filter((listing) => listing.status === "revoked"),
+  })) });
+  setJson("listing-admission-schema-version", 1);
+}).immediate();
+
 // Earlier releases persisted unreadable (403/404) candidates as rejected without
 // a trustworthy reason. Reverify those decisions once, and withhold affected
 // active catalog entries immediately, before the first reindex can run.

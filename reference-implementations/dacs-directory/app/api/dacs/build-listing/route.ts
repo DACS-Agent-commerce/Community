@@ -177,6 +177,12 @@ export async function POST(req: NextRequest) {
     );
   } catch { /* malformed keys/signatures fail closed */ }
   if (!identityOk) return NextResponse.json({ error: "identity presentation signature is invalid" }, { status: 400 });
+  if (delivery[0] === "deliver-attested-payload") {
+    return NextResponse.json(
+      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
+      { status: 409 },
+    );
+  }
   const pricingTerm = {
     amount,
     currency,

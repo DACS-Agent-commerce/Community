@@ -56,7 +56,7 @@ const listing = {
   supportedDelivery: ["deliver-attested-payload"],
 };
 
-test("listing verification requires a valid signer-bound envelope", async () => {
+test("legacy structured listing signatures preserve the historical authenticated read profile", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
   const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
@@ -88,7 +88,7 @@ test("listing verification accepts a current structured listing and verifies its
   const identitySignature = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const currentScope = {
     dacsVersion: "1",
     listingVersion: 1,
@@ -107,7 +107,11 @@ test("listing verification accepts a current structured listing and verifies its
       description: "Description",
       category: "services.test",
       tags: ["test"],
-      deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+      deliverable: {
+        kind: "attested-payload",
+        payloadFormat: "application/json",
+        verificationMethod: { kind: "self-signed" },
+      },
     },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
@@ -808,7 +812,7 @@ test("indexer rejects a shape-valid listing with a fake signature", async () => 
 test("indexer skips a listing with no canonical form and still indexes the next listing", async () => {
   const message = Buffer.from(`dacs-listing:v1:${contentHash(listing)}`, "utf8");
   const value = Buffer.from(await ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
-  const signed = { ...listing, signature: { algorithm: "ed25519", signer: did, value } };
+  const signed = { ...listing, signature: value };
   const malformedAnchor = `stor-${"d".repeat(40)}`;
   const validAnchor = `stor-${"e".repeat(40)}`;
   // JSON `1e400` parses to Infinity, which has no canonical (CF-1) number form.
@@ -843,14 +847,14 @@ test("listing verification is open-world: an unknown additive top-level field is
   const identitySignature = Buffer.from(await ed25519Sign(
     Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`, "utf8"),
     privateKeyFromSeed(seed),
-  )).toString("hex");
+  )).toString("base64url");
   const baseScope = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc", requiredCapabilities: ["SR-2"],
     seller: {
       identity: { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: did, signature: identitySignature }] } },
       displayName: "Service agent", publicEndpoint: "https://agent.example/a2a",
     },
-    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "Service", description: "Description", category: "services.test", tags: ["test"], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [
       { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
@@ -906,7 +910,8 @@ test("SDK listing schema rejects signed malformed compatibility data without cur
     const scope = { ...listing, name: valid ? "Service" : 1 };
     const message = Buffer.from(`dacs-listing:v1:${contentHash(scope)}`, "utf8");
     const value = Buffer.from(ed25519Sign(message, privateKeyFromSeed(seed))).toString("hex");
-    const verified = await verifyListing({ ...scope, signature: { algorithm: "ed25519", signer: did, value } });
+    // The SDK's legacy-MVP read profile carries the compact signature value.
+    const verified = await verifyListing({ ...scope, signature: value });
     assert.equal(Boolean(verified), valid);
   }
 });

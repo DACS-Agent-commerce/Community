@@ -24,11 +24,11 @@ test('full reindex: exhausted discovery retries cannot erase an authenticated wi
     value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
   const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
-    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('hex') }] } };
+    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
   const scope = { dacsVersion: '1', listingVersion: 1, listingId: 'svc', requiredCapabilities: ['SR-2'],
     seller: { displayName: 'Service', identity },
     offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
-      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json' } },
+      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
     buyerRequirement: { requirementVersion: '1', required: [] },
     pipeline: [{ kind: 'negotiate-fixed-price' }, { kind: 'commit-agreement' }, { kind: 'deliver-attested-payload' }],
     pricing: { kind: 'fixed', price: { amount: '1', currency: 'DEM' } },

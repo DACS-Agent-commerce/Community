@@ -25,7 +25,7 @@ const base = {
   name: "Metered AP2 service",
   description: "A metered service settled through an operator-gated AP2 provider.",
   rails: ["ap2:stripe-paymentintents"],
-  delivery: ["deliver-attested-payload"],
+  delivery: ["deliver-storage-program"],
   pricing: {
     kind: "metered",
     amount: "0.02",
@@ -100,7 +100,7 @@ test("publisher builds a verifiable metered listing with the AP2 rail/phase bind
       { kind: "negotiate-fixed-price" },
       { kind: "commit-agreement" },
       { kind: "pay-ap2", parameters: { rail: "ap2:stripe-paymentintents" } },
-      { kind: "deliver-attested-payload" },
+      { kind: "deliver-storage-program" },
     ]);
     assert.equal(built.exists, false);
     assert.equal(built.logicalAddress, `dacs1:did%3Ademos%3Aagent%3A${keyHex}:metered-ap2:v1`);
@@ -343,3 +343,20 @@ test("publication rejects lone high/low surrogate keys and values and accepts a 
   assert.equal(response.status, 200);
   assert.ok((await response.json()).identityMessage);
 });
+
+test("browser publisher refuses attested payloads without seller-runtime production capability", async () => {
+  const identityResponse = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identitySignature = Buffer.from(
+    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
+  ).toString("hex");
+  const response = await POST(request({
+    ...base,
+    delivery: ["deliver-attested-payload"],
+    identityPresentedAt: identity.identityPresentedAt,
+    identitySignature,
+  }));
+  assert.equal(response.status, 409);
+  assert.match(String((await response.json()).error), /cannot prove.*production capability/i);
+});
+

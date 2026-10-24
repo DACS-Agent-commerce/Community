@@ -22,7 +22,7 @@ const identity = {
 const identitySignature = Buffer.from(ed25519Sign(
   Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "utf8"),
   privateKey,
-)).toString("hex");
+)).toString("base64url");
 const scope = {
   dacsVersion: "1",
   listingId: "verified-service",
@@ -40,7 +40,11 @@ const scope = {
     description: "A deterministic verified service.",
     category: "services.other",
     tags: [],
-    deliverable: { kind: "attested-payload", payloadFormat: "application/json" },
+    deliverable: {
+      kind: "attested-payload",
+      payloadFormat: "application/json",
+      verificationMethod: { kind: "self-signed" },
+    },
   },
   buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
   pipeline: [

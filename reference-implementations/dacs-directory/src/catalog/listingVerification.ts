@@ -1,6 +1,6 @@
 import { legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isLegacyMvpListing as isListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { isListing as isCurrentListing, isLegacyMvpListing as isListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -37,108 +37,11 @@ const PHASES = new Set([
   "pay-evm-erc20", "pay-solana-spl", "pay-cross-chain-htlc", "pay-cross-chain-liquidity-tank", "pay-ap2", "pay-x402", "pay-dem",
   "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate",
 ]);
-/** DACS-3 PS-3: the pricing kinds each negotiation pattern accepts. */
-const NEGOTIATION_PRICING: Record<string, ReadonlySet<string>> = {
-  "negotiate-fixed-price": new Set(["fixed", "negotiable", "metered"]),
-  "negotiate-rfq": new Set(["negotiable", "metered"]),
-  "negotiate-sealed-envelope": new Set(["auction"]),
-  "negotiate-sealed-envelope-procurement": new Set(["auction"]),
-};
 /** DACS-4 PricingSpec auction `selectionRule`: a closed enum plus content-hash-bound rule refs. */
 const SELECTION_RULES = new Set(["lowest-price", "highest-price", "first-acceptable"]);
 const validSelectionRule = (value: unknown): boolean =>
   typeof value === "string" && (SELECTION_RULES.has(value) || /^rule-ref:[0-9a-f]{64}:\S+$/.test(value));
 
-// Schema conformance (DACS-1 validation step 1) for the recognised members. Members a later
-// minor may add stay open-world, as below; a recognised member must have its defined type.
-const optional = (value: unknown, valid: (value: unknown) => boolean): boolean => value === undefined || valid(value);
-const isString = (value: unknown): boolean => typeof value === "string";
-const nonNegative = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value) && value >= 0;
-const oneOf = (...values: string[]) => (value: unknown): boolean => typeof value === "string" && values.includes(value);
-const CAPABILITIES = oneOf("SR-1", "SR-2", "SR-3", "SR-4", "SR-5");
-
-/** DACS-4 DeliverableSpec. */
-function validDeliverable(value: unknown): boolean {
-  const deliverable = record(value);
-  const sizeOk = optional(deliverable?.expectedSizeBytes, (size) => Number.isSafeInteger(size) && Number(size) >= 0);
-  return deliverable?.kind === "storage-program"
-    ? optional(deliverable.schemaUrl, isString) && sizeOk && optional(deliverable.accessModel, oneOf("public", "buyer-only", "encrypt-to-buyer"))
-    : deliverable?.kind === "entitlement" ? nonNegative(deliverable.durationSec) && typeof deliverable.renewable === "boolean"
-      : deliverable?.kind === "attested-payload"
-        ? typeof deliverable.payloadFormat === "string" && deliverable.payloadFormat.length > 0 && sizeOk &&
-          optional(deliverable.verificationMethod, (method) => typeof record(method)?.kind === "string")
-        : deliverable?.kind === "external"
-          ? typeof deliverable.description === "string" &&
-            optional(deliverable.verificationMethod, (method) => typeof record(method)?.kind === "string")
-          : false;
-}
-
-/** DACS-1 §6.3.3 BundleRequirement and ClaimRequirement. */
-function validClaimRequirement(value: unknown): boolean {
-  const requirement = record(value);
-  return Boolean(requirement && typeof requirement.scheme === "string" && requirement.scheme.length > 0 &&
-    typeof requirement.verificationRequired === "boolean" && optional(requirement.maxAge, nonNegative) &&
-    optional(requirement.recipeVersion, (version) => Number.isSafeInteger(version) && Number(version) >= 1) &&
-    optional(requirement.parameters, (parameters) => record(parameters) !== null));
-}
-function validBundleRequirement(value: unknown): boolean {
-  const requirement = record(value);
-  return Boolean(requirement && requirement.requirementVersion === "1" &&
-    Array.isArray(requirement.required) && requirement.required.every(validClaimRequirement) &&
-    optional(requirement.oneOf, (groups) => Array.isArray(groups) && groups.every((group) =>
-      Array.isArray(group) && group.length > 0 && group.every(validClaimRequirement))) &&
-    optional(requirement.preferredPresentation, oneOf("siwd", "sr1-root", "per-claim", "session-key", "any")) &&
-    optional(requirement.primaryClaimSelector, isString));
-}
-
-/** DACS-1 ListingTerms. */
-function validTerms(value: unknown): boolean {
-  const terms = record(value);
-  return Boolean(terms && optional(terms.termsOfServiceUrl, isString) && optional(terms.termsOfServiceHash, isString) &&
-    optional(terms.jurisdictions, (codes) => Array.isArray(codes) && codes.every((code) => typeof code === "string" && /^[A-Z]{2}$/.test(code))) &&
-    optional(terms.conflictOfLawsRule, (rule) => oneOf("buyer-jurisdiction", "seller-jurisdiction")(rule) ||
-      (typeof rule === "string" && /^rule-ref:\S+$/.test(rule))) &&
-    optional(terms.deadlineSecAfterCommit, nonNegative) && optional(terms.acceptanceModel, oneOf("auto-accept")) &&
-    optional(terms.cancellationPolicy, oneOf("none", "pre-commit", "with-fee")) && optional(terms.retentionYears, nonNegative) &&
-    optional(terms.transcriptDisclosurePolicy, oneOf("none", "encrypted-anchored-recommended", "encrypted-anchored-required")));
-}
-
-/** DACS-4 PaymentRailRef. */
-const validRail = (value: unknown): boolean => {
-  const rail = record(value);
-  return Boolean(rail && typeof rail.railId === "string" && rail.railId.length > 0 &&
-    optional(rail.railVersion, (version) => Number.isSafeInteger(version) && Number(version) >= 1) &&
-    optional(rail.parameters, (parameters) => record(parameters) !== null));
-};
-
-/**
- * DACS-1 PhaseStep per-kind parameters (DACS-3 §8.4.2-§8.4.3). A sealed-envelope step's
- * selectionRule is authoritative and the auction PricingSpec's must equal it.
- */
-function validPhaseParameters(step: Record<string, unknown>, pricing: Record<string, unknown> | null): boolean {
-  if (step.parameters === undefined) return !["negotiate-rfq", "negotiate-sealed-envelope", "negotiate-sealed-envelope-procurement"].includes(String(step.kind)) &&
-    !String(step.kind).startsWith("pay-");
-  const parameters = record(step.parameters);
-  if (!parameters) return false;
-  if (step.kind === "negotiate-rfq") {
-    return Number.isSafeInteger(parameters.maxTurns) && Number(parameters.maxTurns) >= 2 &&
-      typeof parameters.timeoutSec === "number" && parameters.timeoutSec > 0 &&
-      optional(parameters.channelSubnet, isString) && optional(parameters.rfqInitiator, oneOf("buyer", "seller")) &&
-      optional(parameters.fixedPriceFallback, (fallback) => typeof fallback === "boolean");
-  }
-  if (step.kind === "negotiate-sealed-envelope" || step.kind === "negotiate-sealed-envelope-procurement") {
-    const procurement = step.kind === "negotiate-sealed-envelope-procurement";
-    return typeof parameters.commitDeadline === "number" && Number.isSafeInteger(parameters.commitDeadline) &&
-      typeof parameters.revealWindow === "number" && parameters.revealWindow >= 60 &&
-      validSelectionRule(parameters.selectionRule) && parameters.selectionRule === pricing?.selectionRule &&
-      (procurement ? parameters.auctionMode === "procurement" : optional(parameters.auctionMode, oneOf("demand"))) &&
-      optional(parameters.channelSubnet, isString);
-  }
-  if (step.kind === "rate") return optional(parameters.required, (required) => typeof required === "boolean");
-  // The remaining recognized kinds have no required parameter members. Preserve
-  // object-valued additions in the signed scope; the caller checks the phase kind.
-  return true;
-}
 // NOTE (open-world listing shape): the directory does NOT reject a listing that carries
 // unknown top-level fields. §11.1.2 (additivity) lets a later minor add top-level listing
 // fields, and the older-reads-newer contract (CORE.md) requires an older reader to consume a
@@ -158,73 +61,36 @@ function validPriceTerm(value: unknown): boolean {
     (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
 }
 
-function currentListing(scope: Record<string, unknown>): {
-  signer: string; sellerClaim: string; signature: Record<string, unknown>;
-} | null {
-  const seller = record(scope.seller);
-  const identity = record(seller?.identity);
-  const offering = record(scope.offering);
-  const pricing = record(scope.pricing);
-  const validity = record(scope.validity);
-  const signature = record((scope as Record<string, unknown>).signature);
-  const claims = Array.isArray(identity?.claims) ? identity.claims.map(record).filter(Boolean) as Record<string, unknown>[] : [];
-  const pipeline = Array.isArray(scope.pipeline) ? scope.pipeline.map(record).filter(Boolean) as Record<string, unknown>[] : [];
-  const tags = Array.isArray(offering?.tags) ? offering.tags : [];
+function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
+  const seller = record(listing.seller);
+  const offering = record(listing.offering);
+  const pricing = record(listing.pricing);
+  const terms = record(listing.terms);
+  const pipeline = Array.isArray(listing.pipeline) ? listing.pipeline.map(record) : [];
   const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
-    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter) && typeof pricing.minPct === "number" && pricing.minPct >= 0 && pricing.minPct < 100 && typeof pricing.maxPct === "number" && pricing.maxPct >= 0
+    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter)
       : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
         : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
           typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&
-          (pricing.minTotal === undefined || (
-            validPriceTerm(pricing.minTotal) &&
-            record(pricing.minTotal)?.currency === record(pricing.unitPrice)?.currency
-          )) : false;
-  const hasPayPhase = pipeline.some((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"));
-  const rails = Array.isArray(scope.acceptedRails) ? scope.acceptedRails.map(record).filter(Boolean) : [];
-  const schemaOk = Array.isArray(scope.pipeline) && pipeline.length === scope.pipeline.length &&
-    pipeline.every((step) => validPhaseParameters(step, pricing)) &&
-    optional(scope.acceptedRails, (value) => Array.isArray(value) && value.every(validRail)) &&
-    optional(scope.requiredCapabilities, (value) => Array.isArray(value) && value.every(CAPABILITIES)) &&
-    optional(offering?.extendedDescriptionUrl, isString) && optional(offering?.extendedDescriptionHash, isString) &&
-    validDeliverable(offering?.deliverable) && validBundleRequirement(scope.buyerRequirement) && validTerms(scope.terms) &&
-    optional(validity?.notAfter, (notAfter) => typeof notAfter === "number");
-  const railIds = new Set(rails.map((rail) => rail?.railId).filter((rail): rail is string => typeof rail === "string"));
-  const payBindingsOk = pipeline.filter((step) => typeof step.kind === "string" && step.kind.startsWith("pay-"))
-    .every((step) => { const parameters = record(step.parameters); return typeof parameters?.rail === "string" && railIds.has(parameters.rail); });
-  const negotiationKinds = pipeline.map((step) => step.kind).filter((kind) => typeof kind === "string" && kind.startsWith("negotiate-"));
-  const negotiationIndex = pipeline.findIndex((step) => typeof step.kind === "string" && step.kind.startsWith("negotiate-"));
-  const commitmentIndexes = pipeline.flatMap((step, index) =>
-    step.kind === "commit-agreement" || step.kind === "commit-payee-bound-agreement" ? [index] : []);
-  const commitmentOk = commitmentIndexes.length === 1 && commitmentIndexes[0] === negotiationIndex + 1;
-  const negotiationOk = negotiationKinds.length === 1 && typeof pricing?.kind === "string" &&
-    Boolean(NEGOTIATION_PRICING[negotiationKinds[0] as string]?.has(pricing.kind));
-  // PIPE-1 and VPC-1/2: delivery is mandatory, and vet authorization precedes negotiation.
-  const pipelineOk = pipeline.some((step) => String(step.kind).startsWith("deliver-")) &&
-    pipeline.every((step, index) => step.kind !== "vet-credentials" || index < negotiationIndex);
-  const identityOk = identity?.bundleVersion === "1" && typeof identity.presentedAt === "number" &&
-    Number.isFinite(identity.presentedAt) && Array.isArray(identity.claims) && claims.length === identity.claims.length &&
-    claims.every((claim) => typeof claim.ref === "string" && claim.ref.length > 0);
-  const signer = typeof signature?.signer === "string" ? signature.signer : "";
-  const sellerClaim = typeof identity?.presentedBy === "string" ? identity.presentedBy : "";
-  const signerIdentity = canonicalSigningIdentity(signer);
-  const sellerIdentity = canonicalSigningIdentity(sellerClaim);
-  if (
-    scope.dacsVersion !== "1" || !Number.isSafeInteger(scope.listingVersion) || Number(scope.listingVersion) < 1 ||
-    typeof scope.listingId !== "string" || !/^[A-Za-z0-9._~-]{1,128}$/.test(scope.listingId) ||
-    typeof seller?.displayName !== "string" || seller.displayName.length > 200 ||
-    (seller.publicEndpoint !== undefined && !safePublicEndpoint(seller.publicEndpoint)) || !sellerClaim || claims.length === 0 ||
-    !claims.some((claim) => typeof claim.ref === "string" &&
-      canonicalSigningIdentity(claim.ref) === sellerIdentity) ||
-    !claims.some((claim) => typeof claim.ref === "string" &&
-      canonicalSigningIdentity(claim.ref) === signerIdentity) ||
-    typeof offering?.title !== "string" || offering.title.length > 200 || typeof offering.description !== "string" || offering.description.length > 2000 ||
-    typeof offering.category !== "string" || !/^[a-z0-9.-]{1,64}$/.test(offering.category) || !Array.isArray(offering.tags) || tags.length > 16 || tags.some((tag) => typeof tag !== "string" || tag.length > 32) ||
-    pipeline.length === 0 || pipeline.some((step) => typeof step.kind !== "string" || !PHASES.has(step.kind)) ||
-    !pricingOk || !negotiationOk || !commitmentOk || !pipelineOk || !identityOk || !schemaOk ||
-    (hasPayPhase && (rails.length === 0 || !payBindingsOk)) || typeof validity?.notBefore !== "number" ||
-    (typeof validity.notAfter === "number" && validity.notAfter < validity.notBefore) || !signature
-  ) return null;
-  return { signer, sellerClaim, signature };
+          (pricing.minTotal === undefined || validPriceTerm(pricing.minTotal)) : false;
+  const negotiationIndex = pipeline.findIndex((step) => typeof step?.kind === "string" && step.kind.startsWith("negotiate-"));
+  const conflictOfLawsRule = terms?.conflictOfLawsRule;
+  return pricingOk && pipeline.every((step) => typeof step?.kind === "string" && PHASES.has(step.kind)) &&
+    // VPC-1/2: vet authorization precedes negotiation.
+    pipeline.every((step, index) => step?.kind !== "vet-credentials" || index < negotiationIndex) &&
+    // A sealed-envelope step's selectionRule is authoritative and the auction PricingSpec's must equal it.
+    pipeline.every((step) => step?.kind !== "negotiate-sealed-envelope" ||
+      (validSelectionRule(record(step.parameters)?.selectionRule) && record(step.parameters)?.selectionRule === pricing?.selectionRule)) &&
+    typeof offering?.category === "string" && /^[a-z0-9.-]{1,64}$/.test(offering.category) &&
+    (seller?.publicEndpoint === undefined || safePublicEndpoint(seller.publicEndpoint) !== undefined) &&
+    (typeof conflictOfLawsRule !== "string" || !conflictOfLawsRule.startsWith("rule-ref:") || /^rule-ref:\S+$/.test(conflictOfLawsRule));
+}
+function currentListing(scope: Record<string, unknown>): {
+  signer: string; sellerClaim: string; signature: Record<string, unknown>;
+} | null {
+  if (!isCurrentListing(scope) || !withinDirectoryProfile(scope)) return null;
+  return { signer: scope.signature.signer, sellerClaim: scope.seller.identity.presentedBy,
+    signature: scope.signature as unknown as Record<string, unknown> };
 }
 
 async function verifyEd25519(

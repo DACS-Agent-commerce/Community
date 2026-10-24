@@ -55,7 +55,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(listingScope), PREFIXES.listing, 1) } };
+// The SDK legacy-MVP read profile carries a bare Ed25519 value; agentId is the signer.
+const listing = { ...listingScope, signature: await signature(contentHash(listingScope), PREFIXES.listing, 1) };
 const verifiedListing = await verifyListing(listing);
 assert.ok(verifiedListing);
 const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: verifiedListing.contentHash, revokedAt: 1 };

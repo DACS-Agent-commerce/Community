@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 
 // DACS-1 listing validation (§6.3.4 steps 1-3, LR-2) and the indexer's publication gate, one case per
@@ -31,7 +31,7 @@ function identityFor(claim: string, presentation: (identity: Obj) => Obj | undef
   const value = presentation(identity);
   return value === undefined ? identity : { ...identity, presentation: value };
 }
-const perClaim = (identity: Obj, signer = 0, encoding: BufferEncoding = "hex") =>
+const perClaim = (identity: Obj, signer = 0, encoding: BufferEncoding = "base64url") =>
   ({ kind: "per-claim", signatures: [{ ref: identity.presentedBy, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`, signer, encoding) }] });
 
 /** A valid current listing, edited by `change` before it is signed by `signer`. */
@@ -39,7 +39,7 @@ function listing(change: (scope: Obj) => void = () => {}, options: { signer?: nu
   const scope: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "rules-listing", requiredCapabilities: ["SR-2"],
     seller: { displayName: "Rules desk", identity: identityFor(dids[0], options.presentation ?? ((identity) => perClaim(identity))) },
-    offering: { title: "Rules", description: "Listing rules", category: "rules.test", tags: ["rules"], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "Rules", description: "Listing rules", category: "rules.test", tags: ["rules"], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [] },
     pipeline: [{ kind: "negotiate-fixed-price" }, ...tail],
     pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } },
@@ -70,6 +70,7 @@ const all = (names: Record<string, unknown>, value: boolean) => Object.fromEntri
 test("DACS-1 §6.3.2: identity, offering, pricing, pipeline and validity rules accept their boundaries", async () => {
   const accepted: Record<string, (scope: Obj) => void> = {
     "the base listing": () => {},
+    "zero retention": set("terms", { retentionYears: 0 }),
     "a 128-character listingId of every allowed character": set("listingId", "aZ09._~-".repeat(16)),
     "a 200-character displayName": set("seller.displayName", "d".repeat(200)),
     "a public HTTPS endpoint": set("seller.publicEndpoint", "https://agent.example/a2a"),
@@ -122,7 +123,7 @@ test("DACS-1 §6.3.2: identity, offering, pricing, pipeline and validity rules a
     "a minPct of 100": pricedWith({ ...negotiable, minPct: 100 }, { kind: "negotiate-rfq", parameters: RFQ }),
     "minPct as a string": pricedWith({ ...negotiable, minPct: "10" }, { kind: "negotiate-rfq", parameters: RFQ }),
     "a negative maxPct": pricedWith({ ...negotiable, maxPct: -1 }, { kind: "negotiate-rfq", parameters: RFQ }),
-    "no maxPct": pricedWith({ ...negotiable, maxPct: undefined }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "no maxPct": pricedWith((({ maxPct: _, ...band }) => band)(negotiable), { kind: "negotiate-rfq", parameters: RFQ }),
     "a band centre of zero": pricedWith({ ...negotiable, bandCenter: { amount: "0", currency: "DEM" } }, { kind: "negotiate-rfq", parameters: RFQ }),
     "an unknown pricing kind": set("pricing", { kind: "subscription", price: { amount: "1", currency: "DEM" } }),
     "an auction reserve price of zero": pricedWith({ ...auction, reservePrice: { amount: "0", currency: "DEM" } }, { kind: "negotiate-sealed-envelope", parameters: SEALED }),
@@ -163,20 +164,28 @@ test("DACS-1 validation step 1: schema boundaries of the recognised members", as
   const sealed = (parameters: Obj, kind = "negotiate-sealed-envelope") => step({ kind, parameters: { ...SEALED, ...parameters } }, auction);
   const requirement = (change: Obj) => set("buyerRequirement", { requirementVersion: "1", required: [], ...change });
   const claim = (change: Obj) => requirement({ required: [{ scheme: "lei", verificationRequired: true, ...change }] });
-  const deliverable = (value: Obj) => set("offering.deliverable", value);
+  const deliverable = (value: Obj) => (scope: Obj) => {
+    set("offering.deliverable", value)(scope);
+    // DPA-1: a deliver-attested-payload phase needs an attested-payload deliverable, so pair the others with their own phase.
+    const kind = (value as Obj | undefined)?.kind;
+    if (kind === "storage-program" || kind === "entitlement") (scope.pipeline as Obj[]).splice(-1, 1, { kind: `deliver-${kind}` });
+  };
   const accepted: Record<string, (scope: Obj) => void> = {
     "an expected size of 0": deliverable({ kind: "storage-program", expectedSizeBytes: 0 }),
-    "an entitlement of 0 seconds": deliverable({ kind: "entitlement", durationSec: 0, renewable: false }),
+    "an entitlement of 1 second": deliverable({ kind: "entitlement", durationSec: 1, renewable: false }),
     "a claim pinned to recipe version 1 with maxAge 0": claim({ recipeVersion: 1, maxAge: 0, parameters: { tier: "1" } }),
     "a rail at version 1": set("acceptedRails", [{ railId: "pay-dem", railVersion: 1 }]),
     "an RFQ of two turns and a one-second timeout": rfq({ maxTurns: 2, timeoutSec: 1, channelSubnet: "subnet", rfqInitiator: "buyer" }),
     "a reveal window of 60 seconds": sealed({ revealWindow: 60, channelSubnet: "subnet" }),
-    "terms at their zero values": set("terms", { deadlineSecAfterCommit: 0, retentionYears: 0, conflictOfLawsRule: "seller-jurisdiction" }),
+    "terms at their smallest values": set("terms", { deadlineSecAfterCommit: 1, retentionYears: 1, conflictOfLawsRule: "seller-jurisdiction" }),
     "a rate phase without parameters": (scope) => { scope.pipeline = [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "rate" }]; },
     "extended description members": set("offering.extendedDescriptionUrl", "https://desk.example/more"),
   };
   const rejected: Record<string, (scope: Obj) => void> = {
     "a negative expected size": deliverable({ kind: "storage-program", expectedSizeBytes: -1 }),
+    // The pinned SDK reader requires these to be positive.
+    "an entitlement of 0 seconds": deliverable({ kind: "entitlement", durationSec: 0, renewable: false }),
+    "a deadline of 0": set("terms", { deadlineSecAfterCommit: 0 }),
     "an expected size as a string": deliverable({ kind: "attested-payload", payloadFormat: "application/json", expectedSizeBytes: "10" }),
     "a schemaUrl that is not a string": deliverable({ kind: "storage-program", schemaUrl: 7 }),
     "a negative entitlement": deliverable({ kind: "entitlement", durationSec: -1, renewable: false }),
@@ -240,7 +249,7 @@ test("DACS-1 validation step 1: schema boundaries of the recognised members", as
 test("DACS-1 §6.3.1: the listing's IdentityBundle presentation is the publisher's own per-claim signature", async () => {
   const presented = async (presentation: (identity: Obj) => Obj | undefined) => (await verifyListing(listing(undefined, { presentation }))) !== null;
   assert.deepEqual({
-    "a hex presentation signature": await presented((identity) => perClaim(identity)),
+    "a hex presentation signature": await presented((identity) => perClaim(identity, 0, "hex")),
     "a base64url presentation signature": await presented((identity) => perClaim(identity, 0, "base64url")),
     "a signature entry beside another claim's": await presented((identity) => ({ kind: "per-claim", signatures: [{ ref: dids[1], signature: "00" }, ...perClaim(identity).signatures] })),
     "an SR-1 root presentation": await presented((identity) => ({ ...perClaim(identity), kind: "sr1-root" })),
@@ -249,10 +258,12 @@ test("DACS-1 §6.3.1: the listing's IdentityBundle presentation is the publisher
     "only another claim's signature": await presented((identity) => ({ kind: "per-claim", signatures: [{ ...perClaim(identity).signatures[0], ref: dids[1] }] })),
     "a signature that is not a string": await presented(() => ({ kind: "per-claim", signatures: [{ ref: dids[0], signature: 7 }] })),
     "a signature by another key": await presented((identity) => perClaim(identity, 1)),
+    "a hex signature by another key": await presented((identity) => perClaim(identity, 1, "hex")),
   }, {
     "a hex presentation signature": true, "a base64url presentation signature": true, "a signature entry beside another claim's": true,
     "an SR-1 root presentation": false, "no presentation": false, "signatures not a list": false,
     "only another claim's signature": false, "a signature that is not a string": false, "a signature by another key": false,
+    "a hex signature by another key": false,
   });
 });
 
@@ -336,8 +347,8 @@ test("the indexer publishes a verified listing only when it is readable, bound t
     missing: `stor-${"f".repeat(40)}`,
   };
   // A draft SDK listing named only by serviceId and without a version is version 1.
-  const { listingVersion: _, ...unversioned } = legacyScope;
-  const unversionedAt = anchor(9, { ...unversioned, serviceId: "unversioned", listingId: undefined, signature: legacyValue(0, { ...unversioned, serviceId: "unversioned", listingId: undefined }) });
+  const { listingVersion: _, listingId: _listingId, ...unversioned } = legacyScope;
+  const unversionedAt = anchor(9, { ...unversioned, serviceId: "unversioned", signature: legacyValue(0, { ...unversioned, serviceId: "unversioned" }) });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const entry = stored[String(input).split("/").pop() ?? ""];
@@ -346,7 +357,7 @@ test("the indexer publishes a verified listing only when it is readable, bound t
   try {
     const record = await indexRegistration({
       primaryClaim: dids[0], displayName: "Rules desk", listingAnchors: [...Object.values(anchors), unversionedAt],
-      listingContentHashes: { [anchors.pinned]: `sha256-${contentHash({ ...pinned, signature: undefined })}`, [anchors.mispinned]: "0".repeat(64) },
+      listingContentHashes: { [anchors.pinned]: `sha256-${contentHash((({ signature: _, ...scope }) => scope)(pinned))}`, [anchors.mispinned]: "0".repeat(64) },
     }, undefined, async () => { throw new Error("identity unavailable"); });
     const published = Object.fromEntries(record.listings.map((entry) => [entry.listingId, entry]));
     assert.deepEqual(Object.keys(published).sort(), ["current", "legacy", "pinned", "published", "unversioned"]);
@@ -400,7 +411,7 @@ test("further listing rules: band floor, step order, claim binding and every-mem
 test("RB-3 retention carries forward only this listing version's own revoked record and binding", async () => {
   const at = `stor-${"c1".padStart(40, "0")}`;
   const current = listing((scope) => { scope.listingId = "retained"; });
-  const hash = contentHash({ ...current, signature: undefined });
+  const hash = contentHash((({ signature: _, ...scope }) => scope)(current));
   const binding = { sellerPrimaryClaim: dids[0], listingId: "retained", listingVersion: 1, listingContentHash: hash,
     logicalAddress: `dacs1-revoked:${dids[0].replace(/:/g, "%3A")}:retained:v1`, markerAnchor: { kind: "storage-program", locator: `stor-${"d1".padStart(40, "0")}` }, markerContentHash: "e".repeat(64) };
   const prior = (listings: Obj[]) => ({ primaryClaim: dids[0], displayName: "Rules desk", identityTier: "self-declared", cci: [], listings, deals: [] } as never);
@@ -488,7 +499,7 @@ test("unread unauthenticated revocation hints cannot suppress a verified listing
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("parameterless phase kinds accept object parameters and bind nested extension bytes", async () => {
+test("parameterless phase kinds refuse a parameters member, as the SDK reader does; rate binds nested extension bytes", async () => {
   for (const kind of ["vet-credentials", "negotiate-fixed-price", "commit-agreement", "commit-payee-bound-agreement",
     "deliver-storage-program", "deliver-entitlement", "deliver-attested-payload", "rate"]) {
     const change = (parameters: unknown) => (scope: Obj) => {
@@ -501,6 +512,10 @@ test("parameterless phase kinds accept object parameters and bind nested extensi
     };
     for (const parameters of [{}, { future: { label: "inert", values: [1, 2] } }]) {
       const signed = listing(change(parameters));
+      if (kind !== "rate") {
+        assert.equal(await verifyListing(signed), null, `${kind}: ${JSON.stringify(parameters)}`);
+        continue;
+      }
       assert.ok(await verifyListing(signed), `${kind}: ${JSON.stringify(parameters)}`);
       const tampered = structuredClone(signed);
       const phase = (tampered.pipeline as Obj[]).find(phase => phase.kind === kind)!;
@@ -523,4 +538,35 @@ test("current listing envelopes require canonical SIG-6 bytes", async () => {
     assert.equal(await verifyListing({ ...canonical, signature: { ...signature, value } }), null,
       `noncanonical envelope ${value.slice(0, 12)}`);
   }
+});
+
+
+test("LR-2 caps the unsigned canonical Listing at exactly 16,384 bytes", async () => {
+  const { canonicalize } = await import("../src/catalog/canonical.js");
+  const { isListing } = await import("@kynesyslabs/dacs/artifacts");
+  for (const size of [16_300, 16_384, 16_385]) {
+    const overhead = Buffer.byteLength(canonicalize(stripSignature(listing(scope => { scope.extension = ""; }))), "utf8");
+    const signed = listing(scope => { scope.extension = "x".repeat(size - overhead); });
+    assert.equal(Buffer.byteLength(canonicalize(stripSignature(signed)), "utf8"), size);
+    assert.equal(isListing(signed), size <= 16_384, `SDK unsigned Listing ${size}`);
+    assert.equal(Boolean(await verifyListing(signed)), size <= 16_384, `Directory unsigned Listing ${size}`);
+    signed.extension += "x";
+    assert.equal(await verifyListing(signed), null, "extension bytes remain signed");
+  }
+  for (const retentionYears of [undefined, -1, 0, 1]) {
+    const signed = listing(scope => { scope.terms = retentionYears === undefined ? {} : { retentionYears }; });
+    assert.equal(isListing(signed), retentionYears !== -1);
+    assert.equal(Boolean(await verifyListing(signed)), retentionYears !== -1);
+  }
+});
+
+
+test("LP-2 permits a second authorized seller claim to sign the Listing", async () => {
+  const signed = listing(scope => {
+    const identity: Obj = { bundleVersion: "1", presentedBy: dids[0], presentedAt: 1, claims: [{ ref: dids[0] }, { ref: dids[1] }] };
+    (scope.seller as Obj).identity = { ...identity, presentation: perClaim(identity) };
+  }, { signer: 1 });
+  assert.ok(await verifyListing(signed));
+  const foreign = listing(() => {}, { signer: 1 });
+  assert.equal(await verifyListing(foreign), null, "a key absent from seller claims is unauthorized");
 });
