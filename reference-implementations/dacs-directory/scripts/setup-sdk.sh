@@ -43,3 +43,5 @@ if [ ! -f data/registrations.json ] && [ -f data/registrations.example.json ]; t
   cp data/registrations.example.json data/registrations.json
 fi
 echo "setup complete — npm run index (seed/refresh catalog), then npm run dev"
+
+SDK_PATCH_SHA256="d3e3086b05ec391f5bd4f4177d6a36713757b2435ac8a0c0b3d3fab64202c0d4"
