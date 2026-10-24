@@ -29,12 +29,12 @@ async function seedAnchors() {
   return { currentAt: current.locators.listing, legacyAt, unsignedAt };
 }
 
-async function withChainReads<T>(run: () => Promise<T>): Promise<T> {
+async function withChainReads<T>(run: () => Promise<T>, owner = ownerAddress): Promise<T> {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const data = maps.get(String(input).split("/").pop() ?? "");
     return data
-      ? Response.json({ success: true, owner: ownerAddress, programName: "dacs:test", data })
+      ? Response.json({ success: true, owner, programName: "dacs:test", data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
@@ -92,4 +92,29 @@ test("lookup skips a stored Listing that is not stable canonical JSON instead of
     { address: currentAt, title: "test" },
     { address: legacyAt, title: legacyScope.name },
   ]);
+});
+
+test("lookup omits a Listing signed by another seller, and one at an anchor another account owns", async () => {
+  const { currentAt } = await seedAnchors();
+  const otherOwner = `0x${dids[0].slice(-64)}`;
+  saveScanState({ ...loadScanState(), listings: { [currentAt]: otherOwner } });
+  const lookupAs = async (claim: string, owner: string) => (await (await withChainReads(
+    () => lookup(new NextRequest(`https://directory.example/api/dacs/lookup?claim=${claim}`)), owner,
+  )).json() as { listings: unknown[] }).listings;
+  assert.deepEqual(await lookupAs(dids[0], otherOwner), [], "the signer is another seller than the owner the scanner recorded");
+  saveScanState({ ...loadScanState(), listings: { [currentAt]: ownerAddress } });
+  assert.deepEqual(await lookupAs(dids[1], otherOwner), [], "the anchor is owned by another account than the scanned owner");
+  assert.deepEqual(await lookupAs(dids[1], ownerAddress), [{ address: currentAt, title: "test" }]);
+});
+
+test("derive gives no title for a Listing whose catalog binding does not hold", async () => {
+  const { currentAt } = await seedAnchors();
+  const record = await withChainReads(() => indexRegistration(
+    { primaryClaim: dids[1], displayName: "seller", listingAnchors: [currentAt], deals: [] },
+    undefined, async () => { throw new Error("identity unavailable"); },
+  ));
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ ...record, primaryClaim: dids[0] }] });
+  const response = await withChainReads(() => derive(new NextRequest(
+    `https://directory.example/api/dacs/derive?claim=${dids[0]}&serviceId=svc`)));
+  assert.deepEqual(await response.json(), { address: currentAt, found: true, valid: false, ownedByClaim: false, title: null });
 });

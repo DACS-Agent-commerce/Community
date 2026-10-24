@@ -6,6 +6,7 @@
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
+import { verifyOwnerSignature } from "./registrationSig.js";
 import { boundedJson } from "./artifactLimits.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
@@ -102,7 +103,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
       continue;
     }
-    regs.push({ ...parsed.value,
+    // Crawl data changes what the owner signed, so the signature is checked on the stored registration.
+    const ownerSignatureVerified = parsed.value.ownerSignature
+      ? await verifyOwnerSignature(parsed.value, { ignoreFreshness: true }).catch(() => false)
+      : false;
+    regs.push({ ...parsed.value, ownerSignatureVerified,
       ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
@@ -437,7 +442,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
       // Fail closed per seller: one that cannot be indexed is left out of this pass, never the whole catalog.
-      const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
+      const record = await indexRegistration(crawlIncomplete ? { ...reg, listingRejectionPruneDeferred: true } : reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
       }).catch((error: unknown) => {

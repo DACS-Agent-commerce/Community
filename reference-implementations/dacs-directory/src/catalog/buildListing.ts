@@ -54,14 +54,19 @@ const LISTING_SEPARATOR = "dacs-listing:v1:";
 const BUNDLE_SEPARATOR = "dacs-bundle-presentation:v1:";
 const PUBLISHABLE_DELIVERY = new Set(["deliver-attested-payload", "deliver-storage-program", "deliver-entitlement"]);
 const NONCE_READ_TIMEOUT_MS = 15_000;
+const ATTESTED_PAYLOAD_UNSUPPORTED = "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime.";
+
+const timedOut = (error: unknown): boolean =>
+  error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
 /**
  * The seller's current account nonce from the node. The reply is byte-bounded
  * before decoding and the nonce must be a non-negative safe integer below
  * MAX_SAFE_INTEGER, so the transaction nonce (this plus one) stays exact.
- * Throws an Error naming the real cause: timeout, unreachable node, HTTP
- * refusal, oversized or non-JSON reply, node error result or invalid nonce.
+ * Throws an Error naming the real cause: timeout (also while reading the body),
+ * unreachable node, HTTP refusal, oversized, unreadable or non-JSON reply, node
+ * error result or invalid nonce.
  */
 async function accountNonce(addressHex: string): Promise<number> {
   let res: Response;
@@ -77,14 +82,17 @@ async function accountNonce(addressHex: string): Promise<number> {
       }),
     });
   } catch (error) {
-    throw new Error(error instanceof Error && error.name === "TimeoutError" ? "the node did not answer in time" : "the node could not be reached");
+    throw new Error(timedOut(error) ? "the node did not answer in time" : "the node could not be reached");
   }
   if (!res.ok) throw new Error(`the node answered HTTP ${res.status}`);
   let json: { result?: unknown; response?: unknown } | null;
   try {
     json = await storageResponseJson(res) as typeof json;
   } catch (error) {
-    throw new Error(error instanceof StorageResponseTooLarge ? "the reply exceeds the byte limit" : "the reply is not valid JSON");
+    if (error instanceof StorageResponseTooLarge) throw new Error("the reply exceeds the byte limit");
+    if (error instanceof SyntaxError) throw new Error("the reply is not valid JSON");
+    // The deadline also covers the body, so a stall after the headers lands here.
+    throw new Error(timedOut(error) ? "the node did not answer in time" : "the reply could not be read");
   }
   if (json?.result !== 200) throw new Error(`the node returned result ${String(json?.result)}`);
   const nonce = json.response;
@@ -104,7 +112,7 @@ return async function POST(req: NextRequest) {
     claim?: string; serviceId?: string; name?: string; description?: string;
     rails?: string[]; delivery?: string[]; category?: string; tags?: string[];
     publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string;
-    listingSignature?: string;
+    listingSignature?: string; listingVersion?: number;
     pricing?: {
       kind?: PublishablePricingKind; amount?: string; currency?: string; unit?: string; minTotal?: string;
       minPct?: number; maxPct?: number; selectionRule?: "lowest-price" | "highest-price" | "first-acceptable";
@@ -138,12 +146,9 @@ return async function POST(req: NextRequest) {
   if (!selectedRail || delivery.length !== 1 || !PUBLISHABLE_DELIVERY.has(delivery[0])) {
     return NextResponse.json({ error: "pick one supported payment rail and one delivery method" }, { status: 400 });
   }
-  // Refused before any wallet signature is requested: no second request can succeed.
+  // Refused before any wallet signature is requested: no later request can succeed.
   if (delivery[0] === "deliver-attested-payload") {
-    return NextResponse.json(
-      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
-      { status: 409 },
-    );
+    return NextResponse.json({ error: ATTESTED_PAYLOAD_UNSUPPORTED }, { status: 409 });
   }
 
   const did = `did:demos:agent:${hex}`;
@@ -156,7 +161,17 @@ return async function POST(req: NextRequest) {
   // Stateless by design: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  const listingVersion = Math.max(0, listingVersionFloor(did, serviceId), ...priorVersions) + 1;
+  const versionFloor = listingVersionFloor(did, serviceId);
+  const nextVersion = Math.max(0, versionFloor, ...priorVersions) + 1;
+  // A retry names the version its signed artifact carries, so it still resolves
+  // that version after the catalog has indexed it, instead of allocating the next.
+  const requestedVersion = body.listingVersion;
+  if (requestedVersion !== undefined && requestedVersion !== nextVersion &&
+    !(Number.isSafeInteger(requestedVersion) && requestedVersion >= 1 &&
+      (requestedVersion <= versionFloor || priorVersions.includes(requestedVersion)))) {
+    return NextResponse.json({ error: "listingVersion must be the next version or one this seller already published" }, { status: 400 });
+  }
+  const listingVersion = requestedVersion ?? nextVersion;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
@@ -235,7 +250,7 @@ return async function POST(req: NextRequest) {
   };
   const identityMessage = BUNDLE_SEPARATOR + contentHash(identityScope);
   if (!body.identitySignature) {
-    return NextResponse.json({ identityMessage, identityPresentedAt });
+    return NextResponse.json({ identityMessage, identityPresentedAt, listingVersion });
   }
   const identitySigHex = body.identitySignature.replace(/^(0x)+/i, "");
   // Wallets return hex; CORE §B.7 SIG-6 stores canonical unpadded base64url.
@@ -329,10 +344,7 @@ return async function POST(req: NextRequest) {
     payloadCapability.disposition !== "not-applicable" &&
     payloadCapability.disposition !== "supported"
   ) {
-    return NextResponse.json(
-      { error: "This browser publisher cannot prove the seller runtime's exact attested-payload production capability. Publish this delivery type through the current SDK seller runtime." },
-      { status: 409 },
-    );
+    return NextResponse.json({ error: ATTESTED_PAYLOAD_UNSUPPORTED }, { status: 409 });
   }
 
   // StorageProgram names are producer-held write inputs, not public resolution
@@ -445,9 +457,12 @@ return async function POST(req: NextRequest) {
     }
     // Broadcasting is the seller's irreversible step, so refuse a node outside
     // the pin here rather than after the write (confirm-listing checks again).
-    const deployment = await pinnedNodeDeployment().catch(() => null);
-    if (!deployment) {
-      return NextResponse.json({ error: "could not read the Demos node's build and chain; no transaction was prepared" }, { status: 503 });
+    let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
+    try {
+      deployment = await pinnedNodeDeployment();
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : "unknown failure";
+      return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
     }
     if (!deployment.ok) {
       return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
