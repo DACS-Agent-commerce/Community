@@ -65,21 +65,28 @@ interface ListingIndex {
 }
 
 /**
- * A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete.
- * RB-2: the binding carries the Listing's exact `presentedBy` bytes, which may hold CF-3
- * advisory parameters, so identity is the canonical claim and the address derives from the
- * binding's own claim; ingest compares those bytes with the verified Listing.
+ * RB-2: a binding is complete for one Listing tuple only when it has the SDK's binding shape, names
+ * that tuple, carries the logical address derived from its own claim, and has a well-formed marker
+ * anchor and hash. The claim is the Listing's exact `presentedBy` bytes, which may hold CF-3 advisory
+ * parameters, so the caller compares its identity with the seller it expects.
  */
-function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
-  const hash = entry.contentHash.toLowerCase();
-  const binding = entry.revocation;
-  // The SDK's RB-2 isRevocationBinding shape, then this index's exact tuple.
-  return isRevocationBinding(binding) && sellerIdentity(binding.sellerPrimaryClaim) === seller &&
-    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(binding.sellerPrimaryClaim, entry.listingId, Number(entry.version)) &&
+export function bindsListingTuple(
+  binding: unknown, tuple: { listingId: string; version: number; contentHash: string },
+): binding is RevocationBinding {
+  return isRevocationBinding(binding) &&
+    binding.listingId === tuple.listingId && binding.listingVersion === tuple.version &&
+    binding.listingContentHash === tuple.contentHash &&
+    binding.logicalAddress === revocationLogicalAddress(binding.sellerPrimaryClaim, tuple.listingId, tuple.version) &&
     binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
     /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
-    /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
+    /^[0-9a-f]{64}$/.test(binding.markerContentHash);
+}
+
+/** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
+function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
+  const binding = entry.revocation;
+  const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
+  return bindsListingTuple(binding, tuple) && sellerIdentity(binding.sellerPrimaryClaim) === seller ? binding : null;
 }
 
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
