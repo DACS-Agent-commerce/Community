@@ -53,6 +53,39 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.ok(manifest.filters.includes("identityTier"));
 });
 
+test("the TP-1 contract change carries version signals and the exact advertised filters", async () => {
+  const manifest = directoryManifest("https://directory.example", "https://node.example/demos");
+  assert.equal(manifest.dacsDirectoryVersion, "2");
+  assert.deepEqual([...manifest.restrictions], ["TP-1"]);
+  assert.match(manifest.maturity.reputation, /^Completion verification unavailable\./);
+  assert.match(manifest.maturity.reputation, /Testnet publishes observed counts and individual evidence/);
+  assert.match(manifest.maturity.reputation, /completion and fault rates and numeric reputation scores are null/);
+  assert.deepEqual(manifest.filters, [
+    "category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "q", "profile", "limit", "cursor",
+  ]);
+  const document = openApiDocument("https://directory.example");
+  assert.equal(document.info.version, "2.0.0");
+  const listings = document.paths["/api/dacs/listings"].get;
+  assert.deepEqual(listings.parameters.map((parameter) => parameter.name).sort(), [...manifest.filters].sort());
+  assert.deepEqual(listings.responses, {
+    "200": { description: "A cursor-paginated listing page" },
+    "400": { description: "Invalid query, an unlisted query name, or unavailable rate/score filtering or ranking" },
+  });
+  assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
+  assert.match(listings.description, /every query name not listed here are refused with 400/);
+  // The API index reports the same contract version as the manifest.
+  const { GET: getIndex } = await import("../app/api/dacs/route.js");
+  assert.equal((await (await getIndex(new NextRequest("https://directory.example/api/dacs"))).json()).version, "2");
+  // The schema URL is unversioned, so a changed schema must not be cached as immutable.
+  const { GET: getSchema } = await import("../app/schemas/listing-summary.schema.json/route.js");
+  const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.schema.json"));
+  const cacheControl = response.headers.get("cache-control") ?? "";
+  assert.doesNotMatch(cacheControl, /immutable/);
+  assert.match(cacheControl, /must-revalidate/);
+  assert.ok(Number(/max-age=(\d+)/.exec(cacheControl)?.[1]) <= 300, cacheControl);
+  assert.deepEqual(await response.json(), JSON.parse(JSON.stringify(listingSummarySchema)));
+});
+
 test("public substrate discovery never leaks the indexer's private RPC setting", () => {
   const priorInternal = process.env.DEMOS_RPC;
   const priorPublic = process.env.NEXT_PUBLIC_DEMOS_RPC;
@@ -102,7 +135,7 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   const profile = document.paths["/api/dacs/listings"].get.parameters.find((parameter) => parameter.name === "profile");
   assert.ok(profile?.schema.enum);
   assert.ok(profile.schema.enum.includes("fixture-listing"));
-  for (const filter of ["credential", "primaryClaim", "priceMax", "minCompletionRate", "minRating"]) {
+  for (const filter of ["credential", "primaryClaim", "priceMax"]) {
     assert.ok(filters.includes(filter), `missing normative filter ${filter}`);
   }
   const status = document.paths["/api/dacs/status"].get;

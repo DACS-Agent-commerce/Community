@@ -22,7 +22,7 @@ import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnown
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
-  loadCatalog,
+  loadStoredCatalog,
   loadDomains,
   loadFixtureSeeds,
   loadRegistrations,
@@ -98,7 +98,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
   }
-  const prior = loadCatalog();
+  const prior = loadStoredCatalog();
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a

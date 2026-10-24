@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
 import { deriveSellerReputation } from "./reputation.js";
+import { projectTestnetCatalog } from "./testnetMetrics.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -461,7 +462,7 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => {
+export const loadStoredCatalog = (): Catalog => {
   const catalog: Catalog = getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
     const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
@@ -470,6 +471,7 @@ export const loadCatalog = (): Catalog => {
   }
   return catalog;
 };
+export const loadCatalog = (): Catalog => projectTestnetCatalog(loadStoredCatalog());
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);

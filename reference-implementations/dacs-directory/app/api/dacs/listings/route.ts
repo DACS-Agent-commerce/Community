@@ -10,24 +10,25 @@ import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 import { artifactProfiles } from "@/src/catalog/contracts";
+import { unavailableMetricQuery } from "@/src/catalog/testnetMetricPolicy";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
+  const unavailableQuery = unavailableMetricQuery(q);
+  if (unavailableQuery) {
+    return NextResponse.json({ error: unavailableQuery }, { status: 400 });
+  }
   const category = q.get("category");
   const rail = q.get("rail");
   const tags = q.getAll("tag");
   const credential = q.get("credential");
   const primaryClaim = q.get("primaryClaim");
   const priceMax = q.get("priceMax");
-  const minCompletionRate = q.get("minCompletionRate");
-  const minRating = q.get("minRating");
   const query = q.get("q")?.trim().toLowerCase();
   const profile = q.get("profile");
   const identityTier = q.get("identityTier");
   const numericFilters: Array<[string, string | null, number, number]> = [
     ["priceMax", priceMax, 0, Number.POSITIVE_INFINITY],
-    ["minCompletionRate", minCompletionRate, 0, 1],
-    ["minRating", minRating, 0, 5],
   ];
   for (const [name, raw, min, max] of numericFilters) {
     const value = raw === null ? null : Number(raw);
@@ -66,14 +67,6 @@ export async function GET(req: NextRequest) {
       const max = Number(priceMax);
       const price = Number(l.pricing.priceHint);
       if (!Number.isFinite(max) || max < 0 || !Number.isFinite(price) || price > max) return false;
-    }
-    if (minCompletionRate !== null) {
-      const min = Number(minCompletionRate);
-      if (!Number.isFinite(min) || min < 0 || min > 1 || l.reputationHint?.completionRate == null || l.reputationHint.completionRate < min) return false;
-    }
-    if (minRating !== null) {
-      const min = Number(minRating);
-      if (!Number.isFinite(min) || min < 0 || min > 5 || l.reputationHint?.averageSellerRating == null || l.reputationHint.averageSellerRating < min) return false;
     }
     if (tags.length && !tags.every((t) => l.offering.tags.includes(t))) return false;
     if (query) {
