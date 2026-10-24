@@ -306,7 +306,7 @@ test("rejections never assign unauthenticated coordinates or blame another selle
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("only owner-signed, seller-matching pointer failures appear publicly, and a corrected pointer clears them", async () => {
+test("only a publisher-authenticated hash declaration for a seller-matching listing appears publicly, and a corrected one clears it", async () => {
   const anchor = `stor-${"b".repeat(40)}`;
   const data = signedListing("public-pointer", attested({ kind: "self-signed" }));
   const reg: Registration = { primaryClaim: seller, displayName: "Signed seller", listingAnchors: [anchor],
@@ -315,15 +315,15 @@ test("only owner-signed, seller-matching pointer failures appear publicly, and a
   globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
   try {
     await indexRegistration(reg, undefined, async () => ({}));
-    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0);
-    const message = registrationMessage(reg, 1);
-    reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0, "an unauthenticated declaration stays private");
+    reg.authenticatedHashDeclarations = [anchor];
     await indexRegistration(reg, undefined, async () => ({}));
     let diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 1);
     assert.equal(diagnostics.items.find((item) => item.publicNotice)?.listingId, "public-pointer");
     assert.match(diagnostics.items.find((item) => item.publicNotice)?.guidance ?? "", /declared hash in the discovery channel/);
     reg.listingContentHashes = {};
+    reg.authenticatedHashDeclarations = [];
     assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings.length, 1);
     diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 0);

@@ -34,7 +34,6 @@ import {
   findValidListingRevocation,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  revocationSellerClaim,
   verifyStoredListingResult,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
@@ -222,7 +221,7 @@ export async function indexRegistration(
         reg.primaryClaim,
         "DECLARED_CONTENT_HASH_MISMATCH",
         listingDiagnosticCoordinates(verified.scope),
-        ownerRegistered,
+        reg.authenticatedHashDeclarations?.includes(anchor) === true,
       );
       continue;
     }

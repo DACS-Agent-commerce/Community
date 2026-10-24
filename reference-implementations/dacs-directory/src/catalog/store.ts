@@ -9,7 +9,6 @@ import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
-import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import {
@@ -663,8 +662,7 @@ export const finishWithdrawalCarriageReplay = db.transaction((): void => {
 /** Called only after the indexer verifies the listing's signature and chain owner. */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
   withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
-    // RB-2 bindings name the exact presentedBy, CF-3 advisory parameters included.
-    (source.bindings ?? []).filter((binding) => sellerIdentity(binding.sellerPrimaryClaim) === seller &&
+    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 
 /** Continue bounded discovery work across passes, even across process restarts. */

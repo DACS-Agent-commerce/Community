@@ -14,6 +14,8 @@ export interface Registration {
   listingAnchors: string[];
   /** Trusted only when populated by the hash-verified well-known crawler. */
   listingContentHashes?: Record<string, string>;
+  /** Anchors whose declared hash came from a publisher-authenticated crawl; in memory only, never stored. */
+  authenticatedHashDeclarations?: string[];
   /**
    * Deals offered as reputation evidence: bundle refs + the anchor owners
    * (needed to resolve owner-scoped referenced-artifact addresses on the real
