@@ -21,6 +21,13 @@ const revocationBinding = {
   markerAnchor: { kind: "storage-program", locator: `stor-${"7".repeat(40)}` },
   markerContentHash: "b".repeat(64),
 };
+// Each binding matches its Listing's id, version and hash but breaks RB-2 another way.
+const otherSeller = `did:demos:agent:${"9".repeat(64)}`;
+const mismatchedBindings: Array<[string, Partial<typeof revocationBinding>]> = [
+  ["other-seller", { sellerPrimaryClaim: otherSeller, logicalAddress: `dacs1-revoked:${encodeURIComponent(otherSeller)}:other-seller:v1` }],
+  ["wrong-logical-address", { logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:elsewhere:v1` }],
+  ["unreadable-marker-anchor", { markerAnchor: { kind: "storage-program", locator: "not-an-anchor" } }],
+];
 const seeded = new Database(join(dataDirectory, "directory.sqlite"));
 seeded.exec(`
   CREATE TABLE kv_state (
@@ -73,7 +80,14 @@ seeded.prepare("INSERT INTO kv_state(key,value_json,updated_at) VALUES ('catalog
       contentHash: listingContentHash,
       status: "revoked",
       revocationBinding: { ...revocationBinding, listingContentHash: "c".repeat(64) },
-    }],
+    }, ...mismatchedBindings.map(([name, binding]) => ({
+      listingId: name,
+      version: 1,
+      contentHash: listingContentHash,
+      seller: { primaryClaim: seller, displayName: "migration seller" },
+      status: "revoked",
+      revocationBinding: { ...revocationBinding, listingId: name, logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:${name}:v1`, ...binding },
+    }))],
     deals: [],
     reputation: { completed: 0, bundleCount: 0, totalAgreements: 0, completionRate: null },
     registeredAt: 1,
@@ -106,7 +120,7 @@ test("persisted revocationBinding summaries migrate to normative revocation once
 
 test("startup migrates ready and missing readiness summaries once across restarts", () => {
   const listings = migrated.sellers[0]?.listings;
-  assert.equal(listings?.length, 5);
+  assert.equal(listings?.length, 5 + mismatchedBindings.length);
   for (const listing of listings ?? []) {
     assert.equal(listing.transactionReadiness?.disposition, "unassessed");
     assert.match(listing.transactionReadiness?.reason ?? "", /buyer-local/);
@@ -140,4 +154,13 @@ test("a revoked row whose old binding is incomplete or names another Listing is 
     assert.equal(discoveryListing(listing), false, `${listing.listingId} has no tombstone without its normative binding`);
   }
   assert.equal(discoveryListing(revoked), true);
+});
+
+test("a revoked row whose old binding names another seller, address or marker anchor is not published", () => {
+  const rows = migrated.sellers[0].listings.slice(5);
+  assert.deepEqual(rows.map((listing) => listing.listingId), mismatchedBindings.map(([name]) => name));
+  for (const listing of rows) {
+    assert.equal(Object.hasOwn(listing, "revocation"), false, listing.listingId);
+    assert.equal(discoveryListing(listing), false, `${listing.listingId} has no tombstone without a binding that satisfies RB-2`);
+  }
 });
