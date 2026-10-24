@@ -89,6 +89,24 @@ test("legacy Listing signatures with a malformed spelling or another signer are 
   assert.deepEqual(await checkLegacyListingSignature({ signature: signedBySeller }, seller), { verdict: "key-resolution-reached" });
 });
 
+// The condition that sends a settlement evidence reference to the historical authenticator, with stand-in shape checks:
+// the historical evidence shape carries phaseIndex, the current one refuses it.
+const usesHistoricalEvidenceAuthenticator = compile(
+  ["evidence", "ev", "isNormativeGraph", "isLegacyMvpGraph"],
+  "const isLegacyMvpAttestationRef = (ref) => ref.kind !== undefined;\n"
+  + "const isLegacyMvpSettlementEvidence = (value) => value.phaseIndex !== undefined;\n"
+  + `return ${patchedLines.find((line) => line.includes("isLegacyMvpAttestationRef(ev)") && line.trimStart().startsWith("if (")).trim().slice("if (".length, -") {".length)};`,
+);
+
+test("only historical-shaped evidence behind a historical reference skips the semantic evidence verifier", async () => {
+  const historicalRef = { kind: "dacs-4-evidence", id: "evidence", contentHash: "a".repeat(64) };
+  const ok = { check: { verdict: "ok" } };
+  const historical = { ...ok, value: { evidenceVersion: "1", phaseIndex: 0 } };
+  const currentShaped = { ...ok, value: { evidenceVersion: "1" } };
+  assert.equal(await usesHistoricalEvidenceAuthenticator(historical, historicalRef, false, true), true);
+  assert.equal(await usesHistoricalEvidenceAuthenticator(currentShaped, historicalRef, false, true), false);
+});
+
 test("the compatibility patch applies at its recorded base revision", (context) => {
   const baseRevision = setupScript.match(/^SDK_PATCH_BASE_REV="([0-9a-f]{40})"$/m)?.[1];
   assert.ok(baseRevision);

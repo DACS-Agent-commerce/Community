@@ -77,14 +77,19 @@ test("the dist digest and manifest match a SHA-256 vector computed outside the h
   });
 });
 
-test("the dist manifest sorts by path bytes and skips only setup's top-level marker files", () => {
+test("the dist manifest sorts by path bytes and lists every file, dot-prefixed ones included", () => {
   const dist = mkdtempSync(join(tmpdir(), "dacs-dist-order-"));
   try {
     mkdirSync(join(dist, "sub"));
     for (const name of ["a", "B", "é", ".dacs-sdk-built", "sub/.dacs-sdk-nested"]) writeFileSync(join(dist, name), name);
     const paths = distManifest(dist).trim().split("\n").map((line) => line.slice(66));
-    assert.deepEqual(paths, ["B", "a", "sub/.dacs-sdk-nested", "é"]);
+    assert.deepEqual(paths, [".dacs-sdk-built", "B", "a", "sub/.dacs-sdk-nested", "é"]);
   } finally { rmSync(dist, { recursive: true, force: true }); }
+});
+
+test("the dist digest changes when a top-level dot-prefixed module changes", () => {
+  const digestWithHook = (hook) => withDistTree({ "index.js": 'import "./.dacs-sdk-hook.js";\n', ".dacs-sdk-hook.js": hook }, distDigest);
+  assert.notEqual(digestWithHook("export {};\n"), digestWithHook("export const changed = true;\n"));
 });
 
 test("the dist manifest refuses symlinks, empty trees and file names that could forge another manifest", () => {
