@@ -15,7 +15,13 @@ import { signedBytes } from "@kynesyslabs/dacs/crypto";
 import { stripSignature } from "./catalog/canonical.js";
 import { legacyListingHash } from "./catalog/legacyListingHash.js";
 
-/** Historical raw-hex artifacts use the same frozen hash profile as MVP Listings. */
+/**
+ * Verifies a historical raw-hex signed artifact over the frozen hash profile
+ * (the same one MVP Listings use), so a later SDK pin cannot change which bytes
+ * were signed. Unlike the SDK function it hashes inside the `try`: a scope with
+ * no frozen form (lone surrogate, non-safe-integer number) resolves to `false`
+ * instead of throwing. Resolves `true` only for a valid signature.
+ */
 export const verifySignedArtifact: typeof sdkVerifySignedArtifact = async (signed, separator, publicKey, verify) => {
   const signature = signed.signature;
   if (typeof signature !== "string") return false;

@@ -38,7 +38,7 @@ import {
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
-import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { canonicalDemosAgentClaim, canonicalDemosAgentReference } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
@@ -264,11 +264,12 @@ export async function indexRegistration(
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
-    // A qualified presentedBy (CF-3 parameters) has no exact-reference summary
+    // A presentedBy that carries CF-3 parameters has no exact-reference summary
     // yet, so only the public summary is withheld; the verified artifact above
-    // stays available to deal evidence.
+    // stays available to deal evidence. The case of the scheme does not matter (CF-2).
+    const presentedBy = identityBundle?.presentedBy;
     if (verified.profile === "dacs-v0.1" &&
-        (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
+        (typeof presentedBy !== "string" || canonicalDemosAgentReference(presentedBy) !== verified.sellerClaim)) continue;
     listings.push({
       listingId,
       version,
@@ -500,9 +501,10 @@ export async function indexRegistration(
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const refsOk = verification && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole)
-        ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
+      const authenticated = Boolean(verification) && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole);
+      const refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
+      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts,
+        carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
@@ -528,7 +530,7 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
-      verificationLimitation: !strictRefsVerified && authoritative.signaturesOk && bundle?.vetRecords.length
+      verificationLimitation: !strictRefsVerified && (buyerCopy.carriesVetRecords || sellerCopy?.carriesVetRecords)
         ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
