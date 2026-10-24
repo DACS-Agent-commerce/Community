@@ -56,9 +56,33 @@ test("listing publication recovery fails closed on malformed or cross-bound stat
   assert.equal(parsePendingListingPublication({ ...pending, transaction: [] }), null);
 });
 
+test("a recovery record saved after broadcast keeps its transactionRef", () => {
+  const confirming = { ...pending, transactionRef: "9a".repeat(32), stage: "confirming" as const };
+  assert.deepEqual(parsePendingListingPublication(confirming), confirming);
+  for (const transactionRef of ["9A".repeat(32), "9a".repeat(31), 7]) {
+    assert.equal(parsePendingListingPublication({ ...confirming, transactionRef }), null, String(transactionRef));
+  }
+});
+
 test("storage failures refuse unsafe publication persistence", () => {
   const brokenWrite = { setItem: () => { throw new Error("quota"); } };
   const brokenRead = { getItem: () => "{" };
   assert.equal(writePendingListingPublication(brokenWrite, pending), false);
   assert.equal(readPendingListingPublication(brokenRead), null);
+});
+
+test("recovery parsing handles null roots and malformed receipt members without throwing", () => {
+  assert.doesNotThrow(() => assert.equal(parsePendingListingPublication(null), null));
+  for (const anchorReceipt of [null, []]) {
+    assert.equal(parsePendingListingPublication({ ...pending, anchorReceipt }), null);
+  }
+  assert.deepEqual(parsePendingListingPublication({ ...pending, anchorReceipt: {} }), { ...pending, anchorReceipt: {} });
+});
+
+test("recovery transaction references have an exact string boundary", () => {
+  const transactionRef = "ab".repeat(32);
+  assert.equal(parsePendingListingPublication({ ...pending, transactionRef })?.transactionRef, transactionRef);
+  for (const malformed of [[transactionRef], `junk${transactionRef}`, `${transactionRef}junk`]) {
+    assert.equal(parsePendingListingPublication({ ...pending, transactionRef: malformed }), null);
+  }
 });
