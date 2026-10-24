@@ -2,9 +2,8 @@
 // Digest of a built dacs-sdk `dist` tree, so setup can pin the exact bytes the
 // pinned commit builds to. Each regular file contributes "<sha256>  <path>\n"
 // in byte order of its POSIX relative path; the digest is the sha256 of those
-// lines. Setup's own top-level `.dacs-sdk-*` files are excluded, and any other
-// entry type (a symlink, for example) and any name containing a line break are
-// refused.
+// lines. Every file counts, whatever its name; any other entry type (a symlink,
+// for example) and any name containing a line break are refused.
 //
 // usage: node scripts/sdk-dist-digest.mjs <dist> [--manifest <file>]
 import { createHash } from "node:crypto";
@@ -22,9 +21,8 @@ export function distManifest(root) {
       const relative = prefix ? `${prefix}/${name}` : name;
       const entry = lstatSync(path);
       if (entry.isDirectory()) walk(path, relative);
-      else if (entry.isFile()) {
-        if (!(prefix === "" && name.startsWith(".dacs-sdk-"))) files.push(relative);
-      } else throw new Error(`${relative} is not a regular file or directory`);
+      else if (entry.isFile()) files.push(relative);
+      else throw new Error(`${relative} is not a regular file or directory`);
     }
   };
   walk(root, "");
