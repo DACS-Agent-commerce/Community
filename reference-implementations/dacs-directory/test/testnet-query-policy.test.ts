@@ -73,3 +73,43 @@ test("observed-outcome labels cover an unknown count", () => {
   assert.equal(observedOutcomesLabel(0), "Observed outcomes: 0, not verified");
   assert.equal(observedOutcomesLabel(3), "Observed outcomes: 3, not verified");
 });
+
+test("documented filters and empty queries are accepted on both surfaces", () => {
+  for (const surface of ["api", "discovery"] as const) {
+    for (const query of ["", "category=score&tag=a&tag=b&limit=5&cursor=c&q=rating", "credential=x&primaryClaim=x&identityTier=1&rail=x&priceMax=5&profile=x"]) {
+      assert.equal(unavailableMetricQuery(new URLSearchParams(query), surface), undefined, query);
+    }
+  }
+});
+
+test("discovery ignores unrelated words and tracking names including metric words", () => {
+  for (const query of ["operating=1", "integrating=x", "underscore=1", "orderId=3", "filter=generating", "utm_source=x", "utm_campaign=rating", "utm_rating_campaign=x", "utm_sort=x", "directoryName=x"]) {
+    assert.equal(unavailableMetricQuery(new URLSearchParams(query), "discovery"), undefined, query);
+  }
+  for (const query of ["operating=1", "integrating=x", "underscore=1", "orderId=3", "filter=generating"]) {
+    assert.match(unavailableMetricQuery(new URLSearchParams(query)) ?? "", /^Unsupported listing query parameter/, query);
+  }
+});
+
+test("discovery refuses metrics and ranking including filter wrapper values", () => {
+  for (const query of ["trackRecord=90", "min_rating=4", "completion.rate=1", "filter=completionRate", "filters=rating", "sort=x", "filter=sort", "filter=rank", "filters=orderBy", "filters[sort]=price"]) {
+    const reason = unavailableMetricQuery(new URLSearchParams(query), "discovery");
+    assert.match(reason ?? "", /^(?:Rate and score filters|Sorting and ranking) are unavailable/, query);
+  }
+});
+
+test("exported TP-1 metrics and labels describe unverified observations", async () => {
+  const policy = await import("../src/catalog/testnetMetricPolicy.js");
+  assert.deepEqual(policy.UNAVAILABLE_TESTNET_METRICS, {
+    completionRate: null, counterpartyAdjustedCompletionRate: null, counterpartyFaultRate: null,
+    averageBuyerRating: null, averageSellerRating: null,
+    metricsUnavailableReason: "Completion verification unavailable", metricsProfile: "TP-1",
+  });
+  assert.equal(policy.CHECKED_BUNDLES_LABEL, "signature-checked bundles; not counted as outcomes");
+  assert.deepEqual(policy.OBSERVED_REPUTATION_COUNTS, {
+    completedLabel: "Observed completed outcomes, not verified",
+    totalAgreementsLabel: "Observed outcomes, not verified",
+    observedTransactionalVolumeLabel: "Observed amounts in completed outcomes, not verified completion or settlement",
+    transactionCountByCurrencyLabel: "Observed priced completed outcomes, not verified completion or settlement",
+  });
+});
