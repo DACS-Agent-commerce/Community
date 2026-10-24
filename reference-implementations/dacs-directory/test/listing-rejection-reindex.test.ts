@@ -33,7 +33,7 @@ async function reindexWith(crawl: ReturnType<typeof crawling>, anchorOwner = own
     return data ? Response.json({ success: true, owner: anchorOwner, programName: "dacs:test", data }) : new Response(null, { status: 404 });
   };
   try {
-    await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); }, crawlWellKnown: crawl });
+    await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); }, crawlWellKnown: crawl });
   } finally {
     globalThis.fetch = originalFetch;
   }
