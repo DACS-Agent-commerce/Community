@@ -24,7 +24,6 @@ export type DirectoryEvidenceState = Readonly<{
   >;
   identityTier: IdentityTier;
   deals: Readonly<{
-    completed: number;
     total: number;
     label: string;
     explanation: string;
@@ -43,7 +42,6 @@ export function directoryEvidenceState(
     : listing.artifactProfile === "dacs-v0.1"
       ? { kind: "current" as const, label: "current DACS listing" as const }
       : { kind: "legacy" as const, label: "legacy SDK listing" as const };
-  const completed = seller.reputation.completed;
   const total = seller.reputation.totalAgreements;
   const reachabilityStatus = listing.reachabilityHint
     ? effectiveReachabilityStatus(listing.reachabilityHint, now)
@@ -79,7 +77,6 @@ export function directoryEvidenceState(
     reachability: Object.freeze(reachability),
     identityTier: seller.identityTier ?? "self-declared",
     deals: Object.freeze({
-      completed,
       total,
       label: observedOutcomesLabel(total),
       explanation: COMPLETION_VERIFICATION_UNAVAILABLE,
