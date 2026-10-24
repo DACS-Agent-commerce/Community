@@ -139,9 +139,9 @@ export async function indexRegistration(
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
-  const ownerRegistered = reg.ownerSignature
+  const ownerRegistered = reg.ownerSignatureVerified ?? (reg.ownerSignature
     ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false;
+    : false);
   const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
@@ -337,7 +337,8 @@ export async function indexRegistration(
     });
   }
 
-  pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
+  // An incomplete crawl may have hidden anchors this registration only gains from it.
+  if (!reg.listingRejectionPruneDeferred) pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
