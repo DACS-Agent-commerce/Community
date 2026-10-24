@@ -515,22 +515,6 @@ test("publisher rejects a metered listing without its deterministic unit", async
   assert.match(String((await response.json()).error), /metered pricing needs a unit/);
 });
 
-test("browser publisher refuses attested payloads without seller-runtime production capability", async () => {
-  const identityResponse = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
-  const identitySignature = Buffer.from(
-    ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
-  ).toString("hex");
-  const response = await POST(request({
-    ...base,
-    delivery: ["deliver-attested-payload"],
-    identityPresentedAt: identity.identityPresentedAt,
-    identitySignature,
-  }));
-  assert.equal(response.status, 409);
-  assert.match(String((await response.json()).error), /cannot prove.*production capability/i);
-});
-
 test("publisher refuses a new write when existing-publication lookup is indeterminate", async () => {
   const identityResponse = await POST(request(base));
   const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
@@ -812,6 +796,14 @@ test("publisher refuses to recover an occupied program that holds another seller
     assert.equal(body.tx, undefined, name);
     assert.equal(body.listing, undefined, name);
   }
+});
+
+test("browser publisher refuses attested payloads before asking for a wallet signature", async () => {
+  const response = await POST(request({ ...base, delivery: ["deliver-attested-payload"] }));
+  assert.equal(response.status, 409);
+  const body = await response.json() as { error: string; identityMessage?: string };
+  assert.match(body.error, /cannot prove.*production capability/i);
+  assert.equal(body.identityMessage, undefined);
 });
 
 /** Answer only the explicitly modelled read RPCs, never contact a node. */

@@ -91,6 +91,9 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(inspectSeller?.schema.pattern, "\\S");
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  assert.ok(listingSummarySchema.required.includes("transactionReadiness"));
+  assert.equal(listingSummarySchema.properties.transactionReadiness.additionalProperties, false);
+  assert.equal(listingSummarySchema.properties.transactionReadiness.properties.disposition.const, "unassessed");
   assert.equal(listingSummarySchema.properties.inspection.properties.artifactType.const, "directory-service-profile");
   assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
   assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
