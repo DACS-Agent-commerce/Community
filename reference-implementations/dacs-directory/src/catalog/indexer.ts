@@ -177,6 +177,8 @@ export async function indexRegistration(
     const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
     if (!verified) continue;
     const { scope } = verified;
+    if (verified.profile === "dacs-v0.1" &&
+        (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
       anchored.owner,

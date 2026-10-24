@@ -12,7 +12,7 @@ function fixture(name: string, hash: string) {
 }
 
 test("pinned SIG-6 vectors exercise canonical decoding and declared legacy import", () => {
-  const set = fixture("signature-value-encoding-v0.1.json", "bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312");
+  const set = fixture("signature-value-encoding-v0.1.json", "b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf");
   assert.equal(set.vectors.length, set.count);
   for (const vector of set.vectors) {
     if (vector.mode === "legacy-import") {
