@@ -6,8 +6,9 @@ export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
   title: "DACS Directory ListingSummary",
+  description: "Discovery projection with unassessed transaction readiness. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile.",
   type: "object",
-  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt"],
+  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt", "transactionReadiness"],
   properties: {
     listingId: { type: "string", minLength: 1 },
     version: { type: "integer", minimum: 1 },
@@ -70,6 +71,16 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
+    transactionReadiness: {
+      type: "object",
+      required: ["disposition", "reason"],
+      additionalProperties: false,
+      properties: {
+        disposition: { const: "unassessed" },
+        reason: { type: "string", minLength: 1 },
+      },
+      description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
+    },
     reputationHint: { type: "object" },
     inspection: {
       type: "object",
@@ -252,7 +263,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
     missingProfileMeans: "legacy-sdk-v0.1",
   },
   maturity: {
-    listings: "current publisher and dual-profile reader",
+    listings: "dual-profile discovery reader; browser publication omitted; pay-bearing preparation requires verified rail authority",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
     reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
   },
@@ -268,7 +279,7 @@ export const openApiDocument = (origin: string) => ({
   info: {
     title: "DACS Directory API",
     version: "1.0.0",
-    description: "Discover DACS services and retrieve the signed chain artifacts behind them.",
+    description: "Discover DACS services and retrieve signed chain artifacts. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile. Catalog admission does not establish transaction readiness.",
   },
   servers: [{ url: origin }],
   paths: {

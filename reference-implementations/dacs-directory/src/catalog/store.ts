@@ -7,8 +7,9 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
+import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import { deriveSellerReputation } from "./reputation.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
@@ -243,6 +244,48 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
   });
   setJson("sr2-anchor-schema-version", 2);
 })();
+
+// Early Directory builds exposed the internal name `revocationBinding` in
+// ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
+// every public surface and restart path now emits the normative wire field.
+if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
+  type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => {
+        const legacy = listing as LegacyListingSummary;
+        const { revocationBinding, ...current } = legacy;
+        const revocation = current.revocation ?? revocationBinding;
+        return {
+          ...current,
+          ...(current.status === "revoked" && revocation ? { revocation } : {}),
+        };
+      }),
+    })),
+  });
+  setJson("listing-summary-revocation-schema-version", 1);
+}).immediate();
+
+// Catalog authentication is deliberately narrower than the current SDK's
+// buyer-local LR-1..LR-3 decision. Persist that distinction on every existing
+// summary so old catalogs cannot imply transaction readiness after upgrade.
+if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction(() => {
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => ({
+        ...listing,
+        transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
+      })),
+    })),
+  });
+  setJson("listing-summary-readiness-schema-version", 1);
+}).immediate();
 
 // Cached admission decisions predate the current Listing reader (including
 // DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.

@@ -37,6 +37,7 @@ import {
   verifyStoredListing,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -293,6 +294,7 @@ export async function indexRegistration(
       status: revocation === "revoked" ? "revoked" : "active",
       ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
+      transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
 

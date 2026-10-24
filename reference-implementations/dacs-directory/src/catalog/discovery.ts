@@ -1,4 +1,12 @@
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { Catalog, ListingSummary, SellerRecord } from "./types.js";
+
+/**
+ * A current summary's `seller.primaryClaim` carries the listing's exact
+ * `presentedBy` bytes (§6.3.6 / RB-2), CF-3 parameters included; seller
+ * records, lookups and links use its parameter-free CF-3 identity.
+ */
+export const sellerIdentity = (claim: string): string => canonicalDemosAgentClaim(claim) ?? claim;
 
 /** Historical rail aliases are retained for evidence. A current offer needs
  * at least one rail other than those aliases, or a pipeline without payment. */
