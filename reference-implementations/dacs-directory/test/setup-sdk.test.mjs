@@ -64,10 +64,7 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
       writeFileSync(join(sdk, "dist", stale), "export const removedSource = 1;\n");
     }
     writeFileSync(join(sdk, "package.json"), JSON.stringify({ dacs: { standardRevision } }));
-    if (marker !== undefined) {
-      mkdirSync(join(sdk, "dist"), { recursive: true });
-      writeFileSync(join(sdk, "dist/.dacs-sdk-revision"), marker);
-    }
+    if (marker !== undefined) writeFileSync(join(sdk, ".dacs-sdk-revision"), marker);
     const log = join(root, "calls.log");
     writeFileSync(log, "");
     const result = spawnSync("bash", [join(root, "scripts/setup-sdk.sh")], {
@@ -79,7 +76,7 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
       encoding: "utf8",
     });
     const read = (path) => existsSync(join(sdk, path)) ? readFileSync(join(sdk, path), "utf8") : undefined;
-    return { ...result, calls: readFileSync(log, "utf8"), marker: read("dist/.dacs-sdk-revision"), manifest: read("dist/.dacs-sdk-manifest") };
+    return { ...result, calls: readFileSync(log, "utf8"), marker: read(".dacs-sdk-revision"), manifest: read(".dacs-sdk-manifest") };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -111,6 +108,7 @@ test("setup accepts a packaged SDK build only with the pinned marker, Standard r
     ["SDK for another Standard revision", { marker: sdkRev, standardRevision: "4bb9e48a1095ab32c06c25b7c0b52018d3ce4091" }, /Standard revision/],
     ["marked dist with other bytes", { marker: sdkRev, dist: { "index.js": "export const injected = 1;\n" } }, /not the pinned build/],
     ["marked dist with an extra file", { marker: sdkRev, dist: { "index.js": builtIndex, "extra.js": "" } }, /not the pinned build/],
+    ["marked dist with a dot-prefixed module", { marker: sdkRev, dist: { "index.js": builtIndex, ".dacs-sdk-hook.js": "" } }, /not the pinned build/],
     // A symlink would let bytes outside the hashed tree load as part of the SDK.
     ["marked dist with a symlink", { marker: sdkRev, link: "linked.js" }, /not a regular file/],
   ]) {
