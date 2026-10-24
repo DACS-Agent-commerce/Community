@@ -7,6 +7,7 @@ import {
   verifyCounterpartyEvidenceFixtureListing,
 } from "@/src/catalog/counterpartyEvidence";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
+import { sellerIdentity } from "@/src/catalog/discovery";
 import { catalogJson } from "@/src/catalog/http";
 import { inspectServicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
@@ -20,7 +21,7 @@ export async function GET(
   const origin = requestBaseUrl(req);
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
+    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || sellerIdentity(l.seller.primaryClaim) === sellerIdentity(requestedSeller)));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
   if (hit.anchor.kind === "fixture") {
     const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
