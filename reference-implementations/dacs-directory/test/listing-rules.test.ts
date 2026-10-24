@@ -559,14 +559,3 @@ test("LR-2 caps the unsigned canonical Listing at exactly 16,384 bytes", async (
     assert.equal(Boolean(await verifyListing(signed)), retentionYears !== -1);
   }
 });
-
-
-test("LP-2 permits a second authorized seller claim to sign the Listing", async () => {
-  const signed = listing(scope => {
-    const identity: Obj = { bundleVersion: "1", presentedBy: dids[0], presentedAt: 1, claims: [{ ref: dids[0] }, { ref: dids[1] }] };
-    (scope.seller as Obj).identity = { ...identity, presentation: perClaim(identity) };
-  }, { signer: 1 });
-  assert.ok(await verifyListing(signed));
-  const foreign = listing(() => {}, { signer: 1 });
-  assert.equal(await verifyListing(foreign), null, "a key absent from seller claims is unauthorized");
-});

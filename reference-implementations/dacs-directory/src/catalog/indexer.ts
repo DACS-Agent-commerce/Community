@@ -178,8 +178,6 @@ export async function indexRegistration(
     const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
     if (!verified) continue;
     const { scope } = verified;
-    if (verified.profile === "dacs-v0.1" &&
-        (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
       anchored.owner,
@@ -266,6 +264,11 @@ export async function indexRegistration(
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
+    // A qualified presentedBy (CF-3 parameters) has no exact-reference summary
+    // yet, so only the public summary is withheld; the verified artifact above
+    // stays available to deal evidence.
+    if (verified.profile === "dacs-v0.1" &&
+        (scope.seller as { identity: { presentedBy: string } }).identity.presentedBy !== verified.sellerClaim) continue;
     listings.push({
       listingId,
       version,
