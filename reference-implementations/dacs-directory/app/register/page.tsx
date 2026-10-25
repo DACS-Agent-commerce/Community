@@ -3,18 +3,19 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
-  discardPendingListingPublication, readPendingListingPublication,
-  type PendingListingPublication,
+  discardPendingListingPublication, readSavedListingPublication,
+  type SavedListingPublication,
 } from "../../src/components/listing-publication-recovery";
 import { describeSavedAnchorCheck, readSavedAnchorStatus, savedAnchorAllowsDiscard } from "../../src/components/saved-anchor-check";
 
 export default function Register() {
-  const [pending, setPending] = useState<PendingListingPublication | null>(null);
+  const [saved, setSaved] = useState<SavedListingPublication | null>(null);
   const [observation, setObservation] = useState<string | null>(null);
   const [checked, setChecked] = useState(false);
   const [checking, setChecking] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
-  useEffect(() => { setPending(readPendingListingPublication(localStorage)); }, []);
+  const pending = saved?.pending ?? null;
+  useEffect(() => { setSaved(readSavedListingPublication(localStorage)); }, []);
 
   async function checkSavedAnchor() {
     if (!pending) return;
@@ -27,18 +28,18 @@ export default function Register() {
     setChecking(false);
   }
 
-  function discard() {
-    if (!pending || !checked || !acknowledged) return;
-    const outcome = discardPendingListingPublication(localStorage, pending);
+  async function discard() {
+    if (!saved || !checked || !acknowledged) return;
+    const outcome = await discardPendingListingPublication(localStorage, saved, "locks" in navigator ? navigator.locks : undefined);
     if (outcome === "discarded") {
-      setPending(null);
+      setSaved(null);
       return;
     }
     if (outcome === "failed") {
       setObservation("The browser could not remove the recovery record. Try again.");
       return;
     }
-    setPending(readPendingListingPublication(localStorage));
+    setSaved(readSavedListingPublication(localStorage));
     setChecked(false);
     setAcknowledged(false);
     setObservation("The saved record changed in another tab and was kept. Check it again before discarding.");
