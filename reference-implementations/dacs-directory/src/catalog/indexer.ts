@@ -229,7 +229,8 @@ export async function indexRegistration(
       continue;
     }
     // Without the full discovery state a declaration seen earlier cannot be seen again, so it stays in force.
-    if (reg.discoveryIncomplete && listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH") {
+    // A declaration that was seen in this pass and matches replaces it.
+    if (!declaredHash && reg.discoveryIncomplete && listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH") {
       rejectedListingAnchors.add(anchor);
       continue;
     }
