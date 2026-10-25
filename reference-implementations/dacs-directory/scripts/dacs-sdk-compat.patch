@@ -1,5 +1,5 @@
 diff --git a/src/agent/verifyBundleCore.ts b/src/agent/verifyBundleCore.ts
-index 9a0d7dff..34f5f133 100644
+index 9a0d7dff..dc47632b 100644
 --- a/src/agent/verifyBundleCore.ts
 +++ b/src/agent/verifyBundleCore.ts
 @@ -1,6 +1,6 @@
@@ -203,7 +203,42 @@ index 9a0d7dff..34f5f133 100644
  function bundlePartySignerClaims(
    bundle: ReadableAttestationBundle,
  ): ReadonlySet<string> | null {
-@@ -1410,7 +1495,7 @@ export async function verifyBundleCore(
+@@ -1019,10 +1104,32 @@ function isNormativeListingScope(v: Record<string, unknown>): boolean {
+   return isListingDraft(scope);
+ }
+ 
++/** The draft SDK checked only a Listing's required members, never its pricing or listingVersion. */
++function isHistoricalListing(
++  scope: Record<string, unknown>,
++): scope is Record<string, unknown> & { agentId: string } {
++  return isLegacyMvpListing({ ...scope, pricing: undefined, listingVersion: undefined });
++}
++
++/**
++ * The draft SDK wrote a finality object, with finalityBlocks, for every
++ * settlement outcome; the frozen validator accepts neither on its own.
++ */
++function isHistoricalSettlementEvidence(value: unknown): boolean {
++  if (isLegacyMvpSettlementEvidence(value)) return true;
++  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
++  const evidence = value as Record<string, unknown>;
++  const finality = evidence.settlementFinality;
++  if (typeof finality !== "object" || finality === null || Array.isArray(finality)) return false;
++  const { finalityBlocks, ...finalityWithoutBlocks } = finality as Record<string, unknown>;
++  return (evidence.outcome === "success" || evidence.outcome === "failure") &&
++    Number.isSafeInteger(finalityBlocks) && (finalityBlocks as number) >= 0 &&
++    isLegacyMvpSettlementEvidence({ ...evidence, outcome: "success", settlementFinality: finalityWithoutBlocks });
++}
++
+ /** Historical SDK bundles may read only the isolated MVP Listing scope. */
+ function isLegacyMvpListingScope(v: Record<string, unknown>): boolean {
+-  const scope = stripSignature(v);
+-  return isLegacyMvpListing(scope);
++  return isHistoricalListing(stripSignature(v));
+ }
+ 
+ function exactListingPin(value: unknown): ListingPin | null {
+@@ -1410,7 +1517,7 @@ export async function verifyBundleCore(
        : isFaultBundle(bundle as unknown as Record<string, unknown>)
          ? ARTIFACT_SEPARATORS.FaultAttestationBundle
          : ARTIFACT_SEPARATORS.AttestationBundle,
@@ -212,7 +247,7 @@ index 9a0d7dff..34f5f133 100644
    );
  
    const sigs = Array.isArray(raw["signatures"])
-@@ -1563,6 +1648,7 @@ export async function verifyBundleCore(
+@@ -1563,6 +1670,7 @@ export async function verifyBundleCore(
        ref.contentHash,
        validateScope,
        value,
@@ -220,7 +255,7 @@ index 9a0d7dff..34f5f133 100644
      );
      return {
        check:
-@@ -1581,10 +1667,7 @@ export async function verifyBundleCore(
+@@ -1581,10 +1689,7 @@ export async function verifyBundleCore(
          ? isLegacyMvpAgreementDocument
          : isAgreementScope,
        isLegacyMvpAttestationRef(bundle.agreementRef)
@@ -232,18 +267,27 @@ index 9a0d7dff..34f5f133 100644
          : (artifact) => authenticateAgreementReference(artifact, deps),
      );
      if (
-@@ -1726,7 +1809,9 @@ export async function verifyBundleCore(
+@@ -1714,7 +1819,7 @@ export async function verifyBundleCore(
+       ev,
+       isLegacyMvpAttestationRef(ev)
+         ? (value) =>
+-            isLegacyMvpSettlementEvidence(value) ||
++            isHistoricalSettlementEvidence(value) ||
+             isSettlementEvidenceScope(value)
+         : isSettlementEvidenceScope,
+     );
+@@ -1726,7 +1831,9 @@ export async function verifyBundleCore(
      ) {
        evidence.check.verdict = "invalid-binding";
      }
 -    if (evidence.check.verdict === "ok" && evidence.value) {
-+    if (evidence.check.verdict === "ok" && evidence.value && !isNormativeGraph && isLegacyMvpGraph && isLegacyMvpAttestationRef(ev) && isLegacyMvpSettlementEvidence(evidence.value)) {
++    if (evidence.check.verdict === "ok" && evidence.value && !isNormativeGraph && isLegacyMvpGraph && isLegacyMvpAttestationRef(ev) && isHistoricalSettlementEvidence(evidence.value)) {
 +      evidence.check = attachSignatureCheck(evidence.check, await authenticateLegacyEvidence(evidence.value, bundle, deps));
 +    } else if (evidence.check.verdict === "ok" && evidence.value) {
        let decision: unknown;
        let authorizedSigner: string | null = null;
        try {
-@@ -1962,6 +2047,7 @@ export async function verifyBundleCore(
+@@ -1962,6 +2069,7 @@ export async function verifyBundleCore(
          ? isNormativeListingScope
          : isLegacyMvpListingScope,
        listing,
@@ -251,14 +295,20 @@ index 9a0d7dff..34f5f133 100644
      );
      if (listingCheck.verdict === "ok" && listing && listingUsesNormativeScope) {
        const listingScope = stripSignature(listing) as {
-@@ -1991,9 +2077,8 @@ export async function verifyBundleCore(
+@@ -1986,14 +2094,13 @@ export async function verifyBundleCore(
+       const listingScope = stripSignature(listing) as Record<string, unknown>;
+       const publisher = isListingDraft(listingScope)
+         ? listingScope.seller.identity.presentedBy
+-        : isLegacyMvpListing(listingScope)
++        : isHistoricalListing(listingScope)
+           ? listingScope.agentId
            : null;
        listingCheck = attachSignatureCheck(
          listingCheck,
 -        isLegacyMvpListing(listingScope) &&
 -          typeof listing.signature === "string"
 -          ? await authenticateLegacyHexReference(
-+        isLegacyMvpListing(listingScope)
++        isHistoricalListing(listingScope)
 +          ? await authenticateLegacyListingReference(
                listing,
                ARTIFACT_SEPARATORS.Listing,
