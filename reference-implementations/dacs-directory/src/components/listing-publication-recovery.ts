@@ -12,8 +12,6 @@ export type PendingListingPublication = {
   contentHash: string;
   signedListing: Record<string, unknown>;
   transaction: Record<string, unknown> | null;
-  transactionRef?: string;
-  anchorReceipt?: Record<string, unknown>;
   registration: Record<string, unknown>;
   stage: PendingPublicationStage;
   createdAt: number;
@@ -27,7 +25,6 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
   const signedListing = record(pending?.signedListing);
   const registration = record(pending?.registration);
   const transaction = pending?.transaction === null ? null : record(pending?.transaction);
-  const anchorReceipt = pending?.anchorReceipt === undefined ? undefined : record(pending.anchorReceipt);
   if (
     pending?.version !== 1 ||
     typeof pending.claim !== "string" || !/^did:demos:agent:[0-9a-f]{64}$/.test(pending.claim) ||
@@ -40,10 +37,6 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
     !registration || registration.primaryClaim !== pending.claim ||
     !Array.isArray(registration.listingAnchors) || !registration.listingAnchors.includes(pending.anchorAddress) ||
     (pending.transaction !== null && !transaction) ||
-    (pending.transactionRef !== undefined && (
-      typeof pending.transactionRef !== "string" || !/^[0-9a-f]{64}$/.test(pending.transactionRef)
-    )) ||
-    (pending.anchorReceipt !== undefined && !anchorReceipt) ||
     (pending.stage !== "broadcast-uncertain" && pending.stage !== "confirming" && pending.stage !== "registering") ||
     !Number.isSafeInteger(pending.createdAt) || Number(pending.createdAt) <= 0
   ) return null;
@@ -58,8 +51,6 @@ export function parsePendingListingPublication(value: unknown): PendingListingPu
     contentHash: pending.contentHash,
     signedListing,
     transaction,
-    ...(typeof pending.transactionRef === "string" ? { transactionRef: pending.transactionRef } : {}),
-    ...(anchorReceipt ? { anchorReceipt } : {}),
     registration,
     stage: pending.stage,
     createdAt: Number(pending.createdAt),
@@ -89,4 +80,22 @@ export function writePendingListingPublication(
 
 export function clearPendingListingPublication(storage: Pick<Storage, "removeItem">): void {
   try { storage.removeItem(LISTING_PUBLICATION_KEY); } catch { /* best effort */ }
+}
+
+/** `discarded`: the record is gone. `changed`: the stored record is not the shown one (or none is stored) and was left alone. `failed`: the browser kept the record. */
+export type DiscardOutcome = "discarded" | "changed" | "failed";
+
+/**
+ * Removes the saved record only while it still equals `shown`, the record the user checked and
+ * acknowledged. A record that another tab replaced or advanced since is left in place. The comparison
+ * and the removal run in one synchronous step; localStorage offers nothing stronger across tabs.
+ */
+export function discardPendingListingPublication(
+  storage: Pick<Storage, "getItem" | "removeItem">,
+  shown: PendingListingPublication,
+): DiscardOutcome {
+  const stored = readPendingListingPublication(storage);
+  if (!stored || JSON.stringify(stored) !== JSON.stringify(shown)) return "changed";
+  clearPendingListingPublication(storage);
+  return readPendingListingPublication(storage) ? "failed" : "discarded";
 }
