@@ -76,6 +76,8 @@ const scanOnly = new Set<string>();
 const answers = new Map<string, () => Response>();
 const vanishing = new Set<string>();
 let nodeDown = false;
+/** Transactions one `getTransactions` call returns; a test lowers it to split a scan into windows. */
+let transactionPageLimit = Infinity;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
   if (path.startsWith("/storage-program/")) {
@@ -93,7 +95,10 @@ globalThis.fetch = async (input, init) => {
   }
   const call = JSON.parse(String(init?.body)).params?.[0];
   if (nodeDown) return Response.json({ result: 503 });
-  return Response.json({ result: 200, response: call?.message === "getTransactions" && call.data?.start === "latest" ? transactions : [] });
+  const start = call?.data?.start;
+  const page = call?.message !== "getTransactions" ? [] : start === "latest" ? transactions
+    : transactions.filter((tx) => typeof start === "number" && Number(tx.id) <= start);
+  return Response.json({ result: 200, response: page.slice(0, transactionPageLimit) });
 };
 const memo = (id: number, at?: string): Obj => ({ id, status: "confirmed", type: "transfer", hash: id.toString(16).padStart(64, "0"),
   blockNumber: id, to: "0x1", content: JSON.stringify(at ? { memo: at } : {}) });
@@ -506,6 +511,30 @@ test("a discovered deal keeps its seller copy when a later window has none", asy
   await reindex();
   assert.equal(entry().owners.seller, seller);
   assert.equal(entry().sellerBundleRef, locator(922));
+});
+
+test("a replay split across scan windows attributes a seller whose agreement is in an older window", async () => {
+  const jobId = "split-window";
+  resetIndex([later], 25);
+  chain({
+    [locator(951)]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+    [locator(952)]: { data: '{"any":1}' },
+    [locator(950)]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+  }, [locator(951), locator(952), locator(950)]);
+  const entry = () => store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`];
+  process.env.DACS_SCAN_MAX_TXS = "2";
+  transactionPageLimit = 2;
+  try {
+    await reindex();
+    assert.equal(store.loadScanState().replay?.before, 1, "the first window holds the bundle, not the agreement");
+    assert.equal(entry().owners.seller, "");
+    await reindex();
+    assert.equal(store.loadScanState().replay, undefined);
+    assert.equal(entry().owners.seller, seller, "the older window's agreement attributes the bundle found in the newer one");
+  } finally {
+    delete process.env.DACS_SCAN_MAX_TXS;
+    transactionPageLimit = Infinity;
+  }
 });
 
 /** Records each locator as read with `who` as its storage owner. */

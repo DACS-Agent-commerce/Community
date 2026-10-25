@@ -21,7 +21,7 @@ import { isLegacyMvpAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
-import { discoveredDealKey } from "./scanState.js";
+import { canonicalProgramOwner, discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
   catalogBundleBindings,
@@ -426,6 +426,8 @@ export async function scanChain(
     /** Continue a walk that stopped at `maxTxs`: start at this id instead of the tip, with the tip that walk saw. */
     startBefore?: number;
     chainTip?: number;
+    /** Deals an earlier window found without a seller: their agreement may be in this window. */
+    unattributedDeals?: Iterable<RegisteredDeal>;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
   } = {},
@@ -575,6 +577,12 @@ export async function scanChain(
     // retain the honest finalisedAt fallback and will be retried by backfill.
   }
 
+  for (const deal of opts.unattributedDeals ?? []) {
+    const dealKey = discoveredDealKey(deal.owners.buyer, deal.jobId);
+    if (!bundleOwners.has(dealKey)) {
+      bundleOwners.set(dealKey, { jobId: deal.jobId, address: deal.buyerBundleRef, owner: canonicalProgramOwner(deal.owners.buyer) });
+    }
+  }
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
   const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
   for (const [dealKey, { jobId, ...bundle }] of bundleOwners) {
