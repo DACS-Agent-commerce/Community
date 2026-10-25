@@ -53,7 +53,10 @@ export function describeSavedAnchorCheck(check: SavedAnchorCheck): string {
   return CHECK_MESSAGES[check.status === "unavailable" ? check.reason : check.status];
 }
 
-/** Whether a check answered definitively, so discarding the saved record may be offered. */
-export function savedAnchorAllowsDiscard(check: SavedAnchorCheck): boolean {
-  return check.status !== "unavailable";
+/**
+ * Whether Discard may be offered for the record now shown: the check answered definitively and
+ * was a check of that exact record text, not of a record an earlier check read before it changed.
+ */
+export function savedAnchorAllowsDiscard(check: SavedAnchorCheck, checkedRaw: string, shownRaw: string): boolean {
+  return check.status !== "unavailable" && checkedRaw === shownRaw;
 }
