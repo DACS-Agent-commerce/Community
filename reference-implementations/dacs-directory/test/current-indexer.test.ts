@@ -1080,15 +1080,15 @@ test("completed deals remain verifiable after their Listing expires out of disco
   }
 });
 
-/** Index a deal on a Listing that expired at 100: its agreement is anchored at `committedAt`, its bundles say `finalisedAt`. */
+/** Index a deal on a Listing valid from `notBefore` until 100: its agreement is anchored at `committedAt`, its bundles say `finalisedAt`. */
 async function indexDealOnExpiredListing(
-  t: TestContext, jobId: string, offset: number, committedAt: number | undefined, finalisedAt: number,
+  t: TestContext, jobId: string, offset: number, committedAt: number | undefined, finalisedAt: number, notBefore = 1,
 ) {
   const fixture = await vector(jobId, offset);
   const notAfter = 100;
   t.mock.method(Date, "now", () => notAfter + 50);
   const listingScope = signedScope(fixture.listing, "listing");
-  listingScope.validity = { notBefore: 1, notAfter };
+  listingScope.validity = { notBefore, notAfter };
   fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
   maps.set(fixture.locators.listing, fixture.listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
@@ -1117,6 +1117,13 @@ test("an expired Listing cannot authenticate a deal committed after its validity
   assert.equal(record.deals[0].refsVerified, false, "a backdated finalisedAt cannot stand in for the commitment time");
   assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+});
+
+test("an expired Listing cannot authenticate a deal committed before its validity began", async (t) => {
+  const record = await indexDealOnExpiredListing(t, "listing-early-job", 2200, 50, 90, 60);
+  assert.equal(record.deals[0].refsVerified, false, "an agreement committed before notBefore was made on a Listing that was not yet effective");
+  assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.completed, 0);
 });
 
