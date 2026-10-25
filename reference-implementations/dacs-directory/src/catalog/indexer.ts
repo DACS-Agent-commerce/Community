@@ -189,15 +189,16 @@ export async function indexRegistration(
       rejectedListingAnchors.add(anchor);
       continue;
     }
+    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
+    // A recorded hash mismatch stays in force until a matching declaration is seen. An incomplete pass cannot
+    // see a declaration made earlier, so a failure that cannot read the hash must not replace the row.
+    const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
+      listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
       rejectedListingAnchors.add(anchor);
-      recordListingRejection(
-        anchor,
-        reg.primaryClaim,
-        verification.code,
-      );
+      if (!hashMismatchHeld) recordListingRejection(anchor, reg.primaryClaim, verification.code);
       continue;
     }
     const verified = verification.value;
@@ -209,16 +210,17 @@ export async function indexRegistration(
     );
     if (bindingRejection) {
       rejectedListingAnchors.add(anchor);
-      recordListingRejection(
-        anchor,
-        reg.primaryClaim,
-        bindingRejection,
-        bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
-        ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING" && ownerSignedAnchors.has(anchor),
-      );
+      if (!hashMismatchHeld) {
+        recordListingRejection(
+          anchor,
+          reg.primaryClaim,
+          bindingRejection,
+          bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
+          ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING" && ownerSignedAnchors.has(anchor),
+        );
+      }
       continue;
     }
-    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
     if (declaredHash && declaredHash !== verified.contentHash) {
       rejectedListingAnchors.add(anchor);
       recordListingRejection(
@@ -230,9 +232,8 @@ export async function indexRegistration(
       );
       continue;
     }
-    // Without the full discovery state a declaration seen earlier cannot be seen again, so it stays in force.
-    // A declaration that was seen in this pass and matches replaces it.
-    if (!declaredHash && reg.discoveryIncomplete && listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH") {
+    // A declaration that was seen in this pass and matches replaces the held mismatch.
+    if (!declaredHash && hashMismatchHeld) {
       rejectedListingAnchors.add(anchor);
       continue;
     }

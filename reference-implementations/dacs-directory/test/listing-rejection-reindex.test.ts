@@ -152,6 +152,26 @@ test("index-now keeps a declared-hash notice and crawl-derived history it cannot
   assert.equal(loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.listings.length, 0);
 });
 
+test("incomplete passes keep a declared-hash mismatch when the anchor fails verification in between", async () => {
+  const { listing, locators } = await vector("interleaved-failure-job", 390);
+  saveDomains(["seller.example"]);
+  saveRegistrations([registration([locators.listing])]);
+  const notice = () => diagnostics().find((item) => item.locator === locators.listing);
+  const listingCount = () => loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.listings.length;
+
+  await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), true)], false));
+  assert.equal(notice()?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+
+  maps.set(locators.listing, { ...listing, offering: { ...(listing.offering as object), title: "tampered" } });
+  await reindexWith(crawling([], true));
+  assert.equal(notice()?.code, "DECLARED_CONTENT_HASH_MISMATCH", "an unverifiable read does not discharge the declaration");
+
+  maps.set(locators.listing, listing);
+  await reindexWith(crawling([], true));
+  assert.equal(notice()?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+  assert.equal(listingCount(), 0);
+});
+
 test("a corrected declared hash clears the rejection even when an unrelated domain fails to crawl", async () => {
   const { listing, locators } = await vector("corrected-hash-job", 380);
   saveDomains(["seller.example", "dead.example"]);
