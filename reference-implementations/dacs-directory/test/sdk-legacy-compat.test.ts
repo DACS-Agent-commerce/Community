@@ -6,7 +6,7 @@ import { ed25519Sign, ed25519Verify, privateKeyFromSeed, publicKeyFromSeed, publ
 import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { verifyBundleCore } from "../src/sdkVerification.js";
 import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
-import { verifyListing } from "../src/catalog/listingVerification.js";
+import { storedListingHash, verifyListing } from "../src/catalog/listingVerification.js";
 import { refsPassStrictPolicy, verifiedListingTerms } from "../src/catalog/bundlePolicy.js";
 
 type Obj = Record<string, unknown>;
@@ -18,7 +18,7 @@ const sign = (scope: Obj, prefix: string, index = 1, encoding: BufferEncoding = 
 const partySignature = (scope: Obj, prefix: string, index: number) =>
   ({ party: claims[index], algorithm: "ed25519", value: sign(scope, prefix, index) });
 
-function fixture(signatureKind: string, unicode = false, listingExtension: Obj = {}) {
+function fixture(signatureKind: string, unicode = false, listingExtension: Obj = {}, extension: Obj = {}) {
   const listingScope: Obj = { agentId: claims[1], serviceId: "svc", name: "Service", description: "Legacy service", claimRequirements: [],
     supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-attested-payload"],
     terms: { cancellationPolicy: "pre-commit" }, ...(unicode ? { "e\u0301": "historical member" } : {}), ...listingExtension };
@@ -27,7 +27,7 @@ function fixture(signatureKind: string, unicode = false, listingExtension: Obj =
     ? { algorithm: "ed25519", signer: claims[1], value } : signatureKind === "0x" ? `0x${value}` : value };
   const agreementScope: Obj = { jobId: "legacy", pattern: "fixed-price", buyer: claims[0], seller: claims[1], listingRef: "listing",
     price: { amount: "1", asset: "DEM", decimals: 18, rail: "pay-dem" }, delivery: { phase: "deliver-attested-payload", format: "application/json" },
-    expiresAt: "2099-01-01T00:00:00.000Z", ...(unicode ? { "e\u0301": "agreement member" } : {}) };
+    expiresAt: "2099-01-01T00:00:00.000Z", ...(unicode ? { "e\u0301": "agreement member" } : {}), ...extension };
   const agreement = { ...agreementScope, signatures: [0, 1].map(index => partySignature(agreementScope, "dacs-agreement:v1:", index)) };
   const body: Obj = { bundleVersion: "1", jobId: "legacy", outcome: "completed",
     listingRef: { listingId: "svc", version: 1, contentHash: legacyListingHash(listingScope) },
@@ -35,7 +35,7 @@ function fixture(signatureKind: string, unicode = false, listingExtension: Obj =
     parties: claims.map((primaryClaim, i) => ({ role: i ? "seller" : "buyer", primaryClaim, bundleHash: "a".repeat(64) })),
     phaseSummary: [{ index: 0, kind: "commit-agreement", outcome: "ok" }], vetRecords: [], settlementEvidence: [],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 1_700_000_000_000,
-    ...(unicode ? { "e\u0301": "bundle member" } : {}) };
+    ...(unicode ? { "e\u0301": "bundle member" } : {}), ...extension };
   const bundle = { ...body, anchoredByRole: "seller", signatures: [0, 1].map(index => partySignature(body, "dacs-bundle:v1:", index)) };
   return { bundle, listing, agreement };
 }
@@ -60,6 +60,24 @@ test("legacy bundle verification accepts all historical Listing signature spelli
     assert.equal(checked.strict, true, spelling);
     f.listing.name = "tampered";
     assert.equal((await verify(f)).strict, false, `${spelling}: changed signed content`);
+  }
+});
+
+test("historical Listing, bundle and reference reads preserve NFC-colliding member order", async () => {
+  for (const names of [["é", "e\u0301"], ["e\u0301", "é"]]) {
+    const collisions = Object.fromEntries(names.map((name, index) => [name, `member-${index}`]));
+    for (const extension of [collisions, { nested: [collisions] }]) {
+      const f = fixture("structured", false, extension, extension);
+      const { signature: _signature, ...scope } = f.listing;
+      const hash = legacyListingHash(scope);
+      assert.equal((await verifyListing(f.listing))?.contentHash, hash);
+      assert.equal(storedListingHash(f.listing), hash);
+      const checked = await verify(f);
+      assert.equal(checked.result.ok, true, JSON.stringify(checked.result));
+      assert.equal(checked.strict, true, "both agreement signatures and every reference retain producer order");
+      f.agreement.signatures[0].value = Buffer.alloc(64).toString("base64url");
+      assert.equal((await verify(f)).strict, false);
+    }
   }
 });
 
