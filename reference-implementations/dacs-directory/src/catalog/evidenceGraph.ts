@@ -26,9 +26,12 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
-  /** `expiredAt` is the `validity.notAfter` of a Listing that has expired and is kept only as deal history. */
+  /**
+   * `expiredAt` is the `validity.notAfter` of a Listing that has expired and is kept only as deal history;
+   * `notBefore` is its signed `validity.notBefore`, if any.
+   */
   resolveListing: (ref: Record<string, unknown>) =>
-    Promise<{ locator: string; raw: Record<string, unknown>; expiredAt?: number } | null>;
+    Promise<{ locator: string; raw: Record<string, unknown>; expiredAt?: number; notBefore?: number } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
   /** Consensus (SR-2) anchor time in ms of an artifact's locator, or undefined while it is not known. */
   anchorTime?: (locator: string) => number | undefined;
@@ -436,13 +439,13 @@ async function verifyCurrentEvidenceGraph(
   const listingHash = normalizedHash(listingRef.contentHash);
   if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
       !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
-  // DACS-3 §8.5.2 check 6: the agreement must have been committed by the Listing's expiry, judged
+  // DACS-3 §8.5.2 check 6: the agreement must have been committed within the Listing's validity window, judged
   // by the commitment's anchor time. The producer-set `finalisedAt` is advisory and never decides it;
   // an unknown anchor time (no agreement, or not yet anchored) leaves the deal unverified.
   if (listed.expiredAt !== undefined) {
     const committedAt = agreement && isCurrentRef(raw.agreementRef) ? deps.anchorTime?.(raw.agreementRef.anchor.locator) : undefined;
-    if (committedAt === undefined || committedAt > listed.expiredAt) {
-      return { ...fail("listing expired before the agreement was committed"), signaturesVerified };
+    if (committedAt === undefined || committedAt > listed.expiredAt || committedAt < (listed.notBefore ?? -Infinity)) {
+      return { ...fail("agreement was not committed within the listing's validity"), signaturesVerified };
     }
   }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
