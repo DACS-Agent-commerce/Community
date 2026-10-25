@@ -116,6 +116,23 @@ test("setup accepts a packaged SDK build only with the pinned marker, Standard r
   }
 });
 
+test("the Railway upload carries every file a packaged SDK build needs to pass setup", () => {
+  const root = mkdtempSync(join(tmpdir(), "dacs-railway-ignore-"));
+  try {
+    copyFileSync(new URL("../.railwayignore", import.meta.url), join(root, ".gitignore"));
+    assert.equal(spawnSync("git", ["init", "-q"], { cwd: root }).status, 0);
+    const ignored = (path) => spawnSync("git", ["check-ignore", "--no-index", "-q", path], { cwd: root }).status === 0;
+    for (const path of ["vendor/dacs-sdk/package.json", "vendor/dacs-sdk/.dacs-sdk-revision", "vendor/dacs-sdk/dist/index.js"]) {
+      assert.equal(ignored(path), false, `${path} is uploaded`);
+    }
+    for (const path of ["vendor/dacs-sdk/node_modules/pkg/index.js", "vendor/dacs-sdk/src/index.ts"]) {
+      assert.equal(ignored(path), true, `${path} stays out of the upload`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged SDK setup enforces the app lockfile and propagates installation failure", () => {
   const installed = setup({ marker: sdkRev, appInstall: true });
   assert.equal(installed.status, 0, installed.stderr);
