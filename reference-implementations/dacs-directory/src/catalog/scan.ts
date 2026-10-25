@@ -582,9 +582,10 @@ export async function scanChain(
       agreement.data && storableContentHash(agreement.data) !== null &&
       await validAgreementForDiscovery(agreement.data, jobId, didOf(bundle.owner)) ? agreement.data : undefined;
     const agreementParties = Array.isArray(agreementData?.parties) ? agreementData.parties as Array<Record<string, unknown>> : [];
-    const sellerFromAgreement = agreementData?.agreementVersion !== undefined || agreementData?.payeeBoundAgreementVersion !== undefined
+    const sellerClaim = agreementData?.agreementVersion !== undefined || agreementData?.payeeBoundAgreementVersion !== undefined
       ? agreementParties.find((party) => party?.role === "seller" && typeof party.primaryClaim === "string")?.primaryClaim as string | undefined
       : typeof agreementData?.seller === "string" ? agreementData.seller : undefined;
+    const sellerFromAgreement = sellerClaim ? canonicalDemosAgentClaim(sellerClaim) ?? undefined : undefined;
     // A seller copy is attached only to a deal whose seller is attributed, and only when that seller owns it.
     const sellerCopy = sellerFromAgreement
       ? (sellerCopies.get(jobId) ?? []).find((copy) => didOf(copy.owner) === sellerFromAgreement)
