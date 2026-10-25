@@ -102,3 +102,23 @@ test("index-now requires the pinned chain and treats build drift as a warning", 
     assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
   }
 });
+
+test("index-now leaves a catalog recorded under another chain for the full reindex, but serves a legacy state", async () => {
+  const scan = store.loadScanState();
+  const before = store.loadCatalog();
+  try {
+    store.saveScanState({ ...scan, chainIdentity: "aa".repeat(32) });
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+    storageReads = 0;
+    const response = await indexNow();
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error?: string }).error), /built on another chain; run a full reindex first/);
+    assert.equal(storageReads, 0, "the registration was not indexed");
+    assert.deepEqual(store.loadCatalog(), before);
+
+    store.saveScanState({ ...scan, chainIdentity: undefined });
+    assert.equal((await indexNow()).status, 200, "a legacy state with no recorded chain is not a mismatch");
+  } finally {
+    store.saveScanState(scan);
+  }
+});
