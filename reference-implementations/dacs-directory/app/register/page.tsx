@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
-  clearPendingListingPublication, readPendingListingPublication,
+  discardPendingListingPublication, readPendingListingPublication,
   type PendingListingPublication,
 } from "../../src/components/listing-publication-recovery";
 import { describeSavedAnchorCheck, readSavedAnchorStatus, savedAnchorAllowsDiscard } from "../../src/components/saved-anchor-check";
@@ -20,6 +20,7 @@ export default function Register() {
     if (!pending) return;
     setChecking(true);
     setChecked(false);
+    setAcknowledged(false);
     const check = await readSavedAnchorStatus(pending.anchorAddress);
     setObservation(describeSavedAnchorCheck(check));
     setChecked(savedAnchorAllowsDiscard(check));
@@ -27,13 +28,20 @@ export default function Register() {
   }
 
   function discard() {
-    if (!checked || !acknowledged) return;
-    clearPendingListingPublication(localStorage);
-    if (readPendingListingPublication(localStorage)) {
+    if (!pending || !checked || !acknowledged) return;
+    const outcome = discardPendingListingPublication(localStorage, pending);
+    if (outcome === "discarded") {
+      setPending(null);
+      return;
+    }
+    if (outcome === "failed") {
       setObservation("The browser could not remove the recovery record. Try again.");
       return;
     }
-    setPending(null);
+    setPending(readPendingListingPublication(localStorage));
+    setChecked(false);
+    setAcknowledged(false);
+    setObservation("The saved record changed in another tab and was kept. Check it again before discarding.");
   }
 
   return <section className="section card">

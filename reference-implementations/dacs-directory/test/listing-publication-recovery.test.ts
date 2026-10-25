@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   LISTING_PUBLICATION_KEY,
   clearPendingListingPublication,
+  discardPendingListingPublication,
   parsePendingListingPublication,
   readPendingListingPublication,
   writePendingListingPublication,
@@ -66,4 +67,45 @@ test("storage failures refuse unsafe publication persistence", () => {
 test("a recovery record keeps only the members this version reads", () => {
   const withUnreadMembers = { ...pending, transactionRef: "9a".repeat(32), anchorReceipt: { blockNumber: 7 } };
   assert.deepEqual(parsePendingListingPublication(withUnreadMembers), pending);
+});
+
+function storageHolding(record: PendingListingPublication | null, options: { failRemove?: boolean } = {}) {
+  const values = new Map<string, string>();
+  if (record) values.set(LISTING_PUBLICATION_KEY, JSON.stringify(record));
+  return {
+    values,
+    getItem: (key: string) => values.get(key) ?? null,
+    removeItem: (key: string) => { if (options.failRemove) throw new Error("denied"); values.delete(key); },
+  };
+}
+
+test("discarding removes the saved record that was shown", () => {
+  const storage = storageHolding(pending);
+  assert.equal(discardPendingListingPublication(storage, pending), "discarded");
+  assert.equal(storage.values.has(LISTING_PUBLICATION_KEY), false);
+});
+
+test("discarding keeps a record another tab saved after the shown one", () => {
+  const replacement = { ...pending, listingId: "other-listing", anchorAddress: `stor-${"78".repeat(20)}`,
+    registration: { ...pending.registration, listingAnchors: [`stor-${"78".repeat(20)}`] } };
+  const storage = storageHolding(replacement);
+  assert.equal(discardPendingListingPublication(storage, pending), "changed");
+  assert.deepEqual(readPendingListingPublication(storage), replacement);
+});
+
+test("discarding keeps a record another tab moved to a later stage", () => {
+  const advanced = { ...pending, stage: "confirming" as const };
+  const storage = storageHolding(advanced);
+  assert.equal(discardPendingListingPublication(storage, pending), "changed");
+  assert.deepEqual(readPendingListingPublication(storage), advanced);
+});
+
+test("discarding reports a record that is already gone as changed", () => {
+  assert.equal(discardPendingListingPublication(storageHolding(null), pending), "changed");
+});
+
+test("discarding reports a record the browser would not remove", () => {
+  const storage = storageHolding(pending, { failRemove: true });
+  assert.equal(discardPendingListingPublication(storage, pending), "failed");
+  assert.deepEqual(readPendingListingPublication(storage), pending);
 });

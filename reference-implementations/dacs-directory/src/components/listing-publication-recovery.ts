@@ -81,3 +81,21 @@ export function writePendingListingPublication(
 export function clearPendingListingPublication(storage: Pick<Storage, "removeItem">): void {
   try { storage.removeItem(LISTING_PUBLICATION_KEY); } catch { /* best effort */ }
 }
+
+/** `discarded`: the record is gone. `changed`: the stored record is not the shown one (or none is stored) and was left alone. `failed`: the browser kept the record. */
+export type DiscardOutcome = "discarded" | "changed" | "failed";
+
+/**
+ * Removes the saved record only while it still equals `shown`, the record the user checked and
+ * acknowledged. A record that another tab replaced or advanced since is left in place. The comparison
+ * and the removal run in one synchronous step; localStorage offers nothing stronger across tabs.
+ */
+export function discardPendingListingPublication(
+  storage: Pick<Storage, "getItem" | "removeItem">,
+  shown: PendingListingPublication,
+): DiscardOutcome {
+  const stored = readPendingListingPublication(storage);
+  if (!stored || JSON.stringify(stored) !== JSON.stringify(shown)) return "changed";
+  clearPendingListingPublication(storage);
+  return readPendingListingPublication(storage) ? "failed" : "discarded";
+}

@@ -54,3 +54,19 @@ test("an unavailable anchor check retains recovery data", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Discard local recovery data" })).toHaveCount(0);
   expect(await page.evaluate(key => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).not.toBeNull();
 });
+
+test("discarding keeps a record another tab saved after the check", async ({ page }) => {
+  const otherAnchor = `stor-${"78".repeat(20)}`;
+  const replacement = { ...pending, listingId: "other-service", anchorAddress: otherAnchor, registration: { primaryClaim: claim, listingAnchors: [otherAnchor] } };
+  await page.addInitScript(({ key, pending }) => { localStorage.setItem(key, JSON.stringify(pending)); }, { key: LISTING_PUBLICATION_KEY, pending });
+  await page.route("**/api/dacs/artifact?*", route => route.fulfill({ json: { status: "absent", value: null } }));
+  await page.goto("/register");
+  await page.getByRole("button", { name: "Check saved anchor" }).click();
+  await page.getByRole("checkbox").check();
+  await page.evaluate(({ key, replacement }) => { localStorage.setItem(key, JSON.stringify(replacement)); }, { key: LISTING_PUBLICATION_KEY, replacement });
+  await page.getByRole("button", { name: "Discard local recovery data" }).click();
+  await expect(page.getByRole("status")).toContainText("changed in another tab");
+  await expect(page.getByText("Listing other-service")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Discard local recovery data" })).toHaveCount(0);
+  expect(await page.evaluate(key => localStorage.getItem(key), LISTING_PUBLICATION_KEY)).toBe(JSON.stringify(replacement));
+});
