@@ -32,6 +32,7 @@ import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
+  revocationSellerClaim,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
   verifyStoredListingResult,
@@ -289,7 +290,7 @@ export async function indexRegistration(
       if (marker) retainListingRevocation(found, marker);
     }
     const retained = retainedListingRevocation(verified.contentHash);
-    const boundRetained = retained?.sellerPrimaryClaim === verified.sellerClaim && retained.listingId === listingId &&
+    const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
     const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;

@@ -14,6 +14,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
 import { sha256Hex } from "./canonical.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
@@ -82,7 +83,9 @@ export function bindsListingTuple(
 /** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
   const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
-  return bindsListingTuple(entry.revocation, seller, tuple) ? entry.revocation : null;
+  const binding = entry.revocation;
+  if (typeof binding?.sellerPrimaryClaim !== "string" || canonicalDemosAgentClaim(binding.sellerPrimaryClaim) !== seller) return null;
+  return bindsListingTuple(binding, binding.sellerPrimaryClaim, tuple) ? binding : null;
 }
 
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
