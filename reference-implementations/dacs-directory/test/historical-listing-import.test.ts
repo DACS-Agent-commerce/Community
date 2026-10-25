@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "../src/catalog/canonical.js";
-import { verifyListing, verifyStoredListing } from "../src/catalog/listingVerification.js";
+import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
+import { storedListingHash, verifyListing, verifyStoredListing } from "../src/catalog/listingVerification.js";
 import { verifyReferencedArtifactSignature } from "../src/catalog/bundlePolicy.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-nested-phase-metadata.json", import.meta.url), "utf8"));
@@ -12,6 +15,44 @@ const raw = { ...fixture.listing, signature: { ...fixture.listing.signature,
 const pin = { encoding: "lowercase-hex", sellerPrimaryClaim: raw.signature.signer,
   listingId: raw.listingId, listingVersion: raw.listingVersion, contentHash: fixture.contentHash };
 const offline = async () => null;
+
+test("exact historical imports retain the original Listing and presentation hash profiles", async () => {
+  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  const seed = createHash("sha256").update("DACS Directory nested phase metadata public test fixture").digest();
+  const sign = (prefix: string, hash: string) =>
+    Buffer.from(ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seed))).toString("hex");
+  try {
+    for (const extension of [{ ascii: "extension" }, { "e\u0301": "extension" },
+      { nested: [{ "é": "first", "e\u0301": "second" }] }]) {
+      const { presentation: _presentation, ...identityScope } = fixture.listing.seller.identity;
+      const identity = { ...identityScope, ...extension };
+      const { signature: _signature, ...originalScope } = fixture.listing;
+      const scope = { ...originalScope, ...extension, seller: { ...originalScope.seller, identity: {
+        ...identity, presentation: { kind: "per-claim", signatures: [{ ref: raw.signature.signer,
+          signature: sign("dacs-bundle-presentation:v1:", legacyListingHash(identity)) }] },
+      } } };
+      const hash = legacyListingHash(scope);
+      const listing = { ...scope, signature: { ...raw.signature, value: sign("dacs-listing:v1:", hash) } };
+      const original = JSON.stringify(listing);
+      process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [at]: { ...pin, contentHash: hash } });
+      assert.equal((await verifyStoredListing(listing, at))?.contentHash, hash);
+      assert.equal(storedListingHash(listing), hash);
+      assert.equal(await verifyReferencedArtifactSignature({ kind: "dacs-1-listing", raw: listing, locator: at }), true);
+      assert.equal(await verifyStoredListing(listing, `stor-${"7".repeat(40)}`), null);
+      assert.equal(await verifyStoredListing(listing, at, offline), null);
+      assert.equal(await verifyListing(listing), null, "strict admission never selects an import");
+      const tampered = { ...listing, offering: { ...listing.offering, title: "changed" } };
+      process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [at]: {
+        ...pin, contentHash: legacyListingHash({ ...scope, offering: tampered.offering }),
+      } });
+      assert.equal(await verifyStoredListing(tampered, at), null, "a repinned hash cannot replace either signature");
+      assert.equal(JSON.stringify(listing), original);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
+});
 
 test("historical import is explicit, exact and re-verifies the original signed scope", async () => {
   const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
