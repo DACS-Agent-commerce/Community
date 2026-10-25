@@ -25,12 +25,12 @@ test("this release exposes discovery submission, with no wallet publication flow
   expect(writes).toEqual([]);
 });
 
-for (const value of [null, { listingId: "saved-service" }]) test(`saved publication can be checked (${value ? "visible" : "unreadable"})`, async ({ page }) => {
+for (const [status, value] of [["absent", null], ["present", { listingId: "saved-service" }]] as const) test(`saved publication can be checked (${status})`, async ({ page }) => {
   await page.addInitScript(({ key, pending }) => { localStorage.setItem(key, JSON.stringify(pending)); }, { key: LISTING_PUBLICATION_KEY, pending });
   const requests: string[] = [];
   await page.route("**/api/dacs/**", async route => {
     requests.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
-    await route.fulfill({ json: { value } });
+    await route.fulfill({ json: { status, value } });
   });
   await page.goto("/register");
   await expect(page.getByRole("heading", { name: "Saved publication recovery" })).toBeVisible();
@@ -42,7 +42,7 @@ for (const value of [null, { listingId: "saved-service" }]) test(`saved publicat
 
 test("an unavailable anchor check retains recovery data", async ({ page }) => {
   await page.addInitScript(({ key, pending }) => { localStorage.setItem(key, JSON.stringify(pending)); }, { key: LISTING_PUBLICATION_KEY, pending });
-  await page.route("**/api/dacs/artifact?*", route => route.fulfill({ status: 503, json: {} }));
+  await page.route("**/api/dacs/artifact?*", route => route.fulfill({ status: 503, json: { status: "unavailable", value: null } }));
   await page.goto("/register");
   await page.getByRole("button", { name: "Check saved anchor" }).click();
   await expect(page.getByRole("status")).toContainText("could not be checked");
