@@ -26,7 +26,9 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
-  resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
+  /** `expiredAt` is the `validity.notAfter` of a Listing that has expired and is kept only as deal history. */
+  resolveListing: (ref: Record<string, unknown>) =>
+    Promise<{ locator: string; raw: Record<string, unknown>; expiredAt?: number } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
@@ -432,6 +434,12 @@ async function verifyCurrentEvidenceGraph(
   const listingHash = normalizedHash(listingRef.contentHash);
   if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
       !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+  // DACS-3 §8.5.2 check 6: the agreement must have been committed by the Listing's expiry. No
+  // commitment time is read here, but both parties sign `finalisedAt` and finalising follows
+  // committing, so finalising inside the window proves it. A later finalisation is withheld.
+  if (listed.expiredAt !== undefined && !(typeof raw.finalisedAt === "number" && raw.finalisedAt <= listed.expiredAt)) {
+    return { ...fail("listing expired before the bundle was finalised"), signaturesVerified };
+  }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "./fixtures/isolated-data-dir.js";
-import { admitRevocationCandidates, boundWellKnownRevocations, isOwnerRevocationCandidate,
+import { admitRevocationCandidates, boundWellKnownRevocations, hasPendingOwnerRevocationCandidate,
   recordWellKnownWithdrawalCheck } from "../src/catalog/store.js";
 import type { RevocationBinding } from "../src/catalog/types.js";
 
@@ -30,9 +30,9 @@ test("a populated candidate cannot establish authority when the Listing owner is
   const locator = `stor-${"2".repeat(40)}`;
   const owner = `0x${"a".repeat(64)}`;
   admitRevocationCandidates(hash, [{ locator, owner }]);
-  assert.equal(isOwnerRevocationCandidate(hash, locator, owner), true);
+  assert.equal(hasPendingOwnerRevocationCandidate(hash, owner), true);
   for (const listingOwner of [null, "", `0x${"b".repeat(64)}`]) {
-    assert.equal(isOwnerRevocationCandidate(hash, locator, listingOwner), false);
+    assert.equal(hasPendingOwnerRevocationCandidate(hash, listingOwner), false);
   }
 });
 
