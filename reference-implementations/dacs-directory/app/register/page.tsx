@@ -6,6 +6,7 @@ import {
   clearPendingListingPublication, readPendingListingPublication,
   type PendingListingPublication,
 } from "../../src/components/listing-publication-recovery";
+import { describeSavedAnchorCheck, readSavedAnchorStatus, savedAnchorAllowsDiscard } from "../../src/components/saved-anchor-check";
 
 export default function Register() {
   const [pending, setPending] = useState<PendingListingPublication | null>(null);
@@ -19,17 +20,10 @@ export default function Register() {
     if (!pending) return;
     setChecking(true);
     setChecked(false);
-    try {
-      const response = await fetch(`/api/dacs/artifact?ref=${encodeURIComponent(pending.anchorAddress)}`, { cache: "no-store" });
-      if (!response.ok) throw new Error("The saved anchor could not be checked. Try again before discarding recovery data.");
-      const body = await response.json() as { value?: unknown };
-      setObservation(body.value
-        ? "The node reports data at the saved anchor. This read does not verify its signatures or finality. Discarding this local record will not withdraw it."
-        : "The node reports no readable data at the saved anchor. The earlier send may still have succeeded or may become visible later.");
-      setChecked(true);
-    } catch (error) {
-      setObservation(error instanceof Error ? error.message : "The saved anchor could not be checked.");
-    } finally { setChecking(false); }
+    const check = await readSavedAnchorStatus(pending.anchorAddress);
+    setObservation(describeSavedAnchorCheck(check));
+    setChecked(savedAnchorAllowsDiscard(check));
+    setChecking(false);
   }
 
   function discard() {
