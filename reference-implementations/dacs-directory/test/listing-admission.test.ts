@@ -381,7 +381,7 @@ test("diagnostic pruning keeps current sellers case-insensitively and removes de
 });
 
 test("missing candidate owners and restored withdrawal sources without bindings are empty", async () => {
-  assert.equal(store.isOwnerRevocationCandidate("a".repeat(64), `stor-${"f".repeat(40)}`, `0x${keyHex}`), false);
+  assert.equal(store.hasPendingOwnerRevocationCandidate("a".repeat(64), `0x${keyHex}`), false);
   const { default: Database } = await import("better-sqlite3");
   const db = new Database(join(dataDirectory, "directory.sqlite"));
   const previous = db.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string } | undefined;
