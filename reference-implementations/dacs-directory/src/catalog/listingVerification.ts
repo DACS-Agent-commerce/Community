@@ -5,7 +5,6 @@ import {
   isListing,
   isVerificationMethod,
   readListingArtifact,
-  isLegacyMvpListing,
   verifyComponentSignature,
   type IdentityBundle,
   type LegacyMvpListing,
@@ -17,6 +16,7 @@ import {
 // leaf module. test/client-bundle-imports.test.ts pins this for every client
 // entry.
 import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
+import { isHistoricalListing } from "./legacyListingShape.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -37,6 +37,16 @@ import {
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
+
+/**
+ * Content hash of a stored Listing under its own profile: a Listing that
+ * declares `dacsVersion` uses the current hash, any other the frozen one, as
+ * `verifyListing` selects them. Throws like the hash it selects.
+ */
+export function storedListingHash(raw: Record<string, unknown>): string {
+  const scope = stripSignature(raw);
+  return "dacsVersion" in raw ? contentHash(scope) : legacyListingHash(scope);
+}
 
 interface VerifiedListingBase {
   scope: Record<string, unknown>;
@@ -269,14 +279,15 @@ async function verifyListingArtifact(
 
   // The historical Directory also wrote a structured envelope. Validate its
   // exact unsigned legacy body before authenticating the original envelope.
-  const legacyScope = stripSignature(raw);
-  const readable = typeof raw.signature === "object" && isLegacyMvpListing(legacyScope)
-    ? { compatibility: "legacy-mvp" as const, listing: legacyScope }
+  // The SDK refuses to canonicalize some stored programs, which is a refusal here, not a throw.
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return invalid("LEGACY_LISTING_INVALID"); }
+  const readable = (typeof raw.signature === "object" || typeof raw.signature === "string") && isHistoricalListing(scope)
+    ? { compatibility: "legacy-mvp" as const, listing: scope }
     : readListingArtifact(raw);
   if (!readable || readable.compatibility !== "legacy-mvp") {
     return invalid("LEGACY_LISTING_INVALID");
   }
-  const scope = stripSignature(raw);
   const listing = readable.listing;
   const signature = raw.signature;
   // Early SDK listings stored only the Ed25519 value. Their signer is still
