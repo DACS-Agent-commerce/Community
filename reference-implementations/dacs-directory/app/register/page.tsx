@@ -6,30 +6,31 @@ import {
   discardPendingListingPublication, readSavedListingPublication,
   type SavedListingPublication,
 } from "../../src/components/listing-publication-recovery";
-import { describeSavedAnchorCheck, readSavedAnchorStatus, savedAnchorAllowsDiscard } from "../../src/components/saved-anchor-check";
+import { describeSavedAnchorCheck, readSavedAnchorStatus, savedAnchorAllowsDiscard, type SavedAnchorCheck } from "../../src/components/saved-anchor-check";
 
 export default function Register() {
   const [saved, setSaved] = useState<SavedListingPublication | null>(null);
   const [observation, setObservation] = useState<string | null>(null);
-  const [checked, setChecked] = useState(false);
+  const [checked, setChecked] = useState<{ check: SavedAnchorCheck; raw: string } | null>(null);
   const [checking, setChecking] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const pending = saved?.pending ?? null;
+  const discardable = Boolean(saved && checked && savedAnchorAllowsDiscard(checked.check, checked.raw, saved.raw));
   useEffect(() => { setSaved(readSavedListingPublication(localStorage)); }, []);
 
   async function checkSavedAnchor() {
-    if (!pending) return;
+    if (!saved) return;
     setChecking(true);
-    setChecked(false);
+    setChecked(null);
     setAcknowledged(false);
-    const check = await readSavedAnchorStatus(pending.anchorAddress);
+    const check = await readSavedAnchorStatus(saved.pending.anchorAddress);
     setObservation(describeSavedAnchorCheck(check));
-    setChecked(savedAnchorAllowsDiscard(check));
+    setChecked({ check, raw: saved.raw });
     setChecking(false);
   }
 
   async function discard() {
-    if (!saved || !checked || !acknowledged) return;
+    if (!saved || !discardable || !acknowledged) return;
     const outcome = await discardPendingListingPublication(localStorage, saved, "locks" in navigator ? navigator.locks : undefined);
     if (outcome === "discarded") {
       setSaved(null);
@@ -40,7 +41,7 @@ export default function Register() {
       return;
     }
     setSaved(readSavedListingPublication(localStorage));
-    setChecked(false);
+    setChecked(null);
     setAcknowledged(false);
     setObservation("The saved record changed in another tab and was kept. Check it again before discarding.");
   }
@@ -74,7 +75,7 @@ export default function Register() {
       <p>This page can check the saved anchor and discard local recovery data. It never signs or sends a transaction.</p>
       <button type="button" className="btn secondary" disabled={checking} onClick={checkSavedAnchor}>Check saved anchor</button>
       {observation && <p role="status">{observation}</p>}
-      {checked && <>
+      {discardable && <>
         <label><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> I understand that discarding recovery data does not cancel a transaction or withdraw a listing.</label>
         <button type="button" className="btn secondary" disabled={!acknowledged} onClick={discard}>Discard local recovery data</button>
       </>}
