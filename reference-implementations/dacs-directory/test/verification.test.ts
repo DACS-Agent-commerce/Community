@@ -662,8 +662,8 @@ test("RB-1/RB-4: only the listing signer's marker over the exact listing tuple r
   }
 });
 
-test("standalone revocation verifier rejects a signed revokedAt that is not a non-negative safe integer", async () => {
-  const markerSeed = Uint8Array.from(randomBytes(32));
+test("standalone revocation verifier accepts signed revokedAt numbers within the Standard magnitude bound", async () => {
+  const markerSeed = new Uint8Array(32).fill(42);
   const markerDid = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(markerSeed))).toString("hex")}`;
   const markerListing = { ...listing, agentId: markerDid };
   const listingMessage = Buffer.from(`dacs-listing:v1:${contentHash(markerListing)}`, "utf8");
@@ -707,15 +707,15 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     return { candidate: isListingRevocationCandidate(marker), verified: verdict };
   };
 
-  assert.deepEqual(await outcome(Date.now()), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(1784073600000), { candidate: true, verified: true });
   assert.deepEqual(await outcome(0), { candidate: true, verified: true });
-  // Discovery admits any safe-magnitude number; the SDK's RB-1 isRevocationMarker
-  // verifies only a non-negative safe integer.
-  assert.deepEqual(await outcome(-1), { candidate: true, verified: false });
-  assert.deepEqual(await outcome(-Number.MAX_SAFE_INTEGER), { candidate: true, verified: false });
+  // DACS-1 types revokedAt as a number; CORE §B.2 bounds its magnitude only.
+  assert.deepEqual(await outcome(-1), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(-1.5), { candidate: true, verified: true });
+  assert.deepEqual(await outcome(-Number.MAX_SAFE_INTEGER), { candidate: true, verified: true });
   const rejected = { candidate: false, verified: false };
   assert.deepEqual({
-    // A valid marker, but the pinned SDK canonicalizer has no form for a fraction (SIG-3).
+    // The pinned SDK canonicalizer preserves this valid fractional timestamp.
     fraction: await outcome(1791480684902.5),
     nan: await outcome(Number.NaN),
     infinity: await outcome(Number.POSITIVE_INFINITY),
@@ -724,7 +724,7 @@ test("standalone revocation verifier rejects a signed revokedAt that is not a no
     // Canonicalizable, so only the type check rejects it.
     numericString: await outcome("1791480684902"),
   }, {
-    fraction: { candidate: true, verified: false },
+    fraction: { candidate: true, verified: true },
     nan: rejected,
     infinity: rejected,
     aboveMaxSafeInteger: rejected,
