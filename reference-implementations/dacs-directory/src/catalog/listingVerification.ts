@@ -38,11 +38,7 @@ import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
 
-/**
- * Content hash of a stored Listing under its own profile: a Listing that
- * declares `dacsVersion` uses the current hash, except historical hex imports;
- * other Listings use the frozen hash. This does not authenticate an import.
- */
+/** Return the Listing's current or frozen historical hash; this does not authenticate an import. */
 export function storedListingHash(raw: Record<string, unknown>): string {
   const scope = stripSignature(raw);
   const value = record(raw.signature)?.value;
