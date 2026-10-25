@@ -1078,6 +1078,31 @@ test("completed deals remain verifiable after their Listing expires out of disco
   }
 });
 
+test("an expired Listing cannot authenticate a deal finalised after its validity ended", async (t) => {
+  const fixture = await vector("listing-late-job", 2140);
+  const notAfter = 100;
+  t.mock.method(Date, "now", () => notAfter + 50);
+  const listingScope = signedScope(fixture.listing, "listing");
+  listingScope.validity = { notBefore: 1, notAfter };
+  fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  const deal = registeredDeal("listing-late-job", fixture.locators.buyer, fixture.locators.seller);
+  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+    await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+    await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+  ] });
+  assert.deepEqual(record.listings, []);
+  assert.equal(record.deals[0].finalisedAt, undefined, "the late bundle is not accepted as evidence");
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+});
+
 test("not-yet-effective Listings cannot authenticate completed deal history", async (t) => {
   const fixture = await vector("future-listing-job", 2120);
   t.mock.method(Date, "now", () => 1000);
@@ -1121,6 +1146,25 @@ test("a readable invalid owner marker differs from an unavailable owner marker",
   const record = await indexFixture(fixture);
   assert.equal(record.listings.length, 1, "a readable rejected candidate does not withhold an active listing");
   assert.equal(record.listings[0].status, "active");
+});
+
+test("an unreadable owner marker keeps holding the Listing on a pass inside its retry backoff", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const fixture = await vector("marker-backoff", 630);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = "owner-marker-backoff";
+  fixture.listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, fixture.listing);
+  const markerAt = locator(640);
+  admitRevocationCandidates(artifactHash(fixture.listing, "listing"), [{ locator: markerAt,
+    owner: `0x${dids[1].slice(-64)}`, contentHash: "c".repeat(64) }]);
+  assert.equal((await indexFixture(fixture)).listings.length, 0, "the first pass cannot read the marker");
+  now += 500;
+  assert.equal((await indexFixture(fixture)).listings.length, 0, "the marker is skipped inside its backoff but still holds");
+  now += 61_000;
+  maps.set(markerAt, { revocationVersion: "1", signature: "invalid" });
+  assert.equal((await indexFixture(fixture)).listings.length, 1, "a settled read releases the hold");
 });
 
 test("seller format probes route both signed current discriminators without retrying legacy", async () => {

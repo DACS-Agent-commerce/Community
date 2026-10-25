@@ -523,12 +523,15 @@ export function retainedListingRevocation(hash: string): RevocationBinding | nul
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
   setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
 }
-const candidateOwner = db.prepare("SELECT owner FROM revocation_candidates WHERE listing_hash = ? AND locator = ?");
-/** Whether the listing's own owner anchored this revocation candidate; anyone else may anchor one too. */
-export function isOwnerRevocationCandidate(listingHash: string, locator: string, listingOwner: string | null): boolean {
+const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
+/**
+ * Whether the listing's own owner anchored a marker that no read has settled yet, whether it is
+ * unreadable, backing off or still queued. Anyone else may anchor candidates too, so only the owner's count.
+ */
+export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null): boolean {
   if (!listingOwner) return false;
-  const row = candidateOwner.get(listingHash, locator) as { owner: string | null } | undefined;
-  return Boolean(row?.owner) && row?.owner === canonicalProgramOwner(listingOwner);
+  return ownerPendingCandidate.get(listingHash, canonicalProgramOwner(listingOwner)) !== undefined;
 }
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?

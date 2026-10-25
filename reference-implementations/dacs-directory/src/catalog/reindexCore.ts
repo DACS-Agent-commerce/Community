@@ -113,7 +113,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
   }
-  const prior = loadCatalog();
+  let prior = loadCatalog();
 
   // Nothing from a node outside the pinned chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.
@@ -148,6 +148,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const identityChanged = state.chainIdentity !== servedChain;
   if (identityChanged || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
+    if (state.chainIdentity !== undefined && identityChanged) {
+      // A catalog built on another chain is neither served nor carried into the rebuild (a legacy
+      // cache with no recorded chain is only replayed). The catalog is emptied first, so a crash
+      // leaves the reset still due on the next pass.
+      prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
+      saveCatalog(prior);
+    }
     clearChainDerivedArtifacts();
     state = normalizeScanState({
       // An interrupted genesis replay must not be marked migrated.
