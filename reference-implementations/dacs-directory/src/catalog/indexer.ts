@@ -38,6 +38,7 @@ import {
   verifyStoredListingResult,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
+import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import { listingDiagnosticCoordinates } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim, canonicalDemosAgentReference } from "./claimRef.js";
@@ -310,6 +311,12 @@ export async function indexRegistration(
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
+    const summaryClaim = verified.profile === "dacs-v0.1"
+      ? verified.listing.seller.identity.presentedBy
+      : reg.primaryClaim;
+    // Discovery cannot address a seller by a reference above the query bound, and a summary
+    // carries it verbatim; the signed Listing stays above as evidence only.
+    if (Buffer.byteLength(summaryClaim, "utf8") > MAX_CLAIM_QUERY_BYTES) continue;
     listings.push({
       listingId,
       version,
@@ -318,9 +325,7 @@ export async function indexRegistration(
       // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
       // match the revocation binding against, the exact `presentedBy` bytes.
       seller: {
-        primaryClaim: verified.profile === "dacs-v0.1"
-          ? verified.listing.seller.identity.presentedBy
-          : reg.primaryClaim,
+        primaryClaim: summaryClaim,
         displayName: reg.displayName,
       },
       artifactProfile: verified.profile,
