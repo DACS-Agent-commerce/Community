@@ -599,11 +599,12 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
+// The one-time migration above promoted every legacy `revocationBinding` that
+// names its Listing. One seen later is never revocation evidence: it is
+// dropped, and a revoked row without `revocation` stays out of discovery.
 const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
-    const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
-    if (listing.status === "revoked" && !listing.revocation && legacy.revocationBinding) listing.revocation = legacy.revocationBinding;
-    delete legacy.revocationBinding;
+    Reflect.deleteProperty(listing, "revocationBinding");
   }
   return catalog;
 };

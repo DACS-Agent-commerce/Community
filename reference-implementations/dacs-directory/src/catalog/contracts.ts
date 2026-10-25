@@ -371,7 +371,10 @@ export const openApiDocument = (origin: string) => ({
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
           { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+        responses: {
+          "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" },
+          "502": { description: "Anchor verification failed" }, "503": { description: "The Demos node could not be read; no cached copy is served" },
+        },
       },
     },
     "/api/dacs/bundles/{jobId}": {
