@@ -327,14 +327,15 @@ if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction((
 
 // Cached admission decisions predate the current Listing reader (including
 // DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.
-// Withhold active summaries, and the deal verdicts that relied on them, until
-// a successful reindex authenticates them with this reader. Keep
+// Withhold active summaries, and every cached deal verdict, until a successful
+// reindex authenticates them with this reader. Keep
 // registration/scan pointers and authenticated tombstones so outages cannot
 // restore stale offers or erase withdrawal history. Fixture
-// listings are not chain admission decisions and stay. The highest withheld
-// version of each Listing is kept privately so the publisher still numbers a
-// new version after it. Bump this version whenever a reader change invalidates
-// earlier admission decisions.
+// listings are not chain admission decisions and stay. The highest version of
+// each chain Listing, tombstones included, is kept privately so the publisher
+// still numbers a new version after it even when a later reindex drops the
+// row. Bump this version whenever a reader change invalidates earlier
+// admission decisions.
 const LISTING_VERSION_FLOORS_KEY = "listing-version-floors";
 const listingVersionFloorKey = (seller: string, listingId: string): string => `${seller}\n${listingId}`;
 db.transaction(() => {
@@ -345,24 +346,20 @@ db.transaction(() => {
   // withheld like any other unauthenticated one, never a reason to stop startup.
   const retained = (listing: ListingSummary): boolean =>
     listing.status === "revoked" || listing.anchor?.kind === "fixture";
-  for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => !retained(entry))) {
+  for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => entry.anchor?.kind !== "fixture")) {
     if (typeof listing.listingId !== "string" || !Number.isSafeInteger(listing.version) || listing.version < 1) continue;
     const key = listingVersionFloorKey(seller.primaryClaim, listing.listingId);
     floors[key] = Math.max(floors[key] ?? 0, listing.version);
   }
   setJson(LISTING_VERSION_FLOORS_KEY, floors);
   // A deal's verdict was reached with a Listing reader that no longer applies,
-  // and a deal does not record which Listing it was checked against. When any
-  // active summary is withheld, every cached verdict is withheld too and the
-  // reputation counted from them is recomputed.
-  const withheld = catalog.sellers.some((seller) => seller.listings.some((listing) => !retained(listing)));
+  // and a deal does not record which Listing it was checked against (it may be
+  // a revoked one, or one with no summary). Every cached verdict is withheld
+  // and the reputation counted from them is recomputed.
   const windowEnd = catalog.generatedAt || Date.now();
   setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
-    const deals = withheld
-      ? (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }))
-      : seller.deals;
-    return { ...seller, deals, listings: seller.listings.filter(retained),
-      reputation: withheld ? deriveSellerReputation(deals, 0, windowEnd) : seller.reputation };
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }));
+    return { ...seller, deals, listings: seller.listings.filter(retained), reputation: deriveSellerReputation(deals, 0, windowEnd) };
   }) });
   setJson("listing-admission-schema-version", 1);
 }).immediate();
