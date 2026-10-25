@@ -54,6 +54,8 @@ export interface ScannedArtifacts {
   highestTxId: number;
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
+  /** Transaction id to pass as `startBefore` to continue a walk that stopped at `maxTxs`; absent when complete or failed. */
+  resumeBefore?: number;
   chainTip: number;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
@@ -421,6 +423,9 @@ export async function scanChain(
   opts: {
     maxTxs?: number;
     sinceTxId?: number;
+    /** Continue a walk that stopped at `maxTxs`: start at this id instead of the tip, with the tip that walk saw. */
+    startBefore?: number;
+    chainTip?: number;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
   } = {},
@@ -435,11 +440,11 @@ export async function scanChain(
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
-  let chainTip = since;
+  let chainTip = opts.chainTip ?? since;
   let scanError: string | undefined;
   const finalityDepth = nonNegativeInt(process.env.DACS_SCAN_FINALITY_DEPTH, 2);
 
-  let cursor: number | "latest" = "latest";
+  let cursor: number | "latest" = opts.startBefore ?? "latest";
   const PAGE = 100;
   while (scanned < maxTxs) {
     let page: Array<{ id?: number }> = [];
@@ -615,5 +620,6 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError,
+    ...(!complete && scanError === undefined && typeof cursor === "number" ? { resumeBefore: cursor } : {}) };
 }
