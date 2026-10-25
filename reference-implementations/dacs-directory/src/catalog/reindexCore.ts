@@ -181,8 +181,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   // It retains earlier storage classification, binding and consensus-time replays.
   // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
   const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
+  // A replay longer than one pass's DACS_SCAN_MAX_TXS budget walks down from where the last pass stopped.
+  const resumeFrom = needsHistoryReplay && state.replay && Number.isSafeInteger(state.replay.before) &&
+    Number.isSafeInteger(state.replay.chainTip) ? state.replay : undefined;
   // Overflow is recomputed per signer from the replayed bindings.
-  if (needsHistoryReplay) state.bundleBindingOverflow = [];
+  if (needsHistoryReplay && !resumeFrom) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -220,8 +223,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
-      knownPrograms: new Map(Object.entries(state.programs)) });
-    if (!scan.complete) {
+      knownPrograms: new Map(Object.entries(state.programs)),
+      ...(resumeFrom ? { startBefore: resumeFrom.before, chainTip: resumeFrom.chainTip } : {}) });
+    const replayContinues = needsHistoryReplay && scan.resumeBefore !== undefined && scan.txsScanned >= maxTxs;
+    if (!scan.complete && !replayContinues) {
       throw new Error(
         scan.scanError ? `chain scan failed before reaching its cursor: ${scan.scanError}` :
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
@@ -229,7 +234,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
     // entries are kept and the replay adds or refreshes each owner's entry.
-    if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
+    if (needsHistoryReplay && !resumeFrom && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
     for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
     for (const [key, deal] of scan.deals) {
       // Seller copies are matched within one scan window; keep the stored one when this window has none.
@@ -285,6 +290,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // One bounded age-prune batch per pass keeps failure telemetry from growing
     // without limit (issue #51) while never becoming a blocking maintenance job.
     pruneFailureHistory();
+
+    if (replayContinues && scan.resumeBefore !== undefined) {
+      // The catalog is neither rebuilt nor written from a partial history: a replaced chain's stays
+      // empty and an upgraded cache keeps serving until the replay reaches genesis.
+      state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
+      state.lastChainTip = scan.chainTip;
+      state.replay = { before: scan.resumeBefore, chainTip: scan.chainTip };
+      saveScanState(state);
+      finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
+        artifacts: scan.observations.length, rejected: scan.failures.length });
+      log(`chain replay: ${scan.txsScanned} txs this pass; resumes below tx ${scan.resumeBefore + 1}, catalog not rebuilt until it completes`);
+      return { sellers: prior.sellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
+    }
+    delete state.replay;
 
     // SR-2: bounded historical walk over only unresolved bundle content. The
     // target fingerprint prevents permanently-unresolvable rows from causing a

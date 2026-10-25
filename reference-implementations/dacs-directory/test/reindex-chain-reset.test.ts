@@ -171,3 +171,59 @@ test("successful refreshes log a deployment build warning", async () => {
   assert.equal(result.cursor, 3);
   assert.ok(logs.some(line => line.includes(warning)));
 });
+
+/** Serve twelve transactions, at most three per call, so a scan budget of four spans several pages and passes. */
+function serveTwelveTransactions(starts: Array<number | string>): void {
+  globalThis.fetch = async (_input, init) => {
+    const { start, limit } = JSON.parse(String(init?.body)).params[0].data;
+    starts.push(start);
+    const first = start === "latest" ? 12 : start;
+    const ids = Array.from({ length: Math.min(limit, 3, first) }, (_, i) => first - i);
+    return Response.json({ result: 200, response: ids.map((id) => ({ id })) });
+  };
+}
+
+test("a legacy cache replay longer than the scan budget keeps serving its catalog until it completes", async () => {
+  const chainIdentity = "f".repeat(64);
+  const deployment = async () => ({ ok: true as const, chainIdentity });
+  serveTwelveTransactions([]);
+  process.env.DACS_SCAN_MAX_TXS = "4";
+  try {
+    store.saveScanState({ schemaVersion: 10, lastSeenTxId: 8, listings: {}, deals: {} });
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+
+    await reindexAll({ log: () => {}, nodeDeployment: deployment });
+    assert.equal(store.loadScanState().chainIdentity, chainIdentity);
+    assert.equal(store.loadScanState().replay?.before, 6);
+    assert.equal(store.loadCatalog().sellers.length, 1);
+  } finally {
+    delete process.env.DACS_SCAN_MAX_TXS;
+  }
+});
+
+test("a re-pin replay longer than the scan budget resumes across passes and withholds the catalog until genesis", async () => {
+  const chainIdentity = "e".repeat(64);
+  const deployment = async () => ({ ok: true as const, chainIdentity });
+  const starts: Array<number | string> = [];
+  serveTwelveTransactions(starts);
+  process.env.DACS_SCAN_MAX_TXS = "4";
+  try {
+    store.saveScanState({ chainIdentity: "a".repeat(64), schemaVersion: 10, lastSeenTxId: 100, listings: {}, deals: {} });
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+
+    await reindexAll({ log: () => {}, nodeDeployment: deployment });
+    assert.deepEqual(store.loadScanState().replay, { before: 6, chainTip: 12 });
+    assert.equal(store.loadScanState().schemaVersion, 0);
+    assert.equal(store.loadScanState().lastSeenTxId, 10);
+    assert.deepEqual(store.loadCatalog().sellers, []);
+
+    starts.length = 0;
+    await reindexAll({ log: () => {}, nodeDeployment: deployment });
+    assert.deepEqual(starts.filter((start) => start !== "latest").slice(0, 1), [6], "the next pass resumes below the last one");
+    assert.equal(store.loadScanState().replay, undefined);
+    assert.equal(store.loadScanState().schemaVersion, 10);
+    assert.equal(store.loadScanState().lastSeenTxId, 10);
+  } finally {
+    delete process.env.DACS_SCAN_MAX_TXS;
+  }
+});

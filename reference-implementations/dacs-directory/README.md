@@ -238,7 +238,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    anchored DACS artifacts by their self-describing program names, and attributes deals
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
-   hits the cap fails rather than advancing the cursor and silently skipping history.
+   hits the cap fails rather than advancing the cursor and silently skipping history, except
+   a full history replay (a first run, a schema upgrade, or a changed or unrecorded chain),
+   which resumes below the last pass across passes and leaves the catalog unwritten until it
+   reaches genesis.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those
