@@ -122,3 +122,28 @@ test("index-now leaves a catalog recorded under another chain for the full reind
     store.saveScanState(scan);
   }
 });
+
+test("index-now refuses while a replay from genesis has not finished", async () => {
+  const scan = store.loadScanState();
+  const before = store.loadCatalog();
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  try {
+    // Between bounded passes, and after a re-pin whose first pass failed: older withdrawals are not yet scanned.
+    for (const pending of [
+      { replay: { before: 6, chainTip: 12 } },
+      { schemaVersion: 0 },
+    ]) {
+      store.saveScanState({ ...scan, chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, ...pending });
+      storageReads = 0;
+      const response = await indexNow();
+      assert.equal(response.status, 409, JSON.stringify(pending));
+      assert.match(String((await response.json() as { error?: string }).error), /replay from genesis has not finished/);
+      assert.equal(storageReads, 0, "the registration was not indexed");
+      assert.deepEqual(store.loadCatalog(), before);
+    }
+    store.saveScanState({ ...scan, chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: 10 });
+    assert.equal((await indexNow()).status, 200, "a finished replay indexes again");
+  } finally {
+    store.saveScanState(scan);
+  }
+});
