@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { SellerRecord } from "../src/catalog/types.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-chain-reset-"));
 const originalFetch = globalThis.fetch;
@@ -80,6 +81,45 @@ test("a refused deployment leaves the cursor, chain and catalog unchanged", asyn
   assert.equal(store.loadScanState().lastSeenTxId, 100);
   assert.equal(store.loadScanState().chainIdentity, chainIdentity);
   assert.deepEqual(store.loadCatalog(), prior);
+});
+
+const replacedChainSeller = (): SellerRecord => {
+  const seller = `did:demos:agent:${"a".repeat(64)}`;
+  const contentHash = "e".repeat(64);
+  return {
+    primaryClaim: seller, displayName: "old-chain-seller", cci: [], deals: [], registeredAt: 1, lastIndexedAt: 1,
+    reputation: { completed: 0, totalAgreements: 0, completionRate: null },
+    listings: [{
+      listingId: "old", version: 1, contentHash, anchor: { kind: "storage-program", locator: `stor-${"1".repeat(40)}` },
+      seller: { primaryClaim: seller, displayName: "old-chain-seller" },
+      offering: { title: "old", category: "services.test", tags: [] }, pricing: {}, status: "revoked", catalogObservedAt: 1,
+      revocation: { sellerPrimaryClaim: seller, listingId: "old", listingVersion: 1, listingContentHash: contentHash,
+        logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:old:v1`,
+        markerAnchor: { kind: "storage-program", locator: `stor-${"2".repeat(40)}` }, markerContentHash: "d".repeat(64) },
+    }],
+  };
+};
+
+test("a re-pin stops serving the replaced chain's sellers while the replay is interrupted", async () => {
+  store.saveScanState({ chainIdentity: "a".repeat(64), schemaVersion: 10, lastSeenTxId: 100, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+  globalThis.fetch = async () => { throw new Error("node unavailable"); };
+  await assert.rejects(reindexAll({ log: () => {},
+    nodeDeployment: async () => ({ ok: true as const, chainIdentity: "b".repeat(64) }) }), /chain scan failed/);
+  assert.equal(store.loadScanState().chainIdentity, "b".repeat(64));
+  assert.deepEqual(store.loadCatalog().sellers, []);
+});
+
+test("a re-pin does not carry the replaced chain's revocation markers into the rebuilt scan state", async () => {
+  store.saveScanState({ chainIdentity: "a".repeat(64), schemaVersion: 10, lastSeenTxId: 100, listings: {}, deals: {} });
+  const [oldListing] = replacedChainSeller().listings;
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+  globalThis.fetch = async (_input, init) => init?.method === "POST"
+    ? Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 }] })
+    : new Response(null, { status: 503 });
+  await reindexAll({ log: () => {}, nodeDeployment: async () => ({ ok: true as const, chainIdentity: "b".repeat(64) }) });
+  assert.equal(Object.hasOwn(store.loadScanState().verifiedRevocations ?? {}, oldListing.contentHash), false);
+  assert.deepEqual(store.loadCatalog().sellers, []);
 });
 
 test("an interrupted re-pin replay remains due and same-chain incremental scans retain discoveries", async () => {
