@@ -676,7 +676,7 @@ test("shared canonicalization and listing verification reject lone surrogates in
         assert.throws(() => canonical(extra), /invalid Unicode/);
       }
       // The pinned SDK cannot canonicalize, so cannot sign, these bytes; the Directory reader refuses them too.
-      assert.throws(() => signedCurrentListing(extra), /not stable canonical JSON|surrogate/);
+      assert.throws(() => signedCurrentListing(extra), /not stable wire JSON|surrogate/);
       // An older SDK could sign over a hand-built canonical text; the Directory reader must still refuse that.
       const raw = signedCurrentListing(extra, claim, handBuiltHash);
       assert.deepEqual(await verifyListingResult(raw), { ok: false, code: "NORMATIVE_LISTING_INVALID" });

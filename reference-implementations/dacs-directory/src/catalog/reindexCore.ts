@@ -10,7 +10,7 @@ import { boundedJson } from "./artifactLimits.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
+import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -514,7 +514,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
           listing.contentHash !== agent.contentHashes[anchor]) continue;
       const id = listing.scope.listingId ?? listing.scope.serviceId;
       const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
-      if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
+      if (binding.sellerPrimaryClaim !== revocationSellerClaim(listing) || binding.listingContentHash !== listing.contentHash ||
           binding.listingId !== id || binding.listingVersion !== version) continue;
       if (provenance) {
         admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);

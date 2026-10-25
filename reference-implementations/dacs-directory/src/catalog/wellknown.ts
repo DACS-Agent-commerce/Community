@@ -14,6 +14,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
 import { sha256Hex } from "./canonical.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
@@ -65,9 +66,10 @@ interface ListingIndex {
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
   const hash = entry.contentHash.toLowerCase();
   const binding = entry.revocation;
-  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
+  return binding && typeof binding === "object" && !Array.isArray(binding) && typeof binding.sellerPrimaryClaim === "string" &&
+    canonicalDemosAgentClaim(binding.sellerPrimaryClaim) === seller &&
     binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
+    binding.logicalAddress === revocationLogicalAddress(binding.sellerPrimaryClaim, entry.listingId, Number(entry.version)) &&
     binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
     /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
     /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
