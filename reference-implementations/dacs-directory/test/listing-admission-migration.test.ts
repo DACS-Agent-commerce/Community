@@ -9,6 +9,7 @@ import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { vector, sign, seeds, dids, locator, type Obj } from "./fixtures/current-evidence.js";
+import { signedRailSnapshot } from "./signed-rail-snapshot.js";
 
 const directory = mkdtempSync(join(tmpdir(), "dacs-listing-admission-upgrade-"));
 process.env.DACS_DIRECTORY_DATA = directory;
@@ -129,7 +130,9 @@ test("the reset keeps the highest withheld version so the publisher never renumb
 });
 
 test("the publisher numbers a new version after the withheld one", async () => {
-  const { POST } = await import("../app/api/dacs/build-listing/route.js");
+  const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
+  // The shipped rail table is unsigned and the route refuses it (LP-6), so number against a signed snapshot.
+  const POST = createBuildListingPost(signedRailSnapshot);
   const { NextRequest: Request } = await import("next/server");
   const call = (body: Obj) => POST(new Request("https://directory.example/api/dacs/build-listing", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
