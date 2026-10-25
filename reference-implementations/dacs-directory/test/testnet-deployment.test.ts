@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FixtureNode } from "./fixtures/kit-listing.js";
 
@@ -70,8 +73,73 @@ test("startup refuses a node it cannot read and names that cause", async () => {
   }
 });
 
+test("startup refuses distinct public and private RPCs before reading either node", async () => {
+  const publicNode = new FixtureNode();
+  publicNode.chainIdentity = "cd".repeat(32);
+  const contacted: string[] = [];
+  process.env.NEXT_PUBLIC_DEMOS_RPC = "https://neutral.example.org";
+  globalThis.fetch = async (input, init) => {
+    const host = new URL(input instanceof Request ? input.url : String(input)).hostname;
+    contacted.push(host);
+    return (host === "neutral.example.org" ? publicNode : node).fetch(input, init);
+  };
+  try {
+    const result = await checkTestnetStartup();
+    assert.equal(result.ok, false);
+    assert.match(result.ok ? "" : result.reason, /NEXT_PUBLIC_DEMOS_RPC must match DEMOS_RPC/);
+    assert.deepEqual(contacted, []);
+  } finally {
+    process.env.NEXT_PUBLIC_DEMOS_RPC = profile.NEXT_PUBLIC_DEMOS_RPC;
+    globalThis.fetch = node.fetch;
+  }
+});
+
 test("startup accepts the testnet profile on the reviewed testnet chain", async () => {
   assert.deepEqual(await checkTestnetStartup(), { ok: true, chainIdentity: TESTNET_CHAIN_IDENTITIES[0] });
+});
+
+test("startup checks the compiled RPC before contacting the configured node", async () => {
+  const contacted: string[] = [];
+  globalThis.fetch = async (input) => { contacted.push(String(input)); throw new Error("unexpected network read"); };
+  try {
+    for (const builtRpc of ["https://neutral.example.org", "https://rpc.mainnet.example.org", undefined, 42]) {
+      const result = await checkTestnetStartup(async () => builtRpc);
+      assert.equal(result.ok, false);
+      assert.match(result.ok ? "" : result.reason, /built manifest RPC must match NEXT_PUBLIC_DEMOS_RPC/);
+    }
+    const missing = await checkTestnetStartup(async () => { throw new Error("missing build"); });
+    assert.equal(missing.ok, false);
+    assert.match(missing.ok ? "" : missing.reason, /could not read the built manifest RPC/);
+    assert.deepEqual(contacted, []);
+  } finally {
+    globalThis.fetch = node.fetch;
+  }
+  assert.deepEqual(await checkTestnetStartup(async () => profile.NEXT_PUBLIC_DEMOS_RPC),
+    { ok: true, chainIdentity: TESTNET_CHAIN_IDENTITIES[0] });
+});
+
+test("the startup script reads the compiled manifest and refuses a different RPC or a missing build", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dacs-built-rpc-"));
+  const routeDirectory = join(directory, ".next/server/app/.well-known/dacs-directory.json");
+  mkdirSync(routeDirectory, { recursive: true });
+  const route = join(routeDirectory, "route.js");
+  writeFileSync(route, 'module.exports = { routeModule: { userland: { GET: async () => Response.json({ substrates: { demos: { rpcUrl: "https://neutral.example.org" } } }) } } };');
+  const run = () => spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"),
+    fileURLToPath(new URL("../scripts/check-testnet-deployment.ts", import.meta.url)), "--built"], {
+    cwd: directory, encoding: "utf8", timeout: 60_000,
+    env: { ...process.env, ...profile, TSX_TSCONFIG_PATH: fileURLToPath(new URL("../tsconfig.json", import.meta.url)) },
+  });
+  try {
+    const mismatch = run();
+    assert.equal(mismatch.status, 1, mismatch.stderr);
+    assert.match(mismatch.stderr, /built manifest RPC must match NEXT_PUBLIC_DEMOS_RPC/);
+    rmSync(route);
+    const missing = run();
+    assert.equal(missing.status, 1, missing.stderr);
+    assert.match(missing.stderr, /could not read the built manifest RPC/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("the startup script exits non-zero on a mainnet profile before contacting a node", () => {
@@ -89,7 +157,7 @@ test("the index timer fires every five minutes and both units run the startup ch
   assert.equal(envExample().DACS_INDEX_INTERVAL_SECONDS, "300", "status diagnostics use the timer's interval");
   for (const unit of ["dacs-directory.service", "dacs-directory-index.service"]) {
     const text = deployFile(unit);
-    const check = text.search(/^ExecStartPre=\/usr\/bin\/env npm run --silent check:testnet$/m);
+    const check = text.search(/^ExecStartPre=\/usr\/bin\/env npm run --silent check:testnet -- --built$/m);
     assert.ok(check >= 0 && check < text.search(/^ExecStart=/m), unit);
     assert.match(text, /^EnvironmentFile=\/etc\/dacs-directory\/directory\.env$/m, unit);
   }

@@ -6,11 +6,12 @@ import test, { mock } from "node:test";
 import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { isListing } from "@kynesyslabs/dacs/artifacts";
+import { checkListingRevocation } from "../vendor/dacs-sdk/dist/agent/listingValidation.js";
 import { FixtureNode, kitListing, kitSeller, locator, revocationMarker, type Artifact, type KitSeller } from "./fixtures/kit-listing.js";
 import { clientSearchParams, directoryAdmission, parseListingsPage, projectSummary, catalogSurfaceDisposition } from "./fixtures/sdk-client-directory-reader.js";
 
 // Directory/client contract: a seller-kit Listing through registration,
-// index-now, lookup and the SDK client's purchase admission rules, against
+// index-now, lookup and the Directory/chain subset of SDK client admission, against
 // the real routes, indexer and store with an in-memory Demos node.
 const NOW = Date.UTC(2026, 0, 1);
 const DAY = 24 * 60 * 60 * 1000;
@@ -68,7 +69,7 @@ const listingDetail = (listing: Artifact, claim: string) => listingRoute.GET(
   { params: Promise.resolve({ listingId: String(listing.listingId), version: String(listing.listingVersion) }) },
 );
 
-/** The SDK client's purchase admission over this Directory's listings and detail APIs and the node. */
+/** The Directory/chain subset, excluding validateListing and purchaseSupport. */
 async function clientAdmission(seller: KitSeller, listing: Artifact, checkedAt: number) {
   const page = parseListingsPage({ listings: await listingsFor(seller) });
   const summary = page.listings.find((row) => row.listingId === listing.listingId &&
@@ -139,10 +140,50 @@ test("an authenticated revocation turns the kit Listing into a tombstone that re
 
   const admission = await clientAdmission(seller, listing, NOW + 60_000);
   assert.equal(admission.eligible, false);
-  assert.notEqual(admission.revocation, "absent");
-  // The served binding names this Listing under the SDK reader's RB-2 rules.
+  // SDK directory.mjs:56 (blob c91e7f47) reads revocationBinding; this
+  // Directory serves revocation. Until SDK D16 is fixed, the client cannot
+  // confirm a tombstone and must report indeterminate.
+  assert.equal(admission.revocation, "indeterminate");
+  // What the reader does once the client reads revocation: the served binding
+  // names this Listing under RB-2 and requires a marker read.
   assert.equal(catalogSurfaceDisposition({ kind: "catalog", status: "revoked", readStatus: "ok", catalogObservedAt: NOW,
     binding: row.revocation as object }, listing, NOW + 60_000), "marker-required");
+});
+
+test("malformed catalog bindings agree with the pinned SDK reader", async () => {
+  const seller = kitSeller(0x30);
+  const listing = kitListing(seller, { notBefore: NOW - 60_000 });
+  assert.ok(isListing(listing));
+  const binding = {
+    sellerPrimaryClaim: seller.claim, listingId: listing.listingId, listingVersion: 1,
+    listingContentHash: contentHash(listing),
+    logicalAddress: `dacs1-revoked:${encodeURIComponent(seller.claim)}:${String(listing.listingId)}:v1`,
+    markerAnchor: { kind: "storage-program", locator: locator(0x30) }, markerContentHash: "ab".repeat(32),
+  };
+  const surface = { kind: "catalog", status: "revoked", readStatus: "ok", catalogObservedAt: NOW } as const;
+  assert.equal(catalogSurfaceDisposition({ ...surface, binding }, listing, NOW), "marker-required");
+  for (const malformed of [
+    ...Object.keys(binding).map((key) => {
+      const copy = { ...binding };
+      Reflect.deleteProperty(copy, key);
+      return copy;
+    }),
+    { ...binding, markerAnchor: {} },
+    { ...binding, markerAnchor: { kind: "", locator: "" } },
+    { ...binding, markerContentHash: "invalid" },
+  ]) {
+    let markerReads = 0;
+    const actual = await checkListingRevocation(listing, contentHash(listing), {
+      nowMs: () => NOW,
+      surfaces: [{ ...surface, binding: malformed } as Parameters<typeof checkListingRevocation>[2]["surfaces"][number]],
+      readMarker: async () => { markerReads += 1; return null; },
+      verifyMarkerSignature: () => true,
+    });
+    assert.equal(actual.disposition, "indeterminate");
+    assert.equal(markerReads, 0);
+    assert.equal(catalogSurfaceDisposition({ ...surface, binding: malformed }, listing, NOW), actual.disposition,
+      JSON.stringify(malformed));
+  }
 });
 
 test("a read never refreshes the catalog observation, so a stale one is indeterminate for the client", async () => {

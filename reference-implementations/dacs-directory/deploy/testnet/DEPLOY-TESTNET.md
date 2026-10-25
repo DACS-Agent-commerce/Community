@@ -12,12 +12,15 @@ These files run the Directory on one server with systemd and Caddy:
 
 ## Testnet only
 
-Both units run `npm run check:testnet` before they start
+Both units run `npm run check:testnet -- --built` before they start
 (`scripts/check-testnet-deployment.ts`). It refuses to start when:
 
 - `DACS_DIRECTORY_NETWORK` is not exactly `testnet` (`mainnet` included);
 - `DEMOS_RPC` or `NEXT_PUBLIC_DEMOS_RPC` is missing, is not a credential-free
   `https` URL, or has a host label containing `mainnet`;
+- the two RPC settings name different endpoints (this profile requires one
+  endpoint for the server and public readers);
+- the compiled manifest advertises an RPC different from those settings;
 - `DEMOS_CHAIN_IDENTITY` is set to anything but a reviewed testnet identity
   (`TESTNET_CHAIN_IDENTITIES` in `src/catalog/testnetDeployment.ts`);
 - the configured node serves another chain, or cannot be read within 30 seconds.
@@ -40,6 +43,8 @@ and `npm` on systemd's default `PATH`. As root:
 4. As `dacs-directory`, in `/opt/dacs-directory/reference-implementations/dacs-directory`,
    install and build with the settings loaded (`NEXT_PUBLIC_*` values are built into the pages):
    `set -a; . /etc/dacs-directory/directory.env; set +a; bash scripts/setup-sdk.sh && npm run check:testnet && npm run build`.
+   Rebuild after changing the RPC settings; the startup check reads the compiled
+   manifest, including the public RPC fixed at build time.
 5. Copy the three unit files to `/etc/systemd/system/`, then
    `systemctl daemon-reload && systemctl enable --now dacs-directory.service dacs-directory-index.timer`.
 6. Add the site from `Caddyfile.example` to the Caddy configuration and reload Caddy.

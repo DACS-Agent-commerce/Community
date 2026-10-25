@@ -1,7 +1,7 @@
 /**
  * The rules the SDK buyer client applies to this Directory's output, copied
  * from dacs-sdk main 9d820e0f0fea0d9d34c6c0a2b521c18badfb4fee and ported to
- * TypeScript without changing a rule:
+ * TypeScript for the Directory and chain subset:
  * - packages/dacs-client/src/dacs/directory.mjs (blob c91e7f47): the
  *   patterns, normalizeCatalogObservedAt, projectSummary, search parameters
  *   and the cursor rule;
@@ -15,6 +15,7 @@
  * are not Directory output and are not copied.
  */
 import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
+import { isRevocationBinding } from "@kynesyslabs/dacs/artifacts";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const LOCATOR = /^stor-[0-9a-f]{40}$/;
@@ -150,7 +151,7 @@ export function catalogSurfaceDisposition(surface: CatalogSurface, listing: Reco
   if (observedAt === undefined || observedAt > now || now - observedAt > 24 * 60 * 60 * 1_000) return "indeterminate";
   if (surface.status === "active") return surface.binding ? "indeterminate" : "absent";
   const binding = surface.binding as Record<string, unknown> | undefined;
-  if (!binding) return "indeterminate";
+  if (!isRevocationBinding(binding)) return "indeterminate";
   const presentedBy = String(member(member(member(listing, "seller"), "identity"), "presentedBy"));
   const sameTuple = binding.sellerPrimaryClaim === presentedBy && binding.listingId === listing.listingId &&
     binding.listingVersion === listing.listingVersion && binding.listingContentHash === contentHash(listing);
@@ -163,7 +164,7 @@ export interface AdmissionCheck { name: string; ok: boolean }
 export interface DirectoryAdmission {
   checks: AdmissionCheck[];
   revocation: CatalogSurfaceDisposition;
-  /** Every Directory and chain check passed and the catalog establishes revocation absence. */
+  /** Only the Directory/chain subset passed; validateListing and purchaseSupport are not run. */
   eligible: boolean;
 }
 
