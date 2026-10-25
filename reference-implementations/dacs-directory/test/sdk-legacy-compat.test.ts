@@ -18,10 +18,10 @@ const sign = (scope: Obj, prefix: string, index = 1, encoding: BufferEncoding = 
 const partySignature = (scope: Obj, prefix: string, index: number) =>
   ({ party: claims[index], algorithm: "ed25519", value: sign(scope, prefix, index) });
 
-function fixture(signatureKind: string, unicode = false) {
+function fixture(signatureKind: string, unicode = false, listingExtension: Obj = {}) {
   const listingScope: Obj = { agentId: claims[1], serviceId: "svc", name: "Service", description: "Legacy service", claimRequirements: [],
     supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-attested-payload"],
-    terms: { cancellationPolicy: "pre-commit" }, ...(unicode ? { "e\u0301": "historical member" } : {}) };
+    terms: { cancellationPolicy: "pre-commit" }, ...(unicode ? { "e\u0301": "historical member" } : {}), ...listingExtension };
   const value = sign(listingScope, "dacs-listing:v1:", 1, signatureKind === "base64url" ? "base64url" : "hex");
   const listing: Obj = { ...listingScope, signature: signatureKind === "structured"
     ? { algorithm: "ed25519", signer: claims[1], value } : signatureKind === "0x" ? `0x${value}` : value };
@@ -60,6 +60,20 @@ test("legacy bundle verification accepts all historical Listing signature spelli
     assert.equal(checked.strict, true, spelling);
     f.listing.name = "tampered";
     assert.equal((await verify(f)).strict, false, `${spelling}: changed signed content`);
+  }
+});
+
+test("a historical Listing keeps verifying with pricing and version members the draft SDK never validated", async () => {
+  const extensions: Obj[] = [
+    { pricing: { kind: "metered", unit: "request", unitPrice: { amount: "1", currency: "DEM" } } },
+    { pricing: { kind: "unpriced" }, listingVersion: 0 },
+  ];
+  for (const extension of extensions) {
+    const f = fixture("hex", false, extension);
+    assert.ok(await verifyListing(f.listing), JSON.stringify(extension));
+    const checked = await verify(f);
+    assert.equal(checked.result.ok, true, `${JSON.stringify(extension)}: ${JSON.stringify(checked.result.refs)}`);
+    assert.equal(checked.strict, true, JSON.stringify(extension));
   }
 });
 

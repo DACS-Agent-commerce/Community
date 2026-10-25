@@ -1,6 +1,7 @@
 import { legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isListing as isCurrentListing, isLegacyMvpListing as isListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { isListing as isCurrentListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { isHistoricalListing } from "./legacyListingShape.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -17,6 +18,16 @@ import type { RevocationBinding } from "./types.js";
 const SEPARATOR = "dacs-listing:v1:";
 /** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
 export const MAX_LISTING_CANONICAL_BYTES = 16_384;
+
+/**
+ * Content hash of a stored Listing under its own profile: a Listing that
+ * declares `dacsVersion` uses the current hash, any other the frozen one, as
+ * `verifyListing` selects them. Throws like the hash it selects.
+ */
+export function storedListingHash(raw: Record<string, unknown>): string {
+  const scope = stripSignature(raw);
+  return "dacsVersion" in raw ? contentHash(scope) : legacyListingHash(scope);
+}
 
 export interface VerifiedListing {
   listing: Listing | Record<string, unknown>;
@@ -166,7 +177,7 @@ export async function verifyListing(
 
   let scope: Record<string, unknown>;
   try { scope = stripSignature(raw); } catch { return null; }
-  if (!isListing(scope)) return null;
+  if (!isHistoricalListing(scope)) return null;
   const listing = scope as unknown as Listing;
   const signature = raw.signature;
   // Early SDK listings stored only the Ed25519 value. Their signer is still
