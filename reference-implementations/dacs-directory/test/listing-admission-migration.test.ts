@@ -99,7 +99,7 @@ test("the reset withholds cached deal verdicts and the reputation counted from t
 test("the reset keeps the highest withheld version so the publisher never renumbers it", () => {
   assert.equal(store.listingVersionFloor(seller, "allowed-second-key"), 2);
   assert.equal(store.listingVersionFloor(seller, "missing-method"), 1);
-  assert.equal(store.listingVersionFloor(seller, "withdrawn"), 0, "a retained tombstone already carries its version");
+  assert.equal(store.listingVersionFloor(seller, "withdrawn"), 1, "a tombstone that a later reindex may drop still holds its version");
   assert.equal(store.listingVersionFloor(seller, "never-published"), 0);
   assert.equal(store.listingVersionFloor(seller, "unnumbered"), 0, "an unusable version records no floor");
 });
