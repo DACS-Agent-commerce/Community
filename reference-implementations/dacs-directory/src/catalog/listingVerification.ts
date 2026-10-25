@@ -28,12 +28,7 @@ import {
   type ResolvedPrimaryClaimKey,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import {
-  canonicalSignatureBytes,
-  importLegacySignatureValue,
-  legacySignatureBytes,
-  presentationSignatureBytes,
-} from "./signatureValue.js";
+import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureBytes, presentationSignatureBytes } from "./signatureValue.js";
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
@@ -432,10 +427,7 @@ export function revocationLogicalAddress(
   return `dacs1-revoked:${encodedClaim}:${listingId}:v${listingVersion}`;
 }
 
-/**
- * RB-2: SDK readers require the exact `presentedBy` bytes, including any
- * CF-3 advisory parameters, and the CF-4 address derived from them.
- */
+/** RB-2: keep exact `presentedBy` bytes (including CF-3 parameters) and their CF-4 address. */
 export function revocationSellerClaim(listing: VerifiedListing): string {
   return listing.profile === "dacs-v0.1"
     ? listing.listing.seller.identity.presentedBy
