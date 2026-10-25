@@ -70,9 +70,15 @@ test("each saved anchor check outcome has its own message", () => {
 
 test("discarding is offered only after a definitive saved anchor answer", () => {
   for (const status of ["present", "absent", "invalid"] as const) {
-    assert.equal(savedAnchorAllowsDiscard({ status }), true, status);
+    assert.equal(savedAnchorAllowsDiscard({ status }, "record-a", "record-a"), true, status);
   }
   for (const reason of ["timeout", "failed", "malformed"] as const) {
-    assert.equal(savedAnchorAllowsDiscard({ status: "unavailable", reason }), false, reason);
+    assert.equal(savedAnchorAllowsDiscard({ status: "unavailable", reason }, "record-a", "record-a"), false, reason);
+  }
+});
+
+test("a definitive answer for one saved record does not unlock discarding a different one", () => {
+  for (const status of ["present", "absent", "invalid"] as const) {
+    assert.equal(savedAnchorAllowsDiscard({ status }, "record-a", "record-b"), false, status);
   }
 });
