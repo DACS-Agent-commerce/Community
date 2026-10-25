@@ -14,7 +14,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
 import { sha256Hex } from "./canonical.js";
-import { canonicalDemosAgentClaim } from "./claimRef.js";
+import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
@@ -84,7 +84,7 @@ export function bindsListingTuple(
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
   const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
   const binding = entry.revocation;
-  if (typeof binding?.sellerPrimaryClaim !== "string" || canonicalDemosAgentClaim(binding.sellerPrimaryClaim) !== seller) return null;
+  if (typeof binding?.sellerPrimaryClaim !== "string" || !sameCanonicalClaimIdentity(binding.sellerPrimaryClaim, seller)) return null;
   return bindsListingTuple(binding, binding.sellerPrimaryClaim, tuple) ? binding : null;
 }
 
