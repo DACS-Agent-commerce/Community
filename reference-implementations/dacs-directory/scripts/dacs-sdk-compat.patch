@@ -2,7 +2,7 @@ diff --git a/src/agent/verifyBundleCore.ts b/src/agent/verifyBundleCore.ts
 index 9a0d7dff..dc47632b 100644
 --- a/src/agent/verifyBundleCore.ts
 +++ b/src/agent/verifyBundleCore.ts
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,8 @@
  import { types as nodeTypes } from "node:util";
  
 -import { contentHash, stripSignature } from "../canonical/index.js";
@@ -10,6 +10,13 @@ index 9a0d7dff..dc47632b 100644
  import {
    snapshotCanonicalJson,
    snapshotCanonicalJsonRead,
++  snapshotWireJsonRead,
+ } from "../canonical/snapshot.js";
+@@ -622,3 +623,3 @@
+   try {
+-    return snapshotCanonicalJsonRead(
++    return snapshotWireJsonRead(
+       value as Record<string, unknown>,
 @@ -629,6 +629,22 @@ function snapshotDependencyRecord(
    }
  }
@@ -247,6 +254,11 @@ index 9a0d7dff..dc47632b 100644
    );
  
    const sigs = Array.isArray(raw["signatures"])
+@@ -1544,3 +1651,3 @@
+       try {
+-        value = snapshotCanonicalJsonRead(
++        value = snapshotWireJsonRead(
+           resolved.value,
 @@ -1563,6 +1670,7 @@ export async function verifyBundleCore(
        ref.contentHash,
        validateScope,
@@ -335,3 +347,21 @@ index 7743f4e9..41099dd9 100644
    } catch {
      return false;
    }
+diff --git a/src/canonical/hash.ts b/src/canonical/hash.ts
+--- a/src/canonical/hash.ts
++++ b/src/canonical/hash.ts
+@@ -3,3 +3,3 @@
+ import { canonicalize } from "./jcs.js";
+-import { snapshotCanonicalJsonRead } from "./snapshot.js";
++import { snapshotWireJsonRead } from "./snapshot.js";
+
+@@ -15,3 +15,3 @@
+ export function stripSignature<T extends Record<string, unknown>>(doc: T): Partial<T> {
+-  const snapshot = snapshotCanonicalJsonRead(doc, "signed artifact");
++  const snapshot = snapshotWireJsonRead(doc, "signed artifact");
+   if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+@@ -23,3 +23,3 @@
+   // dispatching through Object.prototype.__proto__ and disappearing. The
+-  // The canonical snapshot normalises CF-1 string values while preserving
++  // The wire snapshot preserves insertion order and strings, as well as
+   // member names exactly, and ensures the returned normal-prototype object owns
