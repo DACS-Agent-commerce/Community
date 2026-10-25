@@ -525,8 +525,8 @@ export async function verifyListingRevocation(
     scope.listingVersion !== expectedVersion ||
     typeof scope.listingContentHash !== "string" ||
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
-    // The pinned SDK's RB-1 isRevocationMarker requires a non-negative safe integer.
-    !Number.isSafeInteger(scope.revokedAt) || Number(scope.revokedAt) < 0
+    // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
+    typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
   ) return false;
   const signature = raw.signature;
   if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
