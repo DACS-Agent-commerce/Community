@@ -109,8 +109,8 @@ its 1.6 GB development dependency tree:
 railway up . --no-gitignore
 ```
 
-`.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
-vendor directory. `scripts/setup-sdk.sh` accepts that packaged build only when
+`.railwayignore` includes only the SDK's compiled `dist` output, its `package.json` and the
+`.dacs-sdk-revision` marker from the otherwise ignored vendor directory. `scripts/setup-sdk.sh` accepts that packaged build only when
 `dist/.dacs-sdk-revision` names the pinned `SDK_REV` (written by the source build after it
 checks a clean checkout of that commit), the SDK's `package.json` declares the pinned
 `dacs.standardRevision`, and the `dist` bytes hash to the pinned `SDK_DIST_SHA256`
