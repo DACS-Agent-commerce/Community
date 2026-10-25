@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
 import { requireAdmin } from "@/src/catalog/security";
-import { loadCatalog, loadRegistrations, saveCatalog, withDataLock } from "@/src/catalog/store";
+import { loadCatalog, loadRegistrations, loadScanState, saveCatalog, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
@@ -29,6 +29,12 @@ export async function POST(req: NextRequest) {
     }
     if (!deployment.ok) {
       return NextResponse.json({ error: `catalog not updated: ${deployment.reason}` }, { status: 409 });
+    }
+    // A catalog recorded under another chain is replaced by the next full reindex, not merged into.
+    // A legacy scan state with no recorded chain is left alone.
+    const recordedChain = loadScanState().chainIdentity;
+    if (recordedChain !== undefined && recordedChain !== deployment.chainIdentity) {
+      return NextResponse.json({ error: "catalog not updated: it was built on another chain; run a full reindex first" }, { status: 409 });
     }
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
