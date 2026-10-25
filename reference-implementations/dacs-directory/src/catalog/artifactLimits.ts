@@ -53,6 +53,27 @@ export function boundedJson(value: unknown, maxBytes = MAX_ARTIFACT_BYTES): stri
 
 export class StorageResponseTooLarge extends Error {}
 
+/**
+ * JSON.parse for text read from the network. CORE §B.2 admits `-0` and serializes it as `0`, but
+ * the SDK's data-only check refuses it, which would drop a correctly signed artifact. Reading it
+ * as `0` leaves every canonical byte unchanged. The walk is iterative: a reviver recurses, and a
+ * deeply nested reply must stay a bounded rejection, not a stack overflow.
+ */
+export function parseWireJson(text: string): unknown {
+  const root = JSON.parse(text) as unknown;
+  const pending: unknown[] = [root];
+  while (pending.length) {
+    const node = pending.pop();
+    if (node === null || typeof node !== "object") continue;
+    const members = node as Record<string, unknown>;
+    for (const key of Object.keys(members)) {
+      if (Object.is(members[key], -0)) members[key] = 0;
+      else pending.push(members[key]);
+    }
+  }
+  return Object.is(root, -0) ? 0 : root;
+}
+
 /** Bound bytes as they arrive; never call Response.json() on storage reads. */
 export async function storageResponseJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
@@ -70,6 +91,6 @@ export async function storageResponseJson(response: Response): Promise<unknown> 
       }
       chunks.push(chunk.value);
     }
-    return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
+    return parseWireJson(Buffer.concat(chunks, bytes).toString("utf8"));
   } finally { reader.releaseLock(); }
 }
