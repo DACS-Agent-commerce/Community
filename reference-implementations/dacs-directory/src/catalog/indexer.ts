@@ -50,7 +50,7 @@ import {
   clearListingRejection,
   listingRejectionCode,
   pruneRegistrationListingRejections,
-  isOwnerRevocationCandidate,
+  hasPendingOwnerRevocationCandidate,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
@@ -200,7 +200,7 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
-  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown> }>();
+  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown>; expiredAt?: number }>();
   const categoriesByListing = new Map<string, string>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
@@ -269,11 +269,13 @@ export async function indexRegistration(
       ? rawVersion
       : 1;
     // DACS-1 §6.3.4 reader step 3: future terms cannot authenticate deal history.
-    const validity = scope.validity as { notBefore?: unknown } | undefined;
+    const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
     if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
     const presentation = listingPresentation(scope);
     // Historical deals retain authenticated terms and category after expiry or revocation.
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+    // An expired Listing only vouches for a deal finalised within its window (see the evidence graph).
+    const expiredAt = typeof validity?.notAfter === "number" && now > validity.notAfter ? validity.notAfter : undefined;
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt });
     categoriesByListing.set(listingId, presentation.category);
     if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
@@ -329,13 +331,14 @@ export async function indexRegistration(
     // SDK readers also take a fresh `active` summary without a binding as
     // established revocation absence, so a marker the node could not serve
     // (including a storage `not found`, which DEMOS-MAPPING §A.2 makes
-    // indeterminate) holds the listing when it was verified before or the
-    // listing owner anchored it. Anyone can anchor other candidates, so an
-    // outage on those cannot hold it.
+    // indeterminate) holds the listing when it was verified before, or while
+    // the listing owner has an anchored marker that no read has settled, even
+    // on a pass that skips it during its retry backoff. Anyone can anchor
+    // other candidates, so an outage on those cannot hold it.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
       : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
-        [...unavailableMarkers].some((ref) => knownMarkers.includes(ref) ||
-          isOwnerRevocationCandidate(verified.contentHash, ref, anchored.owner ?? null))
+        [...unavailableMarkers].some((ref) => knownMarkers.includes(ref)) ||
+        hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
         ? "indeterminate" : "absent";
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
