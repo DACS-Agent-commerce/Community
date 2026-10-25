@@ -18,7 +18,7 @@ import { sha256Hex } from "./canonical.js";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
-import { sellerIdentity } from "./discovery.js";
+import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
@@ -86,7 +86,7 @@ export function bindsListingTuple(
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
   const binding = entry.revocation;
   const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
-  return bindsListingTuple(binding, tuple) && sellerIdentity(binding.sellerPrimaryClaim) === seller ? binding : null;
+  return bindsListingTuple(binding, tuple) && sameCanonicalClaimIdentity(binding.sellerPrimaryClaim, seller) ? binding : null;
 }
 
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
