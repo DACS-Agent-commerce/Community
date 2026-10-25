@@ -6,9 +6,13 @@
  * cross-origin. Browser cryptography validates internal signatures and hashes,
  * but without a chain inclusion proof the proxy/RPC remains trusted for the
  * claim that those exact bytes occupy the requested native address.
+ *
+ * Replies carry `status`: `present`, `absent` or `invalid` are the node's own
+ * answers; an unreachable, slow or failing node is `unavailable` with HTTP 503,
+ * never an empty 200, so callers cannot mistake an outage for an absent artifact.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { readAnchor } from "@/src/catalog/chain";
+import { readAnchorResult } from "@/src/catalog/chain";
 import { resolveProgramAddress } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
@@ -23,6 +27,9 @@ export async function GET(req: NextRequest) {
     }
   }
   if (!ref) return NextResponse.json({ error: "need ?ref= or ?owner=&name=" }, { status: 400 });
-  const value = await readAnchor(ref);
-  return NextResponse.json({ ref, value });
+  const read = await readAnchorResult(ref);
+  if (read.status === "unavailable") {
+    return NextResponse.json({ error: "the node could not be read; the artifact is indeterminate", ref, status: read.status, value: null }, { status: 503 });
+  }
+  return NextResponse.json({ ref, status: read.status, value: read.status === "present" ? read.record.data : null });
 }
