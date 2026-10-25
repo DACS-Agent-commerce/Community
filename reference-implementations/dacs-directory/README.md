@@ -296,7 +296,8 @@ current SDK seller runtime.
    hits the cap fails rather than advancing the cursor and silently skipping history, except
    a full history replay (a first run, a schema upgrade, or a changed or unrecorded chain),
    which resumes below the last pass across passes and leaves the catalog unwritten until it
-   reaches genesis.
+   reaches genesis, and `POST /api/dacs/index-now` answers 409 meanwhile. Deals a pass found
+   without a seller are re-attributed in each later window of the replay.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those

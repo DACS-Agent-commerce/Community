@@ -224,7 +224,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   try {
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
       knownPrograms: new Map(Object.entries(state.programs)),
-      ...(resumeFrom ? { startBefore: resumeFrom.before, chainTip: resumeFrom.chainTip } : {}) });
+      ...(resumeFrom ? { startBefore: resumeFrom.before, chainTip: resumeFrom.chainTip,
+        unattributedDeals: Object.values(state.deals).filter((deal) => !deal.owners.seller) } : {}) });
     const replayContinues = needsHistoryReplay && scan.resumeBefore !== undefined && scan.txsScanned >= maxTxs;
     if (!scan.complete && !replayContinues) {
       throw new Error(

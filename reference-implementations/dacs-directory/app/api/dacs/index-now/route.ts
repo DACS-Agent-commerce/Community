@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
+import { genesisReplayPending } from "@/src/catalog/scanState";
 import { requireAdmin } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations, loadScanState, saveCatalog, withDataLock } from "@/src/catalog/store";
 
@@ -32,9 +33,14 @@ export async function POST(req: NextRequest) {
     }
     // A catalog recorded under another chain is replaced by the next full reindex, not merged into.
     // A legacy scan state with no recorded chain is left alone.
-    const recordedChain = loadScanState().chainIdentity;
+    const scanState = loadScanState();
+    const recordedChain = scanState.chainIdentity;
     if (recordedChain !== undefined && recordedChain !== deployment.chainIdentity) {
       return NextResponse.json({ error: "catalog not updated: it was built on another chain; run a full reindex first" }, { status: 409 });
+    }
+    // Until the replay from genesis ends, older withdrawals of the registered listing may be unscanned.
+    if (genesisReplayPending(scanState)) {
+      return NextResponse.json({ error: "catalog not updated: the replay from genesis has not finished; run a full reindex first" }, { status: 409 });
     }
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
