@@ -437,8 +437,8 @@ async function verifyCurrentEvidenceGraph(
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
-      !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+  const verifiedListing = listed && await verifyStoredListing(listed.raw, listed.locator, resolveKey);
+  if (!verifiedListing || verifiedListing.contentHash !== listingHash) return { ...fail("listing reference failed"), signaturesVerified };
   // DACS-3 §8.5.2 check 6: the agreement must have been committed within the Listing's validity window, judged
   // by the commitment's anchor time. The producer-set `finalisedAt` is advisory and never decides it;
   // an unknown anchor time (no agreement, or not yet anchored) leaves the deal unverified.
