@@ -21,12 +21,14 @@ export const MAX_LISTING_CANONICAL_BYTES = 16_384;
 
 /**
  * Content hash of a stored Listing under its own profile: a Listing that
- * declares `dacsVersion` uses the current hash, any other the frozen one, as
- * `verifyListing` selects them. Throws like the hash it selects.
+ * declares `dacsVersion` uses the current hash, except historical hex imports;
+ * other Listings use the frozen hash. This does not authenticate an import.
  */
 export function storedListingHash(raw: Record<string, unknown>): string {
   const scope = stripSignature(raw);
-  return "dacsVersion" in raw ? contentHash(scope) : legacyListingHash(scope);
+  const value = record(raw.signature)?.value;
+  return "dacsVersion" in raw && !(typeof value === "string" && /^[0-9a-f]{128}$/.test(value))
+    ? contentHash(scope) : legacyListingHash(scope);
 }
 
 export interface VerifiedListing {
@@ -253,6 +255,7 @@ export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
   sellerClaim: string,
   resolveKey: ResolvePrimaryClaimKey,
+  hashScope = contentHash,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
@@ -262,7 +265,7 @@ export async function verifyIdentityPresentation(
   if (!signature) return null;
   const bundleScope = { ...identity };
   delete bundleScope.presentation;
-  const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
+  const message = Buffer.from(`dacs-bundle-presentation:v1:${hashScope(bundleScope)}`, "utf8");
   // A per-claim PresentationSignature carries a bare `signature` string, not a
   // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
   const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
@@ -274,6 +277,14 @@ export async function verifyListing(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
+  return verifyListingUsingHash(raw, resolveKey, contentHash);
+}
+
+async function verifyListingUsingHash(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey,
+  hashScope: typeof contentHash,
+): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
   // Select the profile before validating it. A failed current artifact must
   // never acquire the looser legacy contract by adding draft SDK fields.
@@ -284,14 +295,14 @@ export async function verifyListing(
     delete scope.signature;
     if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
     if (current.signature.algorithm !== "ed25519") return null;
-    const hash = contentHash(scope);
+    const hash = hashScope(scope);
     const verifiedSigner = await verifyEd25519(
       Buffer.from(SEPARATOR + hash, "utf8"), current.signer, canonicalSignatureBytes(current.signature.value), resolveKey,
     );
     const seller = record(raw.seller);
     const identity = record(seller?.identity);
     const verifiedSeller = identity
-      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey)
+      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey, hashScope)
       : null;
     if (!verifiedSigner || !verifiedSeller) return null;
     return {
@@ -374,7 +385,7 @@ export async function verifyStoredListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    const verified = await verifyListingUsingHash({ ...raw, signature: { ...signature, value } }, resolveKey, legacyListingHash);
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
       ? verified : null;
