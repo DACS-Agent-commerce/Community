@@ -273,7 +273,7 @@ export async function indexRegistration(
     if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
     const presentation = listingPresentation(scope);
     // Historical deals retain authenticated terms and category after expiry or revocation.
-    // An expired Listing only vouches for a deal finalised within its window (see the evidence graph).
+    // An expired Listing only vouches for a deal whose agreement was anchored within its window (see the evidence graph).
     const expiredAt = typeof validity?.notAfter === "number" && now > validity.notAfter ? validity.notAfter : undefined;
     listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt });
     categoriesByListing.set(listingId, presentation.category);
@@ -433,7 +433,7 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing, anchorTime: artifactAnchorTime });
     const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
