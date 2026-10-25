@@ -15,6 +15,7 @@ import {
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
+import { MAX_CLAIM_QUERY_BYTES } from "../src/catalog/discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "../src/catalog/inspection.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
@@ -718,6 +719,23 @@ test("a Listing presented by a claim with a mixed-case scheme is not admitted", 
 test("a Listing presented by a qualified claim is summarised under the exact presentedBy and backs its deal evidence", async () => {
   const record = await indexSellerDeal(`${dids[1]}?channel=directory`, "qualified-job", 110);
   assert.deepEqual(record.listings.map((listing) => listing.seller.primaryClaim), [`${dids[1]}?channel=directory`]);
+  assert.equal(record.deals[0].refsVerified, true);
+});
+
+const presentedByOfBytes = (byteLength: number): string => {
+  const prefix = `${dids[1]}?channel=`;
+  return `${prefix}${"a".repeat(byteLength - Buffer.byteLength(prefix, "utf8"))}`;
+};
+
+test("a Listing whose presentedBy fits the claim query bound is summarised", async () => {
+  const presentedBy = presentedByOfBytes(MAX_CLAIM_QUERY_BYTES);
+  const record = await indexSellerDeal(presentedBy, "bounded-claim-job", 140);
+  assert.deepEqual(record.listings.map((listing) => listing.seller.primaryClaim), [presentedBy]);
+});
+
+test("a Listing whose presentedBy exceeds the claim query bound is not summarised but still backs its deal evidence", async () => {
+  const record = await indexSellerDeal(presentedByOfBytes(MAX_CLAIM_QUERY_BYTES + 1), "oversized-claim-job", 150);
+  assert.deepEqual(record.listings, []);
   assert.equal(record.deals[0].refsVerified, true);
 });
 
