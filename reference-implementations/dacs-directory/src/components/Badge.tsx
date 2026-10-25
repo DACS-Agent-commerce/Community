@@ -64,3 +64,11 @@ export function ChipGroup({ label, children }: { label: string; children: React.
     </div>
   );
 }
+
+/**
+ * A bundle's recorded outcome. TP-1: completion is not verified on testnet, so
+ * even `completed` renders as a neutral observation, never a success badge.
+ */
+export function ObservedOutcomeBadge({ outcome }: { outcome: string }) {
+  return <span className="badge"><b>observed</b>{outcome}; completion not verified</span>;
+}

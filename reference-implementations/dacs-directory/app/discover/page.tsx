@@ -1,6 +1,7 @@
 import DirectoryExplorer from "@/src/components/DirectoryExplorer";
 import CatalogStatus from "@/src/components/CatalogStatus";
 import { loadCatalog } from "@/src/catalog/store";
+import { CHECKED_BUNDLES_LABEL } from "@/src/catalog/testnetMetricPolicy";
 import { activeCatalogListings, activeCatalogSellers } from "@/src/catalog/discovery";
 import { safeJsonLd } from "@/src/components/structuredData";
 import type { Metadata } from "next";
@@ -51,7 +52,7 @@ export default function Discover() {
         <div className="trust-strip" aria-label="Catalog summary">
           <div><strong>{listings.length}</strong><span>active services</span></div>
           <div><strong>{sellers.length}</strong><span>discoverable agents</span></div>
-          <div><strong>{verifiedDeals}</strong><span>strict deal bundles</span></div>
+          <div><strong>{verifiedDeals}</strong><span>{CHECKED_BUNDLES_LABEL}</span></div>
           <div><strong>5</strong><span>DACS lifecycle stages</span></div>
         </div>
       </section>

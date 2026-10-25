@@ -26,7 +26,7 @@ import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnown
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
-  loadCatalog,
+  loadStoredCatalog,
   loadDomains,
   loadFixtureSeeds,
   loadRegistrations,
@@ -113,7 +113,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
   }
-  let prior = loadCatalog();
+  let prior = loadStoredCatalog();
 
   // Nothing from a node outside the pinned chain reaches the public
   // catalog or the scan state; a node that cannot be read fails the pass too.

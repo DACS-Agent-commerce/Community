@@ -33,8 +33,8 @@ test("separates listing evidence, endpoint declaration, and unmeasured reachabil
   });
   assert.deepEqual(state.reachability, { kind: "not-measured", label: UNMEASURED_REACHABILITY_LABEL });
   assert.equal(state.identityTier, "verified");
-  assert.equal(state.deals.label, "2 strict-verified / 3 agreements");
-  assert.match(state.deals.explanation, /Both parties/);
+  assert.equal(state.deals.label, "Observed outcomes: 3, not verified");
+  assert.equal(state.deals.explanation, "Completion verification unavailable");
 });
 
 test("projects fresh and stale bounded probes through the evidence boundary", () => {
@@ -75,8 +75,8 @@ test("does not turn a missing endpoint into a service failure", () => {
     explanation: "The listing declares no engagement endpoint",
   });
   assert.equal(state.reachability.label, "Not measured by Directory");
-  assert.equal(state.deals.label, "0 strict-verified / 0 agreements");
-  assert.equal(state.deals.explanation, "No verified two-sided bundle history yet");
+  assert.equal(state.deals.label, "Observed outcomes: 0, not verified");
+  assert.equal(state.deals.explanation, "Completion verification unavailable");
 });
 
 test("distinguishes unsafe declarations without exposing or linking them", () => {
@@ -102,6 +102,13 @@ test("keeps fixture and legacy listing evidence visibly distinct", () => {
   );
 });
 
+test("deal presentation exposes the total observation count without a completed count", () => {
+  assert.deepEqual(directoryEvidenceState(listing(), seller(2, 3)).deals, {
+    total: 3,
+    label: "Observed outcomes: 3, not verified",
+    explanation: "Completion verification unavailable",
+  });
+});
 
 test("catalog authentication labels reflect current, legacy and fixture evidence", () => {
   assert.equal(catalogAuthenticationLabel("dacs-v0.1"), "Structure, signature, and identity presentation authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)");

@@ -16,18 +16,23 @@ name and (when owner-signed) the "owner-registered" badge — it is never a gate
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
-The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
-checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
+Completion verification unavailable: TP-1 testnet catalog projections publish completion and
+fault rates and the average buyer and seller ratings as `null`, with a reason, and omit any
+other score field. Counts are labelled
+as observed outcomes, not verified completion. Rate and score filters and ranking return
+400. Individual evidence inspection remains available. Full metrics return under
+a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
+while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Catalog API | DACS-1 §6.3.6 | Listing filters excluding TP-1 rate/score filters, plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
 | Seller publication | DACS-1 §6.3.4 | The browser publisher is omitted from this release. `/register` explains discovery-pointer submission and offers read-only recovery of saved anchors. Publication through another client requires a verified finalized AnchorReceipt (LP-1), and for pay-bearing listings verified rail authority (LP-6). The internal builder checks rail authority (LP-6) and prepares a transaction; its `publicationReady` flag means a transaction was prepared, not that it is final, so it does not satisfy LP-1. `confirm-listing` requires a transaction hash and reports only an unauthenticated node observation, never a receipt. `POST /api/dacs/register` accepts bounded pointer sets; the indexer independently authenticates each anchor. |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Observed history | DACS-5 §10.4–§10.5 | Bundle references, labelled observed counts, individual evidence, exact-decimal volume and time windows are kept. Completion and fault rates and numeric reputation scores are unavailable on testnet |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -416,6 +421,27 @@ Procurement listings remain outside this reader profile until reconciliation sup
 the publisher as buyer and attributes supplier history to the agreement seller.
 The catalog profile also refuses APR-1 `pay-alternative` pipelines, which the pinned
 SDK reader accepts.
+
+The Node no-rate regression tests use an isolated populated catalog, including
+aborted outcomes, old numeric metrics and missing listing hints. They check the API,
+rendered homepage, discovery, service detail and seller evidence, plus the discovery
+text and refusal of old filters, including bracketed query keys. Run `npm test`.
+
+TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commit:
+`minCompletionRate` and `minRating` return 400, and `completionRate` remains null
+even when `bundleCount` is positive. [`docs/TP-1.md`](./docs/TP-1.md) defines TP-1
+and declares these as open `nonconforming` deviations in the Standard's
+`ImplementationDeviation` shape. `metricsProfile: "TP-1"`,
+`metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
+restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
+document `2.0.0`. A cached listing with no hint, or one that fails the Directory's hint
+validation ([`docs/TP-1.md`](./docs/TP-1.md) rule 5), still has null metrics and uses the
+catalog snapshot window. Every served hint's observed count is rebuilt from the retained
+category records the seller reputation counts. The hint follows the Directory's published
+ListingSummary schema. Seller reputation retains
+`completed` and `totalAgreements` for compatibility, with explicit observed-count
+labels. These fields describe a counted subset, not the seller's complete history,
+and must not be divided into a completion rate.
 
 **Upstream source contracts.** The Directory records these source revisions:
 

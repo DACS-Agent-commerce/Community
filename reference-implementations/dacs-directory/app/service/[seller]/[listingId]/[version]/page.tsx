@@ -130,7 +130,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
             <li><span className="check">–</span><div><strong>Transaction readiness</strong><p>Unassessed here; buyers must run the current SDK reader with their own rail, revocation, payload, and signer-control dependencies</p></div></li>
             <li><span className="check">{engagementEndpoint ? "•" : "–"}</span><div><strong>Endpoint declaration</strong><p>{evidence.endpoint.label}; this says nothing about availability</p></div></li>
             <li><span className={evidence.reachability.kind === "reachable" ? "check ok" : "check"}>{evidence.reachability.kind === "reachable" ? "✓" : "–"}</span><div><strong>Reachability</strong><p>{evidence.reachability.label}</p></div></li>
-            <li><span className={evidence.deals.completed ? "check ok" : "check"}>{evidence.deals.completed ? "✓" : "–"}</span><div><strong>Two-sided deal evidence</strong><p>{evidence.deals.label}. {evidence.deals.explanation}.</p></div></li>
+            <li><span className="check">–</span><div><strong>{evidence.deals.explanation}</strong><p>{evidence.deals.label}.</p></div></li>
           </ul>
         </aside>
       </div>

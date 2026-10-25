@@ -10,7 +10,7 @@ import { indexRegistration } from "@/src/catalog/indexer";
 import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
 import { genesisReplayPending } from "@/src/catalog/scanState";
 import { requireAdmin } from "@/src/catalog/security";
-import { loadCatalog, loadRegistrations, loadScanState, saveCatalog, withDataLock } from "@/src/catalog/store";
+import { loadRegistrations, loadScanState, loadStoredCatalog, saveCatalog, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
     if (genesisReplayPending(scanState)) {
       return NextResponse.json({ error: "catalog not updated: the replay from genesis has not finished; run a full reindex first" }, { status: 409 });
     }
-    const catalog = loadCatalog();
+    const catalog = loadStoredCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
     const record = await indexRegistration({ ...reg, discoveryIncomplete: true }, prior);
     const i = catalog.sellers.findIndex((s) => s.primaryClaim === claim);

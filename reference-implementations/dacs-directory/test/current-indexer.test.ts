@@ -14,6 +14,7 @@ import {
   listingIsCurrentlyEffective,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
+import { UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel } from "../src/catalog/testnetMetricPolicy.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { MAX_CLAIM_QUERY_BYTES } from "../src/catalog/discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "../src/catalog/inspection.js";
@@ -597,7 +598,7 @@ test("strict two-copy fixtures exclude #230 outcome and #224 phase-index diverge
     dealRecord(kindDeal, kindDivergence),
   ], 0, 200);
   assert.equal(reputation.bundleCount, 1);
-  assert.equal(reputation.completionRate, 1);
+  assert.equal(reputation.completionRate, null);
   assert.deepEqual(reputation.bundleRefs?.map((item) => item.id), ["clean-job"]);
 });
 
@@ -673,6 +674,16 @@ test("indexer resolves current copies through BundleBindings rather than submitt
     assert.notEqual(record.deals[0].sellerBundleRef, submittedSellerPointer);
     assert.equal(record.deals[0].rail, "pay-dem");
     assert.equal(record.reputation.bundleCount, 1);
+    const hint = record.listings[0].reputationHint;
+    assert.ok(hint, "indexer stores a listing hint before public projection");
+    for (const [key, value] of Object.entries(UNAVAILABLE_TESTNET_METRICS)) {
+      assert.equal(hint[key as keyof typeof hint], value, key);
+    }
+    const categoryDeals = record.deals.filter((item) => item.refsVerified && item.reputationEligible &&
+      (item.category === record.listings[0].offering.category || item.category?.startsWith(record.listings[0].offering.category + ".")));
+    assert.equal(hint.bundleCount, categoryDeals.length);
+    assert.equal(hint.observedOutcomesLabel, observedOutcomesLabel(categoryDeals.length));
+    assert.equal(record.deals[0].ratings?.[0].value, 5, "stored signed rating evidence stays numeric");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -960,7 +971,7 @@ test("DACS-5 derives exact volume, ratings, SR-2 receipt window and transaction 
   const duplicate = { ...base, jobId: "b", bundleContentHash: "c".repeat(64), agreementPrice: { amount: "9", currency: "DEM" }, settlementTxIds: [{ id: "tx", observedAt: 20, phaseIndex: 2 }] };
   const out = deriveSellerReputation([base, duplicate], 0, 200);
   assert.deepEqual(out.observedTransactionalVolume, [{ currency: "DEM", amount: "1.25" }]);
-  assert.equal(out.averageSellerRating, 5); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
+  assert.equal(out.averageSellerRating, null); assert.equal(out.bundleCount, 1); assert.equal(out.windowingBasis, "sr2-anchor-timestamp");
 });
 
 test("DACS-5 uses one window basis and omits malformed currency aggregates", () => {

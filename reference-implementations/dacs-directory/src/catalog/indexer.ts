@@ -67,6 +67,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
+import { UNAVAILABLE_TESTNET_METRICS, observedOutcomesLabel } from "./testnetMetricPolicy.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
 import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
@@ -655,7 +656,6 @@ export async function indexRegistration(
   // ── Reputation: derived ONLY from verified bundles ────────────────────────
   const counted = deals.filter((d) => d.refsVerified && d.reputationEligible);
   const reputation = deriveSellerReputation(deals, 0, now);
-  const completed = reputation.completed;
   const windowStart = 0;
   const windowEnd = now;
   const listingsWithHint = listings.map((l) => ({
@@ -664,12 +664,10 @@ export async function indexRegistration(
       const categoryDeals = counted.filter(
         (d) => d.category === l.offering.category || d.category?.startsWith(l.offering.category + "."),
       );
-      const categoryCompleted = categoryDeals.filter((d) => d.sellerOutcome === "completed").length;
-      const categoryDenominator = categoryDeals.filter((d) => d.sellerOutcome !== "failed-substrate" && !d.cancellationNeutral).length;
       return {
         categoryScope: l.offering.category,
-        completionRate: categoryDenominator ? categoryCompleted / categoryDenominator : null,
-        averageSellerRating: deriveSellerReputation(categoryDeals, windowStart, windowEnd).averageSellerRating ?? null,
+        ...UNAVAILABLE_TESTNET_METRICS,
+        observedOutcomesLabel: observedOutcomesLabel(categoryDeals.length),
         bundleCount: categoryDeals.length,
         windowStart,
         windowEnd,
