@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 // First: the store must open in a fresh directory, never the checkout's data/.
 import { isolatedDataDir } from "./fixtures/isolated-data-dir.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
@@ -18,7 +18,7 @@ import { verifyListing } from "../src/catalog/listingVerification.js";
 import { MAX_CLAIM_QUERY_BYTES } from "../src/catalog/discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "../src/catalog/inspection.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
-import { admitRevocationCandidates, DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
+import { admitRevocationCandidates, DATA_DIR, loadScanState, recordArtifact, saveScanState } from "../src/catalog/store.js";
 import type { DealRecord, RegisteredDeal, Registration } from "../src/catalog/types.js";
 
 import { type Obj, seeds, dids, locator, maps, sign, ref, vector, bindingFor, installAgreement,
@@ -1042,6 +1042,8 @@ test("completed deals remain verifiable after their Listing expires out of disco
   fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
   fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
   await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+  recordArtifact({ locator: fixture.locators.agreement, kind: "agreement", profile: "dacs-v0.1",
+    contentHash: artifactHash(fixture.agreement, "agreement"), observedAt: 1, anchorTime: notAfter - 10, data: fixture.agreement });
   const deal = registeredDeal("listing-expiry-job", fixture.locators.buyer, fixture.locators.seller);
   const registration: Registration = {
     primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing], deals: [deal],
@@ -1078,8 +1080,11 @@ test("completed deals remain verifiable after their Listing expires out of disco
   }
 });
 
-test("an expired Listing cannot authenticate a deal finalised after its validity ended", async (t) => {
-  const fixture = await vector("listing-late-job", 2140);
+/** Index a deal on a Listing that expired at 100: its agreement is anchored at `committedAt`, its bundles say `finalisedAt`. */
+async function indexDealOnExpiredListing(
+  t: TestContext, jobId: string, offset: number, committedAt: number | undefined, finalisedAt: number,
+) {
+  const fixture = await vector(jobId, offset);
   const notAfter = 100;
   t.mock.method(Date, "now", () => notAfter + 50);
   const listingScope = signedScope(fixture.listing, "listing");
@@ -1087,19 +1092,38 @@ test("an expired Listing cannot authenticate a deal finalised after its validity
   fixture.listing = { ...listingScope, signature: await sign(listingScope, "listing", 1) };
   maps.set(fixture.locators.listing, fixture.listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(fixture.listing, "listing") };
-  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef };
-  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef };
+  fixture.buyerBundle = { ...fixture.buyerBundle, listingRef, finalisedAt };
+  fixture.sellerBundle = { ...fixture.sellerBundle, listingRef, finalisedAt };
   await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
-  const deal = registeredDeal("listing-late-job", fixture.locators.buyer, fixture.locators.seller);
-  const record = await indexFixture(fixture, { deals: [deal], bundleBindings: [
+  recordArtifact({ locator: fixture.locators.agreement, kind: "agreement", profile: "dacs-v0.1",
+    contentHash: artifactHash(fixture.agreement, "agreement"), observedAt: 1, anchorTime: committedAt, data: fixture.agreement });
+  const deal = registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller);
+  return indexFixture(fixture, { deals: [deal], bundleBindings: [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
   ] });
+}
+
+test("an expired Listing authenticates a deal committed in its window even when finalised later", async (t) => {
+  const record = await indexDealOnExpiredListing(t, "listing-late-job", 2140, 90, 120);
   assert.deepEqual(record.listings, []);
-  assert.equal(record.deals[0].finalisedAt, undefined, "the late bundle is not accepted as evidence");
-  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].refsVerified, true);
+  assert.equal(record.deals[0].reputationEligible, true);
+  assert.equal(record.reputation.completed, 1);
+});
+
+test("an expired Listing cannot authenticate a deal committed after its validity ended, whatever finalisedAt says", async (t) => {
+  const record = await indexDealOnExpiredListing(t, "listing-backdated-job", 2160, 120, 90);
+  assert.equal(record.deals[0].refsVerified, false, "a backdated finalisedAt cannot stand in for the commitment time");
   assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.bundleCount, 0);
+  assert.equal(record.reputation.completed, 0);
+});
+
+test("an expired Listing cannot authenticate a deal whose commitment has no anchor time", async (t) => {
+  const record = await indexDealOnExpiredListing(t, "listing-unanchored-job", 2180, undefined, 90);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.completed, 0);
 });
 

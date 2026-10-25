@@ -30,6 +30,8 @@ export interface EvidenceGraphDeps {
   resolveListing: (ref: Record<string, unknown>) =>
     Promise<{ locator: string; raw: Record<string, unknown>; expiredAt?: number } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
+  /** Consensus (SR-2) anchor time in ms of an artifact's locator, or undefined while it is not known. */
+  anchorTime?: (locator: string) => number | undefined;
 }
 
 const rec = (value: unknown): Record<string, unknown> | null =>
@@ -434,11 +436,14 @@ async function verifyCurrentEvidenceGraph(
   const listingHash = normalizedHash(listingRef.contentHash);
   if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
       !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
-  // DACS-3 §8.5.2 check 6: the agreement must have been committed by the Listing's expiry. No
-  // commitment time is read here, but both parties sign `finalisedAt` and finalising follows
-  // committing, so finalising inside the window proves it. A later finalisation is withheld.
-  if (listed.expiredAt !== undefined && !(typeof raw.finalisedAt === "number" && raw.finalisedAt <= listed.expiredAt)) {
-    return { ...fail("listing expired before the bundle was finalised"), signaturesVerified };
+  // DACS-3 §8.5.2 check 6: the agreement must have been committed by the Listing's expiry, judged
+  // by the commitment's anchor time. The producer-set `finalisedAt` is advisory and never decides it;
+  // an unknown anchor time (no agreement, or not yet anchored) leaves the deal unverified.
+  if (listed.expiredAt !== undefined) {
+    const committedAt = agreement && isCurrentRef(raw.agreementRef) ? deps.anchorTime?.(raw.agreementRef.anchor.locator) : undefined;
+    if (committedAt === undefined || committedAt > listed.expiredAt) {
+      return { ...fail("listing expired before the agreement was committed"), signaturesVerified };
+    }
   }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
