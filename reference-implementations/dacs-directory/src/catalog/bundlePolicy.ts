@@ -1,12 +1,12 @@
 import { legacyListingHash } from "./legacyListingHash.js";
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { stripSignature } from "@kynesyslabs/dacs/canonical";
 import {
   isLegacyMvpAttestationBundle,
 } from "@kynesyslabs/dacs/artifacts";
 import type { BundleVerification } from "@kynesyslabs/dacs";
 
 import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
-import { verifyListing, verifyStoredListing } from "./listingVerification.js";
+import { storedListingHash, verifyListing, verifyStoredListing } from "./listingVerification.js";
 import {
   resolvePrimaryClaimKey,
   resolveDemosPrimaryClaimKey,
@@ -130,10 +130,9 @@ export interface ResolvedArtifact {
 // A current Listing keeps its own hash profile even when a historical bundle
 // references it. Other artifacts on this path use the frozen SDK-MVP format.
 function referenceHash(artifact: ResolvedArtifact): string {
-  const scope = stripSignature(artifact.raw);
-  return artifact.kind === "dacs-1-listing" && "dacsVersion" in artifact.raw
-    ? contentHash(scope)
-    : legacyListingHash(scope);
+  return artifact.kind === "dacs-1-listing"
+    ? storedListingHash(artifact.raw)
+    : legacyListingHash(stripSignature(artifact.raw));
 }
 
 interface ExpectedArtifact {

@@ -94,7 +94,7 @@ test("legacy Listing signatures with a malformed spelling or another signer are 
 const usesHistoricalEvidenceAuthenticator = compile(
   ["evidence", "ev", "isNormativeGraph", "isLegacyMvpGraph"],
   "const isLegacyMvpAttestationRef = (ref) => ref.kind !== undefined;\n"
-  + "const isLegacyMvpSettlementEvidence = (value) => value.phaseIndex !== undefined;\n"
+  + "const isHistoricalSettlementEvidence = (value) => value.phaseIndex !== undefined;\n"
   + `return ${patchedLines.find((line) => line.includes("isLegacyMvpAttestationRef(ev)") && line.trimStart().startsWith("if (")).trim().slice("if (".length, -") {".length)};`,
 );
 
