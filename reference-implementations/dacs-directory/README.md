@@ -61,8 +61,17 @@ only after checking the same Ed25519 signature, signed scope, agent key, and anc
 as current structured signature envelopes. Historical deals are displayed, but only
 strictly party-bound bundles with verified references contribute to reputation.
 
-Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
-and re-verifies everything against chain each pass.
+Re-run `npm run index` on a timer in deployment (the testnet units below run it every
+five minutes) — the catalog is a cache and re-verifies everything against chain each pass.
+
+### Testnet server deployment
+
+[`deploy/testnet/`](./deploy/testnet/DEPLOY-TESTNET.md) holds systemd units for the web
+server and a five-minute index timer, an example settings file and a Caddy site. Both
+units first run `npm run check:testnet`, which refuses to start unless
+`DACS_DIRECTORY_NETWORK=testnet`, both RPC settings are credential-free HTTPS URLs whose
+hosts do not name mainnet, any `DEMOS_CHAIN_IDENTITY` is a reviewed testnet identity, and
+the configured node serves the pinned testnet chain.
 
 ### Fixture agent: Counterparty Evidence Desk
 
@@ -143,6 +152,7 @@ Changing either the revision or patch requires rebuilding and updating `SDK_DIST
 | `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. `node2.demos.sh` reported a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-22) on the pinned chain; the build the default `DEMOS_RPC` host reports has not been checked against this pin. Catalog refreshes (`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now`) gate on chain identity only; a changed, dirty or missing build is logged. Publication and inclusion observations still require the exact configured build. A reported dirty build does not provide reviewable deployed source bytes. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
+| `DACS_DIRECTORY_NETWORK` | `deploy/testnet` | Must be `testnet`; `npm run check:testnet` refuses any other value before the units start |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |

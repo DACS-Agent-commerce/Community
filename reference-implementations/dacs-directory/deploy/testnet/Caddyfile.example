@@ -1,0 +1,6 @@
+# Caddy site for the testnet Directory: TLS, compression and the local web server.
+# Replace directory.example.org with the public name in NEXT_PUBLIC_DIRECTORY_URL.
+directory.example.org {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3400
+}
