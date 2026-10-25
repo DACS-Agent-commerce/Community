@@ -14,6 +14,7 @@
     "check:node-runtime": "node scripts/check-node-runtime.mjs",
     "verify:origin-sources": "node scripts/verify-origin-sources.mjs",
     "check:node": "tsx scripts/check-node-contract.ts",
+    "check:testnet": "tsx scripts/check-testnet-deployment.ts",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
     "test:e2e": "playwright test e2e/home.spec.ts e2e/register.spec.ts && playwright test --config=playwright.hash.config.ts --project=chromium",
     "test:e2e:ui": "playwright test --ui",
@@ -41,6 +42,9 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "@types/react-test-renderer": "19.1.0",
+    "ajv": "8.17.1",
+    "react-test-renderer": "19.2.7",
     "typescript": "^5.6.3",
     "esbuild": "0.28.1"
   },

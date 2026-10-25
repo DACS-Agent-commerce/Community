@@ -99,6 +99,8 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
+# conformance/implementation-manifest.schema.json (at d45c0a2; identical at 4bb9e48, which docs/TP-1.md cites)
+# sha256 e6dfc82a621737c2a422aa0708e10776f832608255f5bdc77acacbd77aabf805
 # The SDK Listing schema, including DACS-4 section 9.6.3 DPA-1, and the next
 # vector are at d45c0a2, the Standard revision the pinned SDK declares.
 # conformance/vectors/security/listing-preserve-unknown-v0.1.json 987d3661c2c4ce9da3f4e7c57c55c7cda154743c99d1d3ef4ae164e8a5ae77e9

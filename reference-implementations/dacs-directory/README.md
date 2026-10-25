@@ -16,18 +16,23 @@ name and (when owner-signed) the "owner-registered" badge — it is never a gate
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
 artifacts; GCR identity links are shown separately and are not called DACS-2 verification.
-The catalog's `reputationHint`s remain advisory. “Verify yourself” repeats strict cryptographic
-checks in-browser, while chain inclusion still depends on the disclosed proxy/RPC path.
+Completion verification unavailable: TP-1 testnet catalog projections publish completion and
+fault rates and the average buyer and seller ratings as `null`, with a reason, and omit any
+other score field. Counts are labelled
+as observed outcomes, not verified completion. Rate and score filters and ranking return
+400. Individual evidence inspection remains available. Full metrics return under
+a later reputation contract. “Verify yourself” repeats strict cryptographic checks in-browser,
+while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## What it implements
 
 | Surface | Spec | How |
 |---|---|---|
-| Catalog API | DACS-1 §6.3.6 | Full normative listing filters plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
+| Catalog API | DACS-1 §6.3.6 | Listing filters excluding TP-1 rate/score filters, plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
 | Seller publication | DACS-1 §6.3.4 | The browser publisher is omitted from this release. `/register` explains discovery-pointer submission and offers read-only recovery of saved anchors. Publication through another client requires a verified finalized AnchorReceipt (LP-1), and for pay-bearing listings verified rail authority (LP-6). The internal builder checks rail authority (LP-6) and prepares a transaction; its `publicationReady` flag means a transaction was prepared, not that it is final, so it does not satisfy LP-1. `confirm-listing` requires a transaction hash and reports only an unauthenticated node observation, never a receipt. `POST /api/dacs/register` accepts bounded pointer sets; the indexer independently authenticates each anchor. |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Observed history | DACS-5 §10.4–§10.5 | Bundle references, labelled observed counts, individual evidence, exact-decimal volume and time windows are kept. Completion and fault rates and numeric reputation scores are unavailable on testnet |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -56,8 +61,17 @@ only after checking the same Ed25519 signature, signed scope, agent key, and anc
 as current structured signature envelopes. Historical deals are displayed, but only
 strictly party-bound bundles with verified references contribute to reputation.
 
-Re-run `npm run index` on a timer in deployment (systemd/cron) — the catalog is a cache
-and re-verifies everything against chain each pass.
+Re-run `npm run index` on a timer in deployment (the testnet units below run it every
+five minutes) — the catalog is a cache and re-verifies everything against chain each pass.
+
+### Testnet server deployment
+
+[`deploy/testnet/`](./deploy/testnet/DEPLOY-TESTNET.md) holds systemd units for the web
+server and a five-minute index timer, an example settings file and a Caddy site. Both
+units first run `npm run check:testnet`, which refuses to start unless
+`DACS_DIRECTORY_NETWORK=testnet`, both RPC settings are credential-free HTTPS URLs whose
+hosts do not name mainnet, any `DEMOS_CHAIN_IDENTITY` is a reviewed testnet identity, and
+the configured node serves the pinned testnet chain.
 
 ### Fixture agent: Counterparty Evidence Desk
 
@@ -138,6 +152,7 @@ Changing either the revision or patch requires rebuilding and updating `SDK_DIST
 | `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. `node2.demos.sh` reported a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-22) on the pinned chain; the build the default `DEMOS_RPC` host reports has not been checked against this pin. Catalog refreshes (`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now`) gate on chain identity only; a changed, dirty or missing build is logged. Publication and inclusion observations still require the exact configured build. A reported dirty build does not provide reviewable deployed source bytes. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
+| `DACS_DIRECTORY_NETWORK` | `deploy/testnet` | Must be `testnet`; `npm run check:testnet` refuses any other value before the units start |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
@@ -416,6 +431,27 @@ Procurement listings remain outside this reader profile until reconciliation sup
 the publisher as buyer and attributes supplier history to the agreement seller.
 The catalog profile also refuses APR-1 `pay-alternative` pipelines, which the pinned
 SDK reader accepts.
+
+The Node no-rate regression tests use an isolated populated catalog, including
+aborted outcomes, old numeric metrics and missing listing hints. They check the API,
+rendered homepage, discovery, service detail and seller evidence, plus the discovery
+text and refusal of old filters, including bracketed query keys. Run `npm test`.
+
+TP-1 Directory behavior differs from DACS-1 §6.3.6 at the pinned Standard commit:
+`minCompletionRate` and `minRating` return 400, and `completionRate` remains null
+even when `bundleCount` is positive. [`docs/TP-1.md`](./docs/TP-1.md) defines TP-1
+and declares these as open `nonconforming` deviations in the Standard's
+`ImplementationDeviation` shape. `metricsProfile: "TP-1"`,
+`metricsUnavailableReason` and the manifest's `restrictions: ["TP-1"]` identify this
+restriction; the manifest reports `dacsDirectoryVersion: "2"` and the OpenAPI
+document `2.0.0`. A cached listing with no hint, or one that fails the Directory's hint
+validation ([`docs/TP-1.md`](./docs/TP-1.md) rule 5), still has null metrics and uses the
+catalog snapshot window. Every served hint's observed count is rebuilt from the retained
+category records the seller reputation counts. The hint follows the Directory's published
+ListingSummary schema. Seller reputation retains
+`completed` and `totalAgreements` for compatibility, with explicit observed-count
+labels. These fields describe a counted subset, not the seller's complete history,
+and must not be divided into a completion rate.
 
 **Upstream source contracts.** The Directory records these source revisions:
 

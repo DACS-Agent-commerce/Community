@@ -1,7 +1,25 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
 import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
+import { LISTING_QUERY_PARAMETERS } from "./testnetMetricPolicy.js";
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
+
+// Local Directory constraint: non-negative safe integer counts and Unix milliseconds.
+const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
+
+// ECMAScript `\s` outside the control range, spelled out so that validators
+// whose `\s` differs (Python's omits U+FEFF) read the pattern the same way.
+const PATTERN_SPACE = "\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+const CANONICAL_STRING_PATTERN =
+  `^[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f])?$`;
+
+/**
+ * The no-rate testnet restriction this Directory applies. TP-1 is a Directory-local
+ * profile: completion cannot be verified on testnet, so rates and rating values are
+ * null and the advisory DACS-1 §6.3.6 `minCompletionRate` and `minRating` filters
+ * are refused. The manifest, OpenAPI document and listing schema describe it.
+ */
+export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
 
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -82,7 +100,37 @@ export const listingSummarySchema = {
       },
       description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
     },
-    reputationHint: { type: "object" },
+    reputationHint: {
+      type: "object",
+      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. bundleCount is recomputed on read from the retained records the seller reputation counts; a missing or malformed cached hint uses the listing category and the catalog snapshot window. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
+      additionalProperties: false,
+      required: [
+        "categoryScope", "completionRate", "counterpartyAdjustedCompletionRate", "counterpartyFaultRate",
+        "averageBuyerRating", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
+        "computedAt", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel",
+      ],
+      properties: {
+        categoryScope: {
+          type: "string",
+          minLength: 1,
+          // No leading or trailing white space, C0 control or DEL; NFC cannot be expressed here.
+          pattern: CANONICAL_STRING_PATTERN,
+          description: "A canonical string: equal to its trim(), NFC-normalized, and free of C0 control characters and DEL.",
+        },
+        completionRate: { type: "null" },
+        counterpartyAdjustedCompletionRate: { type: "null" },
+        counterpartyFaultRate: { type: "null" },
+        averageBuyerRating: { type: "null" },
+        averageSellerRating: { type: "null" },
+        metricsUnavailableReason: { const: "Completion verification unavailable" },
+        metricsProfile: { const: "TP-1" },
+        observedOutcomesLabel: { type: "string" },
+        bundleCount: safeUint,
+        windowStart: safeUint,
+        windowEnd: safeUint,
+        computedAt: safeUint,
+      },
+    },
     inspection: {
       type: "object",
       required: ["artifactType", "maturity", "href"],
@@ -229,10 +277,14 @@ export const catalogStatusSchema = {
   },
 } as const;
 
+/** 2: TP-1 refuses the DACS-1 §6.3.6 rate filters and publishes null rates. */
+export const DACS_DIRECTORY_VERSION = "2";
+
 export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()) => ({
   name: "DACS Directory",
   description: "A discovery catalog for signed, chain-anchored DACS agent services.",
-  dacsDirectoryVersion: "1",
+  dacsDirectoryVersion: DACS_DIRECTORY_VERSION,
+  restrictions: TESTNET_RESTRICTIONS,
   humanUrl: origin,
   agentCard: `${origin}/.well-known/agent.json`,
   api: `${origin}/api/dacs`,
@@ -271,20 +323,21 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
   maturity: {
     listings: "dual-profile discovery reader; browser publication omitted; pay-bearing preparation requires verified rail authority",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
-    reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
+    reputation: "Completion verification unavailable. Testnet publishes observed counts and individual evidence; completion and fault rates and numeric reputation scores are null.",
   },
   verification: {
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
+  filters: LISTING_QUERY_PARAMETERS,
 });
 
 export const openApiDocument = (origin: string) => ({
   openapi: "3.1.0",
   info: {
     title: "DACS Directory API",
-    version: "1.0.0",
+    // 2.0.0: minCompletionRate and minRating were removed (now refused with 400 under TP-1).
+    version: "2.0.0",
     description: "Discover DACS services and retrieve signed chain artifacts. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile. Catalog admission does not establish transaction readiness.",
   },
   servers: [{ url: origin }],
@@ -293,6 +346,7 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs/listings": {
       get: {
         summary: "Search active services and verified withdrawal records",
+        description: "Completion verification unavailable. Rate and score filters (including minCompletionRate and minRating), sorting and ranking parameters, and every query name not listed here are refused with 400 on testnet.",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
@@ -301,14 +355,12 @@ export const openApiDocument = (origin: string) => ({
           { name: "primaryClaim", in: "query", schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
-          { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
-          { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
           { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: artifactProfiles } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid query, an unlisted query name, or unavailable rate/score filtering or ranking" } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -319,7 +371,10 @@ export const openApiDocument = (origin: string) => ({
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
           { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+        responses: {
+          "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" },
+          "502": { description: "Anchor verification failed" }, "503": { description: "The Demos node could not be read; no cached copy is served" },
+        },
       },
     },
     "/api/dacs/bundles/{jobId}": {

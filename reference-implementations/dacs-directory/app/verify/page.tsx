@@ -7,6 +7,7 @@
  */
 import { useState } from "react";
 import VerifyDeal from "@/src/components/VerifyDeal";
+import { ObservedOutcomeBadge } from "@/src/components/Badge";
 
 type Loaded = { ref: string; buyer: string; jobId?: string; outcome?: string };
 
@@ -91,7 +92,7 @@ export default function VerifyPage() {
         <div className="section">
           <div className="badges" style={{ marginBottom: 10 }}>
             {loaded.jobId && <span className="badge"><b>deal</b><span className="mono">{loaded.jobId}</span></span>}
-            {loaded.outcome && <span className={`badge ${loaded.outcome === "completed" ? "ok" : ""}`}>{loaded.outcome}</span>}
+            {loaded.outcome && <ObservedOutcomeBadge outcome={loaded.outcome} />}
             <span className="badge"><b>buyer</b><span className="mono">{loaded.buyer.slice(0, 26)}…</span></span>
           </div>
           <VerifyDeal bundleRef={loaded.ref} buyerOwner={loaded.buyer} />

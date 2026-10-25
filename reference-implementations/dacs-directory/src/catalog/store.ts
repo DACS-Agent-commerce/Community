@@ -18,6 +18,7 @@ import {
   type ListingDiagnosticCoordinates,
   type ListingRejectionCode,
 } from "./listingAdmission.js";
+import { projectTestnetCatalog } from "./testnetMetrics.js";
 
 export type { ListingRejectionCode } from "./listingAdmission.js";
 
@@ -598,14 +599,32 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
   }
 }
 
-export const loadCatalog = (): Catalog => {
-  const catalog: Catalog = getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+// The one-time migration above promoted every legacy `revocationBinding` that
+// names its Listing. One seen later is never revocation evidence: it is
+// dropped, and a revoked row without `revocation` stays out of discovery.
+const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
-    const legacy = listing as typeof listing & { revocationBinding?: typeof listing.revocation };
-    if (listing.status === "revoked" && !listing.revocation && legacy.revocationBinding) listing.revocation = legacy.revocationBinding;
-    delete legacy.revocationBinding;
+    Reflect.deleteProperty(listing, "revocationBinding");
   }
   return catalog;
+};
+/** The stored catalog evidence, signed ratings included. Writers read this, never `loadCatalog`. */
+export const loadStoredCatalog = (): Catalog => normalizeStoredCatalog(
+  getJson("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] }),
+);
+let publicCatalogCache: { storedJson: string; publicJson: string } | undefined;
+/** The public TP-1 projection of the stored catalog (ratings null, rates removed). Never pass it to `saveCatalog`. */
+export const loadCatalog = (): Catalog => {
+  // Exact stored bytes detect local and cross-process saves, even when their
+  // timestamps coincide. Parse the same snapshot that keys the cache.
+  const row = db.prepare("SELECT value_json FROM kv_state WHERE key = 'catalog'").get() as { value_json: string } | undefined;
+  const storedJson = row?.value_json ?? '{"catalogVersion":"1","generatedAt":0,"sellers":[]}';
+  if (publicCatalogCache?.storedJson !== storedJson) {
+    const catalog: Catalog = JSON.parse(storedJson);
+    publicCatalogCache = { storedJson, publicJson: JSON.stringify(projectTestnetCatalog(normalizeStoredCatalog(catalog))) };
+  }
+  // A caller may mutate its snapshot without corrupting the shared cache.
+  return JSON.parse(publicCatalogCache.publicJson) as Catalog;
 };
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);

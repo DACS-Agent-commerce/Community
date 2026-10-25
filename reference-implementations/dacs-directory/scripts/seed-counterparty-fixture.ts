@@ -1,12 +1,12 @@
 import { upsertCounterpartyEvidenceSeller } from "../src/catalog/counterpartyEvidence.js";
-import { loadCatalog, loadFixtureSeeds, saveCatalog, saveFixtureSeeds, withDataLock } from "../src/catalog/store.js";
+import { loadStoredCatalog, loadFixtureSeeds, saveCatalog, saveFixtureSeeds, withDataLock } from "../src/catalog/store.js";
 
 const now = Date.now();
 await withDataLock("reindex", () => {
   const seeds = loadFixtureSeeds();
   saveFixtureSeeds([...seeds, "counterparty-evidence"]);
 
-  const catalog = loadCatalog();
+  const catalog = loadStoredCatalog();
   saveCatalog({
     catalogVersion: "1",
     generatedAt: now,

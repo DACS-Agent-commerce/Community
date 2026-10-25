@@ -1,7 +1,7 @@
 /** GET /api/dacs/listings/{listingId}/{version} — §6.3.6: the listing summary + anchor. */
 import { NextRequest, NextResponse } from "next/server";
 import { loadCatalog } from "@/src/catalog/store";
-import { readAnchor } from "@/src/catalog/chain";
+import { readAnchorResult } from "@/src/catalog/chain";
 import {
   readCounterpartyEvidenceFixtureAnchor,
   verifyCounterpartyEvidenceFixtureListing,
@@ -42,7 +42,11 @@ export async function GET(
       ],
     });
   }
-  const raw = await readAnchor(hit.anchor.locator);
+  const read = await readAnchorResult(hit.anchor.locator);
+  if (read.status === "unavailable") {
+    return NextResponse.json({ error: "listing anchor unavailable: the Demos node could not be read" }, { status: 503 });
+  }
+  const raw = read.status === "present" ? read.record.data : null;
   const verified = raw ? await verifyStoredListing(raw, hit.anchor.locator) : null;
   if (!verified || verified.contentHash !== hit.contentHash) {
     return NextResponse.json({ error: "listing anchor failed verification" }, { status: 502 });

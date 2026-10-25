@@ -1,0 +1,22 @@
+# One catalog index pass, Demos testnet only. Started by dacs-directory-index.timer.
+[Unit]
+Description=DACS Directory catalog index pass (testnet)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dacs-directory
+Group=dacs-directory
+WorkingDirectory=/opt/dacs-directory/reference-implementations/dacs-directory
+EnvironmentFile=/etc/dacs-directory/directory.env
+ExecStartPre=/usr/bin/env node scripts/check-node-runtime.mjs
+ExecStartPre=/usr/bin/env npm run --silent check:testnet -- --built
+ExecStart=/usr/bin/env npm run --silent index
+# A pass that hangs is stopped; the timer skips ticks while a pass is still running.
+TimeoutStartSec=15min
+StateDirectory=dacs-directory
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true

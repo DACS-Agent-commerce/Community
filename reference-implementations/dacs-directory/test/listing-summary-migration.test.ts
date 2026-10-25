@@ -102,7 +102,7 @@ const startStore = () => {
   const child = spawnSync(process.execPath, [
     "--import", "tsx", "--input-type=module", "--eval",
     `const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
-     process.stdout.write(JSON.stringify(store.loadCatalog()));`,
+     process.stdout.write(JSON.stringify(store.loadStoredCatalog()));`,
   ], { env: { ...process.env, DACS_DIRECTORY_DATA: dataDirectory }, encoding: "utf8", timeout: 30_000 });
   assert.equal(child.error, undefined);
   assert.equal(child.status, 0, child.stderr);
