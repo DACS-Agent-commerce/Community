@@ -15,7 +15,7 @@
  * Shape-defensive: the tx envelope is deep-walked for storage addresses
  * rather than assuming one schema (testnet payloads vary across versions).
  */
-import { boundedJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
+import { boundedJson, parseWireJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
 import { verifiedDiscoveryAgreement } from "./evidenceGraph.js";
 import { isLegacyMvpAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
@@ -218,7 +218,7 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
       params: [{ type: "nodeCall", message, sender: null, receiver: null, timestamp: null, data, extra: "" }],
     }),
   });
-  const json = (await res.json()) as { result?: number; response?: unknown };
+  const json = parseWireJson(await res.text()) as { result?: number; response?: unknown } | null;
   if (json?.result !== 200) throw new Error(`nodeCall ${message} → ${json?.result}`);
   return json.response;
 }
@@ -243,7 +243,7 @@ const objectValue = (value: unknown): Record<string, unknown> | null =>
 
 const parsedObject = (value: unknown): Record<string, unknown> | null => {
   if (typeof value !== "string") return objectValue(value);
-  try { return objectValue(JSON.parse(value)); } catch { return null; }
+  try { return objectValue(parseWireJson(value)); } catch { return null; }
 };
 
 /**
