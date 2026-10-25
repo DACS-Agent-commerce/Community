@@ -293,10 +293,17 @@ test("legacy agreement authentication rejects missing, invalid and foreign party
 
 
 test("legacy evidence is independently authenticated before the two-copy deal counts", async () => {
-  for (const mode of ["valid", "orchestrator", "missing", "invalid", "foreign", "seller", "tampered"] as const) {
+  const draftSdkSettlement: Obj = {
+    paymentTxRefs: [{ rail: "dem", txHash: "txhash", kind: "payment" }],
+    paymentAmount: { amount: "1", currency: "DEM" },
+    settlementFinality: { model: "provider-receipt", finalityBlocks: 0, finalityObservedAt: 1700000000000 },
+  };
+  for (const mode of ["valid", "orchestrator", "missing", "invalid", "foreign", "seller", "tampered", "draft-sdk-success", "draft-sdk-failure"] as const) {
     const jobId = `legacy-evidence-${mode}`;
     const evidence: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 1,
       outcome: "failure", paymentTxRefs: [], observedAt: 1700000000000 };
+    // The draft SDK wrote a finality object, with finalityBlocks, for every settlement outcome.
+    if (mode.startsWith("draft-sdk-")) Object.assign(evidence, draftSdkSettlement, { outcome: mode.slice("draft-sdk-".length) });
     const deal = legacyDeal(jobId, [{ role: "buyer" }, { role: "seller" }]);
     const signed: Obj = { ...evidence, signature: {
       algorithm: "ed25519", signer: mode === "foreign" || mode === "orchestrator" ? outsider : mode === "seller" ? seller : buyer,
@@ -314,7 +321,7 @@ test("legacy evidence is independently authenticated before the two-copy deal co
         signatures: (mode === "orchestrator" ? [0, 1, 2] : [0, 1]).map(index => partySignature(index, "dacs-bundle:v1:", body)) };
     }
     const record = await indexed(deal);
-    const allowed = mode === "valid" || mode === "orchestrator";
+    const allowed = ["valid", "orchestrator", "draft-sdk-success", "draft-sdk-failure"].includes(mode);
     assert.equal(record.deals[0].refsVerified, allowed, mode);
     assert.equal(record.reputation.bundleCount, allowed ? 1 : 0, mode);
   }

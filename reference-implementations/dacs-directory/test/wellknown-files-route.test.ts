@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
 
 process.env.DACS_DIRECTORY_DATA = mkdtempSync(join(tmpdir(), "dacs-directory-wellknown-route-"));
 process.env.DEMOS_RPC = "https://node.test";
@@ -40,5 +42,31 @@ test("a stored listing with no canonical form is left out of the hosted index in
     const files = (await response.json()).files as Record<string, string>;
     const listed = JSON.parse(files["/.well-known/dacs/listings.json"]).listings;
     assert.deepEqual(listed.map((entry: { listingId: string }) => entry.listingId), ["svc-2"]);
+  } finally { globalThis.fetch = original; }
+});
+
+test("hosted index hashes a historical Listing with its frozen profile and a current Listing with the current one", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(3), listingRecord(4)] }] as never,
+  });
+  // A decomposed member name is where the two hash profiles differ.
+  const historical = { agentId: claim, serviceId: "svc-3", "é": "member", signature: "00" };
+  const current = { dacsVersion: "1", listingId: "svc-4", listingVersion: 1, "é": "member", signature: {} };
+  const stored: Record<string, unknown> = { [locator(3)]: historical, [locator(4)]: current };
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = stored[new URL(String(input)).pathname.split("/").pop() ?? ""];
+    return data === undefined ? new Response(null, { status: 503 })
+      : Response.json({ success: true, owner: `0x${hex}`, programName: "opaque", data });
+  };
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    const files = (await response.json()).files as Record<string, string>;
+    const hashes = Object.fromEntries(JSON.parse(files["/.well-known/dacs/listings.json"]).listings
+      .map((entry: { listingId: string; contentHash: string }) => [entry.listingId, entry.contentHash]));
+    assert.equal(hashes["svc-3"], legacyListingHash(stripSignature(historical)));
+    assert.notEqual(hashes["svc-3"], contentHash(stripSignature(historical)));
+    assert.equal(hashes["svc-4"], contentHash(stripSignature(current)));
   } finally { globalThis.fetch = original; }
 });
