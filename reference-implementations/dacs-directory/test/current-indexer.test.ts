@@ -13,7 +13,8 @@ import {
   listingBindingRejection,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
-import { verifyListing } from "../src/catalog/listingVerification.js";
+import { verifyListing, verifyStoredListing } from "../src/catalog/listingVerification.js";
+import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
 import { boundedBundleBindings, logicalBundleAddress } from "../src/catalog/bundleBinding.js";
 import { DATA_DIR, loadScanState, saveScanState } from "../src/catalog/store.js";
 import type { DealRecord, RegisteredDeal } from "../src/catalog/types.js";
@@ -1365,70 +1366,87 @@ test("new negotiable fixed-price pairings stay discoverable but cannot establish
   }
 });
 
-test("pre-upgrade hex listing remains readable at its pinned anchor in a completed session", async (t) => {
-  const now = Date.now();
-  t.mock.method(Date, "now", () => now);
-  const fixture = await vector("historical-hex-session", 900);
-  const envelope = fixture.listing.signature as Obj;
-  const hex = { ...fixture.listing, signature: { ...envelope,
-    value: Buffer.from(String(envelope.value), "base64url").toString("hex") } };
-  const hash = artifactHash(hex, "listing");
-  assert.equal(hash, artifactHash(fixture.listing, "listing"), "no signed bytes or pinned hash change");
-  assert.equal(await verifyListing(hex), null, "new admission retains strict SIG-6 encoding");
-  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
-  process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [fixture.locators.listing]: {
-    encoding: "lowercase-hex", sellerPrimaryClaim: dids[1], listingId: "svc", listingVersion: 1, contentHash: hash,
-  } });
-  const originalFetch = globalThis.fetch;
-  maps.set(fixture.locators.listing, hex);
-  globalThis.fetch = async (input) => {
-    const at = String(input).split("/").pop()!;
-    const data = maps.get(at);
-    return data ? Response.json({ success: true, data, owner: `0x${dids[1].slice(-64)}` })
-      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
-  };
-  try {
-    const graph = await graphAt(fixture.locators.buyer, hex, fixture.locators.listing);
-    assert.equal(graph.ok, true, graph.reason);
-    assert.equal(graph.refsVerified, true);
-    const deal = registeredDeal("historical-hex-session", locator(9901), locator(9902));
-    const registration = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
-      deals: [deal], bundleBindings: [
-        await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
-        await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
-      ] };
-    const resolve = async () => { throw new Error("offline"); };
-    const indexed = await indexRegistration(registration, undefined, resolve);
-    assert.equal(indexed.deals[0].refsVerified, true, "the full indexer retains the completed session's pinned history");
-    assert.equal(indexed.reputation.completed, 1);
-    const repeated = await indexRegistration(registration, indexed, resolve);
-    assert.deepEqual(repeated.reputation, indexed.reputation, "recrawl re-verifies the same immutable history");
-    assert.equal(indexed.listings.length, 1, "history is retained by the catalog reader");
-    assert.equal(indexed.listings[0].contentHash, hash);
-    const { saveCatalog } = await import("../src/catalog/store.js");
-    saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [indexed] });
-    const { NextRequest } = await import("next/server");
-    const { GET: detail } = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
-    const response = await detail(new NextRequest("https://directory.example/api/dacs/listings/svc/1"),
-      { params: Promise.resolve({ listingId: "svc", version: "1" }) });
-    assert.equal(response.status, 200, "historical detail reads use the same import contract");
-    assert.deepEqual(await response.json(), hex, "detail retains the stored envelope");
-    const { GET: derive } = await import("../app/api/dacs/derive/route.js");
-    const derived = await derive(new NextRequest(`https://directory.example/api/dacs/derive?claim=${dids[1]}&serviceId=svc`));
-    assert.equal((await derived.json()).valid, true, "derivation rechecks history against fresh owner-bound bytes");
-    assert.deepEqual(graph.listing, hex, "original stored envelope remains available as evidence");
-    const tampered = { ...hex, listingId: "changed-after-signing" };
-    assert.equal((await graphAt(fixture.locators.buyer, tampered, fixture.locators.listing)).ok, false);
-    delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
-    assert.equal((await graphAt(fixture.locators.buyer, hex, fixture.locators.listing)).ok, false,
-      "an artifact cannot select its own legacy import");
-    const unpinned = await indexRegistration(registration, indexed, resolve);
-    assert.equal(unpinned.deals[0].refsVerified, false, "cached success cannot replace the now-missing import provenance");
-    assert.equal(unpinned.reputation.completed, 0);
+for (const [label, extension] of [
+  ["ASCII", { ascii: "extension" }],
+  ["decomposed member", { "e\u0301": "extension" }],
+  ["colliding NFC members", { nested: [{ "é": "first", "e\u0301": "second" }] }],
+] as const) {
+  test(`pre-upgrade hex listing remains readable at its pinned anchor in a completed session (${label})`, async (t) => {
+    const now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const fixture = await vector("historical-hex-session", 900);
+    const scope = { ...signedScope(fixture.listing, "listing"), ...extension };
+    const hash = legacyListingHash(scope);
+    const hex = { ...scope, signature: { algorithm: "ed25519", signer: dids[1],
+      value: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${hash}`), privateKeyFromSeed(seeds[1]))).toString("hex") } };
+    const listingRef = { listingId: "svc", version: 1, contentHash: hash };
+    for (const bundle of [fixture.buyerBundle, fixture.sellerBundle]) bundle.listingRef = listingRef;
+    await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
+    assert.equal(await verifyListing(hex), null, "new admission retains strict SIG-6 encoding");
+    const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [fixture.locators.listing]: {
+      encoding: "lowercase-hex", sellerPrimaryClaim: dids[1], listingId: "svc", listingVersion: 1, contentHash: hash,
+    } });
+    const originalFetch = globalThis.fetch;
+    maps.set(fixture.locators.listing, hex);
+    globalThis.fetch = async (input) => {
+      const at = String(input).split("/").pop()!;
+      const data = maps.get(at);
+      return data ? Response.json({ success: true, data, owner: `0x${dids[1].slice(-64)}` })
+        : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+    };
+    try {
+      assert.equal((await verifyStoredListing(hex, fixture.locators.listing))?.contentHash, hash);
+      const graph = await graphAt(fixture.locators.buyer, hex, fixture.locators.listing);
+      assert.equal(graph.ok, true, graph.reason);
+      assert.equal(graph.refsVerified, true);
+      const deal = registeredDeal("historical-hex-session", locator(9901), locator(9902));
+      const registration = { primaryClaim: dids[1], displayName: "seller", listingAnchors: [fixture.locators.listing],
+        deals: [deal], bundleBindings: [
+          await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
+          await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
+        ] };
+      const resolve = async () => { throw new Error("offline"); };
+      const indexed = await indexRegistration(registration, undefined, resolve);
+      assert.equal(indexed.deals[0].refsVerified, true, "the full indexer retains the completed session's pinned history");
+      assert.equal(indexed.reputation.completed, 1);
+      const repeated = await indexRegistration(registration, indexed, resolve);
+      assert.deepEqual(repeated.reputation, indexed.reputation, "recrawl re-verifies the same immutable history");
+      assert.equal(indexed.listings.length, 1, "history is retained by the catalog reader");
+      assert.equal(indexed.listings[0].contentHash, hash);
+      const { saveCatalog } = await import("../src/catalog/store.js");
+      saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [indexed] });
+      const { NextRequest } = await import("next/server");
+      const { GET: detail } = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
+      const response = await detail(new NextRequest("https://directory.example/api/dacs/listings/svc/1"),
+        { params: Promise.resolve({ listingId: "svc", version: "1" }) });
+      assert.equal(response.status, 200, "historical detail reads use the same import contract");
+      assert.deepEqual(await response.json(), hex, "detail retains the stored envelope");
+      const { GET: derive } = await import("../app/api/dacs/derive/route.js");
+      const derived = await derive(new NextRequest(`https://directory.example/api/dacs/derive?claim=${dids[1]}&serviceId=svc`));
+      assert.equal((await derived.json()).valid, true, "derivation rechecks history against fresh owner-bound bytes");
+      assert.deepEqual(graph.listing, hex, "original stored envelope remains available as evidence");
+      const wrongReference = { ...signedScope(fixture.buyerBundle, "bundle"),
+        listingRef: { ...listingRef, contentHash: "f".repeat(64) } };
+      maps.set(fixture.locators.buyer, await resignBundle(wrongReference));
+      assert.equal((await graphAt(fixture.locators.buyer, hex, fixture.locators.listing)).reason,
+        "listing reference failed", "a valid Listing cannot satisfy a different signed hash");
+      maps.set(fixture.locators.buyer, fixture.buyerBundle);
+      assert.equal((await graphAt(fixture.locators.buyer, hex, locator(9999))).ok, false,
+        "an import pin is bound to its exact native locator");
+      const tampered = { ...hex, listingId: "changed-after-signing" };
+      assert.equal((await graphAt(fixture.locators.buyer, tampered, fixture.locators.listing)).ok, false);
+      delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      assert.equal((await graphAt(fixture.locators.buyer, hex, fixture.locators.listing)).ok, false,
+        "an artifact cannot select its own legacy import");
+      const unpinned = await indexRegistration(registration, indexed, resolve);
+      assert.equal(unpinned.deals[0].refsVerified, false, "cached success cannot replace the now-missing import provenance");
+      assert.equal(unpinned.reputation.completed, 0);
 
-  } finally {
-    globalThis.fetch = originalFetch;
-    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
-    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
-  }
-});
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+      else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+    }
+  });
+}
