@@ -5,6 +5,7 @@ import test from "node:test";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { NextRequest } from "next/server";
 import { POST as indexNow } from "../app/api/dacs/index-now/route.js";
+import { artifactHash } from "../src/catalog/evidenceGraph.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
 import { indexerDiagnostics, loadCatalog, recordListingRejection, saveDomains, saveRegistrations } from "../src/catalog/store.js";
@@ -149,4 +150,24 @@ test("index-now keeps a declared-hash notice and crawl-derived history it cannot
   assert.deepEqual(after.map((item) => item.locator).sort(), [locators.listing, rejectedAt("6")].sort());
   assert.equal(after.find((item) => item.locator === locators.listing)?.publicNotice, true);
   assert.equal(loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.listings.length, 0);
+});
+
+test("a corrected declared hash clears the rejection even when an unrelated domain fails to crawl", async () => {
+  const { listing, locators } = await vector("corrected-hash-job", 380);
+  saveDomains(["seller.example", "dead.example"]);
+  saveRegistrations([registration([locators.listing])]);
+  const crawlingWithDeadDomain = (declaredHash: string) => async () => ({
+    agents: [agentDeclaring(locators.listing, declaredHash, true)],
+    errors: [{ domain: "https://dead.example", error: "offline" }],
+  });
+  const notice = () => diagnostics().find((item) => item.locator === locators.listing);
+  const listingCount = () => loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.listings.length;
+
+  await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), true)], false));
+  assert.equal(notice()?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+  assert.equal(listingCount(), 0);
+
+  await reindexWith(crawlingWithDeadDomain(artifactHash(listing, "listing")));
+  assert.equal(notice(), undefined, "the seller declared the matching hash in this pass");
+  assert.equal(listingCount(), 1);
 });
