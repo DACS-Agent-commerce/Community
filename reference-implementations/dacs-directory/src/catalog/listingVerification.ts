@@ -40,12 +40,14 @@ const SEPARATOR = "dacs-listing:v1:";
 
 /**
  * Content hash of a stored Listing under its own profile: a Listing that
- * declares `dacsVersion` uses the current hash, any other the frozen one, as
- * `verifyListing` selects them. Throws like the hash it selects.
+ * declares `dacsVersion` uses the current hash, except historical hex imports;
+ * other Listings use the frozen hash. This does not authenticate an import.
  */
 export function storedListingHash(raw: Record<string, unknown>): string {
   const scope = stripSignature(raw);
-  return "dacsVersion" in raw ? contentHash(scope) : legacyListingHash(scope);
+  const value = record(raw.signature)?.value;
+  return "dacsVersion" in raw && !(typeof value === "string" && /^[0-9a-f]{128}$/.test(value))
+    ? contentHash(scope) : legacyListingHash(scope);
 }
 
 interface VerifiedListingBase {
@@ -167,6 +169,7 @@ export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
   presentedBy: string,
   resolveKey: ResolvePrimaryClaimKey,
+  hashScope = contentHash,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
@@ -178,7 +181,9 @@ export async function verifyIdentityPresentation(
   // §6.3.2 bundle_hash omits only `presentation`; a top-level `signature`
   // member is bundle content, unlike in contentHash.
   const message = Buffer.from(
-    `dacs-bundle-presentation:v1:${identityBundleHash(identity as unknown as IdentityBundle)}`,
+    `dacs-bundle-presentation:v1:${hashScope === contentHash
+      ? identityBundleHash(identity as unknown as IdentityBundle)
+      : hashScope(Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "presentation")))}`,
     "utf8",
   );
   return verifyPrimaryClaimSignature(message, sig, presentedBy, "ed25519", resolveKey);
@@ -207,6 +212,7 @@ export async function verifyListingResult(
 async function verifyListingArtifact(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey,
+  hashScope = contentHash,
 ): Promise<ListingVerificationResult> {
   if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
   // Select the profile before validating it. A failed current artifact must
@@ -244,7 +250,7 @@ async function verifyListingArtifact(
           const decoded = canonicalSignatureBytes(signature.value);
           return Boolean(
             decoded && verifyResolvedPrimaryClaimSignature(
-              signedBytes,
+              hashScope === contentHash ? signedBytes : Buffer.from(SEPARATOR + hashScope(stripSignature(raw))),
               decoded,
               publicKey,
             ),
@@ -261,6 +267,7 @@ async function verifyListingArtifact(
       identity,
       listing.seller.identity.presentedBy,
       resolveKey,
+      hashScope,
     );
     if (!verifiedSeller) return invalid("IDENTITY_PRESENTATION_INVALID");
     const scope = stripSignature(raw) as Record<string, unknown>;
@@ -269,7 +276,7 @@ async function verifyListingArtifact(
       value: {
         listing,
         scope,
-        contentHash: contentHash(scope),
+        contentHash: hashScope(scope),
         signer: verifiedSigner.canonicalClaim,
         sellerClaim: verifiedSeller.canonicalClaim,
         profile: "dacs-v0.1",
@@ -389,7 +396,8 @@ async function importPinnedListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    const result = await verifyListingArtifact(structuredClone({ ...raw, signature: { ...signature, value } }), resolveKey, legacyListingHash);
+    const verified = result.ok ? result.value : null;
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
       ? verified : null;
