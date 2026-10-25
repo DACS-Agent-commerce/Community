@@ -47,6 +47,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  listingRejectionCode,
   pruneRegistrationListingRejections,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -228,6 +229,11 @@ export async function indexRegistration(
       );
       continue;
     }
+    // Without the full discovery state a declaration seen earlier cannot be seen again, so it stays in force.
+    if (reg.discoveryIncomplete && listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH") {
+      rejectedListingAnchors.add(anchor);
+      continue;
+    }
     clearListingRejection(anchor, reg.primaryClaim);
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
@@ -342,8 +348,8 @@ export async function indexRegistration(
     });
   }
 
-  // An incomplete crawl may have hidden anchors this registration only gains from it.
-  if (!reg.listingRejectionPruneDeferred) pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
+  // Incomplete discovery may have hidden anchors this registration only gains from it.
+  if (!reg.discoveryIncomplete) pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
