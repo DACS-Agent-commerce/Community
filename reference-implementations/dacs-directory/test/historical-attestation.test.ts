@@ -49,6 +49,20 @@ test("historical adapter resolves to false for scopes with no frozen hash form",
   assert.equal(calls, 0);
 });
 
+test("historical delivery signatures retain top-level and nested NFC-collision insertion order", async () => {
+  const seed = new Uint8Array(32).fill(27);
+  const key = rawPublicKey(publicKeyFromSeed(seed));
+  const separator = dacsXSeparator("delivery-attestation") as never;
+  const scope = { "é": "first", "e\u0301": "second", nested: [{ "à": 1, "a\u0300": 2 }] };
+  const preimage = '{"nested":[{"à":1,"à":2}],"é":"first","é":"second"}';
+  const hash = createHash("sha256").update(preimage).digest("hex");
+  const signature = Buffer.from(ed25519Sign(Buffer.from(`${separator}${hash}`), privateKeyFromSeed(seed))).toString("hex");
+  const verify = (bytes: Uint8Array, signature: Uint8Array, publicKey: Uint8Array) =>
+    ed25519Verify(bytes, signature, publicKeyFromRaw(publicKey));
+  assert.equal(await verifySignedArtifact({ ...scope, signature }, separator, key, verify), true);
+  assert.equal(await verifySignedArtifact({ ...scope, "é": "changed", signature }, separator, key, verify), false);
+});
+
 test("historical adapter refuses unsupported signature shapes without invoking verification", async () => {
   const separator = dacsXSeparator("delivery-attestation") as never;
   let calls = 0;
