@@ -382,7 +382,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
             }
           }
           // An authenticated publisher's declaration also binds anchors the registration already names.
-          const authenticatedHash = wellKnownWithdrawalProvenance(agent) ? agent.contentHashes[anchor] : undefined;
+          const authenticatedHash = agent.withdrawalAuthenticated ? agent.contentHashes[anchor] : undefined;
           if (authenticatedHash) {
             reg.listingContentHashes ??= {};
             reg.listingContentHashes[anchor] = authenticatedHash;
@@ -415,7 +415,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
       // Fail closed per seller: one that cannot be indexed is left out of this pass, never the whole catalog.
-      const record = await indexRegistration(crawlIncomplete ? { ...reg, listingRejectionPruneDeferred: true } : reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
+      const record = await indexRegistration(crawlIncomplete ? { ...reg, discoveryIncomplete: true } : reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
       }).catch((error: unknown) => {
