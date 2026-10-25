@@ -477,5 +477,5 @@ remain rejected; the labelled draft SDK profile keeps its separate reader.
 this catalog's profile. The identity presentation also accepts the earlier publisher's
 wallet hex and the Standard vector's padded Base64 beside Base64URL; the Listing
 signature stays SIG-6 Base64URL. A string `verificationMethod` is refused, a revocation
-marker needs a non-negative `revokedAt`, and its binding carries the exact `presentedBy`
+marker accepts a numeric `revokedAt` within ±(2^53−1), and its binding carries the exact `presentedBy`
 (RB-2). `test/listing-verification.test.ts` and `test/revocation-vectors.test.ts` pin them.

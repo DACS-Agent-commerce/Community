@@ -10,13 +10,14 @@ process.env.DACS_DIRECTORY_DATA = directory;
 const { crawlDomain, wellKnownWithdrawalMessage } = await import('../src/catalog/wellknown.js');
 const { ingestWellKnownRevocations } = await import('../src/catalog/reindexCore.js');
 const { indexRegistration } = await import('../src/catalog/indexer.js');
-const { findValidListingRevocation, verifyListing } = await import('../src/catalog/listingVerification.js');
+const { revocationLogicalAddress, verifyListing } = await import('../src/catalog/listingVerification.js');
 const store = await import('../src/catalog/store.js');
 const { activeOffer } = await import('../src/catalog/discovery.js');
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
-test('control: authenticated readable tombstone is revoked', async () => {
+for (const [index, revokedAt] of [1, 1784073600000.5, -1, -1.5].entries()) test(`authenticated readable tombstone stays revoked with revokedAt ${revokedAt}`, async () => {
+  const listingId = `svc-${index}`;
   const seed = new Uint8Array(32).fill(41);
   const key = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString('hex');
   const claim = `did:demos:agent:${key}`;
@@ -25,7 +26,7 @@ test('control: authenticated readable tombstone is revoked', async () => {
   const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
     signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
-  const scope = { dacsVersion: '1', listingVersion: 1, listingId: 'svc', requiredCapabilities: ['SR-2'],
+  const scope = { dacsVersion: '1', listingVersion: 1, listingId, requiredCapabilities: ['SR-2'],
     seller: { displayName: 'Service', identity },
     offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
       deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
@@ -35,10 +36,13 @@ test('control: authenticated readable tombstone is revoked', async () => {
     terms: {}, validity: { notBefore: 1 } };
   const listing = { ...scope, signature: sign(scope, 'dacs-listing:v1:') };
   const verified = await verifyListing(listing); assert.ok(verified); assert.equal(verified.profile, 'dacs-v0.1');
-  const markerScope = { listingId: 'svc', listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const markerScope = { listingId, listingVersion: 1, listingContentHash: verified.contentHash, revokedAt };
   const marker = { ...markerScope, signature: sign(markerScope, 'dacs-revocation:v1:') };
-  const binding = await findValidListingRevocation([at(2)], verified, 1, async () => marker); assert.ok(binding);
-  const indexRaw = JSON.stringify({ indexVersion: '1', generatedAt: 123, seller: claim, listings: [{ listingId: 'svc', version: 1,
+  // Build the publisher's binding independently of the verifier under test.
+  const binding = { sellerPrimaryClaim: claim, listingId, listingVersion: 1, listingContentHash: verified.contentHash,
+    logicalAddress: revocationLogicalAddress(claim, listingId, 1), markerAnchor: { kind: 'storage-program', locator: at(2) },
+    markerContentHash: contentHash(markerScope) };
+  const indexRaw = JSON.stringify({ indexVersion: '1', generatedAt: 123 + index, seller: claim, listings: [{ listingId, version: 1,
     contentHash: verified.contentHash, anchor: { kind: 'storage-program', locator: at(1) },
     summary: { title: 'Service', category: 'services.other', tags: [] }, status: 'revoked', revocation: binding }] });
   const docs: Record<string, string> = { '/.well-known/agent.json': JSON.stringify({ dacs: { dacsVersion: '1',
@@ -61,10 +65,12 @@ test('control: authenticated readable tombstone is revoked', async () => {
   try {
     await ingestWellKnownRevocations(crawled);
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
-    const indexed = await indexRegistration(reg, undefined, async () => { throw new Error('offline'); });
-    assert.equal(indexed.listings.length, 1);
-    assert.equal(indexed.listings[0].status, 'revoked');
-    assert.equal(indexed.listings.some(activeOffer), false, `authenticated withdrawal was lost after the first listing read failed: ${JSON.stringify(indexed.listings.map(l => l.status))}`);
+    for (let pass = 0; pass < 2; pass++) {
+      const indexed = await indexRegistration(reg, undefined, async () => { throw new Error('offline'); });
+      assert.equal(indexed.listings.length, 1);
+      assert.equal(indexed.listings[0].status, 'revoked', `indexing pass ${pass}`);
+      assert.equal(indexed.listings.some(activeOffer), false);
+    }
   } finally { globalThis.fetch = oldFetch; }
   assert.equal(store.hasPendingRevocationCandidates(verified.contentHash), true);
 });
