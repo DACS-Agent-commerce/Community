@@ -6,6 +6,7 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import {
   findValidListingRevocation,
+  revocationLogicalAddress,
   verifyListingRevocation,
   type RevocationCandidateProgress,
   type VerifiedListing,
@@ -216,5 +217,33 @@ test("both listing-index statuses require a complete summary before completing a
     }
     assert.equal(complete({ ...entry, summary: { ...summary, future: { inert: true } } }), true);
     assert.equal(complete({ ...entry, anchor: [] }), false);
+  }
+});
+
+test("revoked index rows compare CF-3 identities across claim schemes and retain the exact logical address", async () => {
+  const { listingIndexEntryIsComplete } = await import("../src/catalog/wellknown.js");
+  const binding = fixtures.bindings["opaque-name"];
+  const complete = (publisher: string, seller: string, logicalPublisher = publisher) => listingIndexEntryIsComplete({
+    listingId: binding.listingId, version: binding.listingVersion, contentHash: binding.listingContentHash,
+    anchor: { kind: "storage-program", locator: binding.markerAnchor.locator },
+    summary: { title: "Service", category: "services.other", tags: [] }, status: "revoked",
+    revocation: { ...binding, sellerPrimaryClaim: publisher,
+      logicalAddress: revocationLogicalAddress(logicalPublisher, fixtures.listing.listingId, fixtures.listing.listingVersion) },
+  }, seller);
+  for (const seller of [fixtures.listing.sellerPrimaryClaim, "key:ab", `did:demos:agent:${"a".repeat(64)}`, "future-claim:publisher"]) {
+    const publisher = `${seller}?channel=directory`;
+    assert.equal(complete(seller, seller), true, `${seller}: unqualified`);
+    assert.equal(complete(publisher, seller), true, `${seller}: qualified publisher`);
+    assert.equal(complete(publisher, `${seller}?region=eu`), true, `${seller}: different qualifiers`);
+    assert.equal(complete(publisher, seller, seller), false, `${seller}: logical address needs the exact publisher`);
+    assert.equal(complete(publisher, `${seller}0`), false, `${seller}: different identifier`);
+    assert.equal(complete(publisher, `other:${seller.slice(seller.indexOf(":") + 1)}`), false, `${seller}: different scheme`);
+    for (const suffix of ["?", "?channel=%ZZ", "?channel=one&channel=two", "?z=one&a=two"]) {
+      assert.equal(complete(`${seller}${suffix}`, seller), false, `${seller}: malformed publisher ${suffix}`);
+      assert.equal(complete(publisher, `${seller}${suffix}`), false, `${seller}: malformed seller ${suffix}`);
+    }
+  }
+  for (const malformed of ["not-a-claim", `did:demos:agent:${"A".repeat(64)}`, "key:ab?channel=%ZZ"]) {
+    assert.equal(complete(malformed, malformed), false, "equal malformed references cannot complete a row");
   }
 });

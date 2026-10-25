@@ -15,10 +15,10 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  */
 import { isRevocationBinding } from "@kynesyslabs/dacs/artifacts";
 import { sha256Hex } from "./canonical.js";
+import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
-import { sellerIdentity } from "./discovery.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
@@ -75,7 +75,7 @@ export function bindsListingTuple(
   binding: unknown, seller: string, tuple: { listingId: string; version: number; contentHash: string },
 ): binding is RevocationBinding {
   // The SDK's RB-2 isRevocationBinding shape, then this index's exact tuple.
-  return isRevocationBinding(binding) && sellerIdentity(binding.sellerPrimaryClaim) === sellerIdentity(seller) &&
+  return isRevocationBinding(binding) && sameCanonicalClaimIdentity(binding.sellerPrimaryClaim, seller) &&
     binding.listingId === tuple.listingId && binding.listingVersion === tuple.version &&
     binding.listingContentHash === tuple.contentHash &&
     binding.logicalAddress === revocationLogicalAddress(binding.sellerPrimaryClaim, tuple.listingId, Number(tuple.version)) &&
