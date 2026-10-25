@@ -20,8 +20,11 @@ export interface Registration {
   ownerSignatureVerified?: boolean;
   /** The listing anchors the owner signed, as stored before crawl data was merged in; in memory only, never stored. */
   ownerSignedAnchors?: string[];
-  /** Set when this pass's well-known crawl was incomplete, so absent anchors prove nothing; in memory only, never stored. */
-  listingRejectionPruneDeferred?: boolean;
+  /**
+   * Set when this indexing does not carry the full discovery state (an incomplete crawl, or an immediate
+   * pass that has no crawl): absent anchors and absent declarations prove nothing; in memory only, never stored.
+   */
+  discoveryIncomplete?: boolean;
   /**
    * Deals offered as reputation evidence: bundle refs + the anchor owners
    * (needed to resolve owner-scoped referenced-artifact addresses on the real
