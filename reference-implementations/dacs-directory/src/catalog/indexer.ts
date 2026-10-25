@@ -200,7 +200,7 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
-  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown>; expiredAt?: number }>();
+  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown>; expiredAt?: number; notBefore?: number }>();
   const categoriesByListing = new Map<string, string>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
@@ -270,12 +270,13 @@ export async function indexRegistration(
       : 1;
     // DACS-1 §6.3.4 reader step 3: future terms cannot authenticate deal history.
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
-    if (typeof validity?.notBefore === "number" && now < validity.notBefore) continue;
+    const notBefore = typeof validity?.notBefore === "number" ? validity.notBefore : undefined;
+    if (notBefore !== undefined && now < notBefore) continue;
     const presentation = listingPresentation(scope);
     // Historical deals retain authenticated terms and category after expiry or revocation.
     // An expired Listing only vouches for a deal whose agreement was anchored within its window (see the evidence graph).
     const expiredAt = typeof validity?.notAfter === "number" && now > validity.notAfter ? validity.notAfter : undefined;
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt });
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt, notBefore });
     categoriesByListing.set(listingId, presentation.category);
     if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
