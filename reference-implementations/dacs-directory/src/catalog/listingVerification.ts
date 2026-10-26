@@ -1,6 +1,7 @@
 import { legacyCanonicalize, legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isListing as isCurrentListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { isComponentSignature, isListing as isCurrentListing, isListingDraft, type Listing as CurrentListing, type LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { sameCanonicalClaimIdentity } from "../../vendor/dacs-sdk/dist/identity/claimReference.js";
 import { isHistoricalListing } from "./legacyListingShape.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
@@ -101,12 +102,23 @@ function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
 // scheme is not lowercase (`DID:demos:agent:…`) is refused as the SDK reader
 // refuses it, although DACS-1 §6.3.1 lets a parser read the scheme
 // case-insensitively: CF-2 requires signed bytes to carry the lowercase form.
-function currentListing(scope: Record<string, unknown>): {
+function currentListing(scope: Record<string, unknown>, validateListing: typeof isCurrentListing): {
   signer: string; sellerClaim: string; signature: Record<string, unknown>;
 } | null {
-  if (!isCurrentListing(scope) || !withinDirectoryProfile(scope)) return null;
+  if (!validateListing(scope) || !withinDirectoryProfile(scope)) return null;
   return { signer: scope.signature.signer, sellerClaim: scope.seller.identity.presentedBy,
     signature: scope.signature as unknown as Record<string, unknown> };
+}
+
+// The SDK draft gate has the same schema and pipeline checks without a size
+// decision. Restore its signed-envelope and signer authorization checks here;
+// the frozen profile measures the original scope with its own serializer.
+function isFrozenListing(value: unknown): value is CurrentListing {
+  const raw = record(value);
+  if (!raw) return false;
+  const { signature, ...scope } = raw;
+  return isListingDraft(scope) && isComponentSignature(signature) &&
+    scope.seller.identity.claims.some((claim) => sameCanonicalClaimIdentity(claim.ref, signature.signer));
 }
 
 async function verifyEd25519(
@@ -154,20 +166,21 @@ export async function verifyListing(
 interface ScopeProfile {
   canonicalize: (scope: Record<string, unknown>) => string;
   hashScope: typeof contentHash;
+  validateListing: typeof isCurrentListing;
 }
-const CURRENT_PROFILE: ScopeProfile = { canonicalize, hashScope: contentHash };
-const FROZEN_PROFILE: ScopeProfile = { canonicalize: legacyCanonicalize, hashScope: legacyListingHash };
+const CURRENT_PROFILE: ScopeProfile = { canonicalize, hashScope: contentHash, validateListing: isCurrentListing };
+const FROZEN_PROFILE: ScopeProfile = { canonicalize: legacyCanonicalize, hashScope: legacyListingHash, validateListing: isFrozenListing };
 
 async function verifyListingUsingProfile(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey,
-  { canonicalize: serializeScope, hashScope }: ScopeProfile,
+  { canonicalize: serializeScope, hashScope, validateListing }: ScopeProfile,
 ): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
   // Select the profile before validating it. A failed current artifact must
   // never acquire the looser legacy contract by adding draft SDK fields.
   if ("dacsVersion" in raw) {
-    const current = currentListing(raw);
+    const current = currentListing(raw, validateListing);
     if (!current) return null;
     const scope = { ...raw };
     delete scope.signature;

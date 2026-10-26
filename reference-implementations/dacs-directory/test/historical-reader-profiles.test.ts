@@ -75,6 +75,55 @@ test("historical reads measure the frozen serialization while current admission 
   assert.equal(await verifyListing(current.raw), null);
 });
 
+test("pinned historical hex imports measure the frozen serialization and retain the size cap", async () => {
+  const previous = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+  const empty = listing("hex-boundary", { "e\u0301": "" });
+  const padding = Math.floor((MAX_LISTING_CANONICAL_BYTES - Buffer.byteLength(legacyCanonicalize(empty.scope))) / 2);
+  try {
+    for (const extra of [0, 1]) {
+      const f = listing("hex-boundary", { "e\u0301": "x".repeat(padding + extra) });
+      const raw = { ...f.raw, signature: { ...f.raw.signature,
+        value: Buffer.from(f.raw.signature.value, "base64url").toString("hex") } };
+      const original = JSON.stringify(raw);
+      process.env.DACS_HISTORICAL_LISTING_IMPORTS = JSON.stringify({ [at(1)]: {
+        encoding: "lowercase-hex", contentHash: f.hash, sellerPrimaryClaim: claim,
+        listingId: raw.listingId, listingVersion: raw.listingVersion,
+      } });
+      assert.equal(Buffer.byteLength(legacyCanonicalize(f.scope)) <= MAX_LISTING_CANONICAL_BYTES, extra === 0);
+      assert.ok(Buffer.byteLength(canonicalize(f.scope)) > MAX_LISTING_CANONICAL_BYTES);
+      assert.equal((await verifyStoredListing(raw, at(1)))?.contentHash, extra === 0 ? f.hash : undefined);
+      assert.equal(await verifyListing(raw), null, "hex remains outside current admission");
+      assert.equal(JSON.stringify(raw), original, "import leaves the stored scope and envelope intact");
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DACS_HISTORICAL_LISTING_IMPORTS;
+    else process.env.DACS_HISTORICAL_LISTING_IMPORTS = previous;
+  }
+});
+
+test("frozen reads retain SDK schema, pipeline, signer authorization and presentation checks", async () => {
+  const f = listing("historical-checks", extensions[0]);
+  assert.equal((await verifyStoredListing(f.raw, at(1)))?.contentHash, f.hash);
+  const identity = f.scope.seller.identity;
+  const invalidScopes = [
+    { ...f.scope, validity: { notBefore: -1 } },
+    { ...f.scope, pipeline: f.scope.pipeline.filter((step) => step.kind !== "commit-agreement") },
+    { ...f.scope, offering: { ...f.scope.offering, category: "services..other" } },
+    { ...f.scope, seller: { ...f.scope.seller, identity: { ...identity,
+      presentation: { kind: "per-claim", signatures: [{ ref: claim, signature: Buffer.alloc(64).toString("hex") }] } } } },
+  ];
+  for (const scope of invalidScopes) {
+    const raw = { ...scope, signature: signature(scope, "dacs-listing:v1:") };
+    assert.equal(await verifyStoredListing(raw, at(1)), null, "a valid historical Listing signature does not replace other checks");
+  }
+  const otherSeed = Buffer.alloc(32, 68);
+  const otherClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(otherSeed))).toString("hex")}`;
+  const unauthorized = { ...f.raw, signature: { algorithm: "ed25519", signer: otherClaim,
+    value: Buffer.from(ed25519Sign(Buffer.from("dacs-listing:v1:" + f.hash), privateKeyFromSeed(otherSeed))).toString("base64url") } };
+  assert.equal(await verifyStoredListing(unauthorized, at(1)), null, "the signer must be a carried seller claim");
+  assert.equal(await verifyStoredListing({ ...f.raw, signature: { ...f.raw.signature, extra: true } }, at(1)), null);
+});
+
 test("withdrawal bindings carry the authenticated historical or current marker hash", async () => {
   const f = listing("withdrawal");
   const verified = await verifyListing(f.raw); assert.ok(verified);
