@@ -4,14 +4,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { NextRequest } from "next/server";
+import { GET as listings } from "../app/api/dacs/listings/route.js";
 import { POST as indexNow } from "../app/api/dacs/index-now/route.js";
-import { artifactHash } from "../src/catalog/evidenceGraph.js";
+import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
 import { indexerDiagnostics, loadCatalog, recordListingRejection, saveDomains, saveRegistrations } from "../src/catalog/store.js";
-import type { WellKnownAgent } from "../src/catalog/wellknown.js";
-import { dids, maps, seeds, vector } from "./fixtures/current-evidence.js";
+import { crawlDomain, wellKnownWithdrawalMessage, type WellKnownAgent } from "../src/catalog/wellknown.js";
+import { sha256Hex } from "../src/catalog/canonical.js";
+import { dids, maps, seeds, sign, vector } from "./fixtures/current-evidence.js";
 
 const owner = `0x${dids[1].slice(-64)}`;
 const departedSeller = `did:demos:agent:${"d1".repeat(32)}`;
@@ -202,3 +204,93 @@ test("a corrected declared hash clears the rejection even when an unrelated doma
   assert.equal(notice(), undefined, "the seller declared the matching hash in this pass");
   assert.equal(listingCount(), 1);
 });
+
+async function publicListingVector(jobId: string, offset: number) {
+  const fixture = await vector(jobId, offset);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.acceptedRails = [{ railId: "demos-native:DEM" }];
+  scope.pipeline = [
+    { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
+    { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-attested-payload" },
+  ];
+  const listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, listing);
+  return { listing, locators: fixture.locators };
+}
+
+for (const generatedAt of [100, 200]) {
+  test(`a rejected signed index at ${generatedAt} cannot clear a newer declared-hash notice`, async () => {
+    const { listing, locators } = await publicListingVector("ordered-hash-job", 400 + generatedAt);
+    const source = `https://ordered-${generatedAt}.example`;
+    const hash = artifactHash(listing, "listing");
+    saveDomains([source]);
+    saveRegistrations([registration([locators.listing])]);
+    const crawl = async (timestamp: number, declaredHash: string) => {
+      const raw = JSON.stringify({ indexVersion: "1", generatedAt: timestamp, seller: dids[1], listings: [{
+        listingId: "svc", version: 1, contentHash: declaredHash,
+        anchor: { kind: "storage-program", locator: locators.listing }, status: "active",
+        summary: { title: "Service", category: "services.test", tags: [] },
+      }] });
+      const indexHash = sha256Hex(raw);
+      const signature = Buffer.from(await ed25519Sign(Buffer.from(wellKnownWithdrawalMessage(source, indexHash)),
+        privateKeyFromSeed(seeds[1]))).toString("base64url");
+      const agent = await crawlDomain(source, { validateUrl: async (url) => ({ url: new URL(url), ip: "203.0.113.1" }), fetchJson: async (url) => {
+        const document = url.endsWith("agent.json") ? JSON.stringify({ dacs: { dacsVersion: "1", listings: {
+          indexUrl: `${source}/listings.json`, indexHash, publisherSignature: signature,
+        } } }) : raw;
+        return { raw: document, body: JSON.parse(document) };
+      } });
+      assert.ok(!("error" in agent));
+      assert.equal(agent.withdrawalAuthenticated, true);
+      return crawling([agent], false);
+    };
+    const publicCount = async () => {
+      const response = await listings(new NextRequest("https://directory.example/api/dacs/listings"));
+      assert.equal(response.status, 200);
+      return (await response.json()).total;
+    };
+    const notice = () => diagnostics().find((item) => item.locator === locators.listing);
+    await reindexWith(await crawl(200, "f".repeat(64)));
+    const before = notice();
+    assert.equal(before?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+    assert.equal(before?.publicNotice, true);
+    assert.equal(await publicCount(), 0);
+    for (let repeat = 0; repeat < 2; repeat++) {
+      await reindexWith(await crawl(generatedAt, hash));
+      assert.deepEqual(notice(), before, "a refused source cannot discharge or rewrite the rejection");
+      assert.equal(await publicCount(), 0);
+    }
+    await reindexWith(await crawl(201, hash));
+    assert.equal(notice(), undefined, "a newer accepted source can correct the declaration");
+    assert.equal(await publicCount(), 1);
+  });
+}
+
+for (const mode of ["index-now", "failed crawl"] as const) {
+  test(`an unsigned mismatch cannot hold an owner-signed registration during ${mode}`, async () => {
+    const { locators } = await publicListingVector("unsigned-hash-job", 700);
+    saveDomains(["seller.example"]);
+    saveRegistrations([]);
+    await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), false)], false));
+    const before = diagnostics().find((item) => item.locator === locators.listing);
+    assert.equal(before?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+    assert.equal(before?.publicNotice, false);
+    const stored = registration([locators.listing]);
+    const message = registrationMessage(stored, 1);
+    const signature = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+    saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
+    if (mode === "index-now") {
+      await withChainFetch(async () => {
+        const response = await indexNow(new NextRequest("https://directory.example/api/dacs/index-now",
+          { method: "POST", body: JSON.stringify({ claim: dids[1] }) }));
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).listings, 1);
+      });
+    } else await reindexWith(crawling([], true));
+    const seller = loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1]);
+    assert.equal(seller?.ownerRegistered, true);
+    assert.equal(seller?.listings.length, 1);
+    const response = await listings(new NextRequest("https://directory.example/api/dacs/listings"));
+    assert.equal((await response.json()).total, 1);
+  });
+}
