@@ -3,7 +3,7 @@ import test from "node:test";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { parseWireJson, storageResponseJson } from "../src/catalog/artifactLimits.js";
-import { storageWriteCandidate } from "../src/catalog/scan.js";
+import { readChainTip, storageWriteCandidate } from "../src/catalog/scan.js";
 import { verifyListing, verifyListingRevocation } from "../src/catalog/listingVerification.js";
 
 // CORE §B.2 admits JSON `-0` and serializes it as `0`; a signed artifact carrying it must read as the `0` it signs.
@@ -61,4 +61,11 @@ test("a storage write carrying -0 is attributed to the hash of the same data wri
   const expected = candidate('{"score":0}');
   assert.ok(expected, "control: the same write with 0 is attributed");
   assert.deepEqual(candidate('{"score":-0}'), expected);
+});
+
+test("scanner nodeCall reads a negative-zero transaction tip as zero", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{"result":200,"response":[{"id":-0}]}');
+  try { assert.ok(Object.is(await readChainTip(), 0)); }
+  finally { globalThis.fetch = original; }
 });
