@@ -169,13 +169,19 @@ test("an omitted seller keeps rejection history until its registration leaves th
   assert.equal(diagnostic()?.occurrences, 1);
 
   const prepare = Database.prototype.prepare;
+  let interruptedPruning = false;
   const interrupted = t.mock.method(Database.prototype, "prepare", function (this: Database.Database, sql: string) {
-    if (sql === "SELECT locator FROM listing_rejections WHERE registration_claim = ?") throw new Error("seller indexing interrupted");
+    // Match the pruning read independently of the diagnostic columns it selects.
+    if (sql.startsWith("SELECT ") && sql.endsWith(" FROM listing_rejections WHERE registration_claim = ?")) {
+      interruptedPruning = true;
+      throw new Error("seller indexing interrupted");
+    }
     return prepare.call(this, sql);
   });
   now = 2000;
   await run();
   interrupted.mock.restore();
+  assert.equal(interruptedPruning, true, "the seller's rejection pruning was interrupted");
   assert.deepEqual(store.loadCatalog().sellers, [], "the failed seller is omitted from this catalog");
   assert.equal(diagnostic()?.firstSeenAt, 1000);
   assert.equal(diagnostic()?.occurrences, 2);
