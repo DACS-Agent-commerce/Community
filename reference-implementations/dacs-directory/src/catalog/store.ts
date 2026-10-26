@@ -948,9 +948,9 @@ export function recordListingRejection(
     );
 }
 
-/** The reason code currently recorded for an anchor under a registration, or undefined when none is. */
-export function listingRejectionCode(locator: string, registrationClaim: string): ListingRejectionCode | undefined {
-  const row = db.prepare("SELECT reason_code FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
+/** The authenticated notice code for an anchor under a registration, or undefined when none is. */
+export function listingRejectionNoticeCode(locator: string, registrationClaim: string): ListingRejectionCode | undefined {
+  const row = db.prepare("SELECT reason_code FROM listing_rejections WHERE locator = ? AND registration_claim = ? AND public_notice = 1")
     .get(locator, registrationClaim.toLowerCase()) as { reason_code: ListingRejectionCode } | undefined;
   return row?.reason_code;
 }
