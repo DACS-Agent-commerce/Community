@@ -464,6 +464,34 @@ test("only a publisher-authenticated hash declaration for a seller-matching list
   } finally { globalThis.fetch = originalFetch; }
 });
 
+for (const discoveryIncomplete of [false, true]) {
+  test(`an unverifiable read keeps a corrected hash notice but not a withdrawn one (incomplete ${discoveryIncomplete})`, async () => {
+    const anchor = `stor-${"5".repeat(40)}`;
+    const valid = signedListing("withdrawn-declaration", attested({ kind: "self-signed" }));
+    let data = valid;
+    const reg: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor], discoveryIncomplete };
+    const declaring = (hashes: Record<string, string>) => ({ "https://publisher.example": { hashes, current: true } });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, data });
+    const notice = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor);
+    try {
+      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({ [anchor]: "0".repeat(64) }) }, undefined, async () => ({}));
+      const before = notice();
+      assert.equal(before?.publicNotice, true);
+      data = { ...valid, signature: { algorithm: "ed25519", signer: seller, value: "invalid" } };
+      const { signature: _signature, ...scope } = valid;
+      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({ [anchor]: contentHash(scope) }) }, undefined, async () => ({}));
+      assert.deepEqual(notice(), before, "invalid bytes cannot show the corrected declaration matches");
+      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({}) }, undefined, async () => ({}));
+      assert.equal(notice()?.code, "NORMATIVE_LISTING_INVALID", "a withdrawn declaration no longer supports the notice");
+      assert.equal(notice()?.publicNotice, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      store.clearRegistrationListingRejections(seller);
+    }
+  });
+}
+
 const unverifiableReads: Record<string, (valid: Obj) => Obj> = {
   "invalid shape": () => ({ dacsVersion: "1" }),
   "invalid signature": (valid) => ({ ...valid, signature: { algorithm: "ed25519", signer: seller, value: "invalid" } }),
