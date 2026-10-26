@@ -113,6 +113,7 @@ railway up . --no-gitignore
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
+| `DEMOS_CHAIN_IDENTITY` | No | Chain the catalog is built from (block one's `previousHash`); defaults to the pinned chain. Reindex and index-now refuse a node serving another chain; a self-reported build outside `DEMOS_NODE_BUILDS` is only a warning |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
@@ -238,11 +239,15 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    anchored DACS artifacts by their self-describing program names, and attributes deals
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
-   hits the cap fails rather than advancing the cursor and silently skipping history, except
-   a full history replay (a first run, a schema upgrade, or a changed or unrecorded chain),
-   which resumes below the last pass across passes and leaves the catalog unwritten until it
-   reaches genesis, and `POST /api/dacs/index-now` answers 409 meanwhile. Deals a pass found
-   without a seller are re-attributed in each later window of the replay.
+   hits the cap fails rather than advancing the cursor and silently skipping history.
+   Chain gate: a reindex or `POST /api/dacs/index-now` first reads the chain the node
+   serves. When the node cannot be read (index-now: 503) or serves a chain other than
+   `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
+   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Each complete pass
+   records the chain it scanned. A re-pin empties the public catalog and replays from
+   genesis; a state with no recorded chain (an upgrade) replays once and keeps its catalog
+   meanwhile. A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records nothing, so
+   raise the cap. index-now answers 409 until a complete pass on this chain is recorded.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those

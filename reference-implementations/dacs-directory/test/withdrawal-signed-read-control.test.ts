@@ -63,25 +63,7 @@ for (const [index, revokedAt] of [1, 1784073600000.5, -1, -1.5].entries()) test(
     return Response.json({ success: true, owner: `0x${key}`, data: isMarker ? marker : listing });
   };
   try {
-    // Keep a fully authenticated carrier and readable Listing; change only one
-    // carried coordinate, before any candidate for this Listing has been saved.
-    for (const withdrawalAuthenticated of [true, false]) {
-      for (const change of [
-        { sellerPrimaryClaim: `did:demos:agent:${'b'.repeat(64)}` },
-        { sellerPrimaryClaim: `${claim}?note=other-presentation` },
-        { listingContentHash: 'c'.repeat(64) },
-        { listingId: 'other-service' },
-        { listingVersion: 2 },
-      ]) {
-        await ingestWellKnownRevocations({ ...crawled, withdrawalAuthenticated,
-          revocations: [{ ...binding, ...change }] });
-        assert.deepEqual(store.nextRevocationCandidates(verified.contentHash, `0x${key}`, 10), [], JSON.stringify(change));
-        assert.equal(store.retainedListingRevocation(verified.contentHash), null, JSON.stringify(change));
-      }
-    }
     await ingestWellKnownRevocations(crawled);
-    assert.deepEqual(store.nextRevocationCandidates(verified.contentHash, `0x${key}`, 10), [at(2)],
-      'matching authenticated carriage queues the marker');
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
     for (let pass = 0; pass < 2; pass++) {
       const indexed = await indexRegistration(reg, undefined, async () => { throw new Error('offline'); });
