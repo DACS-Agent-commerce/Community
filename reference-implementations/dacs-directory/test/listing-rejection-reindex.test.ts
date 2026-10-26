@@ -669,3 +669,66 @@ test("a domain's newly signed seller does not refresh its previous seller's decl
   assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing && item.publicNotice), before);
   assert.equal(await publicListingCount(), 0);
 });
+
+const withUnrelatedFailure = (agents: WellKnownAgent[]) => async () => ({
+  agents, errors: [{ domain: "https://unrelated-offline.example", error: "offline" }],
+});
+
+test("an accepted signed omission clears a declared-hash notice while an unrelated domain fails to crawl", async () => {
+  const { locators } = await publicListingVector("signed-omission", 1900);
+  saveDomains([domain, "https://unrelated-offline.example"]);
+  saveRegistrations([registration([locators.listing])]);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64))], false));
+  assert.equal(diagnostics().find((item) => item.locator === locators.listing)?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+  await reindexWith(withUnrelatedFailure([await signedDeclaration(domain, locators.listing, null, 101)]));
+  assert.equal(diagnostics().some((item) => item.locator === locators.listing), false, "every source of the seller was accepted");
+  assert.equal(await publicListingCount(), 1);
+});
+
+test("a signed omission keeps a declared-hash notice while another source of the seller is unread", async () => {
+  const { listing, locators } = await publicListingVector("omission-unread-peer", 2000);
+  const peer = "https://omission-peer.example";
+  saveDomains([domain, peer]);
+  saveRegistrations([registration([locators.listing])]);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64)),
+    await signedDeclaration(peer, locators.listing, artifactHash(listing, "listing"))], false));
+  const before = diagnostics().find((item) => item.locator === locators.listing);
+  assert.equal(before?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+  await reindexWith(async () => ({ agents: [await signedDeclaration(domain, locators.listing, null, 101)],
+    errors: [{ domain: peer, error: "offline" }] }));
+  assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing), before);
+  assert.equal(await publicListingCount(), 0);
+});
+
+for (const failed of [false, true]) {
+  test(`a signed hash correction replaces a declared-hash notice with the owner notice (unrelated failure ${failed})`, async () => {
+    const { listing, locators } = await publicListingVector("corrected-owner-mismatch", 2100);
+    const stored = registration([locators.listing]);
+    const message = registrationMessage(stored, 1);
+    const signature = Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+    saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
+    saveDomains([domain, "https://unrelated-offline.example"]);
+    await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64))], false));
+    assert.equal(diagnostics().find((item) => item.locator === locators.listing)?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+    const corrected = [await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing"), 101)];
+    await reindexWith(failed ? withUnrelatedFailure(corrected) : crawling(corrected, false), `0x${"f".repeat(64)}`);
+    const notice = diagnostics().find((item) => item.locator === locators.listing);
+    assert.equal(notice?.code, "OWNER_CLAIM_BINDING");
+    assert.equal(notice?.publicNotice, true);
+    assert.equal(await publicListingCount(), 0);
+  });
+}
+
+test("an owner mismatch keeps a declared-hash notice while another saved declaration still differs", async () => {
+  const { listing, locators } = await publicListingVector("owner-mismatch-unresolved-hash", 2200);
+  const peer = "https://owner-mismatch-peer.example";
+  saveDomains([domain, peer]);
+  saveRegistrations([registration([locators.listing])]);
+  const matching = await signedDeclaration(peer, locators.listing, artifactHash(listing, "listing"));
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64)), matching], false));
+  const before = diagnostics().find((item) => item.locator === locators.listing);
+  assert.equal(before?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+  await reindexWith(crawling([matching], true), `0x${"f".repeat(64)}`);
+  assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing), before);
+  assert.equal(await publicListingCount(), 0);
+});
