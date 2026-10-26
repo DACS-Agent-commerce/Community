@@ -430,8 +430,8 @@ async function verifyCurrentEvidenceGraph(
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  const verifiedListing = listed && await verifyStoredListing(listed.raw, listed.locator, resolveKey);
-  if (!verifiedListing || verifiedListing.contentHash !== listingHash) return { ...fail("listing reference failed"), signaturesVerified };
+  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
+      !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);

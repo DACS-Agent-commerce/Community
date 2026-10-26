@@ -26,9 +26,7 @@
 #   Every required/oneOf member must declare a boolean verificationRequired;
 #   VerifyResult shape is checked even when verificationRequired is false.
 #   BundleRequirement requires requirementVersion "1". Result and policy methods
-#   must belong to the nine-kind DACS-2 VerificationMethod registry: the eight
-#   kinds of the pinned revision plus demos-gcr-domain, which is defined by the
-#   Standard revision the pinned SDK declares (STANDARD_REV, scripts/setup-sdk.sh).
+#   must belong to the pinned eight-kind DACS-2 VerificationMethod registry.
 #   Unversioned requirements select the latest version in the supplied roster.
 #   Primary selection authenticates the exact result without overriding explicit
 #   listing recipe pins. Every presentedBy requires a trusted method-specific

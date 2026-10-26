@@ -454,8 +454,7 @@ test("reindex drops malformed carried bindings and still indexes every later sel
   chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
-  // No canonical form: the pinned SDK refuses its nesting before recursing (DacsError, not RangeError).
-  assert.throws(() => contentHash(carried));
+  assert.throws(() => contentHash(carried), RangeError);
   resetIndex([
     { primaryClaim: buyer, displayName: "Carrier", listingAnchors: [], bundleBindings: [carried, binding] },
     { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] },

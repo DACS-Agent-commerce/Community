@@ -18,16 +18,17 @@ import { ownArray } from "./scanState.js";
 // Pure vendored subpaths only; no substrate client dependency.
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "./canonical.js";
-import { legacyListingHash } from "./legacyListingHash.js";
-import { usesCurrentBundleProfile } from "./bundleProfile.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
-import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 // verifyBundleCore is exported from the SDK's agent barrel, but that barrel
 // also re-exports createAgent/Agent.js, which pulls in the substrate/bridge
 // dependency chain (rubic-sdk → cetus-sui-clmm-sdk → a broken @mysten/bcs
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+// The SDK at SDK_REV (2026-07-04) doesn't export sessionAnchorName from its public
+// barrel; upstream fixed that after the pin (dacs-sdk#178, follow-up to #14), so
+// reach into the vendored build until the pin moves.
+import { sessionAnchorName } from "../../vendor/dacs-sdk/dist/agent/runSessionCore.js";
 import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
@@ -59,10 +60,10 @@ import {
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
-import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
+import { deriveSellerReputation, flipOutcome, isNeutralCancellation } from "./reputation.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
-import { legacyCopyCanVerifyRefs, reconcileLegacyCopies, reconcileCurrentCopies } from "./currentReconciliation.js";
+import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "./currentReconciliation.js";
 import {
   boundedBundleBindings,
   bundleBindingOverflowKey,
@@ -70,7 +71,6 @@ import {
   verifyBundleBinding,
 } from "./bundleBinding.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
-import { legacySessionAnchorName } from "./legacySessionAnchorName.js";
 import { deriveIdentityTier, type ResolveRecipe } from "./identityVerification.js";
 import {
   bundleMatchesRegisteredDeal,
@@ -133,7 +133,6 @@ export async function indexRegistration(
   resolveIdentities: ResolveIdentities = gcrGetIdentities,
   resolveRecipe?: ResolveRecipe,
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
-  verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
 
@@ -154,7 +153,7 @@ export async function indexRegistration(
     const explorerFor = (chainType: string, address: string): string | undefined =>
       chainType === "evm" ? `https://etherscan.io/address/${address}` :
       chainType === "solana" ? `https://solscan.io/account/${address}` : undefined;
-    cci = record.claims.filter((c) => c.kind === "web2" || c.kind === "wallet").map((c) => c.kind === "web2"
+    cci = record.claims.map((c) => c.kind === "web2"
       ? { kind: c.kind, platform: c.platform, handle: c.handle, ref: c.ref,
           proofUrl: proofFor(c.platform, c.handle), linkUrl: profileFor(c.platform, c.handle) }
       : { kind: c.kind, platform: c.chainType, handle: c.address, ref: c.ref,
@@ -333,14 +332,14 @@ export async function indexRegistration(
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
     const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
-    const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
+    const buyerIsCurrent = buyerInitial?.bundleVersion === "1" || buyerInitial?.faultBundleVersion === "1";
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
       : await graphFor(deal.sellerBundleRef);
     // Profile selection is based on the signed format discriminator, not on
     // whether verification succeeds. A malformed current bundle must fail in
     // the current verifier instead of being retried by the legacy verifier.
-    if (jobBindings.length > 0 || buyerIsCurrent || usesCurrentBundleProfile(sellerCurrentProbe?.bundle ?? null)) {
+    if (jobBindings.length > 0 || buyerIsCurrent || sellerCurrentProbe?.bundle.bundleVersion === "1" || sellerCurrentProbe?.bundle.faultBundleVersion === "1") {
       const graphCache = new Map<string, Promise<EvidenceGraph>>();
       if (sellerCurrentProbe && deal.sellerBundleRef) {
         graphCache.set(deal.sellerBundleRef, Promise.resolve(sellerCurrentProbe));
@@ -460,7 +459,7 @@ export async function indexRegistration(
     const verifyCopy = async (ref: string, expectedRole: "buyer" | "seller") => {
       const resolvedArtifacts: ResolvedArtifact[] = [];
       let rawBundle: Record<string, unknown> | null = null;
-      const verification = await verifyLegacyBundle(ref, {
+      const verification = await verifyBundleCore(ref, {
         readArtifact: async (r) => {
           const raw = await readAnchor(r);
           if (r === ref) rawBundle = raw;
@@ -468,9 +467,9 @@ export async function indexRegistration(
           return raw;
         },
         resolveRef: async (kind, jobId) => {
-          const name = kind === "dacs-3-agreement" ? legacySessionAnchorName.agreement(jobId)
-            : kind === "dacs-4-evidence" ? legacySessionAnchorName.evidence(jobId)
-              : kind === "dacs-2-verifyresult" ? legacySessionAnchorName.vet(jobId) : null;
+          const name = kind === "dacs-3-agreement" ? sessionAnchorName.agreement(jobId)
+            : kind === "dacs-4-evidence" ? sessionAnchorName.evidence(jobId)
+              : kind === "dacs-2-verifyresult" ? sessionAnchorName.vet(jobId) : null;
           if (!name) return null;
           const address = resolveProgramAddress(deal.owners.buyer, name);
           if (!address) return null;
@@ -481,35 +480,38 @@ export async function indexRegistration(
         resolvePublicKey: async (claim) =>
           (await resolveDemosPrimaryClaimKey(claim, "ed25519"))?.publicKey ?? null,
         verify,
-      }).catch((error) => {
-        throwIfInfrastructureError(error);
-        return null;
-      });
-      const bundle = verification && isLegacyMvpAttestationBundle(verification.bundle)
-        ? verification.bundle
-        : undefined;
+      }).catch(() => null);
+      const bundle = verification?.bundle;
       const signaturesOk = verification ? hasRequiredBundleSignatures(
         verification,
         rawBundle,
       ) : false;
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
-      const authenticated = Boolean(verification) && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole);
-      const refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts,
-        carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
+      const refsOk = verification && signaturesOk && bindingOk && bundle?.anchoredByRole === expectedRole
+        ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
+      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
     const sellerCopy = deal.sellerBundleRef ? await verifyCopy(deal.sellerBundleRef, "seller") : null;
-    const { authoritative, refsVerified: strictRefsVerified, sellerOutcome, reputationEligible } =
-      reconcileLegacyCopies(buyerCopy, sellerCopy);
+    const divergent = Boolean(
+      buyerCopy.refsOk && sellerCopy?.refsOk &&
+      buyerCopy.bundle && sellerCopy.bundle && currentBundleCopiesDiverge(
+        buyerCopy.bundle as unknown as Record<string, unknown>,
+        sellerCopy.bundle as unknown as Record<string, unknown>,
+      ),
+    );
+    const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
     const bundle = authoritative.bundle;
+    const strictRefsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && !divergent;
     const selectedRaw = authoritative.rawBundle as Record<string, unknown> | null;
     const signedBundleScope: Record<string, unknown> | null = selectedRaw ? Object.assign({}, selectedRaw) : null;
     if (signedBundleScope) {
       delete signedBundleScope.signatures;
       delete signedBundleScope.anchoredByRole;
     }
+    const sellerOutcome = authoritative === sellerCopy ? bundle?.outcome : flipOutcome(bundle?.outcome);
+    const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);
     const cancellation = selectedRaw?.cancellation as { claimedPolicy?: unknown } | undefined;
     const listingTerms = verifiedListingTerms(
       authoritative.verification,
@@ -522,15 +524,13 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
-      verificationLimitation: !strictRefsVerified && (buyerCopy.carriesVetRecords || sellerCopy?.carriesVetRecords)
-        ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"
         ? bundle.anchoredByRole : undefined,
       // Only a bundle the verifier already hashed is hashed again; a rejected raw bundle gets no hash.
-      bundleContentHash: bundle && signedBundleScope ? legacyListingHash(signedBundleScope) : undefined,
-      reputationEligible,
+      bundleContentHash: bundle && signedBundleScope ? contentHash(signedBundleScope) : undefined,
+      reputationEligible: strictRefsVerified && currentOutcomes.has(sellerOutcome ?? ""),
       cancellationNeutral,
       finalisedAt: bundle?.finalisedAt,
       anchorTimestamp: artifactAnchorTime(selectedLocator),

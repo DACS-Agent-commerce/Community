@@ -13,6 +13,5 @@ data/.indexer-*
 
 vendor/dacs-sdk/*
 !vendor/dacs-sdk/package.json
-!vendor/dacs-sdk/.dacs-sdk-revision
 !vendor/dacs-sdk/dist/
 !vendor/dacs-sdk/dist/**

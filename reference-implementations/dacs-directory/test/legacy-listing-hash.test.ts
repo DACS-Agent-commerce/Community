@@ -3,12 +3,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
-import { canonicalize } from "../src/catalog/canonical.js";
 import { registerLegacyListingHashCases } from "./fixtures/legacy-listing-hash-cases.js";
 
 const digest = (preimage: string) => createHash("sha256").update(preimage, "utf8").digest("hex");
 
-registerLegacyListingHashCases(test, assert, legacyListingHash, canonicalize, digest);
+registerLegacyListingHashCases(test, assert, legacyListingHash, digest);
 
 test("historical string values and keys have literal frozen preimages", () => {
   assert.equal(legacyListingHash({ value: "é" }), digest('{"value":"é"}'));

@@ -14,14 +14,12 @@ test("canonical wrappers reject lone surrogates in nested values and keys", () =
   }
 });
 
-test("valid surrogate pairs and NFC-equivalent values retain canonical hashes; member names stay byte-exact", () => {
-  const a = { "caf\u00e9": ["\u00e9l\u00e8ve", "\ud83d\ude00"] };
-  const b = { "caf\u00e9": ["e\u0301le\u0300ve", "\ud83d\ude00"] };
+test("valid surrogate pairs and NFC-equivalent keys and values retain canonical hashes", () => {
+  const a = { "café": ["élève", "😀"] };
+  const b = { "cafe\u0301": ["e\u0301le\u0300ve", "\ud83d\ude00"] };
   assert.doesNotThrow(() => assertValidUnicode(a));
   assert.equal(canonicalize(a), canonicalize(b));
   assert.equal(contentHash(a), contentHash(b));
-  // The pinned SDK NFC-normalises string values only (CF-1); RFC 8785 keeps member names unchanged.
-  assert.notEqual(canonicalize(a), canonicalize({ "cafe\u0301": ["\u00e9l\u00e8ve", "\ud83d\ude00"] }));
   assert.equal(sha256Hex(canonicalize(a)), sha256Hex(canonicalize(b)));
   assert.equal(sha256Hex("😀"), sha256Hex("\ud83d\ude00"));
   assert.equal(listingAddress("did:example:😀", "svc", 1), listingAddress("did:example:\ud83d\ude00", "svc", 1));

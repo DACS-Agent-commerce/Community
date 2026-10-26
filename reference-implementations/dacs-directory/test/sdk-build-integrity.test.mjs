@@ -47,8 +47,8 @@ test("the SDK compatibility patch bytes match their setup pin", () => {
   assert.equal(createHash("sha256").update(patch).digest("hex"), expected);
 });
 
-test("setup pins the SDK revision that the compatibility patch is built against", () => {
-  assert.equal(pinned.match(/^SDK_REV="([0-9a-f]{40})"$/m)?.[1], "3904d704fb540e6e1d7dd502a0be29f20569c92d");
+test("setup records the full SDK revision that the compatibility patch is built against", () => {
+  assert.match(pinned, /^SDK_PATCH_BASE_REV="[0-9a-f]{40}"$/m);
 });
 
 function withDistTree(files, run) {

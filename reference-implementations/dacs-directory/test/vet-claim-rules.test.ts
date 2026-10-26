@@ -15,8 +15,6 @@ const locator = `stor-${"a".repeat(40)}`;
 function proof(scheme = "lei", identifier = "ABC", change: Obj = {}, claimChange: Obj = {}) {
   const scope = { resultVersion: "1", scheme, identifier, recipeVersion: 1, method: "verifiable-credential", decision: "pass", verifiedAt: 20, validUntil: 100, reason: "registry response", fetchedAt: 19,
     attestation: { anchor: { kind: "storage-program", locator }, contentHash: "d".repeat(64) }, ...change };
-  // An `undefined` change removes the member: the pinned SDK hashes only data-only JSON.
-  for (const [key, value] of Object.entries(scope)) if (value === undefined) delete (scope as Obj)[key];
   const contentHash = artifactHash(scope, "verify-result");
   const raw = { ...scope, signature: { signer, algorithm: "ed25519", value: Buffer.from(ed25519Sign(Buffer.from(`dacs-verifyresult:v1:${contentHash}`), privateKeyFromSeed(seed))).toString("base64url") } };
   const result: ResolvedEvidence = { kind: "verify-result", raw, contentHash, locator };

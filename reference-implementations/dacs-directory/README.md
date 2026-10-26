@@ -105,8 +105,8 @@ its 1.6 GB development dependency tree:
 railway up . --no-gitignore
 ```
 
-`.railwayignore` includes only the SDK's compiled `dist` output, its `package.json` and the
-`.dacs-sdk-revision` marker that setup requires from the otherwise ignored vendor directory.
+`.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
+vendor directory.
 
 ### Configuration
 

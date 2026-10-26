@@ -1,4 +1,4 @@
-// Run these exact preimage and stability assertions in Node and the browser.
+// Preimage and stability assertions written against an adapter, so any test runner can execute the same cases.
 export interface HashAssertions {
   equal(actual: unknown, expected: unknown): void;
   match(actual: string, expected: RegExp): void;
@@ -9,7 +9,6 @@ export function registerLegacyListingHashCases(
   test: (name: string, run: () => void) => void,
   assert: HashAssertions,
   legacyListingHash: (scope: Record<string, unknown>) => string,
-  canonicalize: (scope: unknown) => string,
   digest: (preimage: string) => string,
 ): void {
   test("historical member ordering is stable across large insertion permutations and NFC collisions", () => {
@@ -27,9 +26,6 @@ export function registerLegacyListingHashCases(
         // This preimage intentionally contains duplicate normalized member names.
         const collisionPreimage = colliding.map(([, value]) => `"é":"${value}"`).join(",");
         assert.equal(legacyListingHash(scope), digest(`{${sortedPreimage},${collisionPreimage}}`));
-        // Current canonicalization preserves the original, distinct member names.
-        assert.match(canonicalize(scope), /"é":"decomposed"/);
-        assert.match(canonicalize(scope), /"é":"composed"/);
       }
     }
   });
@@ -44,7 +40,6 @@ export function registerLegacyListingHashCases(
       const scope = { nested: [value] };
       assert.equal(legacyListingHash(scope), digest(`{"nested":[${value}]}`));
     }
-    assert.equal(canonicalize({ nested: [0.5] }), '{"nested":[0.5]}');
   });
 
   test("historical NFC-equal members keep insertion order across separate sorting runs", () => {
