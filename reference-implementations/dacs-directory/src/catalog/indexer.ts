@@ -205,6 +205,7 @@ export async function indexRegistration(
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
   const { verifiedRevocations } = loadScanState();
+  const normalizedHash = (hash: string) => hash.replace(/^sha256-/, "").toLowerCase();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
     if (!anchored) {
@@ -213,28 +214,30 @@ export async function indexRegistration(
       continue;
     }
     const sourceDeclarations = Object.values(reg.authenticatedHashDeclarations ?? {});
-    const authenticatedHashes = sourceDeclarations.flatMap((source) => source?.hashes[anchor] ? [source.hashes[anchor]] : []);
+    const authenticatedHashes = sourceDeclarations.flatMap((source) => source?.hashes[anchor] ? [normalizedHash(source.hashes[anchor])] : []);
     const currentDeclaration = sourceDeclarations.some((source) => source?.current && source.hashes[anchor]);
-    const declaredHashes = (authenticatedHashes.length > 0 ? authenticatedHashes
-      : reg.listingContentHashes?.[anchor] ? [reg.listingContentHashes[anchor]] : [])
-      .map((hash) => hash.replace(/^sha256-/, "").toLowerCase());
-    const declaredHash = declaredHashes[0];
+    const unsignedHash = reg.listingContentHashes?.[anchor];
+    const declaredHashes = authenticatedHashes.length > 0 ? authenticatedHashes : unsignedHash ? [normalizedHash(unsignedHash)] : [];
     const heldNotice = listingRejectionNoticeCode(anchor, reg.primaryClaim);
-    // An authenticated mismatch requires an authenticated replacement declaration.
-    // An incomplete pass without one cannot replace the saved notice or admit the listing.
-    const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
-      heldNotice === "DECLARED_CONTENT_HASH_MISMATCH";
-    if (hashMismatchHeld && (!currentDeclaration || sourceDeclarations.includes(null))) {
+    // A held hash notice waits until this pass knows every authenticated declaration of the anchor: a current
+    // source declares it, every saved source was accepted in this pass, or a complete pass finds no declaration.
+    const declarationsKnown = !sourceDeclarations.includes(null) && (currentDeclaration ||
+      (sourceDeclarations.length > 0 && sourceDeclarations.every((source) => source?.current)) ||
+      (!reg.discoveryIncomplete && declaredHashes.length === 0));
+    if (heldNotice === "DECLARED_CONTENT_HASH_MISMATCH" && !declarationsKnown) {
       rejectedListingAnchors.add(anchor);
       continue;
     }
+    // A held public notice stands until a read refutes it: the owner notice yields to any verified listing,
+    // the hash notice once every authenticated declaration of the anchor matches the verified hash or is withdrawn.
+    const heldNoticeStands = (verifiedHash?: string): boolean => heldNotice === "OWNER_CLAIM_BINDING"
+      ? verifiedHash === undefined
+      : heldNotice === "DECLARED_CONTENT_HASH_MISMATCH" && authenticatedHashes.some((hash) => hash !== verifiedHash);
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
       rejectedListingAnchors.add(anchor);
-      if (!hashMismatchHeld && heldNotice !== "OWNER_CLAIM_BINDING") {
-        recordListingRejection(anchor, reg.primaryClaim, verification.code);
-      }
+      if (!heldNoticeStands()) recordListingRejection(anchor, reg.primaryClaim, verification.code);
       continue;
     }
     const verified = verification.value;
@@ -246,7 +249,7 @@ export async function indexRegistration(
     );
     if (bindingRejection) {
       rejectedListingAnchors.add(anchor);
-      if (!hashMismatchHeld) {
+      if (!heldNoticeStands(verified.contentHash)) {
         recordListingRejection(
           anchor,
           reg.primaryClaim,
@@ -266,11 +269,6 @@ export async function indexRegistration(
         listingDiagnosticCoordinates(verified.scope),
         authenticatedHashes.length > 0,
       );
-      continue;
-    }
-    // A declaration that was seen in this pass and matches replaces the held mismatch.
-    if (!declaredHash && hashMismatchHeld) {
-      rejectedListingAnchors.add(anchor);
       continue;
     }
     clearListingRejection(anchor, reg.primaryClaim);
