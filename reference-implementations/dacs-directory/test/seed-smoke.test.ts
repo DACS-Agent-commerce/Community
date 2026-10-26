@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-// First: the store must open in a fresh directory, never the checkout's data/.
-import "./fixtures/isolated-data-dir.js";
 
 import { activeCatalogListings } from "../src/catalog/discovery.js";
 import { indexRegistration } from "../src/catalog/indexer.js";

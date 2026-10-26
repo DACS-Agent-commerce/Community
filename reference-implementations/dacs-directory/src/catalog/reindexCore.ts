@@ -20,8 +20,8 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { catalogNodeDeployment } from "./listingFinality";
-import { pinnedChainIdentity } from "./nodeDeployment";
+import { scanStateCurrent, servedCatalogChain } from "./chainGate";
+import type { catalogNodeDeployment } from "./listingFinality";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
@@ -72,11 +72,8 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
-  /**
-   * Deployment preflight injected by tests. Production checks the configured
-   * node's chain against the pin; build drift is diagnostic.
-   */
-  nodeDeployment?: () => Promise<{ ok: true; chainIdentity?: string; warning?: string | null } | { ok: false; reason: string }>;
+  /** Node deployment read injected by tests; production reads the configured node. */
+  nodeDeployment?: typeof catalogNodeDeployment;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
@@ -84,6 +81,15 @@ export interface ReindexOptions {
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
+  // The refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
+  const served = await servedCatalogChain(opts.nodeDeployment);
+  if (!served.ok) {
+    const error = `catalog not updated: ${served.cause}`;
+    const { lastSeenTxId } = loadScanState();
+    finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
+    throw new Error(error);
+  }
+  if (served.warning) log(`node build warning: ${served.warning}`);
   const regs: (Registration & { discovered?: boolean })[] = [];
   for (const raw of loadRegistrations()) {
     // The registration and its binding count are checked before any binding is verified;
@@ -118,26 +124,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   }
   let prior = loadCatalog();
 
-  // Nothing from a node outside the pinned chain reaches the public
-  // catalog or the scan state; a node that cannot be read fails the pass too.
-  // The refusal is still recorded as a failed run, so the public status shows
-  // that the catalog is not advancing.
-  const deployment = await (opts.nodeDeployment ?? catalogNodeDeployment)().catch((error: unknown) => ({
-    ok: false as const,
-    reason: `could not read the Demos node's chain: ${error instanceof Error ? error.message : String(error)}`,
-  }));
-  if (!deployment.ok) {
-    const error = `catalog not updated: ${deployment.reason}`;
-    const { lastSeenTxId } = loadScanState();
-    finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
-    throw new Error(error);
-  }
-  if (deployment.warning) log(`node build warning: ${deployment.warning}`);
-
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
-  //    changed chain identity or confirmed large tip regression clears derived
-  //    state before a genesis rescan. An old cache without an identity replays too. First run backfills the full history.
+  //    changed chain identity or a confirmed large tip regression clears
+  //    derived state before a genesis rescan. First run backfills the full history.
   let state = loadScanState();
   const resetThreshold = chainResetThreshold();
   let observedChainTip: number | null = null;
@@ -147,22 +137,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  const servedChain = deployment.chainIdentity ?? pinnedChainIdentity();
-  const identityChanged = state.chainIdentity !== servedChain;
-  if (identityChanged || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
+  // A legacy state with no recorded identity is not reset; it replays below and keeps its catalog.
+  const chainReplaced = state.chainIdentity !== undefined && state.chainIdentity !== served.chainIdentity;
+  if (chainReplaced || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
-    if (state.chainIdentity !== undefined && identityChanged) {
-      // A catalog built on another chain is neither served nor carried into the rebuild (a legacy
-      // cache with no recorded chain is only replayed). The catalog is emptied first, so a crash
-      // leaves the reset still due on the next pass.
+    if (chainReplaced) {
+      // The replaced chain's catalog is neither served nor carried into the rebuild. It is emptied
+      // first; until the reset state below is saved, the recorded identity keeps the reset due.
       prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
       saveCatalog(prior);
     }
     clearChainDerivedArtifacts();
     state = normalizeScanState({
-      // An interrupted genesis replay must not be marked migrated.
+      // No identity and no current schema: only a complete replay stamps them.
       schemaVersion: 0,
-      chainIdentity: servedChain,
       lastSeenTxId: 0,
       ...(observedChainTip === null ? {} : { lastChainTip: observedChainTip }),
       listings: {},
@@ -176,19 +164,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
     log(
-      `chain replacement detected: identity ${String(state.chainIdentity)}, tip ${observedChainTip}, previous cursor ${previousCursor}; ` +
+      `chain replacement detected: ${chainReplaced ? "the node serves another chain than the recorded one"
+        : `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
         `cleared chain-derived cache and restarting from genesis`,
     );
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
   // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
-  const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
-  // A replay longer than one pass's DACS_SCAN_MAX_TXS budget walks down from where the last pass stopped.
-  const resumeFrom = needsHistoryReplay && state.replay && Number.isSafeInteger(state.replay.before) &&
-    Number.isSafeInteger(state.replay.chainTip) ? state.replay : undefined;
+  // A state with no recorded chain identity replays once, like a schema bump.
+  const needsHistoryReplay = !scanStateCurrent(state, served.chainIdentity);
   // Overflow is recomputed per signer from the replayed bindings.
-  if (needsHistoryReplay && !resumeFrom) state.bundleBindingOverflow = [];
+  if (needsHistoryReplay) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
@@ -226,11 +213,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
-      knownPrograms: new Map(Object.entries(state.programs)),
-      ...(resumeFrom ? { startBefore: resumeFrom.before, chainTip: resumeFrom.chainTip,
-        unattributedDeals: Object.values(state.deals).filter((deal) => !deal.owners.seller) } : {}) });
-    const replayContinues = needsHistoryReplay && scan.resumeBefore !== undefined && scan.txsScanned >= maxTxs;
-    if (!scan.complete && !replayContinues) {
+      knownPrograms: new Map(Object.entries(state.programs)) });
+    if (!scan.complete) {
       throw new Error(
         scan.scanError ? `chain scan failed before reaching its cursor: ${scan.scanError}` :
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
@@ -238,7 +222,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
     // entries are kept and the replay adds or refreshes each owner's entry.
-    if (needsHistoryReplay && !resumeFrom && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
+    if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
     for (const [addr, owner] of scan.listings) state.listings[addr] = owner;
     for (const [key, deal] of scan.deals) {
       // Seller copies are matched within one scan window; keep the stored one when this window has none.
@@ -295,20 +279,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // without limit (issue #51) while never becoming a blocking maintenance job.
     pruneFailureHistory();
 
-    if (replayContinues && scan.resumeBefore !== undefined) {
-      // The catalog is neither rebuilt nor written from a partial history: a replaced chain's stays
-      // empty and an upgraded cache keeps serving until the replay reaches genesis.
-      state.lastSeenTxId = Math.max(state.lastSeenTxId, scan.highestTxId);
-      state.lastChainTip = scan.chainTip;
-      state.replay = { before: scan.resumeBefore, chainTip: scan.chainTip };
-      saveScanState(state);
-      finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
-        artifacts: scan.observations.length, rejected: scan.failures.length });
-      log(`chain replay: ${scan.txsScanned} txs this pass; resumes below tx ${scan.resumeBefore + 1}, catalog not rebuilt until it completes`);
-      return { sellers: prior.sellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
-    }
-    delete state.replay;
-
     // SR-2: bounded historical walk over only unresolved bundle content. The
     // target fingerprint prevents permanently-unresolvable rows from causing a
     // full-history rescan on every indexing pass, while a changed/new target set
@@ -356,7 +326,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
+    // Stamped together and only after a complete pass, so an interrupted replay stays due.
     state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
+    state.chainIdentity = served.chainIdentity;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
     log(

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,8 +32,6 @@ const ownerOf = (did: string) => `0x${did.slice(-64)}`;
 const outsider = `did:demos:agent:${"d".repeat(64)}`;
 const locator = (n: number) => `stor-${n.toString(16).padStart(40, "0")}`;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
-/** The stubbed node stands for the pinned deployment that reindexAll checks first. */
-const pinnedDeployment = async () => ({ ok: true as const });
 
 const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
@@ -41,8 +40,7 @@ const PREFIXES: Record<string, string> = {
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
 const signArtifact = async (raw: Obj, kind: ArtifactKind, signer: number, party = false) => {
-  // Current Listings carry CORE §B.7 SIG-6 base64url; other fixtures keep hex.
-  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer, kind === "listing" ? "base64url" : "hex");
+  const value = await signature(artifactHash(raw, kind), PREFIXES[kind], signer);
   return party ? { party: dids[signer], algorithm: "ed25519", value } : { signer: dids[signer], algorithm: "ed25519", value };
 };
 const ref = (at: string, raw: Obj, kind: ArtifactKind, extra: Obj = {}) => ({
@@ -123,14 +121,6 @@ function resetIndex(registrations: Registration[], generatedAt: number) {
     schemaVersion: 8, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
     verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
   });
-  // Queued candidates from an earlier test would name programs this test's node
-  // never serves, and a storage `not found` for an owner's candidate withholds.
-  const db = new Database(join(dataDirectory, "directory.sqlite"));
-  try {
-    if (db.prepare("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").get()) {
-      db.prepare("DELETE FROM revocation_candidates").run();
-    }
-  } finally { db.close(); }
 }
 const artifactRow = (at: string) => {
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
@@ -156,7 +146,7 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   }, [deepMarker, validMarker, listingAnchor]);
   resetIndex([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 42);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 42);
@@ -353,7 +343,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const identity = (listingRaw.seller as Obj).identity as Obj;
   const identityScope = { ...identity };
   delete identityScope.presentation;
-  (identity.presentation as Obj).signatures = [{ ref: seller, signature: await signature(contentHash(identityScope), "dacs-bundle-presentation:v1:", 1, "base64url") }];
+  (identity.presentation as Obj).signatures = [{ ref: seller, signature: await signature(contentHash(identityScope), "dacs-bundle-presentation:v1:", 1) }];
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
@@ -423,7 +413,7 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   assert.equal(byJob.get("job-valid")?.refsVerified, true);
   assert.equal(record.reputation.bundleCount, 1);
   resetIndex([registration], 45);
-  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
@@ -462,7 +452,7 @@ test("identity tier skips claims whose verification artifacts have no canonical 
 test("reindex drops malformed carried bindings and still indexes every later seller", async () => {
   const listingAnchor = locator(81);
   const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
-  const fresh = { ...freshScope, signature: await signature(contentHash(freshScope), PREFIXES.listing, 1) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
   chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
@@ -473,7 +463,7 @@ test("reindex drops malformed carried bindings and still indexes every later sel
     { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] },
   ], 43);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: pinnedDeployment });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 43);
@@ -485,14 +475,14 @@ test("reindex drops malformed carried bindings and still indexes every later sel
 test("a seller whose record cannot be indexed is logged and omitted while later sellers are indexed", async () => {
   const listingAnchor = locator(91);
   const freshScope = { ...listingScope, listingVersion: Number.parseInt(listingAnchor.slice(-2), 16) };
-  const fresh = { ...freshScope, signature: await signature(contentHash(freshScope), PREFIXES.listing, 1) };
+  const fresh = { ...freshScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(freshScope), PREFIXES.listing, 1) } };
   chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   // Legacy or hand-edited registration JSON is untrusted carriage too.
   const broken = { primaryClaim: buyer, displayName: "Broken", listingAnchors: null } as unknown as Registration;
   resetIndex([broken, { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 44);
   const lines: string[] = [];
 
-  await reindexAll({ log: (line) => lines.push(line), resolveIdentities: offline, nodeDeployment: pinnedDeployment });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: (line) => lines.push(line), resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 44);

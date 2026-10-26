@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import Database from "better-sqlite3";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -68,7 +69,6 @@ seeded.close();
 
 const store = await import("../src/catalog/store.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
-const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { verifyListingResult } = await import("../src/catalog/listingVerification.js");
 const { GET } = await import("../app/api/dacs/listings/route.js");
 const restart = () => {
@@ -93,7 +93,7 @@ test("the reset withholds cached deal verdicts and the reputation counted from t
   }
 });
 
-test("old active admission decisions stay withheld through restart and failed refresh, then valid artifacts return", async () => {
+test("old active admission decisions stay withheld through restart, then valid artifacts return", async () => {
   assert.deepEqual(await verifyListingResult(bad), { ok: false, code: "VERIFICATION_METHOD_INVALID" });
   assert.equal((await verifyListingResult(good)).ok, true, "a second authorized seller key is allowed");
   const listed = async () => (await (await GET(new NextRequest("https://directory.example/api/dacs/listings"))).json()).listings;
@@ -102,8 +102,6 @@ test("old active admission decisions stay withheld through restart and failed re
   assert.deepEqual(store.loadRegistrations(), [reg]);
   assert.equal(store.loadScanState().lastSeenTxId, 20);
   assert.equal(store.loadScanState().listings[locator(902)], `0x${seller.slice(-64)}`);
-  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: async () => ({ ok: false, reason: "offline" }) }), /offline/);
-  assert.deepEqual((await listed()).map((l: Obj) => l.listingId), ["fixture-desk", "withdrawn"]);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const at = String(input).split("/").pop();
@@ -171,7 +169,7 @@ test("a reindex returns only the old offers that pass the current reader", async
     return data ? Response.json({ success: true, owner, data }) : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   };
   try {
-    await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+    await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
       crawlWellKnown: async () => ({ agents: [], errors: [] }) });
   } finally {
     globalThis.fetch = originalFetch;

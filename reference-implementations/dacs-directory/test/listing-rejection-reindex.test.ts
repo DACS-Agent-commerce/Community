@@ -8,13 +8,13 @@ import { NextRequest } from "next/server";
 import { GET as listings } from "../app/api/dacs/listings/route.js";
 import { POST as indexNow } from "../app/api/dacs/index-now/route.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
-import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
 import { indexerDiagnostics, loadCatalog, recordListingRejection, recordWellKnownWithdrawalCheck, saveDomains, saveRegistrations } from "../src/catalog/store.js";
 import { crawlDomain, wellKnownWithdrawalMessage, type WellKnownAgent } from "../src/catalog/wellknown.js";
 import { sha256Hex } from "../src/catalog/canonical.js";
 import { dids, maps, seeds, sign, vector } from "./fixtures/current-evidence.js";
+import { pinnedNodeAnswer } from "./fixtures/pinned-node.js";
 
 const owner = `0x${dids[1].slice(-64)}`;
 const departedSeller = `did:demos:agent:${"d1".repeat(32)}`;
@@ -36,18 +36,9 @@ const crawling = (agents: WellKnownAgent[], failed: boolean) => async () => ({
 
 async function withChainFetch(run: () => Promise<unknown>, anchorOwner = owner): Promise<void> {
   const originalFetch = globalThis.fetch;
+  // No deployment is injected: reindexAll and index-now read the pinned chain from this node.
   globalThis.fetch = async (input, init) => {
-    if (init?.body) {
-      const call = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { blockNumber?: number } }> }).params?.[0];
-      // The chain pin the index-now route reads: block one names the chain.
-      if (call?.message === "getBlockByNumber") {
-        return Response.json(call.data?.blockNumber === 1
-          ? { result: 200, response: { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32),
-            content: { previousHash: PINNED_DEMOS_CHAIN_IDENTITY, timestamp: 1 } } }
-          : { result: 400, response: "error" });
-      }
-      return Response.json({ result: 200, response: [] });
-    }
+    if (init?.body) return pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] });
     const data = maps.get(String(input).split("/").pop() ?? "");
     return data ? Response.json({ success: true, owner: anchorOwner, programName: "dacs:test", data }) : new Response(null, { status: 404 });
   };
@@ -59,7 +50,7 @@ async function withChainFetch(run: () => Promise<unknown>, anchorOwner = owner):
 }
 
 const reindexWith = (crawl: ReturnType<typeof crawling>, anchorOwner = owner): Promise<void> => withChainFetch(
-  () => reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); }, crawlWellKnown: crawl }), anchorOwner);
+  () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); }, crawlWellKnown: crawl }), anchorOwner);
 
 const diagnostics = () => indexerDiagnostics().listingRejectionDiagnostics.items;
 
@@ -430,10 +421,11 @@ for (const mirrorHash of ["matching", "different"] as const) {
       import { reindexAll } from "./src/catalog/reindexCore.ts";
       import { indexerDiagnostics } from "./src/catalog/store.ts";
       import { GET } from "./app/api/dacs/listings/route.ts";
+      import { pinnedNodeAnswer } from "./test/fixtures/pinned-node.ts";
       const { listing, anchor, owner, unsigned, source, before } = JSON.parse(readFileSync(0, "utf8"));
       const notice = () => indexerDiagnostics().listingRejectionDiagnostics.items.find(item => item.locator === anchor);
       assert.deepEqual(notice(), before, "the authenticated notice survives restart");
-      globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+      globalThis.fetch = async (input, init) => init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] })
         : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
         : new Response(null, { status: 404 });
       for (let repeat = 0; repeat < 2; repeat++) {
@@ -540,10 +532,11 @@ test("accepted source declarations survive restart even before the diagnostic wr
     import { readFileSync } from "node:fs";
     import { reindexAll } from "./src/catalog/reindexCore.ts";
     import { clearListingRejection, indexerDiagnostics, loadCatalog } from "./src/catalog/store.ts";
+    import { pinnedNodeAnswer } from "./test/fixtures/pinned-node.ts";
     const { listing, anchor, owner, matching, source, seller } = JSON.parse(readFileSync(0, "utf8"));
     // Model interruption after accepting source bytes but before recording their rejection.
     clearListingRejection(anchor, seller);
-    globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+    globalThis.fetch = async (input, init) => init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] })
       : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
       : new Response(null, { status: 404 });
     for (let repeat = 0; repeat < 2; repeat++) {
