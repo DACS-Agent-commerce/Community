@@ -189,12 +189,19 @@ export async function indexRegistration(
       rejectedListingAnchors.add(anchor);
       continue;
     }
-    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
+    const sourceDeclarations = Object.values(reg.authenticatedHashDeclarations ?? {});
+    const authenticatedHashes = sourceDeclarations.flatMap((source) => source?.hashes[anchor] ? [source.hashes[anchor]] : []);
+    const currentDeclaration = sourceDeclarations.some((source) => source?.current && source.hashes[anchor]);
+    const declaredHashes = (authenticatedHashes.length > 0 ? authenticatedHashes
+      : reg.listingContentHashes?.[anchor] ? [reg.listingContentHashes[anchor]] : [])
+      .map((hash) => hash.replace(/^sha256-/, "").toLowerCase());
+    const declaredHash = declaredHashes[0];
+    const heldNotice = listingRejectionNoticeCode(anchor, reg.primaryClaim);
     // An authenticated mismatch requires an authenticated replacement declaration.
     // An incomplete pass without one cannot replace the saved notice or admit the listing.
     const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
-      listingRejectionNoticeCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
-    if (hashMismatchHeld && !reg.authenticatedHashDeclarations?.includes(anchor)) {
+      heldNotice === "DECLARED_CONTENT_HASH_MISMATCH";
+    if (hashMismatchHeld && (!currentDeclaration || sourceDeclarations.includes(null))) {
       rejectedListingAnchors.add(anchor);
       continue;
     }
@@ -202,7 +209,9 @@ export async function indexRegistration(
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
       rejectedListingAnchors.add(anchor);
-      if (!hashMismatchHeld) recordListingRejection(anchor, reg.primaryClaim, verification.code);
+      if (!hashMismatchHeld && heldNotice !== "OWNER_CLAIM_BINDING") {
+        recordListingRejection(anchor, reg.primaryClaim, verification.code);
+      }
       continue;
     }
     const verified = verification.value;
@@ -225,14 +234,14 @@ export async function indexRegistration(
       }
       continue;
     }
-    if (declaredHash && declaredHash !== verified.contentHash) {
+    if (declaredHashes.some((hash) => hash !== verified.contentHash)) {
       rejectedListingAnchors.add(anchor);
       recordListingRejection(
         anchor,
         reg.primaryClaim,
         "DECLARED_CONTENT_HASH_MISMATCH",
         listingDiagnosticCoordinates(verified.scope),
-        reg.authenticatedHashDeclarations?.includes(anchor) === true,
+        authenticatedHashes.length > 0,
       );
       continue;
     }
