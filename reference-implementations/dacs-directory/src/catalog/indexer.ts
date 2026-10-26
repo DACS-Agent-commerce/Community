@@ -349,8 +349,11 @@ export async function indexRegistration(
     });
   }
 
-  // Incomplete discovery may have hidden anchors this registration only gains from it.
-  if (!reg.discoveryIncomplete) pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors);
+  // Partial discovery cannot prove crawl removals, but verified owner pointers can prove owner removals.
+  if (!reg.discoveryIncomplete || ownerRegistered) {
+    pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors,
+      reg.discoveryIncomplete ? ownerSignedAnchors : undefined);
+  }
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
