@@ -1,4 +1,4 @@
-import { legacyListingHash } from "./legacyListingHash.js";
+import { legacyCanonicalize, legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
 import type { LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
 import { isHistoricalListing } from "./legacyListingShape.js";
@@ -276,13 +276,21 @@ export async function verifyListing(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
-  return verifyListingUsingHash(raw, resolveKey, contentHash);
+  return verifyListingUsingProfile(raw, resolveKey, CURRENT_PROFILE);
 }
 
-async function verifyListingUsingHash(
+/** The serializer that measures a scope and the hash that signatures cover; they always come from the same profile. */
+interface ScopeProfile {
+  canonicalize: (scope: Record<string, unknown>) => string;
+  hashScope: typeof contentHash;
+}
+const CURRENT_PROFILE: ScopeProfile = { canonicalize, hashScope: contentHash };
+const FROZEN_PROFILE: ScopeProfile = { canonicalize: legacyCanonicalize, hashScope: legacyListingHash };
+
+async function verifyListingUsingProfile(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey,
-  hashScope: typeof contentHash,
+  { canonicalize: serializeScope, hashScope }: ScopeProfile,
 ): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
   // Select the profile before validating it. A failed current artifact must
@@ -292,7 +300,7 @@ async function verifyListingUsingHash(
     if (!current) return null;
     const scope = { ...raw };
     delete scope.signature;
-    if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
+    if (Buffer.byteLength(serializeScope(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
     if (current.signature.algorithm !== "ed25519") return null;
     const hash = hashScope(scope);
     const verifiedSigner = await verifyEd25519(
@@ -374,7 +382,7 @@ export async function verifyStoredListing(
     if (current) return current;
     // Read the previous SDK's canonical Base64URL records without changing
     // current admission or granting authority to another signature encoding.
-    try { return await verifyListingUsingHash(raw, resolveKey, legacyListingHash); } catch { return null; }
+    try { return await verifyListingUsingProfile(raw, resolveKey, FROZEN_PROFILE); } catch { return null; }
   }
   if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
   const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
@@ -391,7 +399,7 @@ export async function verifyStoredListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const verified = await verifyListingUsingHash({ ...raw, signature: { ...signature, value } }, resolveKey, legacyListingHash);
+    const verified = await verifyListingUsingProfile({ ...raw, signature: { ...signature, value } }, resolveKey, FROZEN_PROFILE);
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
       ? verified : null;
