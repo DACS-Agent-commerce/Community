@@ -45,6 +45,7 @@ import {
   recordArtifact,
   pruneFailureHistory,
   pruneListingRejections,
+  hasPublisherAuthenticatedWellKnownSource,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -363,7 +364,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         log(`well-known: ${e.domain} — ${e.error}`);
       }
       for (const agent of crawl.agents) {
-        if (!await ingestWellKnownRevocations(agent)) {
+        const authenticationLost = !agent.withdrawalAuthenticated &&
+          hasPublisherAuthenticatedWellKnownSource(normalizeSubmittedDomain(agent.domain));
+        if (authenticationLost) recordWellKnownWithdrawalCheck(normalizeSubmittedDomain(agent.domain));
+        if (authenticationLost || !await ingestWellKnownRevocations(agent)) {
           // A refused source cannot supply declarations or prove a prior rejection has gone away.
           crawlIncomplete = true;
           continue;

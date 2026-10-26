@@ -945,6 +945,10 @@ export function listingRejectionNoticeCode(locator: string, registrationClaim: s
   return row?.reason_code;
 }
 
+/** Whether this normalized domain previously supplied publisher-authenticated discovery. */
+export const hasPublisherAuthenticatedWellKnownSource = (domain: string): boolean =>
+  withdrawalSources().some((source) => source.domain === domain && source.provenance === "publisher-signature");
+
 export function clearListingRejection(locator: string, registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
@@ -955,16 +959,20 @@ export function clearRegistrationListingRejections(registrationClaim: string): v
   db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
 }
 
-/** Keep continuing failures' history, then remove failures not observed this pass. */
+/** Prune absent failures; on partial passes, prune only owner notices absent from verified owner anchors. */
 export const pruneRegistrationListingRejections = db.transaction((
   registrationClaim: string,
   currentRejections: ReadonlySet<string>,
+  incompleteOwnerAnchors?: ReadonlySet<string>,
 ): void => {
   const claim = registrationClaim.toLowerCase();
-  const rows = db.prepare("SELECT locator FROM listing_rejections WHERE registration_claim = ?")
-    .all(claim) as Array<{ locator: string }>;
-  for (const { locator } of rows) {
-    if (!currentRejections.has(locator)) clearListingRejection(locator, claim);
+  const rows = db.prepare("SELECT locator, reason_code, public_notice FROM listing_rejections WHERE registration_claim = ?")
+    .all(claim) as Array<{ locator: string; reason_code: ListingRejectionCode; public_notice: number }>;
+  for (const { locator, reason_code, public_notice } of rows) {
+    const removed = incompleteOwnerAnchors
+      ? public_notice === 1 && reason_code === "OWNER_CLAIM_BINDING" && !incompleteOwnerAnchors.has(locator)
+      : !currentRejections.has(locator);
+    if (removed) clearListingRejection(locator, claim);
   }
 });
 
