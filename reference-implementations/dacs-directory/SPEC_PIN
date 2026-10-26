@@ -62,8 +62,8 @@
 #   Historical current hex listings require exact operator-controlled native/hash/
 #   tuple/seller import pins (DACS_HISTORICAL_LISTING_IMPORTS; README). Other graph
 #   envelopes retain legacy decoding. BundleBinding verification is strict.
-# - SDK canonicalization accepts only integer numbers. Fractional publication is
-#   unsupported; listing publication rejects fractional negotiation percentages.
+# - Current canonicalization accepts bounded fractional numbers; frozen historical
+#   hashing requires safe integers. Publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
