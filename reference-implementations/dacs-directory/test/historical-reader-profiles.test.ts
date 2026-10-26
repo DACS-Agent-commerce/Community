@@ -6,9 +6,11 @@ import test from "node:test";
 import { canonicalize, contentHash } from "../src/catalog/canonical.js";
 import { legacyCanonicalize, legacyListingHash } from "../src/catalog/legacyListingHash.js";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { MAX_LISTING_CANONICAL_BYTES, findValidListingRevocation, storedListingHash, verifyListing, verifyListingRevocation, verifyStoredListing } from "../src/catalog/listingVerification.js";
+import { findValidListingRevocation, storedListingHash, verifyListing, verifyListingRevocation, verifyStoredListing } from "../src/catalog/listingVerification.js";
 
 type Obj = Record<string, unknown>;
+/** DACS-1 LR-2 canonical size cap; the listing module no longer exports it. */
+const MAX_LISTING_CANONICAL_BYTES = 16_384;
 const directory = mkdtempSync(join(tmpdir(), "dacs-historical-profiles-"));
 process.env.DACS_DIRECTORY_DATA = directory;
 const store = await import("../src/catalog/store.js");
