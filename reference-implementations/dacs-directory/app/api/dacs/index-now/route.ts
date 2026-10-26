@@ -2,8 +2,8 @@
  * POST /api/dacs/index-now { claim } — index one registration immediately
  * (fresh publishes shouldn't wait for the next timer pass). Full chain
  * verification and the same chain pin as the batch path. It runs no crawl, so
- * it never clears or prunes rejection diagnostics that only a full pass can
- * re-derive.
+ * crawl-derived diagnostics remain; verified owner pointer removals can clear
+ * owner notices.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { indexRegistration } from "@/src/catalog/indexer";
