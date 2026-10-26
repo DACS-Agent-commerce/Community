@@ -14,6 +14,17 @@ export interface Registration {
   listingAnchors: string[];
   /** Trusted only when populated by the hash-verified well-known crawler. */
   listingContentHashes?: Record<string, string>;
+  /** Anchors whose declared hash came from a publisher-authenticated crawl; in memory only, never stored. */
+  authenticatedHashDeclarations?: string[];
+  /** The owner signature verified on the registration as stored, before crawl data was merged in; in memory only, never stored. */
+  ownerSignatureVerified?: boolean;
+  /** The listing anchors the owner signed, as stored before crawl data was merged in; in memory only, never stored. */
+  ownerSignedAnchors?: string[];
+  /**
+   * Set when this indexing does not carry the full discovery state (an incomplete crawl, or an immediate
+   * pass that has no crawl): absent anchors and absent declarations prove nothing; in memory only, never stored.
+   */
+  discoveryIncomplete?: boolean;
   /**
    * Deals offered as reputation evidence: bundle refs + the anchor owners
    * (needed to resolve owner-scoped referenced-artifact addresses on the real
