@@ -35,11 +35,10 @@ import {
   revocationSellerClaim,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  verifyStoredListingResult,
+  verifyStoredListing,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
-import { listingDiagnosticCoordinates } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim, canonicalDemosAgentReference, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
@@ -47,8 +46,6 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
-  listingRejectionNoticeCode,
-  pruneRegistrationListingRejections,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
@@ -141,12 +138,6 @@ export async function indexRegistration(
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
 ): Promise<SellerRecord> {
   const now = Date.now();
-  const ownerRegistered = reg.ownerSignatureVerified ?? (reg.ownerSignature
-    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false);
-  // Only an anchor the owner signed is the owner's pointer; the crawl may add others.
-  const ownerSignedAnchors = new Set(reg.ownerSignedAnchors ?? reg.listingAnchors);
-  const rejectedListingAnchors = new Set<string>();
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -183,24 +174,10 @@ export async function indexRegistration(
   const { verifiedRevocations } = loadScanState();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
-    if (!anchored) {
-      // An unread anchor cannot clear an earlier rejection or reset its history.
-      rejectedListingAnchors.add(anchor);
-      continue;
-    }
-    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    // An authenticated hash mismatch stays in force until a matching declaration is seen. An incomplete pass cannot
-    // see a declaration made earlier, so a failure that cannot read the hash must not replace the row.
-    const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
-      listingRejectionNoticeCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
-    // Fails closed: a listing with no canonical form is rejected like any invalid one.
-    const verification = await verifyStoredListingResult(anchored.data, anchor);
-    if (!verification.ok) {
-      rejectedListingAnchors.add(anchor);
-      if (!hashMismatchHeld) recordListingRejection(anchor, reg.primaryClaim, verification.code);
-      continue;
-    }
-    const verified = verification.value;
+    if (!anchored) continue;
+    // A listing with no canonical form throws while hashing; skip it like any invalid one.
+    const verified = await verifyStoredListing(anchored.data, anchor).catch(() => null);
+    if (!verified) continue;
     const { scope } = verified;
     const bindingRejection = listingBindingRejection(
       verified.sellerClaim,
@@ -208,35 +185,12 @@ export async function indexRegistration(
       reg.primaryClaim,
     );
     if (bindingRejection) {
-      rejectedListingAnchors.add(anchor);
-      if (!hashMismatchHeld) {
-        recordListingRejection(
-          anchor,
-          reg.primaryClaim,
-          bindingRejection,
-          bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
-          ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING" && ownerSignedAnchors.has(anchor),
-        );
-      }
-      continue;
-    }
-    if (declaredHash && declaredHash !== verified.contentHash) {
-      rejectedListingAnchors.add(anchor);
-      recordListingRejection(
-        anchor,
-        reg.primaryClaim,
-        "DECLARED_CONTENT_HASH_MISMATCH",
-        listingDiagnosticCoordinates(verified.scope),
-        reg.authenticatedHashDeclarations?.includes(anchor) === true,
-      );
-      continue;
-    }
-    // A declaration that was seen in this pass and matches replaces the held mismatch.
-    if (!declaredHash && hashMismatchHeld) {
-      rejectedListingAnchors.add(anchor);
+      recordListingRejection(anchor, reg.primaryClaim, bindingRejection);
       continue;
     }
     clearListingRejection(anchor, reg.primaryClaim);
+    const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
+    if (declaredHash && declaredHash !== verified.contentHash) continue;
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
     if (!listingId) continue;
@@ -347,12 +301,6 @@ export async function indexRegistration(
       catalogObservedAt: now,
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
-  }
-
-  // Partial discovery cannot prove crawl removals, but verified owner pointers can prove owner removals.
-  if (!reg.discoveryIncomplete || ownerRegistered) {
-    pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors,
-      reg.discoveryIncomplete ? ownerSignedAnchors : undefined);
   }
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
@@ -641,6 +589,9 @@ export async function indexRegistration(
 
   // Owner badge: re-verify the stored signature each pass (freshness is a
   // submission-time replay gate only — the cryptographic binding must hold).
+  const ownerRegistered = reg.ownerSignature
+    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
+    : false;
   const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
   const identityTier = identityTiers.includes("institutional") ? "institutional"
     : identityTiers.includes("verified") ? "verified" : "self-declared";

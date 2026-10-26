@@ -1,8 +1,7 @@
 /**
  * POST /api/dacs/index-now { claim } — index one registration immediately
  * (fresh publishes shouldn't wait for the next timer pass). Full chain
- * verification, same as the batch path. It runs no crawl, so crawl-derived
- * diagnostics remain; verified owner pointer removals can clear owner notices.
+ * verification, same as the batch path.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { indexRegistration } from "@/src/catalog/indexer";
@@ -21,7 +20,7 @@ export async function POST(req: NextRequest) {
   return withDataLock("reindex", async () => {
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
-    const record = await indexRegistration({ ...reg, discoveryIncomplete: true }, prior);
+    const record = await indexRegistration(reg, prior);
     const i = catalog.sellers.findIndex((s) => s.primaryClaim === claim);
     if (i >= 0) catalog.sellers[i] = record;
     else catalog.sellers.push(record);
