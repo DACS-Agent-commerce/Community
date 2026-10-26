@@ -19,9 +19,12 @@ const SEPARATOR = "dacs-listing:v1:";
 /** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
 export const MAX_LISTING_CANONICAL_BYTES = 16_384;
 
-/** Return the Listing's current or frozen historical hash; this does not authenticate an import. */
-export function storedListingHash(raw: Record<string, unknown>): string {
+/** Compute a stored Listing hash, optionally matching an already authenticated pin; does not verify signatures. */
+export function storedListingHash(raw: Record<string, unknown>, expectedHash?: string): string {
   const scope = stripSignature(raw);
+  if (expectedHash !== undefined) {
+    try { if (legacyListingHash(scope) === expectedHash) return expectedHash; } catch { /* Current scopes may contain fractions. */ }
+  }
   const value = record(raw.signature)?.value;
   return "dacsVersion" in raw && !(typeof value === "string" && /^[0-9a-f]{128}$/.test(value))
     ? contentHash(scope) : legacyListingHash(scope);
@@ -224,7 +227,9 @@ async function verifyListingUsingHash(
 /**
  * Read immutable history without weakening SIG-6 admission. Only an operator's
  * out-of-band pre-upgrade inventory can select the old Directory hex importer;
- * artifact fields, timestamps and a failed signature never grant that authority.
+ * artifact fields and timestamps never grant hex-import authority. Canonical
+ * Base64URL stored Listings may authenticate either supported hash profile;
+ * both the Listing and its embedded presentation must verify with that profile.
  * Pins bind the exact native pointer, unsigned hash, seller and listing tuple.
  * Every read still verifies the complete current schema and both signatures.
  */
@@ -234,8 +239,13 @@ export async function verifyStoredListing(
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
   const signature = record(raw.signature);
-  if (!("dacsVersion" in raw) || canonicalSignatureBytes(signature?.value)) {
-    return verifyListing(raw, resolveKey);
+  if (!("dacsVersion" in raw)) return verifyListing(raw, resolveKey);
+  if (canonicalSignatureBytes(signature?.value)) {
+    const current = await verifyListing(raw, resolveKey);
+    if (current) return current;
+    // Read the previous SDK's canonical Base64URL records without changing
+    // current admission or granting authority to another signature encoding.
+    try { return await verifyListingUsingHash(raw, resolveKey, legacyListingHash); } catch { return null; }
   }
   if (!/^stor-[0-9a-f]{40}$/.test(nativeAddress)) return null;
   const configured = process.env.DACS_HISTORICAL_LISTING_IMPORTS;
@@ -320,16 +330,16 @@ export async function findValidListingRevocation(
 ): Promise<RevocationBinding | null> {
   for (const ref of [...new Set(candidateRefs)].slice(0, limit)) {
     let candidate = await readCandidate(ref);
-    let valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
-    if (!valid && readCurrentCandidate) {
+    let markerHash = candidate ? await authenticatedRevocationHash(candidate, listing, expectedVersion, resolveKey) : null;
+    if (!markerHash && readCurrentCandidate) {
       candidate = await readCurrentCandidate(ref);
-      valid = candidate ? await verifyListingRevocation(candidate, listing, expectedVersion, resolveKey) : false;
+      markerHash = candidate ? await authenticatedRevocationHash(candidate, listing, expectedVersion, resolveKey) : null;
     }
     if (!candidate) {
       progress.unread.push(ref);
       continue;
     }
-    if (!valid) {
+    if (!markerHash) {
       progress.rejected.push(ref);
       continue;
     }
@@ -341,7 +351,7 @@ export async function findValidListingRevocation(
       listingContentHash: listing.contentHash,
       logicalAddress: revocationLogicalAddress(listing.sellerClaim, String(scope.listingId), expectedVersion),
       markerAnchor: { kind: "storage-program", locator: ref },
-      markerContentHash: contentHash(scope),
+      markerContentHash: markerHash,
     };
   }
   return null;
@@ -352,14 +362,24 @@ export function ownerClaim(owner: string | undefined): string | null {
   return hex ? `did:demos:agent:${hex.toLowerCase()}` : null;
 }
 
+/** Verify a tuple-bound withdrawal under the current or previous SDK hash, retaining strict SIG-6 encoding. */
 export async function verifyListingRevocation(
   raw: Record<string, unknown>,
   listing: VerifiedListing,
   expectedVersion: number,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
+  return (await authenticatedRevocationHash(raw, listing, expectedVersion, resolveKey)) !== null;
+}
+
+async function authenticatedRevocationHash(
+  raw: Record<string, unknown>,
+  listing: VerifiedListing,
+  expectedVersion: number,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<string | null> {
   let scope: Record<string, unknown>;
-  try { scope = stripSignature(raw); } catch { return false; }
+  try { scope = stripSignature(raw); } catch { return null; }
   if (
     scope.listingId !== (listing.scope.listingId ?? (listing.listing as Listing).serviceId) ||
     scope.listingVersion !== expectedVersion ||
@@ -367,31 +387,29 @@ export async function verifyListingRevocation(
     scope.listingContentHash.toLowerCase() !== listing.contentHash ||
     // DACS-1 types revokedAt as a number; CORE §B.2 bounds only its magnitude.
     typeof scope.revokedAt !== "number" || !(Math.abs(scope.revokedAt) <= Number.MAX_SAFE_INTEGER)
-  ) return false;
+  ) return null;
   const signature = raw.signature;
-  if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
+  if (!signature || typeof signature !== "object" || Array.isArray(signature)) return null;
   const s = signature as Record<string, unknown>;
   if (
     s.algorithm !== "ed25519" || typeof s.signer !== "string" ||
     typeof s.value !== "string"
-  ) return false;
+  ) return null;
   // A marker is a current-profile artifact whatever the listing's profile: SIG-6 applies.
   const sig = canonicalSignatureBytes(s.value);
-  if (!sig) return false;
-  let hash: string;
-  try {
-    hash = contentHash(scope);
-  } catch {
-    // An unknown member with no canonical form (e.g. JSON 1e400) cannot be signed.
-    return false;
-  }
-  const message = Buffer.from(`dacs-revocation:v1:${hash}`, "utf8");
-  const verifiedSigner = await verifyPrimaryClaimSignature(
-    message, sig, listing.signer, s.algorithm, resolveKey,
-  );
+  if (!sig) return null;
   const verifiedEnvelopeSigner = await resolvePrimaryClaimKey(s.signer, s.algorithm, resolveKey);
-  return Boolean(
-    verifiedSigner && verifiedEnvelopeSigner &&
-    sameResolvedPrimaryClaim(verifiedSigner, verifiedEnvelopeSigner),
-  );
+  if (!verifiedEnvelopeSigner) return null;
+  // The previous SDK normalized member names. Signature encoding does not
+  // distinguish that profile, so authenticate the complete scope under each
+  // supported hash and carry the exact one that verified into the binding.
+  for (const hashScope of [contentHash, legacyListingHash]) {
+    let hash: string;
+    try { hash = hashScope(scope); } catch { continue; }
+    const verifiedSigner = await verifyPrimaryClaimSignature(
+      Buffer.from(`dacs-revocation:v1:${hash}`, "utf8"), sig, listing.signer, s.algorithm, resolveKey,
+    );
+    if (verifiedSigner && sameResolvedPrimaryClaim(verifiedSigner, verifiedEnvelopeSigner)) return hash;
+  }
+  return null;
 }

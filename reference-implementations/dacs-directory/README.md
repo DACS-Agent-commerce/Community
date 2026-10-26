@@ -308,9 +308,10 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   signature and a matching authority hash do not establish that authority proof.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
-  canonical hashing. The pinned serializer supports integer JSON numbers only:
-  publication rejects fractional negotiation percentages with HTTP 400, and readers
-  reject fractional signed inputs too. This is a narrower profile than the Standard.
+  canonical hashing. Current reads accept bounded fractional JSON numbers; the frozen
+  historical hash requires safe integers. Publication rejects fractional negotiation
+  percentages with HTTP 400. Stored Listings and withdrawals also authenticate the
+  previous SDK hash profile; new Listing admission uses the current profile.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
@@ -346,8 +347,11 @@ the publisher as buyer and attributes supplier history to the agreement seller.
   vector adapters remain pending. The `did:demos:agent` primary-claim profile is the
   deliberate addition; it comes from
   DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
-- **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
-  Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
+- **dacs-sdk**: `SDK_REV`, `STANDARD_REV`, patch digest and output digest in
+  `scripts/setup-sdk.sh` pin the compiled compatibility build. It supplies current
+  canonical hashing, Ed25519, CCI parsing and the labelled legacy verifier. Frozen
+  historical hashes stay in the Directory. `/api/dacs/status` reports
+  `legacyVetUnsupportedDeals`; these unverified deals do not contribute to reputation.
 - **Demos node**: the read contract is pinned to `kynesyslabs/node` `ac8f45f`.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the

@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
     if (!raw) continue;
     let listingContentHash: string;
     // Stored programs are mutable; one with no canonical form must not fail the whole index.
-    try { listingContentHash = storedListingHash(raw); } catch { continue; }
+    try { listingContentHash = storedListingHash(raw, l.contentHash); } catch { continue; }
     entries.push({
       listingId: l.listingId,
       version: l.version,
