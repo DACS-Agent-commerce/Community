@@ -152,13 +152,12 @@ export const indexerScanRunSchema = {
 export const catalogStatusSchema = {
   type: "object",
   required: [
-    "legacyVetUnsupportedDeals", "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
     generatedAt: { type: "integer" },
-    legacyVetUnsupportedDeals: { type: "integer", minimum: 0, description: "Cached count of unverified legacy deals whose bundle carries vet records, which this reader cannot verify (session-bound composite vet verification is unsupported); other reference failures may also apply." },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },

@@ -6,6 +6,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
+import { catalogStatusSchema } from "../src/catalog/contracts.js";
 import {
   cursorProgressDiagnostics,
   cursorStallThresholdSeconds,
@@ -184,6 +185,11 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
     ));
     assert.equal(response.status, 200);
     const body = await response.json() as Record<string, unknown>;
+    assert.deepEqual(
+      catalogStatusSchema.required.filter((field) => !Object.hasOwn(body, field)),
+      [],
+      "status response contains every property required by its published schema",
+    );
     assert.equal(body.chainLatestTx, 123);
     assert.equal(body.cursorAheadBy, 0);
     assert.equal(body.chainResetSuspected, false);
