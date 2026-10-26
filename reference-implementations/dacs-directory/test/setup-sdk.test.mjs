@@ -173,4 +173,3 @@ test("a source build is accepted only from a clean pinned checkout whose output 
   assert.equal(rebuilt.status, 0, rebuilt.stderr);
   assert.match(rebuilt.manifest ?? "", /^[0-9a-f]{64} {2}index\.js\n$/);
 });
-
