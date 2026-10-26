@@ -3,12 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { contentHash } from "../src/catalog/canonical.js";
-import { legacyListingHash } from "../src/catalog/legacyListingHash.js";
+import { canonicalize, contentHash } from "../src/catalog/canonical.js";
+import { legacyCanonicalize, legacyListingHash } from "../src/catalog/legacyListingHash.js";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { findValidListingRevocation, storedListingHash, verifyListing, verifyListingRevocation, verifyStoredListing } from "../src/catalog/listingVerification.js";
 
 type Obj = Record<string, unknown>;
+/** DACS-1 LR-2 canonical size cap; the listing module no longer exports it. */
+const MAX_LISTING_CANONICAL_BYTES = 16_384;
 const directory = mkdtempSync(join(tmpdir(), "dacs-historical-profiles-"));
 process.env.DACS_DIRECTORY_DATA = directory;
 const store = await import("../src/catalog/store.js");
@@ -54,6 +56,25 @@ test("stored Base64URL Listings authenticate their historical Listing and presen
   const current = listing("current", extensions[0], contentHash);
   assert.equal((await verifyStoredListing(current.raw, at(1)))?.contentHash, current.hash);
   assert.equal((await verifyListing(current.raw))?.contentHash, current.hash);
+});
+
+test("historical reads measure the frozen serialization while current admission measures the current one", async () => {
+  const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+  const extension = (padding: number): Obj => ({ "é": "x".repeat(padding) });
+  const emptyBytes = bytes(legacyCanonicalize(listing("boundary", extension(0)).scope));
+  // Each padding character is written twice (Listing and identity), so the frozen size lands on 16383 or 16384.
+  const padding = Math.floor((MAX_LISTING_CANONICAL_BYTES - emptyBytes) / 2);
+  const fits = listing("boundary", extension(padding));
+  assert.ok(bytes(legacyCanonicalize(fits.scope)) <= MAX_LISTING_CANONICAL_BYTES);
+  assert.ok(bytes(canonicalize(fits.scope)) > MAX_LISTING_CANONICAL_BYTES, "the current serializer keeps the decomposed member name longer");
+  assert.equal((await verifyStoredListing(fits.raw, at(1)))?.contentHash, fits.hash);
+  assert.equal(await verifyListing(fits.raw), null);
+  const oversized = listing("boundary", extension(padding + 1));
+  assert.ok(bytes(legacyCanonicalize(oversized.scope)) > MAX_LISTING_CANONICAL_BYTES);
+  assert.equal(await verifyStoredListing(oversized.raw, at(1)), null);
+  const current = listing("boundary", extension(padding), contentHash);
+  assert.equal(await verifyStoredListing(current.raw, at(1)), null);
+  assert.equal(await verifyListing(current.raw), null);
 });
 
 test("withdrawal bindings carry the authenticated historical or current marker hash", async () => {
