@@ -14,8 +14,8 @@ export interface Registration {
   listingAnchors: string[];
   /** Trusted only when populated by the hash-verified well-known crawler. */
   listingContentHashes?: Record<string, string>;
-  /** Anchors whose declared hash came from a publisher-authenticated crawl; in memory only, never stored. */
-  authenticatedHashDeclarations?: string[];
+  /** Accepted publisher hashes by normalized domain; current marks this pass's accepted sources. Null means an older source needs a recrawl. In memory only. */
+  authenticatedHashDeclarations?: Record<string, { hashes: Record<string, string>; current: boolean } | null>;
   /** The owner signature verified on the registration as stored, before crawl data was merged in; in memory only, never stored. */
   ownerSignatureVerified?: boolean;
   /** The listing anchors the owner signed, as stored before crawl data was merged in; in memory only, never stored. */
