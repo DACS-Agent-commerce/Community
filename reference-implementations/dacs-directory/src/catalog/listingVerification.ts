@@ -1,5 +1,7 @@
+import { legacyListingHash } from "./legacyListingHash.js";
 import { canonicalize, contentHash, stripSignature } from "./canonical.js";
-import { isListing, type Listing } from "@kynesyslabs/dacs/artifacts";
+import type { LegacyMvpListing as Listing } from "@kynesyslabs/dacs/artifacts";
+import { isHistoricalListing } from "./legacyListingShape.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -16,6 +18,14 @@ import type { RevocationBinding } from "./types.js";
 const SEPARATOR = "dacs-listing:v1:";
 /** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
 export const MAX_LISTING_CANONICAL_BYTES = 16_384;
+
+/** Return the Listing's current or frozen historical hash; this does not authenticate an import. */
+export function storedListingHash(raw: Record<string, unknown>): string {
+  const scope = stripSignature(raw);
+  const value = record(raw.signature)?.value;
+  return "dacsVersion" in raw && !(typeof value === "string" && /^[0-9a-f]{128}$/.test(value))
+    ? contentHash(scope) : legacyListingHash(scope);
+}
 
 export interface VerifiedListing {
   listing: Listing | Record<string, unknown>;
@@ -241,6 +251,7 @@ export async function verifyIdentityPresentation(
   identity: Record<string, unknown>,
   sellerClaim: string,
   resolveKey: ResolvePrimaryClaimKey,
+  hashScope = contentHash,
 ): Promise<ResolvedPrimaryClaimKey | null> {
   const presentation = record(identity.presentation);
   if (presentation?.kind !== "per-claim" || !Array.isArray(presentation.signatures)) return null;
@@ -250,7 +261,7 @@ export async function verifyIdentityPresentation(
   if (!signature) return null;
   const bundleScope = { ...identity };
   delete bundleScope.presentation;
-  const message = Buffer.from(`dacs-bundle-presentation:v1:${contentHash(bundleScope)}`, "utf8");
+  const message = Buffer.from(`dacs-bundle-presentation:v1:${hashScope(bundleScope)}`, "utf8");
   // A per-claim PresentationSignature carries a bare `signature` string, not a
   // SIG-6 envelope `value`; the Directory's publisher writes the wallet's hex.
   const value = typeof signature.signature === "string" ? legacySignatureBytes(signature.signature) : null;
@@ -262,6 +273,14 @@ export async function verifyListing(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<VerifiedListing | null> {
+  return verifyListingUsingHash(raw, resolveKey, contentHash);
+}
+
+async function verifyListingUsingHash(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey,
+  hashScope: typeof contentHash,
+): Promise<VerifiedListing | null> {
   if (raw.signatures !== undefined) return null;
   // Select the profile before validating it. A failed current artifact must
   // never acquire the looser legacy contract by adding draft SDK fields.
@@ -272,14 +291,14 @@ export async function verifyListing(
     delete scope.signature;
     if (Buffer.byteLength(canonicalize(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return null;
     if (current.signature.algorithm !== "ed25519") return null;
-    const hash = contentHash(scope);
+    const hash = hashScope(scope);
     const verifiedSigner = await verifyEd25519(
       Buffer.from(SEPARATOR + hash, "utf8"), current.signer, canonicalSignatureBytes(current.signature.value), resolveKey,
     );
     const seller = record(raw.seller);
     const identity = record(seller?.identity);
     const verifiedSeller = identity
-      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey)
+      ? await verifyIdentityPresentation(identity, current.sellerClaim, resolveKey, hashScope)
       : null;
     if (!verifiedSigner || !verifiedSeller) return null;
     return {
@@ -292,8 +311,9 @@ export async function verifyListing(
     };
   }
 
-  const scope = stripSignature(raw);
-  if (!isListing(scope)) return null;
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return null; }
+  if (!isHistoricalListing(scope)) return null;
   const listing = scope as unknown as Listing;
   const signature = raw.signature;
   // Early SDK listings stored only the Ed25519 value. Their signer is still
@@ -312,7 +332,8 @@ export async function verifyListing(
   // Draft SDK listings predate SIG-6; this profile is read through the legacy decoder only.
   const sig = legacySignatureBytes(s.value);
   if (!sig) return null;
-  const hash = contentHash(scope);
+  let hash: string;
+  try { hash = legacyListingHash(scope); } catch { return null; }
   const message = Buffer.from(SEPARATOR + hash, "utf8");
   const verifiedSigner = await verifyPrimaryClaimSignature(
     message, sig, s.signer, s.algorithm, resolveKey,
@@ -360,7 +381,7 @@ export async function verifyStoredListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const verified = await verifyListing({ ...raw, signature: { ...signature, value } }, resolveKey);
+    const verified = await verifyListingUsingHash({ ...raw, signature: { ...signature, value } }, resolveKey, legacyListingHash);
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
       ? verified : null;
@@ -466,7 +487,8 @@ export async function verifyListingRevocation(
   expectedVersion: number,
   resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
 ): Promise<boolean> {
-  const scope = stripSignature(raw);
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return false; }
   if (
     scope.listingId !== (listing.scope.listingId ?? (listing.listing as Listing).serviceId) ||
     scope.listingVersion !== expectedVersion ||

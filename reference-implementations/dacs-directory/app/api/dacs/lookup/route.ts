@@ -5,7 +5,7 @@
  * known deals. Registration becomes "confirm what we found", not data entry.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { isListing } from "@kynesyslabs/dacs/artifacts";
+import { isHistoricalListing as isListing } from "@/src/catalog/legacyListingShape";
 import { stripSignature } from "../../../../src/catalog/canonical.js";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
@@ -26,7 +26,9 @@ export async function GET(req: NextRequest) {
   for (const [address, o] of Object.entries(state.listings)) {
     if (o.toLowerCase() !== owner.toLowerCase()) continue;
     const raw = await readAnchor(address);
-    const scope = raw ? stripSignature(raw) : null;
+    let scope: ReturnType<typeof stripSignature> | null = null;
+    // The SDK throws on a stored artifact that is not stable canonical JSON; skip that listing, not the lookup.
+    try { scope = raw ? stripSignature(raw) : null; } catch { continue; }
     if (scope && isListing(scope)) {
       listings.push({ address, title: (scope as { name?: string }).name ?? address });
     }
