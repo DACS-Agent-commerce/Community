@@ -363,7 +363,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         log(`well-known: ${e.domain} — ${e.error}`);
       }
       for (const agent of crawl.agents) {
-        await ingestWellKnownRevocations(agent);
+        if (!await ingestWellKnownRevocations(agent)) {
+          // A refused source cannot supply declarations or prove a prior rejection has gone away.
+          crawlIncomplete = true;
+          continue;
+        }
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -476,8 +480,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 /** Total node reads spent resolving one domain's withdrawal carriage per pass. */
 export const WELL_KNOWN_WITHDRAWAL_READS_PER_PASS = 32;
 
-/** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
-export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
+/** Authenticate discovery carriage for RB-4; return false when source ordering refuses the index. */
+export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<boolean> {
   const domain = normalizeSubmittedDomain(agent.domain);
   const provenance = wellKnownWithdrawalProvenance(agent);
   if (provenance) {
@@ -485,7 +489,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
       agent.incompleteWithdrawalHashes ?? [],
-      agent.withdrawalIndex, agent.revocations, provenance)) return;
+      agent.withdrawalIndex, agent.revocations, provenance)) return false;
   } else recordWellKnownWithdrawalCheck(domain);
 
   const byHash = new Map<string, typeof agent.revocations>();
@@ -498,7 +502,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     const bindings = byHash.get(agent.contentHashes[anchor]) ?? [];
     return bindings.map((binding) => ({ anchor, binding }));
   });
-  if (!jobs.length) return;
+  if (!jobs.length) return true;
   const indexHash = agent.withdrawalIndex?.hash ?? "";
   let cursor = loadWithdrawalCursor(domain, agent.seller, indexHash) % jobs.length;
   let reads = 0;
@@ -557,4 +561,5 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
   } finally {
     saveWithdrawalCursor(domain, agent.seller, indexHash, cursor);
   }
+  return true;
 }
