@@ -18,7 +18,9 @@ import { dids, maps, seeds, sign, vector } from "./fixtures/current-evidence.js"
 const owner = `0x${dids[1].slice(-64)}`;
 const departedSeller = `did:demos:agent:${"d1".repeat(32)}`;
 const crawlOnlySeller = `did:demos:agent:${"c2".repeat(32)}`;
-const domain = "https://seller.example";
+let domain = "https://seller.example";
+// Source authentication persists, so unrelated tests must use distinct origins.
+test.beforeEach((context) => { domain = `https://${sha256Hex(context.name).slice(0, 16)}.example`; });
 const rejectedAt = (digit: string) => `stor-${digit.repeat(40)}`;
 
 const registration = (listingAnchors: string[]) => ({ primaryClaim: dids[1], displayName: "seller", listingAnchors, deals: [] });
@@ -62,7 +64,7 @@ const diagnostics = () => indexerDiagnostics().listingRejectionDiagnostics.items
 
 test("a publisher-authenticated declared hash that mismatches a registered anchor becomes a public notice", async () => {
   const { locators } = await vector("declared-hash-job", 300);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), true)], false));
   const notice = diagnostics().find((item) => item.locator === locators.listing);
@@ -72,8 +74,8 @@ test("a publisher-authenticated declared hash that mismatches a registered ancho
 });
 
 test("an unauthenticated declared hash neither rejects a registered anchor nor creates a notice", async () => {
-  const { locators } = await vector("declared-hash-job", 300);
-  saveDomains(["seller.example"]);
+  const { locators } = await vector("unsigned-declared-hash-job", 305);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), false)], false));
   assert.equal(diagnostics().some((item) => item.locator === locators.listing), false);
@@ -81,7 +83,7 @@ test("an unauthenticated declared hash neither rejects a registered anchor nor c
 
 test("a failed crawl keeps the rejection history of a seller only the crawl discovers; a complete pass removes departed sellers", async () => {
   const { locators } = await vector("prune-job", 310);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   recordListingRejection(rejectedAt("1"), crawlOnlySeller, "LISTING_SIGNATURE_INVALID");
   recordListingRejection(rejectedAt("2"), departedSeller, "LISTING_SIGNATURE_INVALID");
@@ -96,7 +98,7 @@ test("a failed crawl keeps the rejection history of a seller only the crawl disc
 
 test("a failed crawl keeps a crawl-derived rejection of a registered seller; a complete pass removes it", async () => {
   const { locators } = await vector("known-seller-job", 330);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   recordListingRejection(rejectedAt("4"), dids[1], "LISTING_SIGNATURE_INVALID");
   const kept = () => diagnostics().some((item) => item.locator === rejectedAt("4"));
@@ -114,7 +116,7 @@ test("an owner-signed registration keeps its public owner-mismatch notice after 
   const message = registrationMessage(stored, 1);
   const signature = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
   saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   await reindexWith(crawling([agentDeclaring(rejectedAt("5"), "f".repeat(64), false)], false), `0x${"f".repeat(64)}`);
   const notice = diagnostics().find((item) => item.locator === locators.listing);
   assert.equal(notice?.code, "OWNER_CLAIM_BINDING");
@@ -127,7 +129,7 @@ test("an owner-signed registration does not publish an owner-mismatch notice for
   const message = registrationMessage(stored, 1);
   const signature = Buffer.from(await ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
   saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), false)], false), `0x${"f".repeat(64)}`);
   const notice = diagnostics().find((item) => item.locator === locators.listing);
   assert.equal(notice?.code, "OWNER_CLAIM_BINDING");
@@ -136,7 +138,7 @@ test("an owner-signed registration does not publish an owner-mismatch notice for
 
 test("an operator-pinned unsigned index cannot reject a registered anchor with a declared hash", async () => {
   const { locators } = await vector("pinned-unsigned-job", 360);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   process.env.DACS_WITHDRAWAL_SOURCE_PINS = JSON.stringify({ [domain]: dids[1] });
   try {
@@ -150,7 +152,7 @@ test("an operator-pinned unsigned index cannot reject a registered anchor with a
 
 test("index-now keeps a declared-hash notice and crawl-derived history it cannot rediscover", async () => {
   const { locators } = await vector("immediate-job", 370);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), true)], false));
   // Written by a crawl, so the registration as stored does not name this anchor.
@@ -167,7 +169,7 @@ test("index-now keeps a declared-hash notice and crawl-derived history it cannot
 
 test("incomplete passes keep a declared-hash mismatch when the anchor fails verification in between", async () => {
   const { listing, locators } = await vector("interleaved-failure-job", 390);
-  saveDomains(["seller.example"]);
+  saveDomains([domain]);
   saveRegistrations([registration([locators.listing])]);
   const notice = () => diagnostics().find((item) => item.locator === locators.listing);
   const listingCount = () => loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.listings.length;
@@ -187,7 +189,7 @@ test("incomplete passes keep a declared-hash mismatch when the anchor fails veri
 
 test("a corrected declared hash clears the rejection even when an unrelated domain fails to crawl", async () => {
   const { listing, locators } = await vector("corrected-hash-job", 380);
-  saveDomains(["seller.example", "dead.example"]);
+  saveDomains([domain, "dead.example"]);
   saveRegistrations([registration([locators.listing])]);
   const crawlingWithDeadDomain = (declaredHash: string) => async () => ({
     agents: [agentDeclaring(locators.listing, declaredHash, true)],
@@ -269,7 +271,7 @@ for (const generatedAt of [100, 200]) {
 for (const mode of ["index-now", "failed crawl"] as const) {
   test(`an unsigned mismatch cannot hold an owner-signed registration during ${mode}`, async () => {
     const { locators } = await publicListingVector("unsigned-hash-job", 700);
-    saveDomains(["seller.example"]);
+    saveDomains([domain]);
     saveRegistrations([]);
     await reindexWith(crawling([agentDeclaring(locators.listing, "f".repeat(64), false)], false));
     const before = diagnostics().find((item) => item.locator === locators.listing);
@@ -292,5 +294,95 @@ for (const mode of ["index-now", "failed crawl"] as const) {
     assert.equal(seller?.listings.length, 1);
     const response = await listings(new NextRequest("https://directory.example/api/dacs/listings"));
     assert.equal((await response.json()).total, 1);
+  });
+}
+
+for (const mode of ["registered", "crawl-only", "operator-pinned"] as const) {
+  test(`a signed-to-unsigned ${mode} source retains its declared-hash rejection until authenticated correction`, async () => {
+    const { listing, locators } = await publicListingVector(`authentication-loss-${mode}`, 810);
+    const source = `https://authentication-loss-${mode}.example`;
+    saveDomains([source]);
+    saveRegistrations(mode === "crawl-only" ? [] : [registration([locators.listing])]);
+    const crawl = async (authenticated: boolean, generatedAt: number, declaredHash: string) => {
+      const raw = JSON.stringify({ indexVersion: "1", generatedAt, seller: dids[1], listings: [{
+        listingId: "svc", version: 1, contentHash: declaredHash,
+        anchor: { kind: "storage-program", locator: locators.listing }, status: "active",
+        summary: { title: "Service", category: "services.test", tags: [] },
+      }] });
+      const indexHash = sha256Hex(raw);
+      const signature = Buffer.from(await ed25519Sign(Buffer.from(wellKnownWithdrawalMessage(source, indexHash)),
+        privateKeyFromSeed(seeds[1]))).toString("base64url");
+      const agent = await crawlDomain(source, { validateUrl: async (url) => ({ url: new URL(url), ip: "203.0.113.1" }), fetchJson: async (url) => {
+        const document = url.endsWith("agent.json") ? JSON.stringify({ dacs: { dacsVersion: "1", listings: {
+          indexUrl: `${source}/listings.json`, indexHash, ...(authenticated ? { publisherSignature: signature } : {}),
+        } } }) : raw;
+        return { raw: document, body: JSON.parse(document) };
+      } });
+      assert.ok(!("error" in agent));
+      assert.equal(agent.withdrawalAuthenticated, authenticated);
+      return crawling([agent], false);
+    };
+    const publicCount = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
+    const notice = () => diagnostics().find((item) => item.locator === locators.listing);
+    await reindexWith(await crawl(true, 100, "f".repeat(64)));
+    const before = notice();
+    assert.equal(before?.publicNotice, true);
+    assert.equal(await publicCount(), 0);
+    if (mode === "operator-pinned") process.env.DACS_WITHDRAWAL_SOURCE_PINS = JSON.stringify({ [source]: dids[1] });
+    try {
+      for (let repeat = 0; repeat < 2; repeat++) {
+        await reindexWith(await crawl(false, 101, artifactHash(listing, "listing")));
+        assert.deepEqual(notice(), before, "unsigned carriage cannot reconcile an authenticated rejection");
+        assert.equal(await publicCount(), 0);
+      }
+      await reindexWith(await crawl(true, 102, artifactHash(listing, "listing")));
+      assert.equal(notice(), undefined);
+      assert.equal(await publicCount(), 1);
+    } finally {
+      delete process.env.DACS_WITHDRAWAL_SOURCE_PINS;
+    }
+  });
+}
+
+for (const mode of ["index-now", "failed crawl"] as const) {
+  test(`a signed owner pointer removal clears its notice during ${mode} and retains crawl history`, async () => {
+    const { locators } = await publicListingVector("removed-owner-pointer", 830);
+    const signRegistration = (anchors: string[], signer = 1) => {
+      const stored = registration(anchors);
+      const message = registrationMessage(stored, 1);
+      const signature = Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[signer]))).toString("hex");
+      return { ...stored, ownerSignature: { message, signedAt: 1, signature } };
+    };
+    saveDomains([domain]);
+    saveRegistrations([signRegistration([locators.listing])]);
+    await reindexWith(crawling([], false), `0x${"f".repeat(64)}`);
+    const before = diagnostics().find((item) => item.locator === locators.listing);
+    assert.equal(before?.code, "OWNER_CLAIM_BINDING");
+    assert.equal(before?.publicNotice, true);
+    recordListingRejection(rejectedAt("7"), dids[1], "LISTING_SIGNATURE_INVALID");
+    recordListingRejection(rejectedAt("8"), dids[1], "DECLARED_CONTENT_HASH_MISMATCH", { listingId: "crawl-hash", listingVersion: 1 }, true);
+    const crawlHistory = diagnostics().filter((item) => [rejectedAt("7"), rejectedAt("8")].includes(item.locator));
+    const run = async () => {
+      if (mode === "failed crawl") await reindexWith(crawling([], true));
+      else await withChainFetch(async () => {
+        const response = await indexNow(new NextRequest("https://directory.example/api/dacs/index-now",
+          { method: "POST", body: JSON.stringify({ claim: dids[1] }) }));
+        assert.equal(response.status, 200);
+      });
+    };
+    for (const replacement of [registration([]), signRegistration([], 0)]) {
+      saveRegistrations([replacement]);
+      await run();
+      assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing), before,
+        "an unverified replacement cannot prove the owner removed a pointer");
+    }
+    saveRegistrations([signRegistration([])]);
+    for (let repeat = 0; repeat < 2; repeat++) {
+      await run();
+      assert.equal(loadCatalog().sellers.find((seller) => seller.primaryClaim === dids[1])?.ownerRegistered, true);
+      assert.equal(diagnostics().some((item) => item.locator === locators.listing), false,
+        "the authenticated owner removal clears the pointer notice on a partial pass");
+      assert.deepEqual(diagnostics().filter((item) => [rejectedAt("7"), rejectedAt("8")].includes(item.locator)), crawlHistory);
+    }
   });
 }
