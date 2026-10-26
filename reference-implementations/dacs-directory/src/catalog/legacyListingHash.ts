@@ -35,6 +35,16 @@ function serialize(value: unknown): string {
 }
 
 /**
+ * Frozen SDK 44d8ff2 serialization of a scope, used to measure historical
+ * scopes against size limits. Throws on lone surrogates, non-safe-integer
+ * numbers and unsupported values.
+ */
+export function legacyCanonicalize(scope: Record<string, unknown>): string {
+  assertValidUnicode(scope);
+  return serialize(scope);
+}
+
+/**
  * Frozen SDK 44d8ff2 artifact hash profile, shared by Listings and historical
  * delivery attestations. That draft NFC-normalized member names before sorting
  * as well as string values, and refuses numbers that are not safe integers.
@@ -44,6 +54,5 @@ function serialize(value: unknown): string {
  * throws on lone surrogates, non-safe-integer numbers and unsupported values.
  */
 export function legacyListingHash(scope: Record<string, unknown>): string {
-  assertValidUnicode(scope);
-  return createHash("sha256").update(serialize(scope), "utf8").digest("hex");
+  return createHash("sha256").update(legacyCanonicalize(scope), "utf8").digest("hex");
 }
