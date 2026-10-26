@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
   const listingVersion = Math.max(0, listingVersionFloor(did, serviceId), ...priorVersions) + 1;
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
-  if (!/^[a-z0-9.-]{1,64}$/.test(category)) {
+  if (!/^[a-z0-9.-]{1,64}$/.test(category) || category.split(".").some((part) => !part)) {
     return NextResponse.json({ error: "category must be dot-notation (e.g. services.code-review)" }, { status: 400 });
   }
   if (body.tags !== undefined && (!Array.isArray(body.tags) || body.tags.length > 16 ||
