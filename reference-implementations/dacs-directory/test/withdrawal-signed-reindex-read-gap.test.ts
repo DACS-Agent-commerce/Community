@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { onPinnedChain } from './fixtures/pinned-node.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,7 +65,7 @@ test('full reindex: exhausted discovery retries cannot erase an authenticated wi
   try {
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
     store.saveRegistrations([reg]); store.saveDomains(['seller.example']);
-    await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => {throw new Error('offline');},
+    await reindexAll({nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => {throw new Error('offline');},
       crawlWellKnown: async () => ({agents: [crawled], errors: []})});
     const indexed = store.loadCatalog().sellers[0];
     assert.equal(indexed.listings.some(activeOffer), false, `authenticated withdrawal was lost after the first listing read failed: ${JSON.stringify(indexed.listings.map(l => l.status))}`);

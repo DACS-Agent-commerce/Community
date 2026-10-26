@@ -18,7 +18,7 @@ const identity = { bundleVersion: "1", presentedBy: claim, presentedAt: 1, claim
 const scope = {
   dacsVersion: "1", listingVersion: 1, listingId: "upgrade", seller: { displayName: "seller", identity: {
     ...identity, presentation: { kind: "per-claim", signatures: [{ ref: claim,
-      signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "base64url") }] },
+      signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`, "hex") }] },
   } },
   offering: { title: "upgrade", description: "upgrade", category: "test", tags: [], deliverable: { kind: "storage-program" } },
   buyerRequirement: { requirementVersion: "1", required: [] },
