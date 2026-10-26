@@ -430,6 +430,12 @@ fallback) are readable for listing discovery. Their deal evidence remains unveri
 and excluded from completion, ratings and volume until semantic agreement, settlement
 and delivery verification adapters support that combination.
 
+Expired Listings leave discovery and their deals remain as unverified history.
+This reader has no authenticated commitment-record and finalized-receipt verifier
+for the DACS-3 §8.5.2 expiry check. A separately anchored Agreement's timestamp
+and the bundle's `finalisedAt` cannot establish commitment time, so those deals
+contribute no completion, ratings or volume credit.
+
 Authenticated revocation bindings survive newer active index advertisements and
 process restarts. An unread marker continues to withhold the offer until a successful
 read rejects it or verifies revocation; verified revocation takes precedence.
