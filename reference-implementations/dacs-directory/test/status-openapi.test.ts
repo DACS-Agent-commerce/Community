@@ -5,6 +5,7 @@ import { NextRequest } from "next/server";
 import { GET as status } from "../app/api/dacs/status/route.js";
 import { GET as openapi } from "../app/openapi.json/route.js";
 import { recordListingRejection } from "../src/catalog/store.js";
+import { LISTING_REJECTION_CODES } from "../src/catalog/listingAdmission.js";
 
 type Schema = {
   type?: string | string[]; const?: unknown; enum?: unknown[]; required?: string[];
@@ -45,19 +46,29 @@ function validate(value: unknown, schema: Schema, components: Record<string, Sch
 
 test("served OpenAPI accepts actual status rejection rows, including public notices and recovery guidance", async (t) => {
   t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
-  for (const [digit, publicNotice] of [["1", false], ["2", true]] as const) {
-    recordListingRejection(`stor-${digit.repeat(40)}`, `did:demos:agent:${digit.repeat(64)}`,
-      "OWNER_CLAIM_BINDING", { listingId: `service-${digit}`, listingVersion: 1 }, publicNotice);
+  for (const [index, code] of LISTING_REJECTION_CODES.entries()) {
+    for (const [variant, coordinates, publicNotice] of [
+      [0, undefined, false],
+      [1, { listingId: `service-${index}`, listingVersion: 1 }, false],
+      [2, { listingId: `service-${index}`, listingVersion: 1 }, true],
+    ] as const) {
+      recordListingRejection(`stor-${(index * 3 + variant).toString(16).padStart(40, "0")}`,
+        `did:demos:agent:${"1".repeat(64)}`, code, coordinates, publicNotice);
+    }
   }
-  const response = await status(new NextRequest("https://directory.example/api/dacs/status"));
+  const response = await status(new NextRequest("https://directory.example/api/dacs/status?deadLetterLimit=100"));
   assert.equal(response.status, 200);
   const body = await response.json();
   const document = await (await openapi(new NextRequest("https://directory.example/openapi.json"))).json();
   const components = document.components.schemas as Record<string, Schema>;
   const contract = components.CatalogStatus.properties!.indexer.properties!.listingRejectionDiagnostics;
   const diagnostics = body.indexer.listingRejectionDiagnostics;
-  assert.equal(diagnostics.total, 2);
-  assert.equal(diagnostics.publicTotal, 1);
+  assert.equal(diagnostics.total, LISTING_REJECTION_CODES.length * 3);
+  assert.equal(diagnostics.publicTotal, LISTING_REJECTION_CODES.length);
+  assert.equal(diagnostics.returned, diagnostics.total);
+  assert.equal(diagnostics.hasMore, false);
+  assert.deepEqual(new Set(diagnostics.items.map((row: { code: string }) => row.code)), new Set(LISTING_REJECTION_CODES));
+  assert.ok(diagnostics.items.some((row: object) => !Object.hasOwn(row, "listingId")));
   assert.deepEqual(new Set(diagnostics.items.map((row: { publicNotice: boolean }) => row.publicNotice)), new Set([true, false]));
   validate(diagnostics, contract, components);
   // Guard the contract's requiredness and field types, in addition to acceptance.
