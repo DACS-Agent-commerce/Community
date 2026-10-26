@@ -37,7 +37,7 @@ import {
   verifyStoredListing,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
-import { canonicalDemosAgentClaim, canonicalDemosAgentReference } from "./claimRef.js";
+import { canonicalDemosAgentClaim, canonicalDemosAgentReference, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { verifyOwnerSignature } from "./registrationSig.js";
@@ -426,7 +426,9 @@ export async function indexRegistration(
         reconcileCurrentCopies(resolvedDeal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
       const ratings = (authoritative?.ratings ?? []).filter((rating) =>
-        rating.jobId === deal.jobId && parties.some((party) => party.primaryClaim === rating.rater),
+        rating.jobId === deal.jobId && parties.some((party) =>
+          typeof party.primaryClaim === "string" && typeof rating.rater === "string" &&
+          canonicalSigningIdentity(party.primaryClaim) === canonicalSigningIdentity(rating.rater)),
       ).map((rating) => ({
         rater: String(rating.rater), target: String(rating.target),
         targetRole: rating.targetRole as "buyer" | "seller", value: Number(rating.value),
