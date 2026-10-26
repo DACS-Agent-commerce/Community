@@ -1,14 +1,13 @@
 /**
  * POST /api/dacs/index-now { claim } — index one registration immediately
  * (fresh publishes shouldn't wait for the next timer pass). Full chain
- * verification and the same chain pin as the batch path. It runs no crawl, so
+ * verification and the same chain gate as the batch path. It runs no crawl, so
  * crawl-derived diagnostics remain; verified owner pointer removals can clear
  * owner notices.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { scanStateCurrent, servedCatalogChain } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
-import { catalogNodeDeployment } from "@/src/catalog/listingFinality";
-import { genesisReplayPending } from "@/src/catalog/scanState";
 import { requireAdmin } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations, loadScanState, saveCatalog, withDataLock } from "@/src/catalog/store";
 
@@ -22,25 +21,13 @@ export async function POST(req: NextRequest) {
   if (!reg) return NextResponse.json({ error: "no registration for that claim" }, { status: 404 });
 
   return withDataLock("reindex", async () => {
-    // As in reindexAll: nothing from a node outside the pinned chain
-    // reaches the public catalog, and a node that cannot be read changes nothing.
-    const deployment = await catalogNodeDeployment().catch(() => null);
-    if (!deployment) {
-      return NextResponse.json({ error: "could not read the Demos node's chain; catalog not updated" }, { status: 503 });
-    }
-    if (!deployment.ok) {
-      return NextResponse.json({ error: `catalog not updated: ${deployment.reason}` }, { status: 409 });
-    }
-    // A catalog recorded under another chain is replaced by the next full reindex, not merged into.
-    // A legacy scan state with no recorded chain is left alone.
-    const scanState = loadScanState();
-    const recordedChain = scanState.chainIdentity;
-    if (recordedChain !== undefined && recordedChain !== deployment.chainIdentity) {
-      return NextResponse.json({ error: "catalog not updated: it was built on another chain; run a full reindex first" }, { status: 409 });
-    }
-    // Until the replay from genesis ends, older withdrawals of the registered listing may be unscanned.
-    if (genesisReplayPending(scanState)) {
-      return NextResponse.json({ error: "catalog not updated: the replay from genesis has not finished; run a full reindex first" }, { status: 409 });
+    const served = await servedCatalogChain();
+    if (!served.ok) return NextResponse.json({ error: `catalog not updated: ${served.cause}` }, { status: served.status });
+    // Until a complete pass on this chain has been scanned, older withdrawals may be missing:
+    // another recorded chain, a legacy or reset state, an unfinished replay, an old schema.
+    if (!scanStateCurrent(loadScanState(), served.chainIdentity)) {
+      return NextResponse.json({ error: "catalog not updated: no complete reindex on this chain yet; run a full reindex first" },
+        { status: 409 });
     }
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
@@ -52,7 +39,7 @@ export async function POST(req: NextRequest) {
     saveCatalog(catalog);
     return NextResponse.json({
       ok: true,
-      nodeBuildWarning: deployment.warning,
+      nodeBuildWarning: served.warning,
       listings: record.listings.length,
       verifiedDeals: record.deals.filter((d) => d.refsVerified).length,
     });
