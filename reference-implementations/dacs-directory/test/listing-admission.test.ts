@@ -316,17 +316,66 @@ test("only a publisher-authenticated hash declaration for a seller-matching list
   try {
     await indexRegistration(reg, undefined, async () => ({}));
     assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0, "an unauthenticated declaration stays private");
-    reg.authenticatedHashDeclarations = [anchor];
+    reg.authenticatedHashDeclarations = { "https://publisher.example": { hashes: { [anchor]: "0".repeat(64) }, current: true } };
     await indexRegistration(reg, undefined, async () => ({}));
     let diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 1);
     assert.equal(diagnostics.items.find((item) => item.publicNotice)?.listingId, "public-pointer");
     assert.match(diagnostics.items.find((item) => item.publicNotice)?.guidance ?? "", /declared hash in the discovery channel/);
     reg.listingContentHashes = {};
-    reg.authenticatedHashDeclarations = [];
+    reg.authenticatedHashDeclarations = {};
     assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings.length, 1);
     diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
     assert.equal(diagnostics.publicTotal, 0);
     assert.equal(diagnostics.items.some((item) => item.locator === anchor), false);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+const unverifiableReads: Record<string, (valid: Obj) => Obj> = {
+  "invalid shape": () => ({ dacsVersion: "1" }),
+  "invalid signature": (valid) => ({ ...valid, signature: { algorithm: "ed25519", signer: seller, value: "invalid" } }),
+  "invalid identity presentation": (valid) => {
+    const identity = { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }],
+      presentation: { kind: "per-claim", signatures: [{ ref: seller, signature: "invalid" }] } };
+    const scope: Obj = { ...valid, seller: { identity, displayName: "Admission Desk" } };
+    delete scope.signature;
+    return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
+  },
+  "invalid verification method": () => signedListing("retained-owner", attested("x402-receipt")),
+  "invalid legacy shape": () => ({ serviceId: "retained-owner" }),
+  "oversized canonical listing": (valid) => ({ ...valid, extension: "x".repeat(16_384) }),
+};
+
+for (const [kind, invalidRead] of Object.entries(unverifiableReads)) {
+  test(`an authenticated owner notice survives repeated present reads with ${kind}`, async () => {
+    const anchor = `stor-${"6".repeat(40)}`;
+    const valid = signedListing("retained-owner", attested({ kind: "self-signed" }));
+    let data = valid;
+    let anchorOwner = `0x${"f".repeat(64)}`;
+    const reg: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] };
+    const message = registrationMessage(reg, 1);
+    reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ success: true, owner: anchorOwner, data });
+    const index = () => indexRegistration(reg, undefined, async () => ({}));
+    const notice = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor);
+    try {
+      assert.equal((await index()).listings.length, 0);
+      const before = notice();
+      assert.equal(before?.code, "OWNER_CLAIM_BINDING");
+      assert.equal(before?.publicNotice, true);
+      data = invalidRead(valid);
+      for (let repeat = 0; repeat < 2; repeat++) {
+        assert.equal((await index()).listings.length, 0);
+        assert.deepEqual(notice(), before, "unverifiable bytes cannot replace authenticated coordinates or history");
+      }
+      data = valid;
+      anchorOwner = `0x${keyHex}`;
+      assert.equal((await index()).listings.length, 1);
+      assert.equal(notice(), undefined, "a verified correction reconciles the owner notice");
+    } finally {
+      globalThis.fetch = originalFetch;
+      store.clearRegistrationListingRejections(seller);
+    }
+  });
+}

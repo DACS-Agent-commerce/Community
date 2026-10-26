@@ -10,7 +10,7 @@ import { POST as indexNow } from "../app/api/dacs/index-now/route.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
-import { indexerDiagnostics, loadCatalog, recordListingRejection, saveDomains, saveRegistrations } from "../src/catalog/store.js";
+import { indexerDiagnostics, loadCatalog, recordListingRejection, recordWellKnownWithdrawalCheck, saveDomains, saveRegistrations } from "../src/catalog/store.js";
 import { crawlDomain, wellKnownWithdrawalMessage, type WellKnownAgent } from "../src/catalog/wellknown.js";
 import { sha256Hex } from "../src/catalog/canonical.js";
 import { dids, maps, seeds, sign, vector } from "./fixtures/current-evidence.js";
@@ -200,6 +200,7 @@ test("a corrected declared hash clears the rejection even when an unrelated doma
 async function publicListingVector(jobId: string, offset: number) {
   const fixture = await vector(jobId, offset);
   const scope = signedScope(fixture.listing, "listing");
+  scope.fixtureCase = jobId;
   scope.acceptedRails = [{ railId: "demos-native:DEM" }];
   scope.pipeline = [
     { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
@@ -439,3 +440,221 @@ for (const mirrorHash of ["matching", "different"] as const) {
     assert.equal((await response.json()).total, 1, "an authenticated matching declaration releases the hold");
   });
 }
+
+async function signedDeclaration(source: string, anchor: string, hash: string | null, generatedAt = 100, signer = 1): Promise<WellKnownAgent> {
+  const raw = JSON.stringify({ indexVersion: "1", generatedAt, seller: dids[signer], listings: hash === null ? [] : [{
+    listingId: "svc", version: 1, contentHash: hash,
+    anchor: { kind: "storage-program", locator: anchor }, status: "active",
+    summary: { title: "Service", category: "services.test", tags: [] },
+  }] });
+  const indexHash = sha256Hex(raw);
+  const publisherSignature = Buffer.from(ed25519Sign(Buffer.from(wellKnownWithdrawalMessage(source, indexHash)),
+    privateKeyFromSeed(seeds[signer]))).toString("base64url");
+  const agent = await crawlDomain(source, {
+    validateUrl: async (url) => ({ url: new URL(url), ip: "203.0.113.1" }),
+    fetchJson: async (url) => {
+      const document = url.endsWith("agent.json") ? JSON.stringify({ dacs: { dacsVersion: "1", listings: {
+        indexUrl: `${source}/listings.json`, indexHash, publisherSignature,
+      } } }) : raw;
+      return { raw: document, body: JSON.parse(document) };
+    },
+  });
+  assert.ok(!("error" in agent));
+  assert.equal(agent.withdrawalAuthenticated, true);
+  return agent;
+}
+
+const publicListingCount = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
+
+for (const mode of ["registered", "crawl-only"] as const) {
+  for (const order of ["wrong-first", "wrong-last"] as const) {
+    for (const priorNotice of [false, true]) {
+      test(`signed conflicting domains reject ${mode} listings ${order}, with prior notice ${priorNotice}`, async () => {
+        const { listing, locators } = await publicListingVector("conflicting-domains", 1000);
+        const mirror = `https://mirror-${sha256Hex(domain).slice(0, 16)}.example`;
+        saveDomains([domain, mirror]);
+        saveRegistrations(mode === "registered" ? [registration([locators.listing])] : []);
+        const wrong = await signedDeclaration(domain, locators.listing, "f".repeat(64));
+        const matching = await signedDeclaration(mirror, locators.listing, artifactHash(listing, "listing"));
+        if (priorNotice) await reindexWith(crawling([wrong], false));
+        const notice = () => diagnostics().find((item) => item.locator === locators.listing);
+        for (let repeat = 0; repeat < 2; repeat++) {
+          await reindexWith(crawling(order === "wrong-first" ? [wrong, matching] : [matching, wrong], false));
+          assert.equal(notice()?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+          assert.equal(notice()?.publicNotice, true);
+          assert.equal(await publicListingCount(), 0, "every signed source must agree before admission");
+        }
+        const corrected = await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing"), 101);
+        await reindexWith(crawling([corrected, matching], false));
+        assert.equal(notice(), undefined);
+        assert.equal(await publicListingCount(), 1, "all sources now agree");
+      });
+    }
+  }
+}
+
+for (const state of ["failed", "rollback", "equal-time conflict", "unsigned"] as const) {
+  test(`a matching signed peer cannot erase the declaration of a ${state} source`, async () => {
+    const { listing, locators } = await publicListingVector(`unresolved-source-${state}`, 1100);
+    const mirror = `https://peer-${sha256Hex(domain).slice(0, 16)}.example`;
+    const actualHash = artifactHash(listing, "listing");
+    saveDomains([domain, mirror]);
+    saveRegistrations([registration([locators.listing])]);
+    await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64))], false));
+    const matching = await signedDeclaration(mirror, locators.listing, actualHash);
+    const replacement = await signedDeclaration(domain, locators.listing, actualHash, state === "rollback" ? 99 : state === "unsigned" ? 101 : 100);
+    if (state === "unsigned") replacement.withdrawalAuthenticated = false;
+    for (let repeat = 0; repeat < 2; repeat++) {
+      await reindexWith(crawling(state === "failed" ? [matching] : [replacement, matching], state === "failed"));
+      const notice = diagnostics().find((item) => item.locator === locators.listing);
+      assert.equal(notice?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+      assert.equal(notice?.publicNotice, true);
+      assert.equal(await publicListingCount(), 0);
+    }
+    await reindexWith(crawling([await signedDeclaration(domain, locators.listing, null, 102), matching], false));
+    assert.equal(diagnostics().some((item) => item.locator === locators.listing), false, "a signed omission releases only this source's declaration");
+    assert.equal(await publicListingCount(), 1);
+  });
+}
+
+test("accepted source declarations survive restart even before the diagnostic write completes", async () => {
+  const { listing, locators } = await publicListingVector("source-restart", 1200);
+  const mirror = "https://restart-peer.example";
+  saveDomains([domain, mirror]);
+  saveRegistrations([registration([locators.listing])]);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64))], false));
+  const matching = await signedDeclaration(mirror, locators.listing, artifactHash(listing, "listing"));
+  const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import assert from "node:assert/strict";
+    import { readFileSync } from "node:fs";
+    import { reindexAll } from "./src/catalog/reindexCore.ts";
+    import { clearListingRejection, indexerDiagnostics, loadCatalog } from "./src/catalog/store.ts";
+    const { listing, anchor, owner, matching, source, seller } = JSON.parse(readFileSync(0, "utf8"));
+    // Model interruption after accepting source bytes but before recording their rejection.
+    clearListingRejection(anchor, seller);
+    globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+      : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
+      : new Response(null, { status: 404 });
+    for (let repeat = 0; repeat < 2; repeat++) {
+      await reindexAll({ log: () => {}, resolveIdentities: async () => ({}),
+        crawlWellKnown: async () => ({ agents: [matching], errors: [{ domain: source, error: "offline" }] }) });
+      const notice = indexerDiagnostics().listingRejectionDiagnostics.items.find(item => item.locator === anchor);
+      assert.equal(notice?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+      assert.equal(notice?.publicNotice, true);
+      assert.equal(loadCatalog().sellers.find(item => item.primaryClaim === seller)?.listings.length, 0);
+    }
+  `], { encoding: "utf8", timeout: 30_000,
+    input: JSON.stringify({ listing, anchor: locators.listing, owner, matching, source: domain, seller: dids[1] }) });
+  assert.equal(restarted.status, 0, restarted.stderr || String(restarted.error));
+});
+
+for (const mode of ["full", "immediate", "restarted"] as const) {
+  test(`a ${mode} repeat preserves an authenticated owner notice on present invalid bytes`, async () => {
+    const { listing, locators } = await publicListingVector(`owner-repeat-${mode}`, 1300);
+    const stored = registration([locators.listing]);
+    const message = registrationMessage(stored, 1);
+    const signature = Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
+    saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
+    saveDomains([domain]);
+    await reindexWith(crawling([], false), `0x${"f".repeat(64)}`);
+    const before = diagnostics().find((item) => item.locator === locators.listing);
+    assert.equal(before?.code, "OWNER_CLAIM_BINDING");
+    assert.equal(before?.publicNotice, true);
+    maps.set(locators.listing, { ...listing, signature: { algorithm: "ed25519", signer: dids[1], value: "invalid" } });
+    if (mode === "restarted") {
+      const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import assert from "node:assert/strict";
+        import { readFileSync } from "node:fs";
+        import { indexRegistration } from "./src/catalog/indexer.ts";
+        import { indexerDiagnostics, loadRegistrations } from "./src/catalog/store.ts";
+        const { invalid, anchor, owner, before } = JSON.parse(readFileSync(0, "utf8"));
+        globalThis.fetch = async () => Response.json({ success: true, owner, data: invalid });
+        for (let repeat = 0; repeat < 2; repeat++) {
+          assert.equal((await indexRegistration(loadRegistrations()[0], undefined, async () => ({}))).listings.length, 0);
+          assert.deepEqual(indexerDiagnostics().listingRejectionDiagnostics.items.find(item => item.locator === anchor), before);
+        }
+      `], { encoding: "utf8", timeout: 30_000,
+        input: JSON.stringify({ invalid: maps.get(locators.listing), anchor: locators.listing, owner, before }) });
+      assert.equal(restarted.status, 0, restarted.stderr || String(restarted.error));
+    }
+    for (let repeat = 0; repeat < 2; repeat++) {
+      if (mode === "full") await reindexWith(crawling([], false));
+      else await withChainFetch(async () => {
+        const response = await indexNow(new NextRequest("https://directory.example/api/dacs/index-now",
+          { method: "POST", body: JSON.stringify({ claim: dids[1] }) }));
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).listings, 0);
+      });
+      assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing), before);
+    }
+    maps.set(locators.listing, listing);
+  });
+}
+
+test("signed declarations are isolated by seller and anchor", async () => {
+  const first = await publicListingVector("isolated-source-first", 1400);
+  const second = await publicListingVector("isolated-source-second", 1500);
+  maps.set(first.locators.listing, first.listing);
+  const peer = "https://isolated-peer.example";
+  const foreign = "https://foreign-source.example";
+  saveDomains([domain, peer, foreign]);
+  saveRegistrations([registration([first.locators.listing, second.locators.listing])]);
+  await reindexWith(crawling([
+    await signedDeclaration(domain, first.locators.listing, artifactHash(first.listing, "listing")),
+    await signedDeclaration(peer, second.locators.listing, "f".repeat(64)),
+    await signedDeclaration(foreign, first.locators.listing, "f".repeat(64), 100, 0),
+  ], false));
+  const seller = loadCatalog().sellers.find((item) => item.primaryClaim === dids[1]);
+  assert.deepEqual(seller?.listings.map((item) => item.anchor.locator), [first.locators.listing]);
+  assert.ok(diagnostics().filter((item) => item.locator === first.locators.listing).every((item) => !item.publicNotice));
+  assert.equal(diagnostics().find((item) => item.locator === second.locators.listing)?.publicNotice, true);
+});
+
+test("a corrected source cannot discharge a third source's still conflicting declaration", async () => {
+  const { listing, locators } = await publicListingVector("three-sources", 1600);
+  const peer = "https://corrected-peer.example";
+  const third = "https://third-source.example";
+  saveDomains([domain, peer, third]);
+  saveRegistrations([registration([locators.listing])]);
+  const actualHash = artifactHash(listing, "listing");
+  const matching = await signedDeclaration(peer, locators.listing, actualHash);
+  const wrong = await signedDeclaration(third, locators.listing, "e".repeat(64));
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64)), wrong, matching], false));
+  await reindexWith(crawling([wrong, await signedDeclaration(domain, locators.listing, actualHash, 101), matching], false));
+  assert.equal(diagnostics().find((item) => item.locator === locators.listing)?.publicNotice, true);
+  assert.equal(await publicListingCount(), 0);
+  await reindexWith(crawling([await signedDeclaration(third, locators.listing, actualHash, 101),
+    await signedDeclaration(domain, locators.listing, actualHash, 101), matching], false));
+  assert.equal(diagnostics().some((item) => item.locator === locators.listing), false);
+  assert.equal(await publicListingCount(), 1);
+});
+
+test("a partial crawl cannot reconcile an older notice without its source's saved declarations", async () => {
+  const { listing, locators } = await publicListingVector("older-source-notice", 1700);
+  const mirror = "https://older-source-peer.example";
+  saveDomains([domain, mirror]);
+  saveRegistrations([registration([locators.listing])]);
+  // Model a database from before per-source declaration retention existed.
+  recordWellKnownWithdrawalCheck(domain, dids[1], [], [], { generatedAt: 100, hash: "f".repeat(64) });
+  recordListingRejection(locators.listing, dids[1], "DECLARED_CONTENT_HASH_MISMATCH", { listingId: "svc", listingVersion: 1 }, true);
+  const before = diagnostics().find((item) => item.locator === locators.listing);
+  const matching = await signedDeclaration(mirror, locators.listing, artifactHash(listing, "listing"));
+  await reindexWith(crawling([matching], true));
+  assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing), before);
+  assert.equal(await publicListingCount(), 0);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing"), 101), matching], false));
+  assert.equal(diagnostics().some((item) => item.locator === locators.listing), false);
+  assert.equal(await publicListingCount(), 1);
+});
+
+test("a domain's newly signed seller does not refresh its previous seller's declaration", async () => {
+  const { locators } = await publicListingVector("source-seller-change", 1800);
+  saveDomains([domain]);
+  saveRegistrations([registration([locators.listing])]);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "f".repeat(64))], false));
+  const before = diagnostics().find((item) => item.locator === locators.listing);
+  assert.equal(before?.publicNotice, true);
+  await reindexWith(crawling([await signedDeclaration(domain, locators.listing, "e".repeat(64), 101, 0)], false));
+  assert.deepEqual(diagnostics().find((item) => item.locator === locators.listing && item.publicNotice), before);
+  assert.equal(await publicListingCount(), 0);
+});

@@ -45,6 +45,8 @@ import {
   pruneFailureHistory,
   pruneListingRejections,
   hasPublisherAuthenticatedWellKnownSource,
+  recordAuthenticatedListingDeclarations,
+  loadAuthenticatedListingDeclarations,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -351,6 +353,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    const acceptedDeclarationDomains = new Map<string, Set<string>>();
     let crawlIncomplete = false;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
@@ -371,6 +374,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           crawlIncomplete = true;
           continue;
         }
+        if (agent.withdrawalAuthenticated) {
+          const domain = normalizeSubmittedDomain(agent.domain);
+          recordAuthenticatedListingDeclarations(domain, agent.seller, agent.contentHashes);
+          const accepted = acceptedDeclarationDomains.get(agent.seller) ?? new Set<string>();
+          accepted.add(domain);
+          acceptedDeclarationDomains.set(agent.seller, accepted);
+        }
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
         if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
@@ -388,13 +398,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
               reg.listingContentHashes ??= {};
               reg.listingContentHashes[anchor] = declaredHash;
             }
-          }
-          // An authenticated publisher's declaration also binds anchors the registration already names.
-          const authenticatedHash = agent.withdrawalAuthenticated ? agent.contentHashes[anchor] : undefined;
-          if (authenticatedHash) {
-            reg.listingContentHashes ??= {};
-            reg.listingContentHashes[anchor] = authenticatedHash;
-            reg.authenticatedHashDeclarations = [...new Set([...(reg.authenticatedHashDeclarations ?? []), anchor])];
           }
         }
         reg.wellKnownDomains = [...new Set([...(reg.wellKnownDomains ?? []), agent.domain])];
@@ -420,6 +423,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 
     const sellers = [];
     for (const reg of allRegs) {
+      // A matching peer cannot reconcile another publisher's still-advertised declaration.
+      reg.authenticatedHashDeclarations = loadAuthenticatedListingDeclarations(reg.primaryClaim, domains,
+        acceptedDeclarationDomains.get(reg.primaryClaim) ?? new Set());
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
       // Fail closed per seller: one that cannot be indexed is left out of this pass, never the whole catalog.

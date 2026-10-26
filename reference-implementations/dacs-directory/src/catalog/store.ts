@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
-import { bindsListingTuple, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import { bindsListingTuple, normalizeSubmittedDomain, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
 import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
@@ -948,6 +948,33 @@ export function listingRejectionNoticeCode(locator: string, registrationClaim: s
 /** Whether this normalized domain previously supplied publisher-authenticated discovery. */
 export const hasPublisherAuthenticatedWellKnownSource = (domain: string): boolean =>
   withdrawalSources().some((source) => source.domain === domain && source.provenance === "publisher-signature");
+
+interface AuthenticatedListingSource { domain: string; seller: string; hashes: Record<string, string> }
+const authenticatedListingSources = (): AuthenticatedListingSource[] => getJson("listing-declaration-sources", []);
+
+/** Replace only this publisher's declarations after its signed index passes source ordering. Storage failures throw. */
+export const recordAuthenticatedListingDeclarations = db.transaction((domain: string, seller: string, hashes: Record<string, string>): void => {
+  const sources = authenticatedListingSources().filter((source) => source.domain !== domain || source.seller !== seller);
+  sources.push({ domain, seller, hashes });
+  setJson("listing-declaration-sources", sources);
+});
+
+/** Retain accepted declarations through failed crawls; older sources without hash maps remain unresolved. Storage failures throw. */
+export function loadAuthenticatedListingDeclarations(
+  seller: string, domains: string[], currentDomains: ReadonlySet<string>,
+): NonNullable<Registration["authenticatedHashDeclarations"]> {
+  const configured = new Set(domains.map((domain) => {
+    try { return normalizeSubmittedDomain(domain); }
+    catch { return domain; /* Invalid legacy origins cannot match an authenticated source. */ }
+  }));
+  const sources = authenticatedListingSources().filter((source) => source.seller === seller && configured.has(source.domain));
+  const unknown = withdrawalSources().filter((source) => source.seller === seller && configured.has(source.domain) &&
+    source.provenance === "publisher-signature" && !sources.some((saved) => saved.domain === source.domain));
+  return Object.fromEntries([
+    ...unknown.map((source) => [source.domain, null]),
+    ...sources.map((source) => [source.domain, { hashes: source.hashes, current: currentDomains.has(source.domain) }]),
+  ]);
+}
 
 export function clearListingRejection(locator: string, registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
