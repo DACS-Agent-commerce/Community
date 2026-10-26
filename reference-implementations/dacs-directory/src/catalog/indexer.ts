@@ -200,7 +200,7 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
-  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown>; expiredAt?: number; notBefore?: number }>();
+  const listingArtifacts = new Map<string, { locator: string; raw: Record<string, unknown>; expiredAt?: number }>();
   const categoriesByListing = new Map<string, string>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
@@ -273,10 +273,10 @@ export async function indexRegistration(
     const notBefore = typeof validity?.notBefore === "number" ? validity.notBefore : undefined;
     if (notBefore !== undefined && now < notBefore) continue;
     const presentation = listingPresentation(scope);
-    // Historical deals retain authenticated terms and category after expiry or revocation.
-    // An expired Listing only vouches for a deal whose agreement was anchored within its window (see the evidence graph).
+    // Retain authenticated Listing terms for history after expiry or revocation.
+    // Expired terms remain in history, but this reader cannot authenticate their commitment finality (see the evidence graph).
     const expiredAt = typeof validity?.notAfter === "number" && now > validity.notAfter ? validity.notAfter : undefined;
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt, notBefore });
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, expiredAt });
     categoriesByListing.set(listingId, presentation.category);
     if (!listingIsCurrentlyEffective(scope, now)) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
@@ -437,7 +437,7 @@ export async function indexRegistration(
       const hash = String(ref.contentHash ?? "").replace(/^sha256:/, "").toLowerCase();
       return listingArtifacts.get(`${id}\n${version}\n${hash}`) ?? null;
     };
-    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing, anchorTime: artifactAnchorTime });
+    const graphFor = (locator: string) => buildCurrentEvidenceGraph(locator, { read: readAnchor, resolveListing });
     const buyerIsCurrent = usesCurrentBundleProfile(buyerInitial);
     const sellerCurrentProbe = buyerIsCurrent || jobBindings.length > 0 || !deal.sellerBundleRef
       ? null
