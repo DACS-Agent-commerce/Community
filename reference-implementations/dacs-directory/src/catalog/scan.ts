@@ -21,7 +21,7 @@ import { isLegacyMvpAgreementDocument } from "@kynesyslabs/dacs/artifacts";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
-import { canonicalProgramOwner, discoveredDealKey } from "./scanState.js";
+import { discoveredDealKey } from "./scanState.js";
 import { agreementRail } from "./agreementMetadata.js";
 import {
   catalogBundleBindings,
@@ -54,8 +54,6 @@ export interface ScannedArtifacts {
   highestTxId: number;
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
-  /** Transaction id to pass as `startBefore` to continue a walk that stopped at `maxTxs`; absent when complete or failed. */
-  resumeBefore?: number;
   chainTip: number;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
@@ -423,11 +421,6 @@ export async function scanChain(
   opts: {
     maxTxs?: number;
     sinceTxId?: number;
-    /** Continue a walk that stopped at `maxTxs`: start at this id instead of the tip, with the tip that walk saw. */
-    startBefore?: number;
-    chainTip?: number;
-    /** Deals an earlier window found without a seller: their agreement may be in this window. */
-    unattributedDeals?: Iterable<RegisteredDeal>;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
   } = {},
@@ -442,11 +435,11 @@ export async function scanChain(
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
-  let chainTip = opts.chainTip ?? since;
+  let chainTip = since;
   let scanError: string | undefined;
   const finalityDepth = nonNegativeInt(process.env.DACS_SCAN_FINALITY_DEPTH, 2);
 
-  let cursor: number | "latest" = opts.startBefore ?? "latest";
+  let cursor: number | "latest" = "latest";
   const PAGE = 100;
   while (scanned < maxTxs) {
     let page: Array<{ id?: number }> = [];
@@ -577,12 +570,6 @@ export async function scanChain(
     // retain the honest finalisedAt fallback and will be retried by backfill.
   }
 
-  for (const deal of opts.unattributedDeals ?? []) {
-    const dealKey = discoveredDealKey(deal.owners.buyer, deal.jobId);
-    if (!bundleOwners.has(dealKey)) {
-      bundleOwners.set(dealKey, { jobId: deal.jobId, address: deal.buyerBundleRef, owner: canonicalProgramOwner(deal.owners.buyer) });
-    }
-  }
   // Attribute each discovered deal to its seller via the buyer-anchored agreement.
   const deals = new Map<string, RegisteredDeal & { sellerFromAgreement?: string }>();
   for (const [dealKey, { jobId, ...bundle }] of bundleOwners) {
@@ -629,6 +616,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError,
-    ...(!complete && scanError === undefined && typeof cursor === "number" ? { resumeBefore: cursor } : {}) };
+    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
 }

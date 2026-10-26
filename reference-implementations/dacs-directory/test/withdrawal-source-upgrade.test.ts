@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { onPinnedChain } from './fixtures/pinned-node.js';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,7 +41,7 @@ test('v2 authenticated incomplete source survives upgrade when discovery is unav
   const reg = store.loadRegistrations()[0];
   const immediate = await indexRegistration(reg, undefined, async()=>{throw new Error('offline')});
   assert.equal(immediate.listings.some(activeOffer),false,'index-now cannot bypass the source-only upgrade hold');
-  await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log:()=>{},resolveIdentities:async()=>{throw new Error('offline')},
+  await reindexAll({nodeDeployment:onPinnedChain,log:()=>{},resolveIdentities:async()=>{throw new Error('offline')},
    crawlWellKnown:async()=>({agents:[],errors:[{domain:'seller.example',error:'transport offline'}]})});
   const listings = store.loadCatalog().sellers.flatMap(s=>s.listings);
   assert.equal(listings.some(activeOffer),false,'upgrade plus failed discovery must not turn a prior authenticated incomplete check into an active offer');
