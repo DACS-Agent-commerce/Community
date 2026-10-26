@@ -350,7 +350,8 @@ the publisher as buyer and attributes supplier history to the agreement seller.
 - **dacs-sdk**: `SDK_REV`, `STANDARD_REV`, patch digest and output digest in
   `scripts/setup-sdk.sh` pin the compiled compatibility build. It supplies current
   canonical hashing, Ed25519, CCI parsing and the labelled legacy verifier. Frozen
-  historical hashes stay in the Directory.
+  historical hashes stay in the Directory. `/api/dacs/status` reports
+  `legacyVetUnsupportedDeals`; these unverified deals do not contribute to reputation.
 - **Demos node**: the read contract is pinned to `kynesyslabs/node` `ac8f45f`.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the

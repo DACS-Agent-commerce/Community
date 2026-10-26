@@ -495,7 +495,8 @@ export async function indexRegistration(
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
       const authenticated = Boolean(verification) && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole);
       const refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts };
+      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts,
+        carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
     };
 
     const buyerCopy = await verifyCopy(deal.buyerBundleRef, "buyer");
@@ -521,6 +522,8 @@ export async function indexRegistration(
       ...deal,
       signatureVerified: authoritative.signaturesOk,
       refsVerified: strictRefsVerified,
+      verificationLimitation: !strictRefsVerified && (buyerCopy.carriesVetRecords || sellerCopy?.carriesVetRecords)
+        ? "legacy-vet-unsupported" : undefined,
       outcome: bundle?.outcome,
       sellerOutcome,
       anchoredByRole: bundle?.anchoredByRole === "buyer" || bundle?.anchoredByRole === "seller" || bundle?.anchoredByRole === "orchestrator"

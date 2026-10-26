@@ -191,6 +191,13 @@ export interface DealRecord extends RegisteredDeal {
   signatureVerified: boolean;
   /** Referenced-artifact integrity (agreement/evidence/vet hash-checks). */
   refsVerified: boolean;
+  /**
+   * A disclosed reader limitation; never a substitute for a verification verdict.
+   * "legacy-vet-unsupported": the deal is not verified and an authenticated, deal-bound copy of its
+   * bundle carries vet records, which this reader cannot verify; the deal's other references may also
+   * have failed, and the other copy may be missing or invalid.
+   */
+  verificationLimitation?: "legacy-vet-unsupported";
   outcome?: string;
   finalisedAt?: number;
   verifiedAt: number;
