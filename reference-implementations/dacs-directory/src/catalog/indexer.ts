@@ -47,7 +47,7 @@ import { verifyOwnerSignature } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
-  listingRejectionCode,
+  listingRejectionNoticeCode,
   pruneRegistrationListingRejections,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -189,10 +189,10 @@ export async function indexRegistration(
       continue;
     }
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    // A recorded hash mismatch stays in force until a matching declaration is seen. An incomplete pass cannot
+    // An authenticated hash mismatch stays in force until a matching declaration is seen. An incomplete pass cannot
     // see a declaration made earlier, so a failure that cannot read the hash must not replace the row.
     const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
-      listingRejectionCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
+      listingRejectionNoticeCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
