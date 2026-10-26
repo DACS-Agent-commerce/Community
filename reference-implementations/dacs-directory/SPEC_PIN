@@ -71,8 +71,9 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   canonical Base64URL, historical 64-byte hex (no 0x prefix), or padded Base64.
 #   CORE SIG-6 does not prescribe these per-claim strings; the pinned vector uses
 #   padded Base64. Catalog admission does not establish SDK transaction readiness.
-# - Current Listing readers support fractional negotiation percentages. Publication
-#   rejects them, and the frozen legacy hash profile requires integer JSON numbers.
+# - Current canonicalization accepts bounded fractional numbers; Listing readers allow
+#   fractional negotiation percentages. Frozen historical hashing requires safe integers.
+#   Publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
