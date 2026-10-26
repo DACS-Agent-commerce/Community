@@ -1,8 +1,10 @@
-import { contentHash, stripSignature } from "./canonical.js";
-import { legacyListingHash } from "./legacyListingHash.js";
+import { canonicalize, contentHash, stripSignature } from "./canonical.js";
+import { legacyCanonicalize, legacyListingHash } from "./legacyListingHash.js";
 import {
   ARTIFACT_SEPARATORS,
+  isComponentSignature,
   isListing,
+  isListingDraft,
   isVerificationMethod,
   readListingArtifact,
   verifyComponentSignature,
@@ -16,6 +18,7 @@ import {
 // leaf module. test/client-bundle-imports.test.ts pins this for every client
 // entry.
 import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
+import { sameCanonicalClaimIdentity } from "../../vendor/dacs-sdk/dist/identity/claimReference.js";
 import { isHistoricalListing } from "./legacyListingShape.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
@@ -32,6 +35,8 @@ import { canonicalSignatureBytes, importLegacySignatureValue, legacySignatureByt
 import type { RevocationBinding } from "./types.js";
 
 const SEPARATOR = "dacs-listing:v1:";
+/** DACS-1 LR-2: the canonical form (signature omitted) of a listing is at most 16 KB. */
+export const MAX_LISTING_CANONICAL_BYTES = 16_384;
 
 /** Compute a stored Listing hash, optionally matching an already authenticated pin; does not verify signatures. */
 export function storedListingHash(raw: Record<string, unknown>, expectedHash?: string): string {
@@ -203,10 +208,30 @@ export async function verifyListingResult(
   }
 }
 
+// The SDK draft gate has the same schema and pipeline checks without a size
+// decision. Restore its signed-envelope and signer authorization checks here;
+// the frozen profile measures the original scope with its own serializer.
+function isFrozenListing(value: unknown): value is Listing {
+  const raw = record(value);
+  if (!raw) return false;
+  const { signature, ...scope } = raw;
+  return isListingDraft(scope) && isComponentSignature(signature) &&
+    scope.seller.identity.claims.some((claim) => sameCanonicalClaimIdentity(claim.ref, signature.signer));
+}
+
+/** The serializer that measures a scope and the hash that signatures cover; they always come from the same profile. */
+interface ScopeProfile {
+  canonicalize: (scope: Record<string, unknown>) => string;
+  hashScope: typeof contentHash;
+  validateListing: typeof isListing;
+}
+const CURRENT_PROFILE: ScopeProfile = { canonicalize, hashScope: contentHash, validateListing: isListing };
+const FROZEN_PROFILE: ScopeProfile = { canonicalize: legacyCanonicalize, hashScope: legacyListingHash, validateListing: isFrozenListing };
+
 async function verifyListingArtifact(
   raw: Record<string, unknown>,
   resolveKey: ResolvePrimaryClaimKey,
-  hashScope = contentHash,
+  { canonicalize: serializeScope, hashScope, validateListing }: ScopeProfile = CURRENT_PROFILE,
 ): Promise<ListingVerificationResult> {
   if (raw.signatures !== undefined) return invalid("LISTING_SIGNATURE_INVALID");
   // Select the profile before validating it. A failed current artifact must
@@ -215,12 +240,14 @@ async function verifyListingArtifact(
     // Validate the exact received bytes, as the pinned SDK reader does at step
     // 1. CF-2 scheme-case leniency applies to standalone ClaimReference
     // lookups, never to ClaimReferences inside a signed artifact.
-    if (!isListing(raw)) {
+    if (!validateListing(raw)) {
       return invalid(verificationMethodFailure(raw)
         ? "VERIFICATION_METHOD_INVALID"
         : "NORMATIVE_LISTING_INVALID");
     }
     if (!withinDirectoryProfile(raw)) return invalid("NORMATIVE_LISTING_INVALID");
+    const scope = stripSignature(raw) as Record<string, unknown>;
+    if (Buffer.byteLength(serializeScope(scope), "utf8") > MAX_LISTING_CANONICAL_BYTES) return invalid("NORMATIVE_LISTING_INVALID");
     const listing = raw as unknown as Listing;
     // The key that verified the signature is the signer; it is never looked up again.
     const verifiedKey: { signer?: ResolvedPrimaryClaimKey } = {};
@@ -264,7 +291,6 @@ async function verifyListingArtifact(
       hashScope,
     );
     if (!verifiedSeller) return invalid("IDENTITY_PRESENTATION_INVALID");
-    const scope = stripSignature(raw) as Record<string, unknown>;
     return {
       ok: true,
       value: {
@@ -371,7 +397,7 @@ export async function verifyStoredListingResult(
       const snapshot = structuredClone(raw);
       const current = await verifyListingResult(snapshot, resolveKey);
       if (current.ok) return current;
-      const historical = await verifyListingArtifact(snapshot, resolveKey, legacyListingHash);
+      const historical = await verifyListingArtifact(snapshot, resolveKey, FROZEN_PROFILE);
       return historical.ok ? historical : current;
     } catch { return invalid("NORMATIVE_LISTING_INVALID"); }
   }
@@ -400,7 +426,7 @@ async function importPinnedListing(
     if (!value) return null;
     // Only the unsigned envelope changes in memory. Keep the native bytes,
     // signed scope and pinned hash intact; never re-sign or write a replacement.
-    const result = await verifyListingArtifact(structuredClone({ ...raw, signature: { ...signature, value } }), resolveKey, legacyListingHash);
+    const result = await verifyListingArtifact(structuredClone({ ...raw, signature: { ...signature, value } }), resolveKey, FROZEN_PROFILE);
     const verified = result.ok ? result.value : null;
     return verified && verified.contentHash === pin.contentHash &&
       verified.sellerClaim === pin.sellerPrimaryClaim && verified.signer === pin.sellerPrimaryClaim
