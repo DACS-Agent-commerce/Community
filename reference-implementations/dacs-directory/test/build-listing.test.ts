@@ -887,3 +887,32 @@ test("a signed retry for a version the catalog lists but the chain lookup cannot
 });
 
 /** Answer only the explicitly modelled read RPCs, never contact a node. */
+for (const category of [".services.other", "services.other.", "services..other", ".", ".."]) {
+  test(`publisher rejects empty category segments in ${JSON.stringify(category)} before requesting a signature`, async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      throw new Error("category rejection must precede network access");
+    };
+    try {
+      const response = await POST(request({ ...base, category }));
+      assert.equal(response.status, 400);
+      const body = await response.json();
+      assert.match(body.error, /category must be dot-notation/);
+      assert.equal(body.identityMessage, undefined);
+      assert.equal(body.tx, undefined);
+      assert.equal(calls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+test("publisher accepts nonempty category segments after normalization", async () => {
+  for (const category of ["services", " services.CODE-review "]) {
+    const response = await POST(request({ ...base, category }));
+    assert.equal(response.status, 200);
+    assert.ok((await response.json()).identityMessage);
+  }
+});
