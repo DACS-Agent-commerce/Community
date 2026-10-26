@@ -90,10 +90,4 @@ export function sameResolvedPrimaryClaim(
     left.publicKey.every((byte, index) => byte === right.publicKey[index]);
 }
 
-/**
- * Strict current-profile comparison: Demos scheme canonicalisation, no aliases.
- * CORE B.1 CF-3 identity, so advisory ClaimReference parameters are ignored.
- */
-export function canonicalSigningIdentity(claim: string): string {
-  return canonicalDemosAgentClaim(claim) ?? claim;
-}
+export { canonicalSigningIdentity } from "./claimRef.js";

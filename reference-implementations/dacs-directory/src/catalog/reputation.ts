@@ -1,4 +1,5 @@
 import type { DealRecord, SellerRecord } from "./types.js";
+import { canonicalSigningIdentity } from "./claimRef.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -92,8 +93,10 @@ export function deriveSellerReputation(
   })).sort((a, b) => byteOrder(a.contentHash, b.contentHash));
   const ratingByDirection = new Map<string, NonNullable<DealRecord["ratings"]>[number]>();
   for (const deal of scoped) for (const rating of deal.ratings ?? []) {
-    if (rating.target.toLowerCase() !== deal.owners.seller.toLowerCase() || rating.rater.toLowerCase() === rating.target.toLowerCase()) continue;
-    const key = `${rating.rater.toLowerCase()}\n${deal.jobId}\n${rating.targetRole}`;
+    const rater = canonicalSigningIdentity(rating.rater);
+    const target = canonicalSigningIdentity(rating.target);
+    if (target !== canonicalSigningIdentity(deal.owners.seller) || rater === target) continue;
+    const key = `${rater}\n${deal.jobId}\n${rating.targetRole}`;
     const prior = ratingByDirection.get(key);
     if (!prior || rating.ratedAt > prior.ratedAt || (rating.ratedAt === prior.ratedAt && rating.contentHash > prior.contentHash)) ratingByDirection.set(key, rating);
   }
