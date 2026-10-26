@@ -1030,7 +1030,7 @@ async function indexFixture(fixture: Awaited<ReturnType<typeof vector>>, extra: 
   }
 }
 
-test("completed deals remain verifiable after their Listing expires out of discovery", async (t) => {
+test("expired Listings leave discovery and retain unverified deal history without commitment proof", async (t) => {
   const fixture = await vector("listing-expiry-job", 2100);
   const notAfter = 200;
   let now = notAfter - 1;
@@ -1064,26 +1064,28 @@ test("completed deals remain verifiable after their Listing expires out of disco
   assert.equal(before.listings[0].contentHash, listingRef.contentHash);
   assert.equal(before.deals[0].refsVerified, true);
   assert.equal(before.deals[0].finalisedAt, 120, "the deal completed before Listing expiry");
+  assert.equal(before.deals[0].signatureVerified, true);
+  assert.equal(before.deals[0].reputationEligible, true);
+  assert.equal(before.deals[0].outcome, "completed");
+  assert.equal(before.deals[0].category, "services.test");
+  assert.equal(before.deals[0].bundleContentHash, artifactHash(fixture.sellerBundle, "bundle"));
+  assert.equal(before.reputation.bundleCount, 1);
+  assert.equal(before.reputation.completed, 1);
 
   now = notAfter + 1;
   const after = await indexRegistration(registration, before, resolveIdentities);
   assert.deepEqual(after.listings, [], "expired Listings must leave the discoverable catalog");
-  for (const record of [before, after]) {
-    assert.equal(record.deals.length, 1);
-    assert.equal(record.deals[0].refsVerified, true, "expiry must preserve historical reference verification");
-    assert.equal(record.deals[0].signatureVerified, true);
-    assert.equal(record.deals[0].reputationEligible, true);
-    assert.equal(record.deals[0].outcome, "completed");
-    assert.equal(record.deals[0].category, "services.test");
-    assert.equal(record.deals[0].bundleContentHash, artifactHash(fixture.sellerBundle, "bundle"));
-    assert.equal(record.reputation.bundleCount, 1);
-    assert.equal(record.reputation.completed, 1);
-  }
+  assert.equal(after.deals.length, 1);
+  assert.equal(after.deals[0].jobId, deal.jobId, "expiry retains the deal as unverified history");
+  assert.equal(after.deals[0].refsVerified, false, "the Agreement anchor cannot prove commitment finality");
+  assert.equal(after.deals[0].reputationEligible, false);
+  assert.equal(after.reputation.bundleCount, 0);
+  assert.equal(after.reputation.completed, 0);
 });
 
-/** Index a deal on a Listing valid from `notBefore` until 100: its agreement is anchored at `committedAt`, its bundles say `finalisedAt`. */
+/** Index expired terms with an Agreement anchor observation, but no authenticated commitment proof. */
 async function indexDealOnExpiredListing(
-  t: TestContext, jobId: string, offset: number, committedAt: number | undefined, finalisedAt: number, notBefore = 1,
+  t: TestContext, jobId: string, offset: number, agreementAnchoredAt: number | undefined, finalisedAt: number, notBefore = 1,
 ) {
   const fixture = await vector(jobId, offset);
   const notAfter = 100;
@@ -1097,7 +1099,7 @@ async function indexDealOnExpiredListing(
   fixture.sellerBundle = { ...fixture.sellerBundle, listingRef, finalisedAt };
   await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef });
   recordArtifact({ locator: fixture.locators.agreement, kind: "agreement", profile: "dacs-v0.1",
-    contentHash: artifactHash(fixture.agreement, "agreement"), observedAt: 1, anchorTime: committedAt, data: fixture.agreement });
+    contentHash: artifactHash(fixture.agreement, "agreement"), observedAt: 1, anchorTime: agreementAnchoredAt, data: fixture.agreement });
   const deal = registeredDeal(jobId, fixture.locators.buyer, fixture.locators.seller);
   return indexFixture(fixture, { deals: [deal], bundleBindings: [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
@@ -1105,15 +1107,15 @@ async function indexDealOnExpiredListing(
   ] });
 }
 
-test("an expired Listing authenticates a deal committed in its window even when finalised later", async (t) => {
+test("an in-window Agreement anchor cannot authenticate expired Listing history", async (t) => {
   const record = await indexDealOnExpiredListing(t, "listing-late-job", 2140, 90, 120);
   assert.deepEqual(record.listings, []);
-  assert.equal(record.deals[0].refsVerified, true);
-  assert.equal(record.deals[0].reputationEligible, true);
-  assert.equal(record.reputation.completed, 1);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.deals[0].reputationEligible, false);
+  assert.equal(record.reputation.completed, 0);
 });
 
-test("an expired Listing cannot authenticate a deal committed after its validity ended, whatever finalisedAt says", async (t) => {
+test("a late Agreement anchor and backdated finalisedAt cannot authenticate expired Listing history", async (t) => {
   const record = await indexDealOnExpiredListing(t, "listing-backdated-job", 2160, 120, 90);
   assert.equal(record.deals[0].refsVerified, false, "a backdated finalisedAt cannot stand in for the commitment time");
   assert.equal(record.deals[0].reputationEligible, false);
@@ -1121,14 +1123,14 @@ test("an expired Listing cannot authenticate a deal committed after its validity
   assert.equal(record.reputation.completed, 0);
 });
 
-test("an expired Listing cannot authenticate a deal committed before its validity began", async (t) => {
+test("an early Agreement anchor cannot authenticate expired Listing history", async (t) => {
   const record = await indexDealOnExpiredListing(t, "listing-early-job", 2200, 50, 90, 60);
-  assert.equal(record.deals[0].refsVerified, false, "an agreement committed before notBefore was made on a Listing that was not yet effective");
+  assert.equal(record.deals[0].refsVerified, false, "the Agreement anchor is not commitment proof");
   assert.equal(record.deals[0].reputationEligible, false);
   assert.equal(record.reputation.completed, 0);
 });
 
-test("an expired Listing cannot authenticate a deal whose commitment has no anchor time", async (t) => {
+test("expired Listing history without Agreement anchor metadata remains unverified", async (t) => {
   const record = await indexDealOnExpiredListing(t, "listing-unanchored-job", 2180, undefined, 90);
   assert.equal(record.deals[0].refsVerified, false);
   assert.equal(record.deals[0].reputationEligible, false);
