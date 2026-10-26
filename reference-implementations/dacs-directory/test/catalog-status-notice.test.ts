@@ -27,7 +27,7 @@ const render = (rejected: ListingRejectionDiagnostics) => renderToStaticMarkup(R
 
 test("the notice says how many public notices exist when the status reply lists fewer", () => {
   const markup = render({ total: 25, publicTotal: 21, items: notices(STATUS_PAGE_SIZE) });
-  assert.match(markup, /21 owner-submitted listing pointers could not be indexed/);
+  assert.match(markup, /21 listing pointers could not be indexed/);
   assert.match(markup, /Showing 20 of 21/);
   assert.match(markup, /href="\/api\/dacs\/status\?deadLetterLimit=100"/);
 });
@@ -40,4 +40,16 @@ test("the notice lists every public notice without a truncation line when the re
 
 test("the notice renders nothing when no owner-signed pointer failed", () => {
   assert.equal(render({ total: 4, publicTotal: 0, items: notices(4, false) }), "");
+});
+
+test("a retained publisher hash notice describes unresolved pointers from an earlier pass", () => {
+  const markup = render({ total: 1, publicTotal: 1, items: [{
+    locator: `stor-${"a".repeat(40)}`, listingId: "publisher-service", listingVersion: 1,
+    code: "DECLARED_CONTENT_HASH_MISMATCH", publicNotice: true,
+    message: "The declared hash does not match the verified artifact.", guidance: "Correct the declared hash.",
+  }] });
+  assert.match(markup, /1 listing pointer could not be indexed/);
+  assert.match(markup, /Unresolved diagnostics may be retained from an earlier indexing pass/);
+  assert.match(markup, /publisher-authenticated hash declarations/);
+  assert.doesNotMatch(markup, /owner-submitted|latest indexing pass/);
 });

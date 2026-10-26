@@ -34,14 +34,14 @@ interface Status {
 /** The most diagnostics one status reply lists. */
 const MAX_DIAGNOSTICS_LIMIT = 100;
 
-/** Owner-signed listing pointer failures; says how many exist when the status reply lists fewer. */
+/** Render unresolved authenticated pointer failures and the total when the reply lists fewer. */
 export function ListingRejectionNotice({ rejected }: { rejected: ListingRejectionDiagnostics }) {
   const notices = rejected.items.filter((item) => item.publicNotice);
   if (rejected.publicTotal === 0) return null;
   return (
     <details className="listing-rejection-notice">
-      <summary>{rejected.publicTotal.toLocaleString()} owner-submitted listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
-      <p>These diagnostics describe the latest indexing pass for owner-signed registrations and publisher-authenticated hash declarations. Check the registration's storage pointers and the content hashes your discovery index declares, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
+      <summary>{rejected.publicTotal.toLocaleString()} listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
+      <p>Unresolved diagnostics may be retained from an earlier indexing pass for owner-signed registrations and publisher-authenticated hash declarations. Check the registration's storage pointers and the content hashes your discovery index declares, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
       <ul>
         {notices.map((item) => (
           <li key={`${item.locator}:${item.code}`}>
