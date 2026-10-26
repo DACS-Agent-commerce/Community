@@ -1,6 +1,7 @@
 // First: the store must open in a fresh directory, never the checkout's data/.
 import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { NextRequest } from "next/server";
@@ -384,5 +385,68 @@ for (const mode of ["index-now", "failed crawl"] as const) {
         "the authenticated owner removal clears the pointer notice on a partial pass");
       assert.deepEqual(diagnostics().filter((item) => [rejectedAt("7"), rejectedAt("8")].includes(item.locator)), crawlHistory);
     }
+  });
+}
+
+for (const mirrorHash of ["matching", "different"] as const) {
+  test(`an unsigned ${mirrorHash} mirror preserves a publisher rejection across restart and repeated crawls`, async () => {
+    const { listing, locators } = await publicListingVector(`unsigned-mirror-${mirrorHash}`, 900);
+    const source = domain;
+    const mirror = `https://mirror-${mirrorHash}.example`;
+    const actualHash = artifactHash(listing, "listing");
+    saveDomains([source, mirror]);
+    saveRegistrations([]);
+    const crawlIndex = async (origin: string, hash: string, authenticated: boolean, generatedAt: number) => {
+      const raw = JSON.stringify({ indexVersion: "1", generatedAt, seller: dids[1], listings: [{
+        listingId: "svc", version: 1, contentHash: hash,
+        anchor: { kind: "storage-program", locator: locators.listing }, status: "active",
+        summary: { title: "Service", category: "services.test", tags: [] },
+      }] });
+      const indexHash = sha256Hex(raw);
+      const publisherSignature = Buffer.from(ed25519Sign(Buffer.from(wellKnownWithdrawalMessage(origin, indexHash)),
+        privateKeyFromSeed(seeds[1]))).toString("base64url");
+      const agent = await crawlDomain(origin, {
+        validateUrl: async (url) => ({ url: new URL(url), ip: "203.0.113.1" }),
+        fetchJson: async (url) => {
+          const document = url.endsWith("agent.json") ? JSON.stringify({ dacs: { dacsVersion: "1", listings: {
+            indexUrl: `${origin}/listings.json`, indexHash, ...(authenticated ? { publisherSignature } : {}),
+          } } }) : raw;
+          return { raw: document, body: JSON.parse(document) };
+        },
+      });
+      assert.ok(!("error" in agent));
+      assert.equal(agent.withdrawalAuthenticated, authenticated);
+      return agent;
+    };
+    await reindexWith(crawling([await crawlIndex(source, "f".repeat(64), true, 100)], false));
+    const before = diagnostics().find((item) => item.locator === locators.listing);
+    assert.equal(before?.publicNotice, true);
+    const unsigned = await crawlIndex(mirror, mirrorHash === "matching" ? actualHash : "e".repeat(64), false, 101);
+    const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { readFileSync } from "node:fs";
+      import { NextRequest } from "next/server";
+      import { reindexAll } from "./src/catalog/reindexCore.ts";
+      import { indexerDiagnostics } from "./src/catalog/store.ts";
+      import { GET } from "./app/api/dacs/listings/route.ts";
+      const { listing, anchor, owner, unsigned, source, before } = JSON.parse(readFileSync(0, "utf8"));
+      const notice = () => indexerDiagnostics().listingRejectionDiagnostics.items.find(item => item.locator === anchor);
+      assert.deepEqual(notice(), before, "the authenticated notice survives restart");
+      globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+        : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
+        : new Response(null, { status: 404 });
+      for (let repeat = 0; repeat < 2; repeat++) {
+        await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+          crawlWellKnown: async () => ({ agents: [unsigned], errors: [{ domain: source, error: "offline" }] }) });
+        assert.deepEqual(notice(), before, "unsigned carriage cannot replace or clear the authenticated notice");
+        assert.equal((await (await GET(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total, 0);
+      }
+    `], { encoding: "utf8", timeout: 30_000, input: JSON.stringify({ listing, anchor: locators.listing, owner, unsigned, source, before }) });
+    assert.equal(restarted.status, 0, restarted.stderr || String(restarted.error));
+    const correction = await crawlIndex(source, actualHash, true, 102);
+    await reindexWith(async () => ({ agents: [correction], errors: [{ domain: mirror, error: "offline" }] }));
+    assert.equal(diagnostics().some((item) => item.locator === locators.listing), false);
+    const response = await listings(new NextRequest("https://directory.example/api/dacs/listings"));
+    assert.equal((await response.json()).total, 1, "an authenticated matching declaration releases the hold");
   });
 }

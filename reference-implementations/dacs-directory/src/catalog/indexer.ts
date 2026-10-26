@@ -213,10 +213,14 @@ export async function indexRegistration(
       continue;
     }
     const declaredHash = reg.listingContentHashes?.[anchor]?.replace(/^sha256-/, "").toLowerCase();
-    // An authenticated hash mismatch stays in force until a matching declaration is seen. An incomplete pass cannot
-    // see a declaration made earlier, so a failure that cannot read the hash must not replace the row.
+    // An authenticated mismatch requires an authenticated replacement declaration.
+    // An incomplete pass without one cannot replace the saved notice or admit the listing.
     const hashMismatchHeld = (reg.discoveryIncomplete === true || Boolean(declaredHash)) &&
       listingRejectionNoticeCode(anchor, reg.primaryClaim) === "DECLARED_CONTENT_HASH_MISMATCH";
+    if (hashMismatchHeld && !reg.authenticatedHashDeclarations?.includes(anchor)) {
+      rejectedListingAnchors.add(anchor);
+      continue;
+    }
     // Fails closed: a listing with no canonical form is rejected like any invalid one.
     const verification = await verifyStoredListingResult(anchored.data, anchor);
     if (!verification.ok) {
