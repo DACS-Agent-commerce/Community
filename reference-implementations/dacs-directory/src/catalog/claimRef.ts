@@ -82,6 +82,11 @@ export function canonicalDemosAgentClaim(value: string): string | null {
   return parseDemosAgentClaim(value)?.identity ?? null;
 }
 
+/** CF-3 signing identity, retaining exact spelling for unsupported references. */
+export function canonicalSigningIdentity(claim: string): string {
+  return canonicalDemosAgentClaim(claim) ?? claim;
+}
+
 /**
  * Exact CF-2 bytes of a Demos agent claim reference — the scheme token
  * lowercased, every advisory parameter kept — or null.
