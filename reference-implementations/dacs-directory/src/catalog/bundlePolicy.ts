@@ -129,9 +129,9 @@ export interface ResolvedArtifact {
 
 // A current Listing keeps its own hash profile even when a historical bundle
 // references it. Other artifacts on this path use the frozen SDK-MVP format.
-function referenceHash(artifact: ResolvedArtifact): string {
+function referenceHash(artifact: ResolvedArtifact, expectedHash?: string): string {
   return artifact.kind === "dacs-1-listing"
-    ? storedListingHash(artifact.raw)
+    ? storedListingHash(artifact.raw, expectedHash)
     : legacyListingHash(stripSignature(artifact.raw));
 }
 
@@ -263,7 +263,13 @@ export async function refsPassStrictPolicy(
         (artifact.raw.buyer !== bundleBuyers[0].primaryClaim ||
          artifact.raw.seller !== bundleSellers[0].primaryClaim)) return false;
     try {
-      if (referenceHash(artifact) !== want.contentHash) return false;
+      if (referenceHash(artifact, want.contentHash) !== want.contentHash) return false;
+      if (artifact.kind === "dacs-1-listing") {
+        const listing = artifact.locator
+          ? await verifyStoredListing(artifact.raw, artifact.locator, resolveKey)
+          : await verifyListing(artifact.raw, resolveKey);
+        if (listing?.contentHash !== want.contentHash) return false;
+      }
     } catch {
       return false;
     }
@@ -296,7 +302,7 @@ export function verifiedListingTerms(
       : null;
   if (version === null) return undefined;
   try {
-    if (listingId !== ref.listingId || version !== ref.version || referenceHash(artifact) !== ref.contentHash) return undefined;
+    if (listingId !== ref.listingId || version !== ref.version || referenceHash(artifact, ref.contentHash) !== ref.contentHash) return undefined;
   } catch {
     return undefined;
   }
