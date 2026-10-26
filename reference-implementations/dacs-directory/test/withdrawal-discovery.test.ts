@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,7 +80,7 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
     };
     try {
       store.saveRegistrations([]); store.saveDomains(["seller.example"]);
-      await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+      await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
         crawlWellKnown: async () => ({ agents, errors: [] }) });
       const response = await GET(new NextRequest("https://directory.example/api/dacs/listings"));
       assert.equal(response.status, 200);

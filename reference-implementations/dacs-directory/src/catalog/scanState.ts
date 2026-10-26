@@ -37,14 +37,6 @@ export const discoveredDealKey = (buyer: string, jobId: string): string => `${ca
  */
 export const SCAN_STATE_SCHEMA_VERSION = 10;
 
-/**
- * Whether a replay from genesis on the recorded chain has not finished: a bounded pass stopped partway
- * (`replay`), or a reset saved its empty state and no pass has completed since. Older withdrawals are
- * not yet scanned, so nothing may be published from this state.
- */
-export const genesisReplayPending = (state: ScanState): boolean =>
-  state.replay !== undefined || (state.chainIdentity !== undefined && state.schemaVersion === 0);
-
 /** JSON/SQLite restore prototypes: rebuild every attacker-keyed dictionary on ingress. */
 export type NormalizedScanState = ScanState & Required<Pick<ScanState, "programs" | "revocations" | "verifiedRevocations" | "bundleBindings" | "bundleBindingOverflow">>;
 

@@ -1,5 +1,6 @@
 import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import Database from "better-sqlite3";
@@ -162,7 +163,7 @@ test("an omitted seller keeps rejection history until its registration leaves th
   t.mock.method(Date, "now", () => now);
   store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
   store.saveDomains([]);
-  const run = () => reindexAll({ nodeDeployment: async () => ({ ok: true }), log: () => {}, resolveIdentities: offline });
+  const run = () => reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
   const diagnostic = () => store.indexerDiagnostics({ deadLetterLocator: anchor }).listingRejectionDiagnostics.items[0];
   await run();
   assert.equal(diagnostic()?.firstSeenAt, 1000);

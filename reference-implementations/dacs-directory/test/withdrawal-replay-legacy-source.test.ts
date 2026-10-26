@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { onPinnedChain } from './fixtures/pinned-node.js';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,11 +34,11 @@ test('completed replay releases unrelated seller while preserving legacy seller 
     const original = globalThis.fetch;
     try {
         globalThis.fetch = async () => { throw new Error('chain unavailable'); };
-        await assert.rejects(reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => { }, crawlWellKnown: async () => { throw new Error('crawl must follow chain replay'); } }), /chain scan failed/);
+        await assert.rejects(reindexAll({ nodeDeployment: onPinnedChain, log: () => { }, crawlWellKnown: async () => { throw new Error('crawl must follow chain replay'); } }), /chain scan failed/);
         assert.equal(store.loadScanState().schemaVersion, 0, 'an incomplete chain replay must be retried from genesis');
         assert.equal(store.hasIncompleteWellKnownWithdrawal(seller, legacyHash), true, 'failed chain replay retains ambiguous hash holds');
         globalThis.fetch = async (_input, init) => init?.body ? Response.json({ result: 200, response: [] }) : Response.json(fixture);
-        await reindexAll({ nodeDeployment: async () => ({ ok: true as const }), log: () => { }, resolveIdentities: async () => { throw new Error('offline'); },
+        await reindexAll({ nodeDeployment: onPinnedChain, log: () => { }, resolveIdentities: async () => { throw new Error('offline'); },
             crawlWellKnown: async () => ({ agents: [{ domain: 'https://legacy.example', seller: legacySeller, listingAnchors: [], activeListingAnchors: [], contentHashes: {}, revocations: [], bundleBindings: [], withdrawalAuthenticated: false, withdrawalHashes: [legacyHash], incompleteWithdrawalHashes: [legacyHash], withdrawalIndex: { generatedAt: 2, hash: 'f'.repeat(64) } }], errors: [] }) });
         const rows = store.loadCatalog().sellers.find(s => s.primaryClaim === seller)?.listings ?? [];
         assert.equal(rows.some(activeOffer), true, `unrelated seller withheld: incomplete=${store.hasIncompleteWellKnownWithdrawal(seller, hash)} rows=${JSON.stringify(rows)}`);

@@ -288,14 +288,12 @@ export interface Catalog {
 
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  /** Deployment chain identity that produced this cursor and derived state. */
+  /** Chain identity of the last complete pass; absent on a legacy or reset state, which replays. */
   chainIdentity?: string;
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;
   lastChainTip?: number;
-  /** Where an interrupted, bounded history replay resumes: the next id to walk down from, and the tip it started at. */
-  replay?: { before: number; chainTip: number };
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;
   /** Descending transaction cursor for the bounded SR-2 consensus-time backfill. */
