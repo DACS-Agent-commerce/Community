@@ -393,6 +393,11 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
     const { GET } = await import("../app/api/dacs/status/route.js");
     const status = await (await GET(new NextRequest("https://directory.test/api/dacs/status"))).json();
     assert.equal(status.legacyVetUnsupportedDeals, mode === "invalid-signatures" ? 0 : 1, "the copies contribute one diagnostic deal");
+    const { GET: openapi } = await import("../app/openapi.json/route.js");
+    const document = await (await openapi(new NextRequest("https://directory.test/openapi.json"))).json();
+    const schema = document.components.schemas.CatalogStatus;
+    assert.ok(schema.required.includes("legacyVetUnsupportedDeals"));
+    assert.deepEqual(schema.properties.legacyVetUnsupportedDeals, { type: "integer", minimum: 0 });
   }
 });
 
