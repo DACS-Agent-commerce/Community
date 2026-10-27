@@ -298,11 +298,16 @@ current SDK seller runtime.
    serves. When the node cannot be read (index-now: 503) or serves a chain other than
    `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
    failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
-   saves what it read, the served chain is read again; if it changed, nothing more is saved and the
-   run fails. Each complete pass records the chain it scanned, after its catalog is saved. A re-pin empties the public catalog and replays from
-   genesis; a state with no recorded chain (an upgrade) replays once and keeps its catalog
-   meanwhile. A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records nothing, so
-   raise the cap. index-now answers 409 until a complete pass on this chain is recorded.
+   saves what it read, the served chain is read again. Indexing records rejections and revocation
+   progress as it reads; those writes are journaled and undone when that read fails, the run
+   fails, or a crash interrupts it (the next writer undoes them). Each complete pass records the
+   chain it scanned, after its catalog is saved. A state recorded on another chain (a re-pin), a
+   state with no recorded chain (an upgrade, or an unfinished reset) and a large tip regression
+   are reset after a further chain read: cached discoveries, artifacts and retained revocations
+   are cleared, no earlier catalog record is used, and history replays from genesis. A re-pin
+   also empties the public catalog first; the others keep serving it until the rebuild is saved.
+   A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records no chain, so raise the cap.
+   index-now answers 409 until a complete pass on this chain is recorded.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those

@@ -149,7 +149,7 @@ test("a re-pin empties the catalog first and carries nothing from the replaced c
   assertNothingFromOldChain();
   assert.equal(store.loadScanState().chainIdentity, NEW_CHAIN);
   assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
-  assert.equal(logs.some((line) => line.includes("chain replacement detected")), false, "the reset ran once");
+  assert.equal(logs.some((line) => line.includes("chain replacement detected")), false, "the replacement is detected once");
 });
 
 test("a re-pin interrupted after each reset step converges on the next pass", async () => {
@@ -186,14 +186,16 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   serveTwelveTransactions([]);
   process.env.DACS_SCAN_MAX_TXS = "4";
   try {
-    // A legacy cache with no recorded chain keeps its state and catalog.
+    // A legacy cache with no recorded chain stays reset and keeps serving its catalog.
     store.saveRegistrations([]);
     store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 8, listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
-    const legacy = { state: store.loadScanState(), catalog: store.loadCatalog() };
+    const legacyCatalog = store.loadCatalog();
     await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }), /DACS_SCAN_MAX_TXS=4/);
-    assert.deepEqual(store.loadScanState(), legacy.state);
-    assert.deepEqual(store.loadCatalog(), legacy.catalog);
+    assert.equal(store.loadScanState().chainIdentity, undefined);
+    assert.equal(store.loadScanState().schemaVersion, 0);
+    assert.deepEqual(Object.keys(store.loadScanState().listings), []);
+    assert.deepEqual(store.loadCatalog(), legacyCatalog);
 
     // A re-pin stays reset: no chain, an old schema, an empty catalog.
     store.saveScanState(oldChainState());
@@ -212,7 +214,7 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   serveFiveTransactions();
 });
 
-test("a state with no recorded chain replays once and keeps its discoveries; the next pass is incremental", async () => {
+test("a state with no recorded chain replays from genesis without its evidence; the next pass is incremental", async () => {
   const fromTx = () => {
     const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
     try { return (db.prepare("SELECT from_tx FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { from_tx: number }).from_tx; }
@@ -220,13 +222,33 @@ test("a state with no recorded chain replays once and keeps its discoveries; the
   };
   store.saveRegistrations([]);
   store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, lastChainTip: 5,
-    listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
-  await reindexAll({ log: () => {}, nodeDeployment: onPinnedChain });
+    listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {}, verifiedRevocations: { [oldContentHash]: [oldMarker] } });
+  store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "unknown chain", 1);
+  const logs: string[] = [];
+  await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain });
   assert.equal(fromTx(), 0, "replayed from genesis");
-  assert.ok(Object.hasOwn(store.loadScanState().listings, oldAnchor), "a legacy state is replayed, not reset");
+  assert.ok(logs.some((line) => line.startsWith("no chain is recorded for the cached state")));
+  assert.equal(Object.hasOwn(store.loadScanState().listings, oldAnchor), false, "unrecorded discoveries are not carried");
+  assert.equal(Object.hasOwn(store.loadScanState().verifiedRevocations ?? {}, oldContentHash), false);
+  assert.deepEqual(store.indexerDiagnostics().artifacts, {});
   await reindexAll({ log: () => {}, nodeDeployment: onPinnedChain });
   assert.equal(fromTx(), 1, "the recorded chain makes the next pass incremental");
-  assert.ok(Object.hasOwn(store.loadScanState().listings, oldAnchor));
+});
+
+test("a re-pin or legacy reset whose node changes chain before the reset changes nothing", async () => {
+  serveFiveTransactions();
+  for (const [name, saved] of [["re-pin", oldChainState()], ["legacy", { ...oldChainState(), chainIdentity: undefined }]] as const) {
+    store.saveRegistrations([]);
+    store.saveScanState(saved);
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+    store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "kept", 5);
+    const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
+    await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, OLD_CHAIN) }),
+      /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /, name);
+    assert.deepEqual(store.loadCatalog(), before.catalog, name);
+    assert.deepEqual(store.loadScanState(), before.state, name);
+    assert.deepEqual(store.indexerDiagnostics().artifacts, before.artifacts, name);
+  }
 });
 
 test("same-chain tip regression resets only beyond the configured threshold", async () => {
