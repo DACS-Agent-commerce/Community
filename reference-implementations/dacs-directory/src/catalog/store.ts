@@ -618,10 +618,9 @@ export const recordRevocationProgress = db.transaction(
       // scope bytes whose previously invalid signature may have been repaired.
       const rejectedBindings = new Set(examinedBindings.filter((binding) =>
         binding.listingContentHash === listingHash && progress.rejected.includes(binding.markerAnchor.locator)).map(revocationBindingKey));
-      const sources = withdrawalSources();
-      for (const source of sources) source.bindings = (source.bindings ?? []).filter((binding) =>
-        !rejectedBindings.has(revocationBindingKey(binding)));
-      saveWithdrawalSources(sources);
+      // The sources are not journaled, so a release a node read decided waits for the window's commit.
+      if (chainReadWindowOpen()) stageWithdrawalBindingRelease(rejectedBindings);
+      else releaseWithdrawalBindings(rejectedBindings);
     }
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
     for (const locator of progress.unread) {
@@ -704,7 +703,8 @@ const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_wr
  * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
  * an undo would drop their saves. Withdrawal sources hold what a publisher signed and served from its
  * own domain, not what the node returned, so a refused chain check says nothing about them; undoing
- * them would let a failed pass publish a listing the publisher had already withdrawn.
+ * them would let a failed pass publish a listing the publisher had already withdrawn. A marker read
+ * that releases one of their bindings is node-derived, so it is staged under a journaled key instead.
  */
 const UNJOURNALED_KEYS = ["registrations", "domains", "withdrawal-sources", "withdrawal-source-revision"];
 const unjournaledKeyList = UNJOURNALED_KEYS.map((key) => `'${key}'`).join(",");
@@ -737,14 +737,31 @@ export function openChainReadWindow(): void {
 const closeChainReadWindow = (): void => {
   if (journalTriggersCreated) db.exec("DELETE FROM temp.unconfirmed_chain_window");
 };
+const chainReadWindowOpen = (): boolean =>
+  journalTriggersCreated && db.prepare("SELECT 1 FROM temp.unconfirmed_chain_window").get() !== undefined;
+/**
+ * Withdrawal bindings a marker rejection released inside the open window, each with the source revision
+ * it was decided against. The key is journaled, so a refused or crashed pass drops the release and the
+ * binding keeps holding; readers already see it released, as they would outside a window.
+ */
+const STAGED_BINDING_RELEASES_KEY = "withdrawal-binding-releases";
+interface StagedBindingRelease { revision: number; keys: string[] }
+const stagedBindingReleases = (): StagedBindingRelease[] => getJson(STAGED_BINDING_RELEASES_KEY, []);
+const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => setJson(STAGED_BINDING_RELEASES_KEY,
+  [...stagedBindingReleases(), { revision: wellKnownWithdrawalRevision(), keys: [...keys] }]);
 /**
  * Run the writer's last saves (its scan state and catalog) and keep the window's writes, in one
  * transaction: a chain read after those writes confirmed the gated chain, so either all of them are
- * durable or, after a failed save or a crash, none is. A failed save leaves the window open for
+ * durable or, after a failed save or a crash, none is. A staged binding release is applied only if no
+ * signed source changed since it was decided. A failed save leaves the window open for
  * `revertChainReadWindow`.
  */
 export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
   lastSaves();
+  const revision = wellKnownWithdrawalRevision();
+  const released = new Set(stagedBindingReleases().filter((release) => release.revision === revision).flatMap((release) => release.keys));
+  if (released.size > 0) releaseWithdrawalBindings(released);
+  db.prepare("DELETE FROM kv_state WHERE key = ?").run(STAGED_BINDING_RELEASES_KEY);
   closeChainReadWindow();
   db.exec("DELETE FROM unconfirmed_chain_writes");
 });
@@ -772,11 +789,24 @@ interface WithdrawalSource { domain: string; seller: string; hashes: string[]; i
   index?: { generatedAt: number; hash: string };
   /** Content hashes by anchor from the last publisher-signed index accepted; absent on rows saved before them. */
   declarations?: Record<string, string> }
-const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+const storedWithdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+/** The saved sources, less the bindings a marker rejection in the open window released. */
+const withdrawalSources = (): WithdrawalSource[] => {
+  const released = new Set(stagedBindingReleases().flatMap((release) => release.keys));
+  const sources = storedWithdrawalSources();
+  if (released.size > 0) for (const source of sources) source.bindings = source.bindings?.filter((binding) =>
+    !released.has(revocationBindingKey(binding)));
+  return sources;
+};
 export const wellKnownWithdrawalRevision = (): number => getJson("withdrawal-source-revision", 0);
 const saveWithdrawalSources = (sources: WithdrawalSource[]): void => {
   setJson("withdrawal-sources", sources);
   setJson("withdrawal-source-revision", wellKnownWithdrawalRevision() + 1);
+};
+const releaseWithdrawalBindings = (keys: ReadonlySet<string>): void => {
+  const sources = storedWithdrawalSources();
+  for (const source of sources) source.bindings = (source.bindings ?? []).filter((binding) => !keys.has(revocationBindingKey(binding)));
+  saveWithdrawalSources(sources);
 };
 /**
  * Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. An accepted
@@ -787,7 +817,8 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
   hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
   bindings: NonNullable<WithdrawalSource["bindings"]> = [],
   provenance: WithdrawalProvenance = "publisher-signature", declarations?: Record<string, string>): boolean => {
-  const sources = withdrawalSources();
+  // A release staged in the open window is not saved here; only the window's commit applies it.
+  const sources = storedWithdrawalSources();
   for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
   if (seller) {
     const prior = sources.find((source) => source.domain === domain && source.seller === seller);
