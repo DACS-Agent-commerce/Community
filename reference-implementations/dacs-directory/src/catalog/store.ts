@@ -406,23 +406,30 @@ export const listingVersionFloor = (seller: string, listingId: string): number =
 // trustworthy reason: 403/404 replies before version 1, and replies whose data
 // is not an object before version 2. Reverify those decisions once, and withhold
 // affected active catalog entries immediately, before the first reindex can run.
+// Withholding follows hasPendingOwnerRevocationCandidate: only a candidate the
+// Listing's own storage owner anchored holds it, so anyone else's cannot hide it.
 // Bump this version whenever a reader change turns a past rejection into an unread.
 const REVOCATION_READ_SCHEMA_VERSION = 2;
 db.transaction(() => {
   if (getJson("revocation-read-schema-version", 0) >= REVOCATION_READ_SCHEMA_VERSION) return;
-  const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
-    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
+  const rejected = db.prepare("SELECT listing_hash, owner FROM revocation_candidates WHERE state='rejected'")
+    .all() as Array<{ listing_hash: string; owner: string | null }>;
+  const ownerHeld = new Set(rejected.flatMap((row) => row.owner ? [`${row.listing_hash}\n${canonicalProgramOwner(row.owner)}`] : []));
+  const anyHeld = new Set(rejected.map((row) => row.listing_hash));
   db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
     SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
       AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
   )`).run();
   db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
-  if (affected.size) {
+  if (rejected.length) {
     const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
-    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
-      ...seller, listings: seller.listings.filter((listing) =>
-        listing.status === "revoked" || !affected.has(listing.contentHash)),
-    })) });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+      // An admitted Listing's storage owner is the seller's own key; a claim without one fails closed.
+      const listingOwner = /[0-9a-fA-F]{64}$/.test(seller.primaryClaim) ? canonicalProgramOwner(seller.primaryClaim) : null;
+      const held = (hash: string) => listingOwner ? ownerHeld.has(`${hash}\n${listingOwner}`) : anyHeld.has(hash);
+      return { ...seller, listings: seller.listings.filter((listing) =>
+        listing.status === "revoked" || listing.anchor?.kind === "fixture" || !held(listing.contentHash)) };
+    }) });
   }
   setJson("revocation-read-schema-version", REVOCATION_READ_SCHEMA_VERSION);
 }).immediate();
@@ -721,18 +728,24 @@ export const saveDomains = (domains: string[]): void => setJson("domains", [...n
 interface WithdrawalSource { domain: string; seller: string; hashes: string[]; incomplete: string[];
   provenance?: WithdrawalProvenance | "legacy";
   bindings?: RevocationBinding[];
-  index?: { generatedAt: number; hash: string } }
+  index?: { generatedAt: number; hash: string };
+  /** Content hashes by anchor from the last publisher-signed index accepted; absent on rows saved before them. */
+  declarations?: Record<string, string> }
 const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
 export const wellKnownWithdrawalRevision = (): number => getJson("withdrawal-source-revision", 0);
 const saveWithdrawalSources = (sources: WithdrawalSource[]): void => {
   setJson("withdrawal-sources", sources);
   setJson("withdrawal-source-revision", wellKnownWithdrawalRevision() + 1);
 };
-/** Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. */
+/**
+ * Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. An accepted
+ * publisher-signed index saves its declared content hashes in the same transaction; an operator-pinned one keeps
+ * the row's earlier declarations.
+ */
 export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
   hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
   bindings: NonNullable<WithdrawalSource["bindings"]> = [],
-  provenance: WithdrawalProvenance = "publisher-signature"): boolean => {
+  provenance: WithdrawalProvenance = "publisher-signature", declarations?: Record<string, string>): boolean => {
   const sources = withdrawalSources();
   for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
   if (seller) {
@@ -749,7 +762,8 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
     // the binding rather than turning arbitrary chain hints into authority.
     const retained = prior?.provenance !== "legacy" ? (prior?.bindings ?? []) : [];
     const carried = [...new Map([...retained, ...bindings].map((binding) => [revocationBindingKey(binding), binding])).values()];
-    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings: carried, provenance };
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings: carried, provenance,
+      declarations: provenance === "publisher-signature" ? declarations : prior?.declarations };
     if (prior) Object.assign(prior, next); else sources.push(next);
   }
   saveWithdrawalSources(sources);
@@ -1046,33 +1060,6 @@ export function listingRejectionNoticeCode(locator: string, registrationClaim: s
 export const hasPublisherAuthenticatedWellKnownSource = (domain: string): boolean =>
   withdrawalSources().some((source) => source.domain === domain && source.provenance === "publisher-signature");
 
-interface AuthenticatedListingSource { domain: string; seller: string; hashes: Record<string, string> }
-const authenticatedListingSources = (): AuthenticatedListingSource[] => getJson("listing-declaration-sources", []);
-
-/** Replace only this publisher's declarations after its signed index passes source ordering. Storage failures throw. */
-export const recordAuthenticatedListingDeclarations = db.transaction((domain: string, seller: string, hashes: Record<string, string>): void => {
-  const sources = authenticatedListingSources().filter((source) => source.domain !== domain || source.seller !== seller);
-  sources.push({ domain, seller, hashes });
-  setJson("listing-declaration-sources", sources);
-});
-
-/** Retain accepted declarations through failed crawls; older sources without hash maps remain unresolved. Storage failures throw. */
-export function loadAuthenticatedListingDeclarations(
-  seller: string, domains: string[], currentDomains: ReadonlySet<string>,
-): NonNullable<Registration["authenticatedHashDeclarations"]> {
-  const configured = new Set(domains.map((domain) => {
-    try { return normalizeSubmittedDomain(domain); }
-    catch { return domain; /* Invalid legacy origins cannot match an authenticated source. */ }
-  }));
-  const sources = authenticatedListingSources().filter((source) => source.seller === seller && configured.has(source.domain));
-  const unknown = withdrawalSources().filter((source) => source.seller === seller && configured.has(source.domain) &&
-    source.provenance === "publisher-signature" && !sources.some((saved) => saved.domain === source.domain));
-  return Object.fromEntries([
-    ...unknown.map((source) => [source.domain, null]),
-    ...sources.map((source) => [source.domain, { hashes: source.hashes, current: currentDomains.has(source.domain) }]),
-  ]);
-}
-
 export function clearListingRejection(locator: string, registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
@@ -1083,27 +1070,72 @@ export function clearRegistrationListingRejections(registrationClaim: string): v
   db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
 }
 
-/** Prune absent failures; on partial passes, prune only owner notices absent from verified owner anchors. */
+/** A seller's saved publisher-signed declarations from configured domains, and whether an older such source saved none. */
+export interface SavedListingDeclarations { sources: Array<Record<string, string>>; unknown: boolean }
+
+/** Read a seller's saved declarations, hashes as their index declared them. Storage failures throw. */
+export function savedListingDeclarations(seller: string): SavedListingDeclarations {
+  const configured = new Set(loadDomains().flatMap((domain) => {
+    try { return [normalizeSubmittedDomain(domain)]; }
+    catch { return []; /* An invalid legacy domain cannot identify a source. */ }
+  }));
+  const rows = withdrawalSources().filter((source) =>
+    source.seller.toLowerCase() === seller.toLowerCase() && configured.has(source.domain));
+  return {
+    sources: rows.flatMap((source) => source.declarations ? [source.declarations] : []),
+    unknown: rows.some((source) => !source.declarations && source.provenance === "publisher-signature"),
+  };
+}
+
+const declaredBySavedSource = (saved: SavedListingDeclarations, locator: string): boolean =>
+  saved.unknown || saved.sources.some((hashes) => Object.hasOwn(hashes, locator));
+
+const listingRejectionRows = (claim: string) =>
+  db.prepare("SELECT locator, reason_code, public_notice FROM listing_rejections WHERE registration_claim = ?")
+    .all(claim) as Array<{ locator: string; reason_code: ListingRejectionCode; public_notice: number }>;
+
+/**
+ * Prune public notices of anchors the registration no longer lists once their evidence is gone: a hash notice when
+ * no saved signed source declares the anchor, an owner notice when the verified owner-signed registration no longer
+ * names it. Other rows wait for complete discovery (`pruneListingRejections`). Storage failures throw.
+ */
 export const pruneRegistrationListingRejections = db.transaction((
   registrationClaim: string,
-  currentRejections: ReadonlySet<string>,
-  incompleteOwnerAnchors?: ReadonlySet<string>,
+  listedAnchors: readonly string[],
+  ownerSignedAnchors?: readonly string[],
 ): void => {
   const claim = registrationClaim.toLowerCase();
-  const rows = db.prepare("SELECT locator, reason_code, public_notice FROM listing_rejections WHERE registration_claim = ?")
-    .all(claim) as Array<{ locator: string; reason_code: ListingRejectionCode; public_notice: number }>;
-  for (const { locator, reason_code, public_notice } of rows) {
-    const removed = incompleteOwnerAnchors
-      ? public_notice === 1 && reason_code === "OWNER_CLAIM_BINDING" && !incompleteOwnerAnchors.has(locator)
-      : !currentRejections.has(locator);
-    if (removed) clearListingRejection(locator, claim);
+  const saved = savedListingDeclarations(claim);
+  for (const { locator, reason_code, public_notice } of listingRejectionRows(claim)) {
+    if (public_notice !== 1 || listedAnchors.includes(locator)) continue;
+    const evidenceGone = reason_code === "DECLARED_CONTENT_HASH_MISMATCH" ? !declaredBySavedSource(saved, locator)
+      : reason_code === "OWNER_CLAIM_BINDING" && ownerSignedAnchors !== undefined && !ownerSignedAnchors.includes(locator);
+    if (evidenceGone) clearListingRejection(locator, claim);
   }
 });
 
-export const pruneListingRejections = db.transaction((claims: string[]): void => {
-  const keep = new Set(claims.map((claim) => claim.toLowerCase()));
-  for (const row of db.prepare("SELECT DISTINCT registration_claim FROM listing_rejections").all() as Array<{ registration_claim: string }>) {
-    if (!keep.has(row.registration_claim)) clearRegistrationListingRejections(row.registration_claim);
+/**
+ * After complete discovery, prune diagnostics of pointers no indexed registration lists. A public hash notice stays
+ * while a saved signed source declares its anchor; a listed seller's public owner notice is left to its owner
+ * evidence (`pruneRegistrationListingRejections`). Storage failures throw.
+ */
+export const pruneListingRejections = db.transaction((
+  registrations: ReadonlyArray<Pick<Registration, "primaryClaim" | "listingAnchors">>,
+): void => {
+  const listed = new Map<string, Set<string>>();
+  for (const reg of registrations) {
+    const claim = reg.primaryClaim.toLowerCase();
+    listed.set(claim, new Set([...listed.get(claim) ?? [], ...reg.listingAnchors]));
+  }
+  for (const { registration_claim: claim } of db.prepare("SELECT DISTINCT registration_claim FROM listing_rejections").all() as Array<{ registration_claim: string }>) {
+    const anchors = listed.get(claim);
+    const saved = savedListingDeclarations(claim);
+    for (const { locator, reason_code, public_notice } of listingRejectionRows(claim)) {
+      if (anchors?.has(locator)) continue;
+      const kept = public_notice === 1 && (reason_code === "DECLARED_CONTENT_HASH_MISMATCH"
+        ? declaredBySavedSource(saved, locator) : reason_code === "OWNER_CLAIM_BINDING" && anchors !== undefined);
+      if (!kept) clearListingRejection(locator, claim);
+    }
   }
 });
 /**
