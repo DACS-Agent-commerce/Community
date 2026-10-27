@@ -12,6 +12,7 @@ import { admitRevocationCandidates, loadScanState, saveScanState } from "../src/
 import type { Registration } from "../src/catalog/types.js";
 import { type Obj, bindingFor, dids, installAgreement, locator, maps, registeredDeal, seeds, sign, vector }
   from "./fixtures/current-evidence.js";
+import { indexWithCommitments } from "./fixtures/commitment-proof.js";
 
 const seller = dids[1];
 const owner = `0x${seller.slice(-64)}`;
@@ -140,7 +141,7 @@ test("an unreadable candidate anchored by someone else cannot hold the Listing",
   }
 });
 
-test("a held Listing without authenticated pre-withdrawal proof withholds deal credit", async (t) => {
+test("a held Listing keeps its authentically committed deal history", async (t) => {
   serveStorage(t);
   const { fixture, registration, hash } = await ownListing("held-history", 4700);
   const listingRef = { listingId: "held-history", version: 1, contentHash: hash };
@@ -150,13 +151,13 @@ test("a held Listing without authenticated pre-withdrawal proof withholds deal c
   const deal = registeredDeal("held-history-job", fixture.locators.buyer, fixture.locators.seller);
   const markerAt = locator(4710);
   admitRevocationCandidates(hash, [{ locator: markerAt, owner }]);
-  const record = await index({ ...registration, deals: [deal], bundleBindings: [
+  const record = await indexWithCommitments({ ...registration, deals: [deal], bundleBindings: [
     await bindingFor(deal.jobId, "buyer", fixture.locators.buyer, fixture.buyerBundle, 0),
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
-  ] });
+  ] }, undefined, offline);
   assert.deepEqual(record.listings, [], "the unread owner marker holds discovery");
-  assert.equal(record.deals[0].refsVerified, false);
-  assert.equal(record.reputation.completed, 0);
+  assert.equal(record.deals[0].refsVerified, true, "an unsettled withdrawal does not withhold committed credit");
+  assert.equal(record.reputation.completed, 1);
 });
 
 test("the owner hold survives a restart inside the retry backoff and a later readable rejection releases it", async (t) => {

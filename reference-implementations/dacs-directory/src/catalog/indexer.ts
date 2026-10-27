@@ -36,7 +36,6 @@ import {
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
   verifyStoredListingResult,
-  verifyListingRevocation,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
 import { summaryPublicationRefusal } from "./discovery.js";
@@ -55,7 +54,6 @@ import {
   savedListingDeclarations,
   observedRevocationCandidate,
   retainedListingRevocation,
-  retainedListingRevocationMarker,
   retainListingRevocation,
   hasIncompleteWellKnownWithdrawal,
   boundWellKnownRevocations,
@@ -99,7 +97,6 @@ import type {
   ListingSummary,
   Registration,
   RegisteredDeal,
-  RevocationBinding,
   RevocationCheck,
   SellerRecord,
 } from "./types.js";
@@ -245,44 +242,39 @@ export async function indexRegistration(
     const knownMarkers = (verifiedRevocations[verified.contentHash] ?? []).slice(0, limit);
     const unavailableMarkers = new Set<string>();
     const readMarkers = new Map<string, Record<string, unknown>>();
-    const observedMarker = async (locator: string) => {
-      const marker = observedRevocationCandidate(locator);
-      if (marker) readMarkers.set(locator, marker);
-      return marker;
-    };
-    const currentMarker = async (locator: string) => {
-      // Cached invalid bytes cannot adjudicate either a repaired marker or
-      // its current source binding, even if only its signature has changed.
-      const marker = await readRevocationCandidate(locator, unavailableMarkers);
-      if (marker) readMarkers.set(locator, marker);
-      return marker;
-    };
-    // The whole batch is examined, not only up to its first valid marker: the withdrawal
-    // cutoff is the earliest signed one, which may be discovered after a later one.
-    const verifiedMarkers: RevocationBinding[] = [];
-    let unexamined = [...new Set([...knownMarkers,
-      ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit)])].slice(0, limit);
-    while (unexamined.length > 0) {
-      const next = await findValidListingRevocation(unexamined, verified, version, observedMarker, undefined, progress,
-        unexamined.length, currentMarker);
-      if (!next) break;
-      verifiedMarkers.push(next);
-      unexamined = unexamined.slice(unexamined.indexOf(next.markerAnchor.locator) + 1);
-    }
-    const found = verifiedMarkers[0] ?? null;
+    const found = await findValidListingRevocation(
+      [
+        ...knownMarkers,
+        ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
+      ],
+      verified,
+      version,
+      async (locator) => {
+        const marker = observedRevocationCandidate(locator);
+        if (marker) readMarkers.set(locator, marker);
+        return marker;
+      },
+      undefined,
+      progress,
+      limit,
+      async (locator) => {
+        // Cached invalid bytes cannot adjudicate either a repaired marker or
+        // its current source binding, even if only its signature has changed.
+        const marker = await readRevocationCandidate(locator, unavailableMarkers);
+        if (marker) readMarkers.set(locator, marker);
+        return marker;
+      },
+    );
     recordRevocationProgress(verified.contentHash, progress, carriedBindings, sourceRevision);
     // RB-3: a revocation verified on an earlier pass is retained, whatever its marker reads now.
-    // The store keeps the earliest signed one.
-    for (const binding of verifiedMarkers) {
-      const marker = readMarkers.get(binding.markerAnchor.locator);
-      if (marker) retainListingRevocation(binding, marker);
+    if (found) {
+      const marker = readMarkers.get(found.markerAnchor.locator);
+      if (marker) retainListingRevocation(found, marker);
     }
-    const verifiedLocators = verifiedMarkers.map((binding) => binding.markerAnchor.locator);
     const retained = retainedListingRevocation(verified.contentHash);
     const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
-    // Publish the retained earliest marker, the one the credit cutoff below reads, not the batch's first.
-    const revocationBinding = boundRetained ?? found ?? prior?.listings.find((listing) => listing.status === "revoked" &&
+    const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
     // Raw chain hints have no withdrawal authority. Only an authenticated source
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
@@ -290,21 +282,17 @@ export async function indexRegistration(
     // marker verified on an earlier pass holds the Listing, and so does a marker the
     // Listing's owner anchored that no read has settled, even while it backs off.
     // Anyone can anchor other candidates, so an outage on those cannot hold it.
-    // Markers verified in this pass are settled.
-    const withdrawalUnresolved = hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash, verifiedLocators) ||
-      knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
-      hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null, verifiedLocators);
-    const revocation: RevocationCheck = revocationBinding ? "revoked" : withdrawalUnresolved ? "indeterminate" : "absent";
+    const revocation: RevocationCheck = revocationBinding ? "revoked"
+      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
+        knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
+        hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
+        ? "indeterminate" : "absent";
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
-    // Expiry affects discovery; historical credit uses the exact tuple at authenticated commitment time.
-    // An unsettled authoritative marker may be earlier than the retained one, so it leaves the cutoff unresolved.
-    const marker = retainedListingRevocationMarker(verified.contentHash);
-    const withdrawnAt = revocation === "absent" ? undefined
-      : !withdrawalUnresolved && marker && await verifyListingRevocation(marker, verified, version) &&
-        typeof marker.revokedAt === "number" ? marker.revokedAt : null;
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data, withdrawnAt });
+    // Past sessions still verify against the exact tuple, whatever its revocation state (DACS-1:
+    // revocation does not invalidate committed sessions) and after expiry; both affect discovery only.
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
     if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {

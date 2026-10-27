@@ -3,7 +3,8 @@ import test, { type TestContext } from "node:test";
 import "./fixtures/isolated-data-dir.js";
 import { buildCurrentEvidenceGraph, artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
-import { admitRevocationCandidates, recordWellKnownWithdrawalCheck, retainedListingRevocationMarker } from "../src/catalog/store.js";
+import { admitRevocationCandidates, recordWellKnownWithdrawalCheck } from "../src/catalog/store.js";
+import { revocationLogicalAddress } from "../src/catalog/listingVerification.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { dids, seeds, maps, sign, locator, vector, payeeBoundVector, bindingFor, installAgreement, registeredDeal, type Obj }
@@ -175,31 +176,39 @@ test("expired exact Listing tuples still credit authentically committed history 
   assert.equal(repeated.reputation.completed, 0);
 });
 
-test("withdrawn Listing history requires strictly pre-withdrawal commitment finality", async (t) => {
+const withdrawalMarker = (hash: string, revokedAt: number) => {
+  const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt };
+  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
+  return { ...scope, signature: { algorithm: "ed25519", signer: seller, value } };
+};
+
+test("a signed withdrawal anchored after a credited commitment removes no credit, whatever its revokedAt", async (t) => {
   t.mock.method(Date, "now", () => 200);
   storage(t);
-  for (const [time, accepted] of [[89, true], [90, false], [91, false]] as const) {
-    const fixture = await prepared(false, { notBefore: 1 });
+  // Each case signs its own validity window, so its Listing hash and candidates are its own.
+  for (const [n, revokedAt] of [[0, -1], [1, 0], [2, 1], [3, 89], [4, 90], [5, 120]] as const) {
+    const fixture = await prepared(false, { notBefore: 10 + n });
     const hash = artifactHash(fixture.listing, "listing");
-    const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt: 90 };
-    const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
-    maps.set(locator(7100), { ...scope, signature: { algorithm: "ed25519", signer: seller, value } });
-    admitRevocationCandidates(hash, [{ locator: locator(7100), owner }]);
-    const record = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, time));
-    assert.equal(record.deals[0].refsVerified, accepted, `commitment at ${time}`);
-    assert.equal(record.reputation.completed, accepted ? 1 : 0);
+    const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 89);
+    assert.equal((await indexed(fixture, proof)).deals[0].refsVerified, true, `credited before revokedAt ${revokedAt}`);
+    maps.set(locator(7100 + n), withdrawalMarker(hash, revokedAt));
+    admitRevocationCandidates(hash, [{ locator: locator(7100 + n), owner }]);
+    const record = await indexed(fixture, proof);
+    assert.equal(record.listings[0]?.status, "revoked", `revokedAt ${revokedAt}`);
+    assert.equal(record.deals[0].refsVerified, true, `revokedAt ${revokedAt}`);
+    assert.equal(record.reputation.completed, 1);
   }
 });
 
-test("an unresolved owner withdrawal cannot credit a newly fabricated deal", async (t) => {
+test("an unread owner withdrawal marker holds discovery but not authentically committed credit", async (t) => {
   t.mock.method(Date, "now", () => 300);
   storage(t);
   const fixture = await prepared(false, { notBefore: 2 });
   admitRevocationCandidates(artifactHash(fixture.listing, "listing"), [{ locator: locator(7200), owner }]);
   const record = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj));
   assert.deepEqual(record.listings, []);
-  assert.equal(record.deals[0].refsVerified, false);
-  assert.equal(record.reputation.completed, 0);
+  assert.equal(record.deals[0].refsVerified, true);
+  assert.equal(record.reputation.completed, 1);
 });
 
 test("proof resolution failures keep their cause and supplied callbacks receive an abort deadline", async () => {
@@ -304,33 +313,6 @@ test("commitment authority may be an authenticated orchestrator outside the buye
   assert.equal((await graph(fixture, proof)).ok, true);
 });
 
-test("a later withdrawal cannot overwrite an earlier authenticated cutoff, even if the original is unreadable", async (t) => {
-  t.mock.method(Date, "now", () => 200);
-  storage(t);
-  const fixture = await prepared(false, { notBefore: 4 });
-  const hash = artifactHash(fixture.listing, "listing");
-  const marker = (revokedAt: number) => {
-    const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt };
-    const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
-    return { ...scope, signature: { algorithm: "ed25519", signer: seller, value } };
-  };
-  maps.set(locator(7400), marker(100));
-  admitRevocationCandidates(hash, [{ locator: locator(7400), owner }]);
-  const first = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj));
-  assert.equal(first.deals[0].refsVerified, true);
-  const binding = first.listings[0].revocation;
-  assert.ok(binding);
-  const { retainListingRevocation, retainedListingRevocationMarker } = await import("../src/catalog/store.js");
-  const later = marker(120);
-  retainListingRevocation({ ...binding, markerAnchor: { kind: "storage-program", locator: locator(7401) },
-    markerContentHash: contentHash(signedScope(later, "listing")) }, later);
-  assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
-  maps.delete(locator(7400));
-  const repeated = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110));
-  assert.equal(repeated.deals[0].refsVerified, false);
-  assert.equal(repeated.reputation.completed, 0);
-});
-
 test("commitment key resolver outages retain their original cause", async () => {
   const { verifyListingCommitment } = await import("../src/catalog/commitmentFinality.js");
   const fixture = await prepared();
@@ -343,71 +325,33 @@ test("commitment key resolver outages retain their original cause", async () => 
   if (!result.ok) assert.match(result.reason, /session key service timed out/);
 });
 
-// Each cutoff test signs its own validity window, so its Listing hash, candidates and retained marker are its own.
-const withdrawalMarker = (hash: string, revokedAt: number) => {
-  const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt };
-  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
-  return { ...scope, signature: { algorithm: "ed25519", signer: seller, value } };
-};
-async function creditedAfterWithdrawalAt120(t: TestContext, notBefore: number, at: number) {
+test("an unread marker carried by an authenticated withdrawal source holds discovery but not committed credit", async (t) => {
   t.mock.method(Date, "now", () => 200);
   storage(t);
-  const fixture = await prepared(false, { notBefore });
+  const fixture = await prepared(false, { notBefore: 6 });
   const hash = artifactHash(fixture.listing, "listing");
-  maps.set(locator(at), withdrawalMarker(hash, 120));
-  admitRevocationCandidates(hash, [{ locator: locator(at), owner }]);
-  const first = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110));
-  assert.equal(first.deals[0].refsVerified, true, "a commitment before the only signed withdrawal is credited");
-  return { fixture, hash, first, repeat: () => indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110)) };
-}
-
-test("an earlier signed withdrawal discovered after a later one replaces the retained cutoff", async (t) => {
-  const { hash, repeat } = await creditedAfterWithdrawalAt120(t, 5, 7410);
-  maps.set(locator(7411), withdrawalMarker(hash, 100));
-  admitRevocationCandidates(hash, [{ locator: locator(7411), owner }]);
-  const repeated = await repeat();
-  assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
-  assert.equal(repeated.listings[0].revocation?.markerAnchor.locator, locator(7411), "the published binding is the retained cutoff's marker");
-  assert.equal(repeated.deals[0].refsVerified, false);
-  assert.equal(repeated.reputation.completed, 0);
+  const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
+  assert.equal((await indexed(fixture, proof)).deals[0].refsVerified, true);
+  const carried = { sellerPrimaryClaim: seller, listingId: "svc", listingVersion: 1, listingContentHash: hash,
+    logicalAddress: revocationLogicalAddress(seller, "svc", 1), markerAnchor: { kind: "storage-program" as const, locator: locator(7431) },
+    markerContentHash: contentHash(withdrawalMarker(hash, 1)) };
+  assert.ok(recordWellKnownWithdrawalCheck("https://carried.example", seller, [], [], { generatedAt: 1, hash: "c".repeat(64) }, [carried]));
+  const held = await indexed(fixture, proof);
+  assert.deepEqual(held.listings, [], "the unread carried marker holds discovery");
+  assert.equal(held.deals[0].refsVerified, true);
+  assert.equal(held.reputation.completed, 1);
 });
 
-test("of two signed withdrawals verified in one pass the catalog publishes the earlier, whatever the batch order", async (t) => {
+test("an incomplete authenticated withdrawal source holds discovery but not committed credit", async (t) => {
   t.mock.method(Date, "now", () => 200);
   storage(t);
-  const fixture = await prepared(false, { notBefore: 8 });
+  const fixture = await prepared(false, { notBefore: 7 });
   const hash = artifactHash(fixture.listing, "listing");
-  maps.set(locator(7440), withdrawalMarker(hash, 120));
-  maps.set(locator(7441), withdrawalMarker(hash, 100));
-  admitRevocationCandidates(hash, [{ locator: locator(7440), owner }, { locator: locator(7441), owner }]);
-  const record = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110));
-  assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
-  assert.equal(record.listings[0].revocation?.markerAnchor.locator, locator(7441), "the published binding is the retained cutoff's marker");
-  assert.equal(record.deals[0].refsVerified, false);
-});
-
-test("an unread owner marker withholds credit beside a retained cutoff until a read settles it", async (t) => {
-  const { hash, repeat } = await creditedAfterWithdrawalAt120(t, 6, 7420);
-  admitRevocationCandidates(hash, [{ locator: locator(7421), owner }]);
-  const held = await repeat();
-  assert.equal(held.deals[0].refsVerified, false, "the unread owner marker may carry an earlier cutoff");
-  assert.equal(held.reputation.completed, 0);
-  maps.set(locator(7421), { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt: 90 });
-  t.mock.method(Date, "now", () => 200 + 120_000);
-  const settled = await repeat();
-  assert.equal(settled.deals[0].refsVerified, true, "an unsigned marker is rejected, and the verified owner marker does not hold");
-});
-
-test("an unread marker carried by an authenticated withdrawal source withholds credit beside a retained cutoff", async (t) => {
-  const { hash, first, repeat } = await creditedAfterWithdrawalAt120(t, 7, 7430);
-  const binding = first.listings[0].revocation;
-  assert.ok(binding);
-  const carried = { ...binding, markerAnchor: { kind: "storage-program" as const, locator: locator(7431) } };
-  assert.ok(recordWellKnownWithdrawalCheck("https://cutoff.example", seller, [], [], { generatedAt: 1, hash: "c".repeat(64) }, [carried]));
-  const held = await repeat();
-  assert.equal(held.deals[0].refsVerified, false, "the carried marker may carry an earlier cutoff");
-  maps.set(locator(7431), withdrawalMarker(hash, 130));
-  t.mock.method(Date, "now", () => 200 + 120_000);
-  const settled = await repeat();
-  assert.equal(settled.deals[0].refsVerified, true, "a verified carried marker settles its binding and the earliest cutoff stays 120");
+  const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
+  assert.equal((await indexed(fixture, proof)).deals[0].refsVerified, true);
+  assert.ok(recordWellKnownWithdrawalCheck("https://incomplete.example", seller, [hash], [hash], { generatedAt: 1, hash: "d".repeat(64) }));
+  const held = await indexed(fixture, proof);
+  assert.deepEqual(held.listings, [], "the incomplete source holds discovery");
+  assert.equal(held.deals[0].refsVerified, true);
+  assert.equal(held.reputation.completed, 1);
 });

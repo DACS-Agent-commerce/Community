@@ -397,11 +397,10 @@ base64url-patched Buffer).
   and legacy indexer paths verify the commitment's session-orchestrator signature,
   exact agreement hash, Listing tuple, pattern and signing-party roster. New records
   use finalized receipt consensus time; legacy signed `committedAt` must equal it.
-  That time must fall inside the signed Listing validity window, satisfy its deadline
-  bound, and strictly precede the earliest signed withdrawal found. Each pass checks
-  every withdrawal candidate in its bounded batch. While an owner-anchored or
-  source-carried marker, or an incomplete authenticated source, is unsettled, credit
-  is withheld, since it may carry an earlier cutoff. Expired tuples remain available
+  That time must fall inside the signed Listing validity window and satisfy its
+  deadline bound. Withdrawal never removes committed credit (DACS-1): a marker's
+  signed `revokedAt` is chosen by the seller rather than authenticated consensus time,
+  and an unsettled withdrawal holds only discovery. Expired tuples remain available
   as historical evidence without returning to discovery; category attribution uses
   the exact tuple. Startup clears older cached deal credit and category hints.
   `EvidenceGraphDeps.commitment` and `indexRegistration`'s final dependency accept a
