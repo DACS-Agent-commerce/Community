@@ -286,7 +286,7 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
 const bindsListing = (binding: Partial<RevocationBinding> | undefined, listing: ListingSummary): binding is RevocationBinding =>
   typeof binding?.sellerPrimaryClaim === "string" && typeof listing.seller?.primaryClaim === "string" &&
   sellerIdentity(binding.sellerPrimaryClaim) === sellerIdentity(listing.seller.primaryClaim) &&
-  bindsListingTuple(binding, { listingId: listing.listingId, version: listing.version, contentHash: listing.contentHash });
+  bindsListingTuple(binding, binding.sellerPrimaryClaim, { listingId: listing.listingId, version: listing.version, contentHash: listing.contentHash });
 if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
   type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
