@@ -5,7 +5,9 @@
  * side effect. Green when the cursor is at the tip, amber when it trails.
  */
 import { useEffect, useState } from "react";
+import { DEAD_LETTER_MAX_LIMIT } from "../catalog/statusDiagnostics.js";
 
+/** The public listing-rejection part of a status reply. */
 export interface ListingRejectionDiagnostics {
   total: number;
   publicTotal: number;
@@ -20,7 +22,7 @@ export interface ListingRejectionDiagnostics {
   }>;
 }
 
-interface Status {
+export interface Status {
   generatedAt: number;
   syncedToTx: number;
   chainLatestTx: number | null;
@@ -31,9 +33,6 @@ interface Status {
   };
 }
 
-/** The most diagnostics one status reply lists. */
-const MAX_DIAGNOSTICS_LIMIT = 100;
-
 /** Render unresolved authenticated pointer failures and the total when the reply lists fewer. */
 export function ListingRejectionNotice({ rejected }: { rejected: ListingRejectionDiagnostics }) {
   const notices = rejected.items.filter((item) => item.publicNotice);
@@ -43,8 +42,9 @@ export function ListingRejectionNotice({ rejected }: { rejected: ListingRejectio
       <summary>{rejected.publicTotal.toLocaleString()} listing pointer{rejected.publicTotal === 1 ? "" : "s"} could not be indexed</summary>
       <p>Unresolved diagnostics may be retained from an earlier indexing pass for owner-signed registrations and publisher-authenticated hash declarations. Check the registration's storage pointers and the content hashes your discovery index declares, then submit a signed update. Historical versions remain immutable and do not require seller action.</p>
       <ul>
-        {notices.map((item) => (
-          <li key={`${item.locator}:${item.code}`}>
+        {notices.map((item, index) => (
+          // Two registrations can share a pointer, and the reply omits their claims.
+          <li key={`${index}:${item.locator}:${item.code}`}>
             <strong>{item.listingId ?? item.locator}{item.listingVersion ? ` · version ${item.listingVersion}` : ""}</strong>
             <span>{item.message}</span>
             <span>{item.guidance}</span>
@@ -55,7 +55,7 @@ export function ListingRejectionNotice({ rejected }: { rejected: ListingRejectio
       {notices.length < rejected.publicTotal && (
         <p className="listing-rejection-truncated">
           Showing {notices.length.toLocaleString()} of {rejected.publicTotal.toLocaleString()}.{" "}
-          <a href={`/api/dacs/status?deadLetterLimit=${MAX_DIAGNOSTICS_LIMIT}`}>List up to {MAX_DIAGNOSTICS_LIMIT}</a>, or look up one
+          <a href={`/api/dacs/status?deadLetterLimit=${DEAD_LETTER_MAX_LIMIT}`}>List up to {DEAD_LETTER_MAX_LIMIT}</a>, or look up one
           pointer with <code>?locator=</code>.
         </p>
       )}
@@ -88,7 +88,14 @@ export default function CatalogStatus() {
     return () => clearInterval(t);
   }, []);
 
-  if (!status || status.generatedAt === 0) return null;
+  return status && <CatalogStatusView status={status} />;
+}
+
+/** The freshness chip once a catalog has been saved, and public listing notices even before that. */
+export function CatalogStatusView({ status }: { status: Status }) {
+  const rejected = status.indexer?.listingRejectionDiagnostics;
+  const notice = rejected && rejected.publicTotal > 0 ? <ListingRejectionNotice rejected={rejected} /> : null;
+  if (status.generatedAt === 0) return notice ? <div className="catalog-status">{notice}</div> : null;
 
   const behind = status.txsBehind;
   const inSync = behind !== null && behind === 0;
@@ -99,20 +106,20 @@ export default function CatalogStatus() {
         ? "in sync with chain"
         : `${behind.toLocaleString()} tx${behind === 1 ? "" : "s"} behind chain`;
 
-  const rejected = status.indexer?.listingRejectionDiagnostics;
   return (
-    <div className="catalog-status"><span
-      className={`sync-chip ${cls}`}
-      role="status"
-      aria-live="polite"
-      title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
-        status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
-      } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
-    >
-      <span className="sync-dot" />
-      {label} · indexed {ago(status.generatedAt)}
-    </span>
-      {rejected && <ListingRejectionNotice rejected={rejected} />}
+    <div className="catalog-status">
+      <span
+        className={`sync-chip ${cls}`}
+        role="status"
+        aria-live="polite"
+        title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
+          status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
+        } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
+      >
+        <span className="sync-dot" />
+        {label} · indexed {ago(status.generatedAt)}
+      </span>
+      {notice}
     </div>
   );
 }
