@@ -1,5 +1,9 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
 import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
+import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
+
+const claimBoundDescription = (purpose: string): string =>
+  `${purpose}. At most ${MAX_CLAIM_QUERY_BYTES} UTF-8 bytes as sent, before any trimming; a longer value gets 400.`;
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
@@ -298,7 +302,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
           { name: "rail", in: "query", schema: { type: "string" } },
           { name: "credential", in: "query", schema: { type: "string" } },
-          { name: "primaryClaim", in: "query", schema: { type: "string" } },
+          { name: "primaryClaim", in: "query", description: claimBoundDescription("Seller claim or claim-scheme prefix"), schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
           { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
@@ -308,7 +312,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: `Invalid filter or pagination, or primaryClaim over ${MAX_CLAIM_QUERY_BYTES} bytes` } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -317,9 +321,14 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
+          { name: "seller", in: "query", description: claimBoundDescription("Disambiguates seller-scoped listing IDs"), schema: { type: "string" } },
         ],
-        responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+        responses: {
+          "200": { description: "Signed listing artifact" },
+          "400": { description: `seller over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+          "502": { description: "Anchor verification failed" },
+        },
       },
     },
     "/api/dacs/bundles/{jobId}": {
@@ -342,16 +351,24 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", required: true, description: "Identifies the seller-scoped listing ID", schema: { type: "string", minLength: 1, pattern: "\\S" } },
+          { name: "seller", in: "query", required: true, description: claimBoundDescription("Identifies the seller-scoped listing ID"), schema: { type: "string", minLength: 1, pattern: "\\S" } },
         ],
-        responses: { "200": { description: "Directory service profile inspection envelope" }, "400": { description: "Seller is required" }, "404": { description: "Listing not found" } },
+        responses: {
+          "200": { description: "Directory service profile inspection envelope" },
+          "400": { description: `Seller is required, or over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+        },
       },
     },
     "/api/dacs/sellers/{primaryClaimRef}": {
       get: {
         summary: "Retrieve seller identity, services, reputation hints, and deals",
-        parameters: [{ name: "primaryClaimRef", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Seller view" }, "404": { description: "Seller not found" } },
+        parameters: [{ name: "primaryClaimRef", in: "path", required: true, description: claimBoundDescription("Seller claim, percent-encoded once"), schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Seller view" },
+          "400": { description: `primaryClaimRef over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Seller not found" },
+        },
       },
     },
     "/api/dacs/status": {
