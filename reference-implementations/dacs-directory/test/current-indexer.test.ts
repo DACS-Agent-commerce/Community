@@ -1301,7 +1301,12 @@ test("unresolved withdrawal withholds history until authenticated pre-withdrawal
         privateKeyFromSeed(seeds[1]))).toString("base64url") } };
     const binding = await findValidListingRevocation([locator(807)], verified, 1, async () => marker);
     assert.ok(binding); retainListingRevocation(binding, marker);
-    const revoked = await indexRegistration(reg, held, resolve);
+    const incomplete = await indexRegistration(reg, held, resolve);
+    assert.equal(incomplete.listings[0].status, "revoked");
+    assert.equal(incomplete.deals[0].refsVerified, false, "the incomplete source may still carry an earlier cutoff");
+    assert.ok(recordWellKnownWithdrawalCheck("https://history.example", dids[1], [listingRef.contentHash], [],
+      { generatedAt: 2, hash: "d".repeat(64) }, [], "publisher-signature"));
+    const revoked = await indexRegistration(reg, incomplete, resolve);
     assert.equal(revoked.listings.some(activeOffer), false);
     assert.equal(revoked.listings[0].status, "revoked");
     assert.deepEqual(revoked.listings[0].revocation, binding);

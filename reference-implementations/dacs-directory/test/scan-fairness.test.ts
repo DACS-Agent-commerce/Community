@@ -285,7 +285,11 @@ test("a verified marker missing from the candidate queue is still checked first"
   store.saveScanState({ ...emptyState(), revocations: { [listingHash]: others }, verifiedRevocations: { [listingHash]: [locator(4)] } });
   await reindex();
   assert.equal(listingStatus(), "revoked");
-  assert.ok(readsOf(others) === 0, "the verified marker is checked before any other candidate");
+  // The rest of the bounded batch is still examined: an earlier signed cutoff may be among it.
+  const order = [...reads.keys()];
+  assert.ok(order.includes(locator(4)) && others.every((at) => !order.includes(at) || order.indexOf(at) > order.indexOf(locator(4))),
+    "the verified marker is checked before any other candidate");
+  assert.ok(readsOf(others) < 16, `the batch stays within the per-pass bound, read ${readsOf(others)}`);
 });
 
 const publishedListing = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0];

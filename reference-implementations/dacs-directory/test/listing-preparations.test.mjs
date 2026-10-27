@@ -376,6 +376,26 @@ test("a prepared version the catalog already lists returns its saved anchor and 
   assert.equal(state.nonceReads, 1);
 });
 
+const catalogWithSeller = (displayName) => ({ catalogVersion: "1", generatedAt: clock,
+  sellers: displayName ? [{ primaryClaim: `did:demos:agent:${ownerHex}`, displayName, listings: [] }] : [] });
+for (const [change, before, after] of [
+  ["gains", undefined, "Renamed seller"],
+  ["renames", "Original seller", "Renamed seller"],
+  ["drops", "Original seller", undefined],
+]) {
+  test(`an exact signed repeat gets its saved transaction after the catalog ${change} the seller's display name`, async (t) => {
+    const state = node(t);
+    module.saveCatalog(catalogWithSeller(before));
+    try {
+      const signed = await signedInput(`display-name-${change}`);
+      const first = await prepare(signed);
+      module.saveCatalog(catalogWithSeller(after));
+      await resumed(await post(request(signed)), first);
+    } finally { module.saveCatalog(catalogWithSeller(undefined)); }
+    assert.equal(state.nonceReads, 1, "a repeat never asks for a replacement nonce");
+  });
+}
+
 test("concurrent signed requests return at most one transaction and cannot overwrite its bytes", async (t) => {
   const state = node(t);
   const first = await signedInput("concurrent");
@@ -478,7 +498,7 @@ test("empty producer-name searches permit a default preview and one signed creat
   const first = await prepare(signed);
   assert.equal(first.exists, false);
   assert.equal(first.publicationReady, true);
-  await unresolved(await post(request(signed)), first.anchorAddress);
+  await resumed(await post(request(signed)), first);
   assert.equal(state.nonceReads, 1);
   assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress).n, 1);
 });
@@ -496,6 +516,12 @@ test("the default handler creates only the next version when a prior version is 
   }] });
   const next = await signedInput(id);
   assert.equal(next.listingVersion, 2);
+  const preview = await post(request({ ...prior, listingSignature: undefined }));
+  assert.equal(preview.status, 200, "a prepared prior version previews its own Listing");
+  assert.equal((await preview.json()).tx, null);
+  await unresolved(await post(request(prior)), first.anchorAddress);
+  // Without a saved preparation, a listed version the lookups cannot find is refused outright.
+  db.prepare("DELETE FROM listing_preparations WHERE logical_address=?").run(first.logicalAddress);
   for (const listingSignature of [undefined, prior.listingSignature]) {
     const response = await post(request({ ...prior, listingSignature }));
     assert.equal(response.status, 409);
@@ -532,7 +558,7 @@ test("the API route with trusted rail authority creates on producer-name absence
   assert.equal(body.exists, false);
   assert.ok(body.tx);
   assert.equal(state.nonceReads, 1);
-  await unresolved(await route.POST(request(signed)), body.anchorAddress);
+  await resumed(await route.POST(request(signed)), body);
   assert.equal(state.nonceReads, 1);
 });
 
