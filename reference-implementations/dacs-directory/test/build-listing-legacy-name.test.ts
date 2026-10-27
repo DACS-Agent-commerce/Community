@@ -61,13 +61,13 @@ const walletHex = (message: string) => Buffer.from(ed25519Sign(Buffer.from(messa
 const legacyProgramName = (serviceId: string, version: number) =>
   `dacs1-${Buffer.from(`dacs1:${encodeURIComponent(claim)}:${serviceId}:v${version}`, "utf8").toString("base64url")}`;
 
-type V1 = { programName: string; anchorAddress: string; listing: Record<string, unknown> };
+type V1 = { programName: string; anchorAddress: string; listing: Record<string, unknown>; tx: unknown };
 type Built = { exists: boolean; tx: { content: { data: [string, { programName: string }] } } | null; programName: string; error?: string; listing?: unknown };
 
 async function withOccupancy(
   serviceId: string,
   occupy: (v1: V1) => { name: string; data: Record<string, unknown> },
-  check: (ctx: { post: () => Promise<Response>; queries: string[] }) => Promise<void>,
+  check: (ctx: { post: () => Promise<Response>; queries: string[]; v1: V1 }) => Promise<void>,
 ) {
   const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const finalInput = { ...base, serviceId, listingVersion: identity.listingVersion,
@@ -101,7 +101,7 @@ async function withOccupancy(
     const v1 = await (await post()).json() as V1;
     occupied = { ...occupy(v1), address: v1.anchorAddress };
     queries.length = 0;
-    await check({ post, queries });
+    await check({ post, queries, v1 });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -145,16 +145,16 @@ test("an authenticated listing under the legacy program name is recovered withou
   );
 });
 
-test("a legacy program for another version cannot release an unresolved preparation", async () => {
+test("a legacy program for another version only gets this version's saved preparation back", async () => {
   await withOccupancy(
     "legacy-other-version",
     (v1) => ({ name: legacyProgramName("legacy-other-version", 2), data: v1.listing }),
-    async ({ post, queries }) => {
+    async ({ post, queries, v1 }) => {
       const response = await post();
-      assert.equal(response.status, 409);
+      assert.equal(response.status, 200);
       const body = await response.json() as Built;
-      assert.match(String(body.error), /preparation.*unresolved/);
-      assert.equal(body.tx, undefined);
+      assert.equal(body.exists, false);
+      assert.equal(JSON.stringify(body.tx), JSON.stringify(v1.tx), "the exact repeat gets the saved v1 bytes, not a new create");
       assert.ok(queries.includes(legacyProgramName("legacy-other-version", 1)), "the legacy name is looked up");
     },
   );
