@@ -297,8 +297,9 @@ current SDK seller runtime.
    Chain gate: a reindex or `POST /api/dacs/index-now` first reads the chain the node
    serves. When the node cannot be read (index-now: 503) or serves a chain other than
    `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
-   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Each complete pass
-   records the chain it scanned. A re-pin empties the public catalog and replays from
+   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
+   saves what it read, the served chain is read again; if it changed, nothing more is saved and the
+   run fails. Each complete pass records the chain it scanned, after its catalog is saved. A re-pin empties the public catalog and replays from
    genesis; a state with no recorded chain (an upgrade) replays once and keeps its catalog
    meanwhile. A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records nothing, so
    raise the cap. index-now answers 409 until a complete pass on this chain is recorded.
