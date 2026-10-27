@@ -9,6 +9,7 @@ import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { BundleBinding, Registration, ScanState } from "../src/catalog/types.js";
+import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 
 // Each listing, deal and retry stays isolated from other parties' writes:
 // real SDK hashes and signatures over a stubbed node, through reindexAll.
@@ -109,8 +110,9 @@ function sql(query: string, ...params: unknown[]) {
     return (statement.reader ? statement.all(...params) : (statement.run(...params), [])) as Record<string, unknown>[];
   } finally { db.close(); }
 }
+/** A schema-9 state recorded on the pinned chain: a pass replays its history without resetting it. */
 const emptyState = (): ScanState => ({
-  schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
+  chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
   verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
 });
 const candidateTable = () => sql("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").length > 0;
