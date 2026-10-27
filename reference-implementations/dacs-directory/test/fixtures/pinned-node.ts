@@ -13,6 +13,12 @@ export const nodeOnChain = (chainIdentity: string, warning: string | null = null
 /** A node serving the pinned chain. */
 export const onPinnedChain = nodeOnChain(PINNED_DEMOS_CHAIN_IDENTITY);
 
+/** A node re-pointed mid-pass: its n-th deployment read reports `chains[n]`, then the last one. */
+export const nodeServingInTurn = (...chains: string[]): typeof catalogNodeDeployment => {
+  let reads = 0;
+  return async () => nodeOnChain(chains[Math.min(reads++, chains.length - 1)])();
+};
+
 /**
  * The pinned node's answer to a chain-identity or build read (`getBlockByNumber`
  * 0 or 1, `getNetworkInfo`), or null for any other RPC body.
