@@ -249,12 +249,15 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    node reads is journaled with the statement that undoes it. The journal is confirmed in the same
    transaction that saves the scan state and the catalog; when that read fails, the run fails, or a
    crash interrupts it, the next writer undoes the writes. Withdrawal sources a publisher signed
-   (the crawl's declarations) are kept, as are registrations and domains. Each complete pass
-   records the chain it scanned in that same transaction. A state recorded on another chain (a re-pin), a
-   state with no recorded chain (an upgrade, or an unfinished reset) and a large tip regression
-   are reset after a further chain read: cached discoveries, artifacts and retained revocations
-   are cleared, no earlier catalog record is used, and history replays from genesis. A re-pin
-   also empties the public catalog first; the others keep serving it until the rebuild is saved.
+   (the crawl's declarations) are kept, as are registrations and domains; a binding release that a
+   marker read decides is journaled and applied only on commit. Each complete pass
+   records the chain it scanned in that same transaction. A state recorded on another chain (a
+   re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
+   artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin
+   drops the earlier catalog, emptying the public catalog first; a tip regression keeps serving it
+   until the rebuild is saved. A state with no recorded chain (an upgrade or an unfinished reset)
+   is not proof of another chain: it replays from genesis and keeps its retained revocations and
+   earlier catalog, so a verified withdrawal stays in force (RB-3).
    A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records no chain, so raise the cap.
    index-now answers 409 until a complete pass on this chain is recorded.
    Revocation markers are recognised by their signed content, never by program name.
