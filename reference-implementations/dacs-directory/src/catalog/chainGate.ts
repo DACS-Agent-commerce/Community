@@ -45,6 +45,20 @@ export async function servedCatalogChain(read: typeof catalogNodeDeployment = ca
   }
 }
 
-/** True only when a complete pass on this chain, at the current schema, produced the scan state. */
+/**
+ * The gate again, just before a writer persists what it read from the node after
+ * passing the gate: the same verdict, except that a node now serving a chain other
+ * than `chainIdentity` is refused with WRONG_CHAIN. Never throws.
+ */
+export async function servedChainUnchanged(
+  chainIdentity: string,
+  read: typeof catalogNodeDeployment = catalogNodeDeployment,
+): Promise<ServedCatalogChain> {
+  const served = await servedCatalogChain(read);
+  return !served.ok || served.chainIdentity === chainIdentity ? served
+    : { ok: false, status: 409, cause: `WRONG_CHAIN: the node now serves chain ${causeText(served.chainIdentity)}` };
+}
+
+/** True only when a complete pass on this chain, at the current schema, produced the scan state and catalog. */
 export const scanStateCurrent = (state: ScanState, chainIdentity: string): boolean =>
   state.chainIdentity === chainIdentity && state.schemaVersion === SCAN_STATE_SCHEMA_VERSION;

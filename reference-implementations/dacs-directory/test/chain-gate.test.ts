@@ -2,7 +2,7 @@
 import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { scanStateCurrent, servedCatalogChain } from "../src/catalog/chainGate.js";
+import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "../src/catalog/chainGate.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 import { reindexAll, type ReindexOptions } from "../src/catalog/reindexCore.js";
 import { SCAN_STATE_SCHEMA_VERSION } from "../src/catalog/scanState.js";
@@ -57,6 +57,15 @@ test("node-supplied text in a cause is bounded and printable", async () => {
   if (gate.ok) return;
   assert.match(gate.cause, /^WRONG_CHAIN: line\?break\?z+$/);
   assert.equal(gate.cause.length, "WRONG_CHAIN: ".length + 200);
+});
+
+test("the second read refuses a node that now serves another chain or cannot be read", async () => {
+  assert.deepEqual(await servedChainUnchanged(PINNED_DEMOS_CHAIN_IDENTITY, onPinnedChain),
+    { ok: true, chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, warning: null });
+  assert.deepEqual(await servedChainUnchanged(OTHER_CHAIN, onPinnedChain),
+    { ok: false, status: 409, cause: `WRONG_CHAIN: the node now serves chain ${PINNED_DEMOS_CHAIN_IDENTITY}` });
+  const unreadable = await servedChainUnchanged(PINNED_DEMOS_CHAIN_IDENTITY, async () => { throw new TypeError("fetch failed"); });
+  assert.deepEqual(unreadable, { ok: false, status: 503, cause: "NODE_TRANSPORT: fetch failed" });
 });
 
 test("a scan state is current only when a complete pass on this chain wrote the current schema", () => {
