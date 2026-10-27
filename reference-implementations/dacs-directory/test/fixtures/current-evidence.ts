@@ -160,7 +160,9 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
 }
 
 export async function graphAt(at: string, listing: Obj, listingLocator: string) {
+  const { fixtureCommitments } = await import("./commitment-proof.js");
   return buildCurrentEvidenceGraph(at, {
+    commitment: fixtureCommitments,
     read: async (locatorValue) => maps.get(locatorValue) ?? null,
     resolveListing: async () => ({ locator: listingLocator, raw: listing }),
   });

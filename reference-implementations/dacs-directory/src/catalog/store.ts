@@ -395,6 +395,20 @@ db.transaction(() => {
   setJson("listing-admission-schema-version", 1);
 }).immediate();
 
+// Old catalog verdicts predate commitment authentication. Clear only derived deal
+// credit atomically; retain Listing discovery, withdrawal evidence and scan pointers.
+db.transaction(() => {
+  if (getJson("commitment-finality-schema-version", 0) >= 1) return;
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }));
+    return { ...seller, deals,
+      listings: seller.listings.map(({ reputationHint: _unprovenHint, ...listing }) => listing),
+      reputation: deriveSellerReputation(deals, 0, catalog.generatedAt) };
+  }) });
+  setJson("commitment-finality-schema-version", 1);
+}).immediate();
+
 /**
  * The highest version of a seller's Listing that a past admission reset
  * withheld from the catalog, or 0. The publisher numbers new versions after it.
@@ -550,9 +564,17 @@ export function observedRevocationCandidate(locator: string): Record<string, unk
 export function retainedListingRevocation(hash: string): RevocationBinding | null {
   return getJson<{ binding: RevocationBinding } | null>(`listing-revocation:${hash}`, null)?.binding ?? null;
 }
+/** Return original marker bytes or null; storage errors propagate. Reverify bytes before using signed timing. */
+export function retainedListingRevocationMarker(hash: string): Record<string, unknown> | null {
+  return getJson<{ marker: Record<string, unknown> } | null>(`listing-revocation:${hash}`, null)?.marker ?? null;
+}
 /** Call only after RB-4 verification against the independently verified listing signer. */
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
-  setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+  db.transaction(() => {
+    const earlier = retainedListingRevocationMarker(binding.listingContentHash);
+    if (typeof earlier?.revokedAt === "number" && typeof marker.revokedAt === "number" && earlier.revokedAt <= marker.revokedAt) return;
+    setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+  }).immediate();
 }
 const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);

@@ -132,7 +132,7 @@ test("an unreadable candidate anchored by someone else cannot hold the Listing",
   }
 });
 
-test("a held Listing keeps its committed deal history", async (t) => {
+test("a held Listing without authenticated pre-withdrawal proof withholds deal credit", async (t) => {
   serveStorage(t);
   const { fixture, registration, hash } = await ownListing("held-history", 4700);
   const listingRef = { listingId: "held-history", version: 1, contentHash: hash };
@@ -147,8 +147,8 @@ test("a held Listing keeps its committed deal history", async (t) => {
     await bindingFor(deal.jobId, "seller", fixture.locators.seller, fixture.sellerBundle, 1),
   ] });
   assert.deepEqual(record.listings, [], "the unread owner marker holds discovery");
-  assert.equal(record.deals[0].refsVerified, true);
-  assert.equal(record.reputation.completed, 1);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.reputation.completed, 0);
 });
 
 test("the owner hold survives a restart inside the retry backoff and a later readable rejection releases it", async (t) => {

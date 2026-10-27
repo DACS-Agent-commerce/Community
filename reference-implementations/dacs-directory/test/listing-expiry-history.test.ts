@@ -12,6 +12,7 @@ import type { Registration, RegisteredDeal } from "../src/catalog/types.js";
 import { type Obj, bindingFor, dids, installAgreement, locator, maps, registeredDeal, seeds, sign, vector }
   from "./fixtures/current-evidence.js";
 
+import { fixtureCommitments } from "./fixtures/commitment-proof.js";
 const [buyer, seller] = dids;
 const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
 
@@ -80,7 +81,7 @@ test("a Listing is still effective, and backs its deals, at its notAfter instant
   t.mock.method(Date, "now", () => notAfter);
   serveStorage(t);
   const record = await indexRegistration(await dealOnWindowedListing("not-after-edge", 3200,
-    { notAfter, agreementAnchoredAt: 90, finalisedAt: 120 }), undefined, offline);
+    { notAfter, agreementAnchoredAt: 90, finalisedAt: 120 }), undefined, offline, undefined, undefined, undefined, fixtureCommitments);
   assert.deepEqual(record.listings.map((listing) => [listing.listingId, listing.status]), [["svc", "active"]]);
   assert.equal(record.deals[0].refsVerified, true);
   assert.equal(record.reputation.completed, 1);
@@ -101,25 +102,25 @@ test("not-yet-effective Listings cannot authenticate completed deal history", as
   assert.deepEqual(record.reputation.observedTransactionalVolume, []);
 });
 
-// ── Legacy two-copy deals take their category from the Listing ID alone ─────
+// ── Legacy two-copy deals resolve categories from exact verified tuples ─────
 
 const legacySignature = (scope: Obj, prefix: string, signer: number) =>
   Buffer.from(ed25519Sign(Buffer.from(prefix + legacyListingHash(scope)), privateKeyFromSeed(seeds[signer]))).toString("base64url");
 
 /** A signed legacy-profile Listing. */
-function legacyListing(listingId: string, version: number, category: string, validity: Obj): Obj {
+function legacyListing(listingId: string, version: number, category: string, validity: Obj, terms?: Obj): Obj {
   const scope: Obj = { agentId: seller, serviceId: listingId, listingVersion: version, name: "Service", description: "Legacy service",
     category, claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
-    supportedDelivery: ["deliver-attested-payload"], validity };
+    supportedDelivery: ["deliver-attested-payload"], validity, ...(terms ? { terms } : {}) };
   return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: legacySignature(scope, "dacs-listing:v1:", 1) } };
 }
 
 /** Anchor a completed legacy two-copy deal on `listing` at `listingAt`, both copies signed by both parties. */
-function legacyDeal(jobId: string, listing: Obj, listingAt: string, offset: number): RegisteredDeal {
+function legacyDeal(jobId: string, listing: Obj, listingAt: string, offset: number, expiresAt = "2099-01-01T00:00:00.000Z"): RegisteredDeal {
   const { signature: _signature, ...listingScope } = listing;
   const agreementScope: Obj = { jobId, pattern: "fixed-price", buyer, seller, listingRef: listingAt,
     price: { amount: "1", asset: "DEM", decimals: 18, rail: "pay-dem" },
-    delivery: { phase: "deliver-attested-payload", format: "application/json" }, expiresAt: "2099-01-01T00:00:00.000Z" };
+    delivery: { phase: "deliver-attested-payload", format: "application/json" }, expiresAt };
   const agreement = { ...agreementScope, signatures: [0, 1].map((signer) =>
     ({ party: dids[signer], algorithm: "ed25519", value: legacySignature(agreementScope, "dacs-agreement:v1:", signer) })) };
   maps.set(deriveAnchorAddress(buyer, `dacs3:agreement:${jobId}`), agreement);
@@ -167,10 +168,136 @@ test("an expired version never replaces the effective version's category, in eit
   const deal = legacyDeal("legacy-effective-job", effective, effectiveAt, 3342);
   for (const listingAnchors of [[expiredAt, effectiveAt], [effectiveAt, expiredAt]]) {
     const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors, deals: [deal] },
-      undefined, offline);
+      undefined, offline, undefined, undefined, undefined, fixtureCommitments);
     assert.deepEqual(record.listings.map((listing) => [listing.listingId, listing.version]), [["versioned-svc", 2]]);
     assert.equal(record.deals[0].refsVerified, true, "the effective version backs the deal");
     assert.equal(record.deals[0].category, "services.beta", listingAnchors.join(","));
     assert.equal(record.listings[0].reputationHint?.bundleCount, 1, listingAnchors.join(","));
+  }
+});
+
+test("Listing-bound legacy deals without authenticated commitment proof receive no reputation", async (t) => {
+  t.mock.method(Date, "now", () => 150);
+  serveStorage(t);
+  maps.clear();
+  const listing = legacyListing("legacy-proof-required", 1, "services.alpha", { notBefore: 1 });
+  const listingAt = locator(6100);
+  maps.set(listingAt, listing);
+  const deal = legacyDeal("legacy-missing-proof", listing, listingAt, 6101);
+  const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors: [listingAt], deals: [deal] },
+    undefined, offline);
+  assert.equal(record.deals[0].signatureVerified, true);
+  assert.equal(record.deals[0].refsVerified, false);
+  assert.equal(record.reputation.completed, 0);
+});
+
+test("legacy history uses the exact expired tuple and category rather than an active same-ID version", async (t) => {
+  t.mock.method(Date, "now", () => 150);
+  serveStorage(t);
+  maps.clear();
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  const expired = legacyListing("shared-proof-svc", 1, "services.alpha", { notBefore: 60, notAfter: 100 });
+  const active = legacyListing("shared-proof-svc", 2, "services.beta", { notBefore: 1 });
+  const expiredAt = locator(6200);
+  const activeAt = locator(6201);
+  maps.set(expiredAt, expired);
+  maps.set(activeAt, active);
+  const deal = legacyDeal("legacy-valid-proof", expired, expiredAt, 6202);
+  const agreement = maps.get(deriveAnchorAddress(buyer, `dacs3:agreement:${deal.jobId}`));
+  assert.ok(agreement);
+  const bundle = maps.get(deal.buyerBundleRef);
+  assert.ok(bundle);
+  for (const legacy of [false, true]) for (const listingAnchors of [[expiredAt, activeAt], [activeAt, expiredAt]]) {
+    const proof = commitmentProof(agreement, bundle.listingRef as Obj, 90, legacy);
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors, deals: [deal] },
+      undefined, offline, undefined, undefined, undefined,
+      { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].category, "services.alpha");
+    assert.equal(record.reputation.completed, 1);
+    assert.deepEqual(record.listings.map((listing) => [listing.version, listing.offering.category, listing.reputationHint?.bundleCount]),
+      [[2, "services.beta", 0]]);
+    proof.receipt.blockRef = { id: "late-block", timestamp: 101 };
+    const { signReceipt } = await import("./fixtures/commitment-proof.js");
+    signReceipt(proof);
+    const late = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors, deals: [deal] },
+      undefined, offline, undefined, undefined, undefined,
+      { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
+    assert.equal(late.deals[0].refsVerified, false);
+    assert.equal(late.deals[0].category, undefined);
+    assert.equal(late.reputation.completed, 0);
+  }
+});
+
+test("legacy commitment history refuses malformed signed validity windows", async (t) => {
+  t.mock.method(Date, "now", () => 150);
+  serveStorage(t);
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  for (const validity of [{ notBefore: "60" }, { notAfter: "100" }, { notBefore: 100, notAfter: 60 }]) {
+    maps.clear();
+    const listing = legacyListing("malformed-window", 1, "services.alpha", validity);
+    const listingAt = locator(6300);
+    maps.set(listingAt, listing);
+    const deal = legacyDeal("legacy-malformed-window", listing, listingAt, 6301);
+    const agreement = maps.get(deriveAnchorAddress(buyer, `dacs3:agreement:${deal.jobId}`));
+    const bundle = maps.get(deal.buyerBundleRef);
+    assert.ok(agreement && bundle);
+    const proof = commitmentProof(agreement, bundle.listingRef as Obj);
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors: [listingAt], deals: [deal] },
+      undefined, offline, undefined, undefined, undefined,
+      { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
+    assert.equal(record.deals[0].refsVerified, false, JSON.stringify(validity));
+    assert.equal(record.reputation.completed, 0);
+  }
+});
+
+test("legacy agreement deadlines obey the authenticated commitment-relative Listing bound", async (t) => {
+  t.mock.method(Date, "now", () => 150);
+  serveStorage(t);
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  for (const [deadline, accepted] of [[1090, true], [1091, false]] as const) {
+    maps.clear();
+    const listing = legacyListing("legacy-deadline", 1, "services.alpha", { notBefore: 1 }, { deadlineSecAfterCommit: 1 });
+    const listingAt = locator(6400);
+    maps.set(listingAt, listing);
+    const deal = legacyDeal("legacy-deadline-proof", listing, listingAt, 6401, new Date(deadline).toISOString());
+    const agreement = maps.get(deriveAnchorAddress(buyer, `dacs3:agreement:${deal.jobId}`));
+    const bundle = maps.get(deal.buyerBundleRef);
+    assert.ok(agreement && bundle);
+    const proof = commitmentProof(agreement, bundle.listingRef as Obj);
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors: [listingAt], deals: [deal] },
+      undefined, offline, undefined, undefined, undefined,
+      { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
+    assert.equal(record.deals[0].refsVerified, accepted, `deadline ${deadline}`);
+  }
+});
+
+test("legacy Listing history requires authenticated finality strictly before its signed withdrawal", async (t) => {
+  t.mock.method(Date, "now", () => 150);
+  serveStorage(t);
+  maps.clear();
+  const { contentHash } = await import("@kynesyslabs/dacs/canonical");
+  const { admitRevocationCandidates } = await import("../src/catalog/store.js");
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  const listing = legacyListing("legacy-withdrawn", 1, "services.alpha", { notBefore: 1, notAfter: 100 });
+  const listingAt = locator(6500);
+  maps.set(listingAt, listing);
+  const deal = legacyDeal("legacy-withdrawn-proof", listing, listingAt, 6501);
+  const agreement = maps.get(deriveAnchorAddress(buyer, `dacs3:agreement:${deal.jobId}`));
+  const bundle = maps.get(deal.buyerBundleRef);
+  assert.ok(agreement && bundle);
+  const hash = (bundle.listingRef as Obj).contentHash;
+  const scope = { listingId: "legacy-withdrawn", listingVersion: 1, listingContentHash: hash, revokedAt: 90 };
+  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
+  maps.set(locator(6510), { ...scope, signature: { algorithm: "ed25519", signer: seller, value } });
+  assert.equal(typeof hash, "string");
+  admitRevocationCandidates(String(hash), [{ locator: locator(6510), owner: `0x${seller.slice(-64)}` }]);
+  for (const [time, accepted] of [[89, true], [90, false], [91, false]] as const) {
+    const proof = commitmentProof(agreement, bundle.listingRef as Obj, time, true);
+    const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors: [listingAt], deals: [deal] },
+      undefined, offline, undefined, undefined, undefined,
+      { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
+    assert.equal(record.deals[0].refsVerified, accepted, `legacy commitment at ${time}`);
+    assert.equal(record.reputation.completed, accepted ? 1 : 0);
   }
 });

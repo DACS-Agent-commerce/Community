@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "./fixtures/isolated-data-dir.js";
 import { signedScope } from "../src/catalog/evidenceGraph.js";
-import { indexRegistration } from "../src/catalog/indexer.js";
+import { indexWithCommitments as indexRegistration } from "./fixtures/commitment-proof.js";
 import { bindingFor, dids, locator, maps, ref, registeredDeal, sign, vector, type Obj } from "./fixtures/current-evidence.js";
 
 async function indexRatings(subjects: Array<{ rater: string; target: string; value: number; signer: number }>) {

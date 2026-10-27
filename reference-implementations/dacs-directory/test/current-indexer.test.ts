@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 // First: the store must open in a fresh directory, never the checkout's data/.
 import { isolatedDataDir } from "./fixtures/isolated-data-dir.js";
+import { graphWithCommitments as buildCurrentEvidenceGraph, indexWithCommitments as indexRegistration } from "./fixtures/commitment-proof.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { artifactHash, buildCurrentEvidenceGraph, signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
+import { artifactHash, signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
 import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
 import {
-  indexRegistration,
   listingBindingRejection,
 } from "../src/catalog/indexer.js";
 import { deriveSellerReputation, isNeutralCancellation } from "../src/catalog/reputation.js";
@@ -1245,7 +1245,7 @@ test("RFQ fixed-price fallback cannot select a center from metered pricing", asy
   }
 });
 
-test("authenticated indeterminate withdrawal hides discovery but retains a committed completed deal", async t => {
+test("unresolved withdrawal withholds history until authenticated pre-withdrawal timing is known", async t => {
   const now = Date.now();
   t.mock.method(Date, "now", () => now);
   const { activeOffer } = await import("../src/catalog/discovery.js");
@@ -1291,11 +1291,11 @@ test("authenticated indeterminate withdrawal hides discovery but retains a commi
       [listingRef.contentHash], { generatedAt: 1, hash: "c".repeat(64) }, [], "publisher-signature");
     const held = await indexRegistration(reg, before, resolve);
     assert.deepEqual(held.listings, [], "authenticated incomplete withdrawal suppresses new discovery");
-    assert.equal(held.deals[0].refsVerified, true, "historical listing remains available to the evidence graph");
-    assert.deepEqual(held.reputation, before.reputation, "committed completion and reputation are unchanged");
+    assert.equal(held.deals[0].refsVerified, false, "unresolved withdrawal has no authenticated cutoff");
+    assert.equal(held.reputation.completed, 0);
 
     const verified = await verifyListing(fixture.listing); assert.ok(verified);
-    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 1 };
+    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 100 };
     const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: dids[1],
       value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(markerScope)}`),
         privateKeyFromSeed(seeds[1]))).toString("base64url") } };

@@ -310,10 +310,3 @@ export function verifiedListingTerms(
     ? scope.terms as Record<string, unknown>
     : undefined;
 }
-
-export function bundleCategory(
-  bundle: { listingRef: { listingId: string } } | undefined,
-  categoriesByListing: Map<string, string>,
-): string | undefined {
-  return bundle ? categoriesByListing.get(String(bundle.listingRef.listingId)) : undefined;
-}

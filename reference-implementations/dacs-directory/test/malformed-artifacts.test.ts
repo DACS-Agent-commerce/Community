@@ -399,7 +399,15 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
     deals: [legacyDeal, currentMalformedDeal, poisoned.deal, valid.deal],
     bundleBindings: [currentBinding, ...poisoned.bindings, ...valid.bindings],
   };
-  const record = await indexRegistration(registration, undefined, offline);
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  const record = await indexRegistration(registration, undefined, offline, undefined, undefined, undefined, {
+    ...fixtureCommitments,
+    resolve: async (jobId) => {
+      const agreement = Object.values({ ...poisoned.programs, ...valid.programs }).map((program) => JSON.parse(program.data) as Obj)
+        .find((raw) => raw.jobId === jobId && raw.agreementVersion === "1");
+      return agreement ? commitmentProof(agreement, agreement.listingRef as Obj, 90, false, { claim: buyer, seed: seeds[0] }) : null;
+    },
+  });
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
   for (const jobId of ["job-legacy-malformed", "job-current-malformed", "job-poisoned"]) {
@@ -417,7 +425,8 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
-    assert.equal(run.omitted_deals, 1, "the failed summary is counted in operator diagnostics");
+    assert.equal(run.omitted_deals, 0, "the default finality gate refuses these deals before summary extraction");
+    assert.equal(store.loadCatalog().sellers[0].deals.some((deal) => deal.refsVerified), false);
   } finally { db.close(); }
 });
 

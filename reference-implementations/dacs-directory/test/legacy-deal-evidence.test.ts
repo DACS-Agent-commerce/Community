@@ -16,7 +16,7 @@ import type { RegisteredDeal } from "../src/catalog/types.js";
 process.env.DACS_DIRECTORY_DATA = mkdtempSync(join(tmpdir(), "dacs-directory-legacy-deals-"));
 process.env.DEMOS_RPC = "https://node.test";
 const store = await import("../src/catalog/store.js");
-const { indexRegistration } = await import("../src/catalog/indexer.js");
+const { indexRegistration: indexWithoutCommitment } = await import("../src/catalog/indexer.js");
 const { deriveAnchorAddress } = await import("../src/catalog/chain.js");
 const { legacySessionAnchorName } = await import("../src/catalog/legacySessionAnchorName.js");
 
@@ -36,6 +36,18 @@ const listingScope: Obj = {
 };
 const listing = { ...listingScope, signature: signWith(1, `dacs-listing:v1:${contentHash(listingScope)}`, "hex") };
 
+const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+function indexRegistration(...args: Parameters<typeof indexWithoutCommitment>) {
+  const [registration, prior, identities, recipes, omitted, legacy] = args;
+  return indexWithoutCommitment(registration, prior, identities, recipes, omitted, legacy, {
+    ...fixtureCommitments,
+    resolve: async (jobId) => {
+      const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))];
+      const bundle = Object.values(storage).find((raw) => raw.jobId === jobId && raw.bundleVersion === "1");
+      return agreement && bundle ? commitmentProof(agreement, bundle.listingRef as Obj, 90, false, { claim: buyer, seed: seeds[0] }) : null;
+    },
+  });
+}
 let storage: Record<string, Obj> = {};
 let reads = new Map<string, number>();
 /** Locators whose first read fails, as on a transient node error. */
@@ -88,7 +100,7 @@ function legacyDeal(jobId: string, copies: [Copy, Copy]): RegisteredDeal {
 
 async function indexed(deal: RegisteredDeal, primaryClaim = seller) {
   reads = new Map();
-  const record = await indexRegistration({ primaryClaim, displayName: "Seller", listingAnchors: [], deals: [deal] },
+  const record = await indexRegistration({ primaryClaim, displayName: "Seller", listingAnchors: [locator(1)], deals: [deal] },
     undefined, async () => { throw new Error("identity unavailable"); });
   storage = {};
   return record;
@@ -204,7 +216,7 @@ test("a rejected legacy verifier publishes a false signature verdict and no inve
   const deal = legacyDeal("legacy-rejected-verifier", [{ role: "buyer" }, { role: "seller" }]);
   reads = new Map();
   let calls = 0;
-  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] },
+  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)], deals: [deal] },
     undefined, async () => ({}), undefined, undefined, async () => {
       calls++;
       throw new Error("SDK read rejected");
@@ -228,7 +240,7 @@ test("infrastructure errors during legacy verification abort indexing and preser
     reads = new Map();
     const failure = Object.assign(new Error("persistent storage unavailable"), { code });
     const omissions: Array<[string, number]> = [];
-    await assert.rejects(indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] },
+    await assert.rejects(indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)], deals: [deal] },
       undefined, async () => ({}), undefined, (kind, count) => omissions.push([kind, count]), async () => { throw failure; }),
     (error) => error === failure);
     assert.deepEqual(store.loadCatalog(), prior);
@@ -248,7 +260,7 @@ test("an ordinary per-deal exception reports exactly one omission and keeps the 
     return originalRef;
   } });
   const omissions: Array<[string, number]> = [];
-  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal, next] },
+  const record = await indexRegistration({ primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)], deals: [deal, next] },
     undefined, async () => ({}), undefined, (kind, count) => omissions.push([kind, count]));
   assert.deepEqual(omissions.filter(([kind]) => kind === "deals"), [["deals", 1]]);
   assert.equal(record.deals.length, 2);

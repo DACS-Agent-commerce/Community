@@ -61,6 +61,12 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # agreement/listing conformance are pending; graph reference verification alone
 # does not establish these properties. No DACS_RAIL_SNAPSHOTS adapter exists here.
 #
+# Commitment finality: current and legacy deal-credit paths require a server-owned
+# CommitmentVerifier; default indexing refuses credit without one. Signed records,
+# finalized receipt binding, CA-8 consensus time, validity/deadline/withdrawal windows
+# and exact historical tuples are tested in test/commitment-finality.test.ts and
+# test/listing-expiry-history.test.ts. The test receipt authority is not Demos consensus.
+#
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
 # - New current listings and revocation markers enforce strict SIG-6 encoding.

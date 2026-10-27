@@ -1,3 +1,4 @@
+import { verifyListingCommitment, type CommitmentVerifier, type ListingEvidence } from "./commitmentFinality.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyStoredListing } from "./listingVerification.js";
@@ -26,7 +27,8 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
-  resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
+  resolveListing: (ref: Record<string, unknown>) => Promise<ListingEvidence | null>;
+  commitment?: CommitmentVerifier;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
@@ -444,6 +446,11 @@ async function verifyCurrentEvidenceGraph(
       return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
+  if (!agreement) return { ...fail("commitment verification requires an authenticated agreement"), signaturesVerified };
+  const commitment = await verifyListingCommitment({ jobId: String(raw.jobId), listingRef,
+    agreementHash: artifactHash(agreement, "agreement"), pattern: agreement.derivedFromPattern,
+    parties: arr(agreement.parties).map((party) => party.primaryClaim), deadline: rec(agreement.terms)?.deadline }, listed, deps.commitment, resolveKey);
+  if (!commitment.ok) return { ...fail(commitment.reason), signaturesVerified };
   // Discovery compatibility does not establish settlement semantics. This
   // pairing needs agreement/deliverable, payment/finality and delivery adapters
   // before either signed copy can contribute a verified outcome or volume.
