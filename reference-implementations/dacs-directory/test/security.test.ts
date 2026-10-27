@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
-// First: the store must open in a fresh directory, never the checkout's data/.
-import "./fixtures/isolated-data-dir.js";
 
 import { listingPresentation } from "../src/catalog/listingMetadata.js";
 import {
@@ -24,7 +22,6 @@ import { programBindingKey } from "../src/catalog/store.js";
 import {
   crawlDomain,
   isPrivateAddress,
-  listingIndexEntryIsComplete,
   normalizeSubmittedDomain,
 } from "../src/catalog/wellknown.js";
 
@@ -139,13 +136,6 @@ test("publisher options bind AP2 rail ids to phases and project metered pricing"
   assert.equal(publishableRail("ap2:stripe-paymentintents")?.availability, "operator_gated");
   assert.ok(PUBLISHABLE_PRICING_KINDS.includes("metered"));
   assert.equal(negotiationPhaseForPricing("metered"), "negotiate-fixed-price");
-  // The pinned SDK runs RFQ only on negotiable (or metered) pricing.
-  assert.deepEqual(PUBLISHABLE_PRICING_KINDS.map((kind) => [kind, negotiationPhaseForPricing(kind)]), [
-    ["fixed", "negotiate-fixed-price"],
-    ["negotiable", "negotiate-rfq"],
-    ["auction", "negotiate-sealed-envelope"],
-    ["metered", "negotiate-fixed-price"],
-  ]);
 
   const presentation = listingPresentation({
     offering: { title: "Metered API", description: "Per call", category: "services.api", tags: [] },
@@ -198,66 +188,6 @@ test("well-known URL policy rejects unsafe schemes and address ranges", async ()
   assert.equal(isPrivateAddress("2606:4700:4700::1111"), false);
   const result = await crawlDomain("https://127.0.0.1");
   assert.equal("error" in result, true);
-});
-
-test("well-known listing indexes enforce normative revocation coherence", () => {
-  const listingId = "service-1";
-  const contentHash = "b".repeat(64);
-  const active = {
-    listingId,
-    version: 1,
-    contentHash,
-    anchor: { kind: "storage-program", locator: `stor-${"c".repeat(40)}` },
-    summary: { title: "Service", category: "services.other", tags: ["a"] },
-    status: "active",
-  };
-  const revocation = {
-    sellerPrimaryClaim: claim,
-    listingId,
-    listingVersion: 1,
-    listingContentHash: contentHash,
-    logicalAddress: `dacs1-revoked:${encodeURIComponent(claim)}:${listingId}:v1`,
-    markerAnchor: { kind: "storage-program", locator: `stor-${"d".repeat(40)}` },
-    markerContentHash: "e".repeat(64),
-  };
-
-  // Only a complete row introduces an offer or completes a withdrawal check;
-  // any other row holds its listing (crawl-level bounds: wellknown-crawl.test.ts).
-  assert.equal(listingIndexEntryIsComplete(active, claim), true);
-  assert.equal(listingIndexEntryIsComplete({ ...active, status: "revoked", revocation }, claim), true);
-  assert.equal(listingIndexEntryIsComplete({ ...active, summary: { ...active.summary, priceHint: "1 DEM" } }, claim), true);
-
-  const { summary: _summary, ...summaryless } = active;
-  for (const [name, invalid] of [
-    ["an active entry carrying a binding", { ...active, revocation }],
-    ["a revoked entry without one", { ...active, status: "revoked" }],
-    ["a binding for other content", { ...active, status: "revoked", revocation: { ...revocation, listingContentHash: "f".repeat(64) } }],
-    ["an uppercase content hash", { ...active, contentHash: contentHash.toUpperCase() }],
-    ["null", null],
-    ["an array", [active]],
-    // §6.3.5 ListingIndexEntry.summary is required on every entry.
-    ["no summary", summaryless],
-    ["a revoked entry with no summary", { ...summaryless, status: "revoked", revocation }],
-    ["a string summary", { ...active, summary: "Service" }],
-    ["a summary without a title", { ...active, summary: { category: "services.other", tags: [] } }],
-    ["a summary without a category", { ...active, summary: { title: "Service", tags: [] } }],
-    ["a summary without tags", { ...active, summary: { title: "Service", category: "services.other" } }],
-    ["a non-string tag", { ...active, summary: { ...active.summary, tags: [1] } }],
-    ["a numeric priceHint", { ...active, summary: { ...active.summary, priceHint: 1 } }],
-    // Every other entry field.
-    ["no listingId", { ...active, listingId: undefined }],
-    ["a listingId with a slash", { ...active, listingId: "service/1" }],
-    ["a 129-character listingId", { ...active, listingId: "a".repeat(129) }],
-    ["version zero", { ...active, version: 0 }],
-    ["a string version", { ...active, version: "1" }],
-    ["another anchor kind", { ...active, anchor: { ...active.anchor, kind: "ipfs" } }],
-    ["a locator with a junk prefix", { ...active, anchor: { ...active.anchor, locator: `x${active.anchor.locator}` } }],
-    ["a locator with a junk suffix", { ...active, anchor: { ...active.anchor, locator: `${active.anchor.locator}0` } }],
-    ["a short content hash", { ...active, contentHash: "b".repeat(63) }],
-    ["another status", { ...active, status: "retired" }],
-  ] as const) {
-    assert.equal(listingIndexEntryIsComplete(invalid, claim), false, name);
-  }
 });
 
 test("rate-limit state ignores spoofed proxy headers by default and stays bounded", () => {

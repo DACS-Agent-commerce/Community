@@ -6,8 +6,12 @@ import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { contentHash, sha256Hex } from "../src/catalog/canonical.js";
 import { findValidListingRevocation, revocationLogicalAddress, verifyListing } from "../src/catalog/listingVerification.js";
 import { crawlDomain, listingIndexEntryIsComplete, type WellKnownAgent } from "../src/catalog/wellknown.js";
-import { ingestWellKnownRevocations } from "../src/catalog/reindexCore.js";
-import { retainedListingRevocation } from "../src/catalog/store.js";
+import { indexRegistration } from "../src/catalog/indexer.js";
+import { ingestWellKnownRevocations, reindexAll } from "../src/catalog/reindexCore.js";
+import {
+  hasIncompleteWellKnownWithdrawal, loadCatalog, recordWellKnownWithdrawalCheck, retainedListingRevocation, saveDomains,
+  saveRegistrations,
+} from "../src/catalog/store.js";
 import { dids, locator, seeds, vector } from "./fixtures/current-evidence.js";
 
 const presentedBy = `${dids[1]}?channel=directory`;
@@ -67,5 +71,60 @@ test("unsigned qualified withdrawal carriage is verified and survives restart wi
       assert.deepEqual(retainedListingRevocation(${JSON.stringify(verified.contentHash)}), ${JSON.stringify(binding)});
     `], { encoding: "utf8", env: process.env });
     assert.equal(restarted.status, 0, restarted.stderr);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+/** Serve storage programs from `storage` as the seller's, and answer every node RPC with no transactions. */
+const serveChain = (storage: Record<string, unknown>) => {
+  globalThis.fetch = async (input, init) => {
+    if (init?.body) return Response.json({ result: 200, response: [] });
+    const at = String(input).split("/").pop() ?? "";
+    return at in storage ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, data: storage[at] })
+      : Response.json({ success: false }, { status: 404 });
+  };
+};
+
+test("a carried qualified binding whose marker is rejected releases its hold and the Listing is summarised", async () => {
+  const carriedBy = `${dids[1]}?channel=carried`;
+  const { listing: carriedListing } = await vector("qualified-carried", 0, carriedBy);
+  const carried = await verifyListing(carriedListing);
+  assert.ok(carried);
+  // An authenticated source carries a binding whose marker withdraws another Listing.
+  const carriedBinding = { ...binding, sellerPrimaryClaim: carriedBy, listingContentHash: carried.contentHash,
+    logicalAddress: revocationLogicalAddress(carriedBy, "svc", 1), markerAnchor: { kind: "storage-program" as const, locator: locator(3) } };
+  recordWellKnownWithdrawalCheck("carried.example", dids[1], [carried.contentHash], [], { generatedAt: 1, hash: "a".repeat(64) },
+    [carriedBinding], "operator-pin");
+  assert.equal(hasIncompleteWellKnownWithdrawal(dids[1], carried.contentHash), true);
+  const originalFetch = globalThis.fetch;
+  serveChain({ [locator(1)]: carriedListing, [locator(3)]: marker });
+  try {
+    const record = await indexRegistration({ primaryClaim: dids[1], displayName: "seller", listingAnchors: [locator(1)] }, undefined, offline);
+    assert.equal(hasIncompleteWellKnownWithdrawal(dids[1], carried.contentHash), false, "the rejected binding is released");
+    assert.deepEqual(record.listings.map((summary) => [summary.seller.primaryClaim, summary.status]), [[carriedBy, "active"]]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("a retained qualified binding re-attaches its crawled anchor in a full reindex", async () => {
+  const retainedBy = `${dids[1]}?channel=retained`;
+  const { listing: retainedListing } = await vector("qualified-retained", 0, retainedBy);
+  const retained = await verifyListing(retainedListing);
+  assert.ok(retained);
+  const scope = { listingId: "svc", listingVersion: 1, listingContentHash: retained.contentHash, revokedAt: 1 };
+  const retainedMarker = { ...scope, signature: { algorithm: "ed25519", signer: dids[1],
+    value: Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url") } };
+  const retainedBinding = await findValidListingRevocation([locator(5)], retained, 1, async () => retainedMarker);
+  assert.ok(retainedBinding);
+  // An unsigned source lists the anchor only as withdrawal carriage.
+  const crawled: WellKnownAgent = { domain: "https://retained.example", seller: dids[1], listingAnchors: [locator(4)],
+    activeListingAnchors: [], contentHashes: { [locator(4)]: retained.contentHash }, revocations: [retainedBinding], bundleBindings: [] };
+  const originalFetch = globalThis.fetch;
+  serveChain({ [locator(4)]: retainedListing, [locator(5)]: retainedMarker });
+  try {
+    saveRegistrations([]);
+    saveDomains([crawled.domain]);
+    await reindexAll({ log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [crawled], errors: [] }) });
+    const summary = loadCatalog().sellers.flatMap((seller) => seller.listings).find((listing) => listing.contentHash === retained.contentHash);
+    assert.deepEqual([summary?.seller.primaryClaim, summary?.status, summary?.revocation], [retainedBy, "revoked", retainedBinding]);
   } finally { globalThis.fetch = originalFetch; }
 });
