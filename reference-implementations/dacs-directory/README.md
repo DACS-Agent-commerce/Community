@@ -440,8 +440,10 @@ base64url-patched Buffer).
   remain stateless. Empty name lookups, nonce advancement, re-signing and elapsed time
   never release another create for a prepared version. An exact repeat of the signed
   request, including one whose first response was lost or one racing it, receives the
-  same saved transaction bytes again. Any other signed retry, or one for a version the
-  catalog already lists, returns HTTP 409 with the saved anchor and no transaction.
+  same saved transaction bytes again; a prepared version keeps the seller display name
+  it was signed with, whatever the catalog shows later. Any other signed retry, or one
+  for a version the catalog already lists, returns HTTP 409 with the saved anchor and
+  no transaction.
   Current owner-bound, signature-verified readback can resume registration without a
   write, including with an expired presentation. Saved preparations never establish
   finality or success and remain retained after readback. There is no automatic
