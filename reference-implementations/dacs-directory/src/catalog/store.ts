@@ -697,10 +697,13 @@ export const finishWithdrawalCarriageReplay = db.transaction((): void => {
   setJson("withdrawal-carriage-replay-hashes", []);
 });
 
-/** Called only after the indexer verifies the listing's signature and chain owner. */
+/**
+ * Called only after the indexer verifies the listing's signature and chain owner. A binding
+ * carries the exact `presentedBy`, CF-3 parameters included, so it matches the canonical seller.
+ */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
   withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
-    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
+    (source.bindings ?? []).filter((binding) => sellerIdentity(binding.sellerPrimaryClaim) === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 
 /** Continue bounded discovery work across passes, even across process restarts. */
