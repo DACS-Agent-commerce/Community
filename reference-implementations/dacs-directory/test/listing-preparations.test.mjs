@@ -433,6 +433,19 @@ for (const [change, before, after] of [
     } finally { module.saveCatalog(catalogWithSeller(undefined)); }
     assert.equal(state.nonceReads, 1, "a repeat never asks for a replacement nonce");
   });
+
+  test(`a signed retry learns its saved anchor during a failed lookup after the catalog ${change} the seller's display name`, async (t) => {
+    const state = node(t);
+    module.saveCatalog(catalogWithSeller(before));
+    try {
+      const signed = await signedInput(`uncertain-display-name-${change}`);
+      const first = await prepare(signed);
+      module.saveCatalog(catalogWithSeller(after));
+      state.lookup = "failed";
+      await unresolved(await post(request(signed)), first.anchorAddress, /program-name lookup failed/);
+    } finally { module.saveCatalog(catalogWithSeller(undefined)); }
+    assert.equal(state.nonceReads, 1);
+  });
 }
 
 test("concurrent signed requests return at most one transaction and cannot overwrite its bytes", async (t) => {
