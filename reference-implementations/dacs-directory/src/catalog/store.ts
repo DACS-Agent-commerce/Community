@@ -554,16 +554,19 @@ export function retainListingRevocation(binding: RevocationBinding, marker: Reco
     setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
   }).immediate();
 }
-const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
-  WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
+const ownerPendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
 /**
  * Whether the Listing's own owner anchored a marker that no read has settled: unread,
  * backing off or still queued. Anyone may anchor other candidates, so only the owner's count.
+ * Candidates in `verified` were verified by the caller's current pass and count as settled.
  * Returns false when the owner is unknown.
  */
-export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null): boolean {
+export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null,
+  verified: readonly string[] = []): boolean {
   if (!listingOwner) return false;
-  return ownerPendingCandidate.get(listingHash, canonicalProgramOwner(listingOwner)) !== undefined;
+  const pending = ownerPendingCandidates.all(listingHash, canonicalProgramOwner(listingOwner), verified.length + 1) as Array<{ locator: string }>;
+  return pending.some(({ locator }) => !verified.includes(locator));
 }
 
 // Earlier releases persisted unreadable candidates as rejected without a
@@ -841,11 +844,13 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
   saveWithdrawalSources(sources);
   return true;
 });
-export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
+/** Whether an authenticated source leaves this Listing's withdrawal unsettled; carried markers in `verified` are settled. */
+export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string, verified: readonly string[] = []): boolean =>
   getJson("withdrawal-carriage-replay-required", false) ||
   getJson<string[]>("withdrawal-carriage-replay-hashes", []).includes(hash) || withdrawalSources().some((source) =>
     source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*") ||
-      (source.provenance !== "legacy" && (source.bindings ?? []).some((binding) => binding.listingContentHash === hash))));
+      (source.provenance !== "legacy" && (source.bindings ?? []).some((binding) => binding.listingContentHash === hash &&
+        !verified.includes(binding.markerAnchor.locator)))));
 export const finishWithdrawalCarriageReplay = db.transaction((): void => {
   // Older v4 databases may still carry the global flag. Successful chain
   // replay clears it independently of each source's authenticated checks.
