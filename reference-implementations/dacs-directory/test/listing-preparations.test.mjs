@@ -178,6 +178,35 @@ test("an expired signed presentation keeps its preparation and cannot authorize 
   assert.match((await response.json()).error, /identity presentation expired/);
 });
 
+test("a retained preparation still validates the retried Listing signature", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("invalid-retained-signature");
+  const first = await prepare(signed);
+  for (const listingSignature of ["malformed", "00".repeat(64)]) {
+    const response = await post(request({ ...signed, listingSignature }));
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.tx, undefined);
+    assert.equal(body.anchorAddress, undefined);
+  }
+  await unresolved(await post(request(signed)), first.anchorAddress);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("an expired preview cannot resume a preparation without a Listing signature", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("expired-retained-preview");
+  await prepare(signed);
+  t.mock.method(Date, "now", () => clock + 16 * 60_000);
+  const response = await post(request({ ...signed, listingSignature: undefined }));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.match(body.error, /identity presentation expired/);
+  assert.equal(body.tx, undefined);
+  assert.equal(body.anchorAddress, undefined);
+  assert.equal(state.nonceReads, 1);
+});
+
 test("current authenticated readback resumes without a write and later missing reads cannot erase occupancy", async (t) => {
   const state = node(t);
   const signed = await signedInput("observed");
