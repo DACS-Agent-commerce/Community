@@ -24,7 +24,12 @@ export const resolveListingRails = ({ inCodeDefinitions }) => ({
   disposition: inCodeDefinitions.every((definition) => definition.signatureValid) ? "verified" : "indeterminate",
 });
 export const resolveListingPayloadVerificationCapability = async () => ({ disposition: "not-applicable" });
-export const pinnedNodeDeployment = async () => ({ ok: true, chainIdentity: "fixture-chain" });
+/** What the fixture node's deployment check reports; a test may set a refusal or an Error to throw. */
+export const nodeDeployment = { current: { ok: true, chainIdentity: "fixture-chain" } };
+export const pinnedNodeDeployment = async () => {
+  if (nodeDeployment.current instanceof Error) throw nodeDeployment.current;
+  return nodeDeployment.current;
+};
 export const registrationMessage = (registration, at) => JSON.stringify({ registration, at });
 export async function verifyStoredListing(listing) {
   const { signature, ...scope } = listing;
