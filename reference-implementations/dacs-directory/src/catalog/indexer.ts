@@ -32,16 +32,16 @@ import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
+  revocationSellerClaim,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
-  revocationSellerClaim,
   verifyStoredListingResult,
   type RevocationCandidateProgress,
 } from "./listingVerification.js";
-import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
+import { summaryPublicationRefusal } from "./discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 import { decideListingNotice, listingDiagnosticCoordinates, type ListingAnchorEvidence } from "./listingAdmission.js";
-import { canonicalDemosAgentClaim, canonicalDemosAgentReference, canonicalSigningIdentity } from "./claimRef.js";
+import { canonicalDemosAgentClaim, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
 import { ownerSignedRegistration } from "./registrationSig.js";
@@ -282,23 +282,17 @@ export async function indexRegistration(
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
     if (revocation === "indeterminate") continue;
-    const summaryClaim = verified.profile === "dacs-v0.1"
-      ? verified.listing.seller.identity.presentedBy
-      : reg.primaryClaim;
-    // Discovery cannot address a seller by a reference above the query bound, and a summary
-    // carries it verbatim; the signed Listing stays above as evidence only.
-    if (Buffer.byteLength(summaryClaim, "utf8") > MAX_CLAIM_QUERY_BYTES) continue;
+    // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and match the
+    // revocation binding against, the exact signed `presentedBy`, CF-3 parameters included.
+    const summaryClaim = verified.profile === "dacs-v0.1" ? verified.listing.seller.identity.presentedBy : reg.primaryClaim;
+    // Only the summary is withheld; the verified artifact above stays deal evidence.
+    if (summaryPublicationRefusal(summaryClaim)) continue;
     listings.push({
       listingId,
       version,
       contentHash: verified.contentHash,
       anchor: { kind: "storage-program", locator: anchor },
-      // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and
-      // match the revocation binding against, the exact `presentedBy` bytes.
-      seller: {
-        primaryClaim: summaryClaim,
-        displayName,
-      },
+      seller: { primaryClaim: summaryClaim, displayName },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
       offering: {
