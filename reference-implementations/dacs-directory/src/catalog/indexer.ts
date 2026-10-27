@@ -281,7 +281,8 @@ export async function indexRegistration(
     const retained = retainedListingRevocation(verified.contentHash);
     const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
-    const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
+    // Publish the retained earliest marker, the one the credit cutoff below reads, not the batch's first.
+    const revocationBinding = boundRetained ?? found ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
     // Raw chain hints have no withdrawal authority. Only an authenticated source
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
