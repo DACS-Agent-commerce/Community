@@ -430,17 +430,15 @@ fallback) are readable for listing discovery. Their deal evidence remains unveri
 and excluded from completion, ratings and volume until semantic agreement, settlement
 and delivery verification adapters support that combination.
 
-Expired Listings leave discovery and their deals remain as unverified history.
-This reader has no authenticated commitment-record and finalized-receipt verifier
-for the DACS-3 §8.5.2 expiry check. A separately anchored Agreement's timestamp
-and the bundle's `finalisedAt` cannot establish commitment time, so those deals
-contribute no completion, ratings or volume credit.
-
 Authenticated revocation bindings survive newer active index advertisements and
 process restarts. An unread marker continues to withhold the offer until a successful
 read rejects it or verifies revocation; verified revocation takes precedence.
 Rejection is applied only while the captured source revision is current, so a slow
 read cannot clear a newer advertisement even when it references the same marker scope.
+A marker verified on an earlier pass that can no longer be read, or a marker the
+Listing's owner anchored that no read has settled, also withholds the offer, including
+while that marker waits out its retry backoff. Candidates anchored by anyone else
+cannot withhold it.
 
 The x402, AP2, EVM/EIP, SPL and HTLC names mirror the pinned DACS-4 rail registry.
 Independent protocol revisions and live handler compatibility are not asserted by
