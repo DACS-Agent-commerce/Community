@@ -298,10 +298,13 @@ current SDK seller runtime.
    serves. When the node cannot be read (index-now: 503) or serves a chain other than
    `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
    failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
-   saves what it read, the served chain is read again. Indexing records rejections and revocation
-   progress as it reads; those writes are journaled and undone when that read fails, the run
-   fails, or a crash interrupts it (the next writer undoes them). Each complete pass records the
-   chain it scanned, after its catalog is saved. A state recorded on another chain (a re-pin), a
+   saves what it read, the served chain is read again. From before its first write (the scan
+   cursor, artifacts, revocation candidates and progress, rejections), everything a pass saves from
+   node reads is journaled with the statement that undoes it. The journal is confirmed in the same
+   transaction that saves the scan state and the catalog; when that read fails, the run fails, or a
+   crash interrupts it, the next writer undoes the writes. Withdrawal sources a publisher signed
+   (the crawl's declarations) are kept, as are registrations and domains. Each complete pass
+   records the chain it scanned in that same transaction. A state recorded on another chain (a re-pin), a
    state with no recorded chain (an upgrade, or an unfinished reset) and a large tip regression
    are reset after a further chain read: cached discoveries, artifacts and retained revocations
    are cleared, no earlier catalog record is used, and history replays from genesis. A re-pin
