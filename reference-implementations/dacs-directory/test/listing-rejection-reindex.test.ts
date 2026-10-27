@@ -10,7 +10,7 @@ import { POST as indexNow } from "../app/api/dacs/index-now/route.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
-import { indexerDiagnostics, loadCatalog, recordListingRejection, recordWellKnownWithdrawalCheck, saveDomains, saveRegistrations } from "../src/catalog/store.js";
+import { indexerDiagnostics, loadAuthenticatedListingDeclarations, loadCatalog, recordListingRejection, recordWellKnownWithdrawalCheck, saveDomains, saveRegistrations } from "../src/catalog/store.js";
 import { crawlDomain, wellKnownWithdrawalMessage, type WellKnownAgent } from "../src/catalog/wellknown.js";
 import { sha256Hex } from "../src/catalog/canonical.js";
 import { dids, maps, seeds, sign, vector } from "./fixtures/current-evidence.js";
@@ -444,16 +444,17 @@ for (const mirrorHash of ["matching", "different"] as const) {
   });
 }
 
-async function signedDeclaration(source: string, anchor: string, hash: string | null, generatedAt = 100, signer = 1): Promise<WellKnownAgent> {
-  const raw = JSON.stringify({ indexVersion: "1", generatedAt, seller: dids[signer], listings: hash === null ? [] : [{
-    listingId: "svc", version: 1, contentHash: hash,
+async function crawlSignedDeclaration(source: string, anchor: string, hash: string | string[] | null, generatedAt = 100, signer = 1) {
+  const hashes = hash === null ? [] : Array.isArray(hash) ? hash : [hash];
+  const raw = JSON.stringify({ indexVersion: "1", generatedAt, seller: dids[signer], listings: hashes.map(contentHash => ({
+    listingId: "svc", version: 1, contentHash,
     anchor: { kind: "storage-program", locator: anchor }, status: "active",
     summary: { title: "Service", category: "services.test", tags: [] },
-  }] });
+  })) });
   const indexHash = sha256Hex(raw);
   const publisherSignature = Buffer.from(ed25519Sign(Buffer.from(wellKnownWithdrawalMessage(source, indexHash)),
     privateKeyFromSeed(seeds[signer]))).toString("base64url");
-  const agent = await crawlDomain(source, {
+  return crawlDomain(source, {
     validateUrl: async (url) => ({ url: new URL(url), ip: "203.0.113.1" }),
     fetchJson: async (url) => {
       const document = url.endsWith("agent.json") ? JSON.stringify({ dacs: { dacsVersion: "1", listings: {
@@ -462,12 +463,48 @@ async function signedDeclaration(source: string, anchor: string, hash: string | 
       return { raw: document, body: JSON.parse(document) };
     },
   });
+}
+
+async function signedDeclaration(source: string, anchor: string, hash: string | null, generatedAt = 100, signer = 1): Promise<WellKnownAgent> {
+  const agent = await crawlSignedDeclaration(source, anchor, hash, generatedAt, signer);
   assert.ok(!("error" in agent));
   assert.equal(agent.withdrawalAuthenticated, true);
   return agent;
 }
 
 const publicListingCount = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
+
+for (const mode of ["registered", "crawl-only"] as const) {
+  for (const reverse of [false, true]) {
+    test(`conflicting signed duplicate anchors preserve the ${mode} hash notice (reversed ${reverse})`, async () => {
+      const { listing, locators } = await publicListingVector(`duplicate-anchor-${mode}-${reverse}`, 2300);
+      const actualHash = artifactHash(listing, "listing");
+      const wrongHash = "f".repeat(64);
+      saveDomains([domain]);
+      saveRegistrations(mode === "registered" ? [registration([locators.listing])] : []);
+      await reindexWith(crawling([await signedDeclaration(domain, locators.listing, wrongHash)], false));
+      const before = diagnostics().find(item => item.locator === locators.listing);
+      const declarations = () => loadAuthenticatedListingDeclarations(dids[1], [domain], new Set());
+      const savedDeclarations = declarations();
+      assert.equal(before?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+      assert.equal(before?.publicNotice, true);
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const hashes = reverse ? [actualHash, wrongHash] : [wrongHash, actualHash];
+        const result = await crawlSignedDeclaration(domain, locators.listing, hashes, 101);
+        const crawl = "error" in result ? async () => ({ agents: [], errors: [result] }) : crawling([result], false);
+        await reindexWith(crawl);
+        assert.deepEqual(declarations(), savedDeclarations);
+        assert.deepEqual(diagnostics().find(item => item.locator === locators.listing), before);
+        assert.equal(await publicListingCount(), 0);
+        assert.ok("error" in result, "ambiguous declarations are rejected before persistence");
+      }
+      // Refused bytes must not advance source ordering, even at this timestamp.
+      await reindexWith(crawling([await signedDeclaration(domain, locators.listing, actualHash, 101)], false));
+      assert.equal(diagnostics().some(item => item.locator === locators.listing), false);
+      assert.equal(await publicListingCount(), 1);
+    });
+  }
+}
 
 for (const mode of ["registered", "crawl-only"] as const) {
   for (const order of ["wrong-first", "wrong-last"] as const) {

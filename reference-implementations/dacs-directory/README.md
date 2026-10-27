@@ -513,6 +513,10 @@ timestamp and hash ordering, including after migration. A stored timestamp that 
 incorrectly ahead of the publisher's current index requires explicit operator
 revalidation of that source; an older index cannot silently replace it.
 
+A hosted listings index is rejected if duplicate anchors declare different content
+hashes, including in incomplete rows. Equal hashes remain deduplicated. A rejected
+index cannot replace saved declarations or clear an earlier listing rejection notice.
+
 Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
 fallback) are readable for listing discovery. Their deal evidence remains unverified
 and excluded from completion, ratings and volume until semantic agreement, settlement
