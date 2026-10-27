@@ -643,10 +643,18 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 // A catalog writer persists some node reads while it indexes (rejections, revocation progress,
 // retained markers). Until a later read confirms the node still serves the gated chain, each such
 // write is journaled with the statement that undoes it, in the same transaction, so a failed check
-// or a crash reverts it. Leases, run history, and the registrations and domains that other routes
-// write concurrently are not journaled.
+// or a crash reverts it. Leases and run history are not journaled, nor are the keys in
+// UNJOURNALED_KEYS.
 db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
 const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence"]);
+/**
+ * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
+ * an undo would drop their saves. Withdrawal sources hold what a publisher signed and served from its
+ * own domain, not what the node returned, so a refused chain check says nothing about them; undoing
+ * them would let a failed pass publish a listing the publisher had already withdrawn.
+ */
+const UNJOURNALED_KEYS = ["registrations", "domains", "withdrawal-sources", "withdrawal-source-revision"];
+const unjournaledKeyList = UNJOURNALED_KEYS.map((key) => `'${key}'`).join(",");
 let journalTriggersCreated = false;
 /** Per-connection triggers, created once every migration has run; they journal only while a window is open. */
 function createJournalTriggers(): void {
@@ -660,7 +668,7 @@ function createJournalTriggers(): void {
     const oldAssignments = columns.map((column) => `'${column}=' || quote(old.${column})`).join(" || ',' || ");
     const journal = (event: string, row: "old" | "new", undo: string) => db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS
       journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
-      WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN ('registrations','domains')` : ""}
+      WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN (${unjournaledKeyList})` : ""}
       BEGIN INSERT INTO unconfirmed_chain_writes(undo_sql) VALUES (${undo}); END`);
     journal("INSERT", "new", `'DELETE FROM ${table} WHERE rowid=' || new.rowid`);
     journal("UPDATE", "old", `'UPDATE ${table} SET ' || ${oldAssignments} || ' WHERE rowid=' || old.rowid`);
@@ -676,8 +684,14 @@ export function openChainReadWindow(): void {
 const closeChainReadWindow = (): void => {
   if (journalTriggersCreated) db.exec("DELETE FROM temp.unconfirmed_chain_window");
 };
-/** Keep the window's writes: a chain read after them confirmed the gated chain. */
-export const confirmChainReadWindow = db.transaction((): void => {
+/**
+ * Run the writer's last saves (its scan state and catalog) and keep the window's writes, in one
+ * transaction: a chain read after those writes confirmed the gated chain, so either all of them are
+ * durable or, after a failed save or a crash, none is. A failed save leaves the window open for
+ * `revertChainReadWindow`.
+ */
+export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
+  lastSaves();
   closeChainReadWindow();
   db.exec("DELETE FROM unconfirmed_chain_writes");
 });

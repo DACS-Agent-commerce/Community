@@ -7,6 +7,7 @@ import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { onPinnedChain } from "./fixtures/pinned-node.js";
+import { refuseCatalogWrites } from "./fixtures/refuse-catalog-writes.js";
 
 // POST /api/dacs/index-now writes the public catalog, so it passes the same
 // chain gate as reindexAll and needs a complete pass recorded on that chain.
@@ -232,6 +233,21 @@ test("a batch pass keeps no rejection it recorded when the node changes chain wh
   store.clearChainDerivedArtifacts();
   await assert.rejects(withChainLostOnRead(badSignature, { chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
     /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
+  assert.deepEqual(rejections(), []);
+  assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+});
+
+test("index-now keeps no rejection it recorded when its catalog cannot be saved", async () => {
+  store.clearChainDerivedArtifacts();
+  const indexWithCatalogRefused = async () => {
+    const allowCatalogWrites = refuseCatalogWrites(dataDirectory);
+    try {
+      return await indexNow();
+    } finally {
+      allowCatalogWrites();
+    }
+  };
+  await assert.rejects(withChainLostOnRead(badSignature, {}, indexWithCatalogRefused), /the catalog write failed/);
   assert.deepEqual(rejections(), []);
   assert.deepEqual(store.loadCatalog(), unchangedCatalog);
 });
