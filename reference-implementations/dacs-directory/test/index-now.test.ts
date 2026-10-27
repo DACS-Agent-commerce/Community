@@ -38,17 +38,20 @@ const listing = {
 
 /** node2's getNetworkInfo `nodeVersion` for the pinned commit. */
 const cleanBuild = { commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false, builtAt: "2026-10-14T16:45:24Z" };
-type NodeReply = { nodeVersion?: Record<string, unknown>; chain: string; failure?: "http" | "timeout" | "malformed"; historyDown?: boolean };
+type NodeReply = { nodeVersion?: Record<string, unknown>; chain: string; failure?: "http" | "timeout" | "malformed"; historyDown?: boolean;
+  /** Newest transaction id; the history is then transactions tip..1 with no artifacts. */
+  tip?: number };
 let node: NodeReply = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
 let storageReads = 0;
 let onStorageRead = () => {};
+let storedListing: Record<string, unknown> = listing;
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
   if (path.startsWith("/storage-program/")) {
     storageReads++;
     onStorageRead();
     if (path.slice("/storage-program/".length) !== anchor) return new Response(null, { status: 404 });
-    return Response.json({ success: true, owner: `0x${seller.slice(-64)}`, programName: "opaque", data: listing });
+    return Response.json({ success: true, owner: `0x${seller.slice(-64)}`, programName: "opaque", data: storedListing });
   }
   if (node.failure === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
   if (node.failure === "http") return new Response("unavailable", { status: 503 });
@@ -61,6 +64,11 @@ globalThis.fetch = async (input, init) => {
       : { id: 2, number: 1, status: "confirmed", hash: "12".repeat(32), content: { previousHash: node.chain, timestamp: 1 } } });
   }
   if (call?.message === "getTransactions" && node.historyDown) return Response.json({ result: 503 });
+  if (call?.message === "getTransactions" && node.tip) {
+    const { start, limit } = (call as { data: { start: number | "latest"; limit: number } }).data;
+    const first = start === "latest" ? node.tip : start;
+    return Response.json({ result: 200, response: Array.from({ length: Math.min(limit, first) }, (_, i) => ({ id: first - i })) });
+  }
   return Response.json({ result: 200, response: [] });
 };
 
@@ -174,3 +182,109 @@ test("index-now refuses after a replay that failed before its catalog was saved"
     store.saveDomains([]);
   }
 });
+
+// Indexing records rejections and revocation progress as it reads. A writer whose
+// last chain check fails keeps none of them, and reverts a crashed writer's too.
+const offlinePass = { log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+  crawlWellKnown: async () => ({ agents: [], errors: [] }) };
+const badSignature = { ...listing, signature: { ...listing.signature, value: Buffer.alloc(64, 1).toString("base64url") } };
+const rejections = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.map((item) => item.code);
+/** Run `write` with the listing read answered by `stored`, after which the node fails its next chain read. */
+async function withChainLostOnRead<T>(stored: Record<string, unknown>, lost: Partial<NodeReply>, write: () => Promise<T>): Promise<T> {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.saveScanState(currentState());
+  store.saveCatalog(unchangedCatalog);
+  storedListing = stored;
+  onStorageRead = () => { node = { ...node, ...lost }; };
+  try {
+    return await write();
+  } finally {
+    onStorageRead = () => {};
+    storedListing = listing;
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  }
+}
+
+test("index-now keeps no rejection it recorded when the node changes chain while indexing", async () => {
+  store.clearChainDerivedArtifacts();
+  const response = await withChainLostOnRead(badSignature, { chain: "aa".repeat(32) }, indexNow);
+  assert.equal(response.status, 409);
+  assert.deepEqual(rejections(), []);
+  assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+});
+
+test("index-now keeps an earlier rejection it cleared when the node changes chain while indexing", async () => {
+  store.clearChainDerivedArtifacts();
+  store.recordListingRejection(anchor, seller, "SELLER_CLAIM_BINDING");
+  const response = await withChainLostOnRead(listing, { chain: "aa".repeat(32) }, indexNow);
+  assert.equal(response.status, 409);
+  assert.deepEqual(rejections(), ["SELLER_CLAIM_BINDING"]);
+});
+
+test("index-now keeps no rejection it recorded when its last chain read times out", async () => {
+  store.clearChainDerivedArtifacts();
+  const response = await withChainLostOnRead(badSignature, { failure: "timeout" }, indexNow);
+  assert.equal(response.status, 503);
+  assert.deepEqual(rejections(), []);
+});
+
+test("a batch pass keeps no rejection it recorded when the node changes chain while sellers are indexed", async () => {
+  store.clearChainDerivedArtifacts();
+  await assert.rejects(withChainLostOnRead(badSignature, { chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
+    /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
+  assert.deepEqual(rejections(), []);
+  assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+});
+
+test("a writer reverts the unconfirmed writes a crashed writer left behind", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.clearChainDerivedArtifacts();
+  store.saveScanState(currentState());
+  // A crash after indexing wrote a rejection, before its chain check.
+  store.openChainReadWindow();
+  store.recordListingRejection(anchor, seller, "SELLER_CLAIM_BINDING");
+  storedListing = badSignature;
+  storageReads = 0;
+  try {
+    // A refused writer only reverts: the node now serves another chain.
+    node = { ...node, chain: "aa".repeat(32) };
+    assert.equal((await indexNow()).status, 409);
+    assert.equal(storageReads, 0);
+    assert.deepEqual(rejections(), []);
+  } finally {
+    storedListing = listing;
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  }
+});
+
+const marker = `stor-${"2".repeat(40)}`;
+// Each reset of the cached state: a re-pin, a state with no recorded chain, and a large tip regression.
+const resets: Array<[string, Record<string, unknown>, Partial<NodeReply>]> = [
+  ["a re-pin", { chainIdentity: "aa".repeat(32) }, {}],
+  ["a state with no recorded chain", { chainIdentity: undefined }, {}],
+  ["a large tip regression", { lastSeenTxId: 5000, lastChainTip: 5 }, { tip: 5 }],
+];
+for (const [name, change, reply] of resets) {
+  test(`after ${name}, the rebuild takes no revocation from the earlier catalog or cache`, async () => {
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+    store.clearChainDerivedArtifacts();
+    store.saveScanState(currentState());
+    store.saveCatalog(unchangedCatalog);
+    assert.equal((await indexNow()).status, 200);
+    const indexed = store.loadCatalog().sellers[0];
+    const { contentHash: hash } = indexed.listings[0];
+    // Evidence of a marker the configured chain does not hold: the catalog record, the retained binding, the scan state.
+    const revocation = { sellerPrimaryClaim: seller, listingId: "svc", listingVersion: 1, listingContentHash: hash,
+      logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:svc:v1`,
+      markerAnchor: { kind: "storage-program" as const, locator: marker }, markerContentHash: "d".repeat(64) };
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 8,
+      sellers: [{ ...indexed, listings: [{ ...indexed.listings[0], status: "revoked", revocation }] }] });
+    store.retainListingRevocation(revocation, { kind: "listing-revocation" });
+    store.saveScanState({ ...currentState(), verifiedRevocations: { [hash]: [marker] }, ...change });
+    node = { ...node, ...reply };
+    await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+    assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
+    assert.equal(store.retainedListingRevocation(hash), null);
+    assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  });
+}
