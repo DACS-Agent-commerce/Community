@@ -6,7 +6,7 @@
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
-import { verifyOwnerSignature } from "./registrationSig.js";
+import { ownerSignedRegistration } from "./registrationSig.js";
 import { boundedJson } from "./artifactLimits.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
@@ -45,9 +45,6 @@ import {
   recordArtifact,
   pruneFailureHistory,
   pruneListingRejections,
-  hasPublisherAuthenticatedWellKnownSource,
-  recordAuthenticatedListingDeclarations,
-  loadAuthenticatedListingDeclarations,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -99,12 +96,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
       continue;
     }
-    // Crawl data changes what the owner signed, so the signature is checked on the stored registration.
-    const ownerSignatureVerified = parsed.value.ownerSignature
-      ? await verifyOwnerSignature(parsed.value, { ignoreFreshness: true }).catch(() => false)
-      : false;
-    regs.push({ ...parsed.value, ownerSignatureVerified,
-      ownerSignedAnchors: ownerSignatureVerified ? [...parsed.value.listingAnchors] : [],
+    // Verified before crawl data is merged in, which changes what the owner signed.
+    regs.push({ ...parsed.value, ownerSigned: await ownerSignedRegistration(parsed.value),
       ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
         ? { listingContentHashes: raw.listingContentHashes } : {}),
     });
@@ -354,7 +347,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
-    const acceptedDeclarationDomains = new Map<string, Set<string>>();
     let crawlIncomplete = false;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
@@ -367,23 +359,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         log(`well-known: ${e.domain} — ${e.error}`);
       }
       for (const agent of crawl.agents) {
-        const authenticationLost = !agent.withdrawalAuthenticated &&
-          hasPublisherAuthenticatedWellKnownSource(normalizeSubmittedDomain(agent.domain));
-        if (authenticationLost) recordWellKnownWithdrawalCheck(normalizeSubmittedDomain(agent.domain));
-        if (authenticationLost || !await ingestWellKnownRevocations(agent)) {
-          // A refused source cannot supply declarations or prove a prior rejection has gone away.
-          crawlIncomplete = true;
-          continue;
-        }
-        if (agent.withdrawalAuthenticated) {
-          const domain = normalizeSubmittedDomain(agent.domain);
-          recordAuthenticatedListingDeclarations(domain, agent.seller, agent.contentHashes);
-          const accepted = acceptedDeclarationDomains.get(agent.seller) ?? new Set<string>();
-          accepted.add(domain);
-          acceptedDeclarationDomains.set(agent.seller, accepted);
-        }
+        await ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
-        if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
+        // agent.json is unsigned: its name never replaces one the owner signed.
+        if (agent.displayName && !reg.ownerSigned && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
           // A revoked or incomplete row can carry a marker, but cannot introduce an
           // active offer. Authenticated unresolved sources create holds; unsigned
@@ -424,13 +403,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 
     const sellers = [];
     for (const reg of allRegs) {
-      // A matching peer cannot reconcile another publisher's still-advertised declaration.
-      reg.authenticatedHashDeclarations = loadAuthenticatedListingDeclarations(reg.primaryClaim, domains,
-        acceptedDeclarationDomains.get(reg.primaryClaim) ?? new Set());
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
       // Fail closed per seller: one that cannot be indexed is left out of this pass, never the whole catalog.
-      const record = await indexRegistration(crawlIncomplete ? { ...reg, discoveryIncomplete: true } : reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
+      const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
       }).catch((error: unknown) => {
@@ -471,8 +447,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
 
-    // A failed crawl hides the sellers only it discovers; absence from an incomplete pass is not removal.
-    if (!crawlIncomplete) pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
+    // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
+    if (!crawlIncomplete) pruneListingRejections(allRegs);
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
@@ -490,8 +466,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
 /** Total node reads spent resolving one domain's withdrawal carriage per pass. */
 export const WELL_KNOWN_WITHDRAWAL_READS_PER_PASS = 32;
 
-/** Authenticate discovery carriage for RB-4; return false when source ordering refuses the index. */
-export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<boolean> {
+/** Authenticate the listing publisher before letting discovery carriage affect RB-4. */
+export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise<void> {
   const domain = normalizeSubmittedDomain(agent.domain);
   const provenance = wellKnownWithdrawalProvenance(agent);
   if (provenance) {
@@ -499,7 +475,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
       agent.incompleteWithdrawalHashes ?? [],
-      agent.withdrawalIndex, agent.revocations, provenance)) return false;
+      agent.withdrawalIndex, agent.revocations, provenance, agent.contentHashes)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
   const byHash = new Map<string, typeof agent.revocations>();
@@ -512,7 +488,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     const bindings = byHash.get(agent.contentHashes[anchor]) ?? [];
     return bindings.map((binding) => ({ anchor, binding }));
   });
-  if (!jobs.length) return true;
+  if (!jobs.length) return;
   const indexHash = agent.withdrawalIndex?.hash ?? "";
   let cursor = loadWithdrawalCursor(domain, agent.seller, indexHash) % jobs.length;
   let reads = 0;
@@ -571,5 +547,4 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
   } finally {
     saveWithdrawalCursor(domain, agent.seller, indexHash, cursor);
   }
-  return true;
 }

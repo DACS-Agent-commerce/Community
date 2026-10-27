@@ -12,7 +12,7 @@ import {
   verifyPrimaryClaimSignature,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
-import type { Registration } from "./types.js";
+import type { OwnerSignedRegistration, Registration } from "./types.js";
 
 export function registrationMessage(
   reg: Pick<Registration, "primaryClaim" | "displayName" | "listingAnchors" | "deals" | "bundleBindings">,
@@ -66,4 +66,15 @@ export async function verifyOwnerSignature(
     "ed25519",
     opts.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey,
   ));
+}
+
+/**
+ * The anchors and display name the owner signed, re-verifying the stored signature without the freshness window
+ * (a submission-time replay gate only). Returns null when the registration has no signature that verifies.
+ */
+export async function ownerSignedRegistration(reg: Registration): Promise<OwnerSignedRegistration | null> {
+  const verified = reg.ownerSignature
+    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
+    : false;
+  return verified ? { anchors: [...reg.listingAnchors], displayName: reg.displayName } : null;
 }
