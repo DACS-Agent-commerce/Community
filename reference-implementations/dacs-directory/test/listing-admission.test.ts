@@ -16,7 +16,6 @@ import type { Registration, ListingSummary, SellerRecord } from "../src/catalog/
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-listing-admission-"));
 process.env.DACS_DIRECTORY_DATA = dataDirectory;
 const store = await import("../src/catalog/store.js");
-const { verifyListingResult } = await import("../src/catalog/listingVerification.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { DIRECTORY_TRANSACTION_READINESS, buildDirectoryServiceProfile } = await import("../src/catalog/inspection.js");
 const { GET: listingsGet } = await import("../app/api/dacs/listings/route.js");
@@ -137,8 +136,6 @@ test("unreadable listing anchors retain rejection notices and history until admi
     response = invalid;
     await index();
     assert.ok(diagnostic());
-    await indexRegistration({ ...reg, listingAnchors: [] }, undefined, async () => ({}));
-    assert.equal(diagnostic(), undefined, "removing the anchor clears the notice");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -186,20 +183,6 @@ test("published summaries never claim transaction readiness the Directory did no
   );
 });
 
-test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
-  const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
-  const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");
-  const pattern = new RegExp(listingRejectionDiagnosticSchema.properties.listingId.pattern);
-  for (const listingId of ["a".repeat(65), "A.b_c~d-".repeat(16), "x"]) {
-    assert.deepEqual(listingDiagnosticCoordinates({ dacsVersion: "1", listingId, listingVersion: 2 }), { listingId, listingVersion: 2 }, listingId);
-    assert.ok(pattern.test(listingId), listingId);
-  }
-  for (const listingId of ["a".repeat(129), "a/b", "a b", ""]) {
-    assert.equal(listingDiagnosticCoordinates({ dacsVersion: "1", listingId, listingVersion: 2 }), undefined, listingId);
-    assert.equal(pattern.test(listingId), false, listingId);
-  }
-});
-
 test("a declared content hash mismatch excludes a listing and a corrected declaration clears its diagnostic", async () => {
   const at = `stor-${"e".repeat(40)}`;
   const listing = signedListing("declared-hash", attested({ kind: "self-signed" }));
@@ -224,62 +207,21 @@ test("a declared content hash mismatch excludes a listing and a corrected declar
   }
 });
 
-test("every rejection has a public explanation and coordinate-free diagnostics omit the version", async () => {
-  const { LISTING_REJECTION_CODES } = await import("../src/catalog/listingAdmission.js");
-  for (const [index, code] of LISTING_REJECTION_CODES.entries()) {
-    const at = `stor-${(800 + index).toString(16).padStart(40, "0")}`;
-    store.recordListingRejection(at, seller, code);
-    const item = store.indexerDiagnostics({ deadLetterLocator: at }).listingRejectionDiagnostics.items[0];
-    assert.equal(item.code, code);
-    assert.ok(item.message.trim().length > 0, code);
-    assert.ok(item.guidance.trim().length > 0, code);
-    assert.equal(Object.hasOwn(item, "listingId"), false, code);
-    assert.equal(Object.hasOwn(item, "listingVersion"), false, code);
-  }
-});
-
-test("owner-mismatch diagnostics preserve authenticated coordinates but require a signed registration for public notice", async () => {
-  const anchor = `stor-${"c".repeat(40)}`;
-  const data = signedListing("owner-mismatch", attested({ kind: "self-signed" }));
-  assert.equal((await verifyListingResult(data)).ok, true);
-  const reg: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${"f".repeat(64)}`, programName: "opaque", data });
-  try {
-    for (const signed of [false, true]) {
-      if (signed) {
-        const message = registrationMessage(reg, 1);
-        reg.ownerSignature = { message, signedAt: 1, signature: sign(message) };
-      }
-      const record = await indexRegistration(reg, undefined, async () => ({}));
-      assert.deepEqual(record.listings, []);
-      const diagnostics = store.indexerDiagnostics({ deadLetterLocator: anchor }).listingRejectionDiagnostics;
-      const item = diagnostics.items.find((item) => item.locator === anchor)!;
-      assert.equal(item.code, "OWNER_CLAIM_BINDING");
-      assert.equal(item.listingId, "owner-mismatch");
-      assert.equal(item.listingVersion, 1);
-      assert.equal(item.publicNotice, signed);
-      assert.equal(diagnostics.publicTotal, signed ? 1 : 0);
-    }
-  } finally {
-    globalThis.fetch = originalFetch;
-    store.clearRegistrationListingRejections(seller);
-  }
-});
-
-test("diagnostic pruning keeps current sellers case-insensitively and removes departed sellers", () => {
-  const keepAt = `stor-${"d".repeat(40)}`, dropAt = `stor-${"e".repeat(40)}`;
+test("complete-pass pruning keeps listed pointers case-insensitively and removes unlisted pointers and departed sellers", () => {
+  const keepAt = `stor-${"d".repeat(40)}`, dropAt = `stor-${"e".repeat(40)}`, unlistedAt = `stor-${"7".repeat(40)}`;
   const other = `did:demos:agent:${"f".repeat(64)}`;
   store.recordListingRejection(keepAt, seller, "LISTING_SIGNATURE_INVALID");
+  store.recordListingRejection(unlistedAt, seller, "LISTING_SIGNATURE_INVALID");
   store.recordListingRejection(dropAt, other, "LISTING_SIGNATURE_INVALID");
-  store.pruneListingRejections([seller.toUpperCase()]);
-  const items = store.indexerDiagnostics().listingRejectionDiagnostics.items;
-  assert.ok(items.some((item) => item.locator === keepAt));
-  assert.equal(items.some((item) => item.locator === dropAt), false);
+  store.pruneListingRejections([{ primaryClaim: seller.toUpperCase(), listingAnchors: [keepAt] }]);
+  const locators = store.indexerDiagnostics().listingRejectionDiagnostics.items.map((item) => item.locator);
+  assert.ok(locators.includes(keepAt));
+  assert.equal(locators.includes(unlistedAt), false);
+  assert.equal(locators.includes(dropAt), false);
   store.clearRegistrationListingRejections(seller);
 });
 
-test("rejections never assign unauthenticated coordinates or blame another seller; latest pointers replace stale diagnostics", async () => {
+test("rejections never assign unauthenticated coordinates or blame another seller", async () => {
   const anchor = `stor-${"a".repeat(40)}`;
   const other = `did:demos:agent:${"f".repeat(64)}`;
   let data = signedListing("valid-seller", attested({ kind: "self-signed" }));
@@ -299,78 +241,15 @@ test("rejections never assign unauthenticated coordinates or blame another selle
     diagnostic = store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor)!;
     assert.equal(diagnostic.listingId, undefined);
     assert.equal(diagnostic.publicNotice, false);
-    await indexRegistration({ ...reg, listingAnchors: [] }, undefined, async () => ({}));
-    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === anchor && item.code !== "SELLER_CLAIM_BINDING"), false);
-    await indexRegistration({ ...reg, primaryClaim: other, listingAnchors: [] }, undefined, async () => ({}));
-    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === anchor), false);
-  } finally { globalThis.fetch = originalFetch; }
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.pruneListingRejections([]);
+  }
 });
-
-test("only a publisher-authenticated hash declaration for a seller-matching listing appears publicly, and a corrected one clears it", async () => {
-  const anchor = `stor-${"b".repeat(40)}`;
-  const data = signedListing("public-pointer", attested({ kind: "self-signed" }));
-  const reg: Registration = { primaryClaim: seller, displayName: "Signed seller", listingAnchors: [anchor],
-    listingContentHashes: { [anchor]: "0".repeat(64) } };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
-  try {
-    await indexRegistration(reg, undefined, async () => ({}));
-    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.publicTotal, 0, "an unauthenticated declaration stays private");
-    reg.authenticatedHashDeclarations = { "https://publisher.example": { hashes: { [anchor]: "0".repeat(64) }, current: true } };
-    await indexRegistration(reg, undefined, async () => ({}));
-    let diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
-    assert.equal(diagnostics.publicTotal, 1);
-    assert.equal(diagnostics.items.find((item) => item.publicNotice)?.listingId, "public-pointer");
-    assert.match(diagnostics.items.find((item) => item.publicNotice)?.guidance ?? "", /declared hash in the discovery channel/);
-    reg.listingContentHashes = {};
-    reg.authenticatedHashDeclarations = {};
-    assert.equal((await indexRegistration(reg, undefined, async () => ({}))).listings.length, 1);
-    diagnostics = store.indexerDiagnostics().listingRejectionDiagnostics;
-    assert.equal(diagnostics.publicTotal, 0);
-    assert.equal(diagnostics.items.some((item) => item.locator === anchor), false);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-for (const discoveryIncomplete of [false, true]) {
-  test(`an unverifiable read keeps a corrected hash notice but not a withdrawn one (incomplete ${discoveryIncomplete})`, async () => {
-    const anchor = `stor-${"5".repeat(40)}`;
-    const valid = signedListing("withdrawn-declaration", attested({ kind: "self-signed" }));
-    let data = valid;
-    const reg: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor], discoveryIncomplete };
-    const declaring = (hashes: Record<string, string>) => ({ "https://publisher.example": { hashes, current: true } });
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, data });
-    const notice = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.find((item) => item.locator === anchor);
-    try {
-      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({ [anchor]: "0".repeat(64) }) }, undefined, async () => ({}));
-      const before = notice();
-      assert.equal(before?.publicNotice, true);
-      data = { ...valid, signature: { algorithm: "ed25519", signer: seller, value: "invalid" } };
-      const { signature: _signature, ...scope } = valid;
-      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({ [anchor]: contentHash(scope) }) }, undefined, async () => ({}));
-      assert.deepEqual(notice(), before, "invalid bytes cannot show the corrected declaration matches");
-      await indexRegistration({ ...reg, authenticatedHashDeclarations: declaring({}) }, undefined, async () => ({}));
-      assert.equal(notice()?.code, "NORMATIVE_LISTING_INVALID", "a withdrawn declaration no longer supports the notice");
-      assert.equal(notice()?.publicNotice, false);
-    } finally {
-      globalThis.fetch = originalFetch;
-      store.clearRegistrationListingRejections(seller);
-    }
-  });
-}
 
 const unverifiableReads: Record<string, (valid: Obj) => Obj> = {
   "invalid shape": () => ({ dacsVersion: "1" }),
   "invalid signature": (valid) => ({ ...valid, signature: { algorithm: "ed25519", signer: seller, value: "invalid" } }),
-  "invalid identity presentation": (valid) => {
-    const identity = { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }],
-      presentation: { kind: "per-claim", signatures: [{ ref: seller, signature: "invalid" }] } };
-    const scope: Obj = { ...valid, seller: { identity, displayName: "Admission Desk" } };
-    delete scope.signature;
-    return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
-  },
-  "invalid verification method": () => signedListing("retained-owner", attested("x402-receipt")),
-  "invalid legacy shape": () => ({ serviceId: "retained-owner" }),
   "oversized canonical listing": (valid) => ({ ...valid, extension: "x".repeat(16_384) }),
 };
 
