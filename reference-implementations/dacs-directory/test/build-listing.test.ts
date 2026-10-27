@@ -16,6 +16,7 @@ import {
   publicKeyFromSeed,
   rawPublicKey,
 } from "@kynesyslabs/dacs/crypto";
+import { MAX_STORAGE_RESPONSE_BYTES } from "../src/catalog/artifactLimits.js";
 import { deriveStorageAddress, LIVE_STORAGE_SALT } from "../src/catalog/chain.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 import { authenticateReadableListingArtifact } from "../vendor/dacs-sdk/dist/agent/discover.js";
@@ -96,7 +97,7 @@ test("Listing signature decoding and verifier exceptions refuse transaction rele
   });
   const input = { ...base, serviceId: "signature-refusal" };
   const identity = await (await POST(request(input))).json();
-  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt,
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
     identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") };
   const preview = await (await POST(request(authenticated))).json();
   assert.equal(preview.tx, null);
@@ -142,6 +143,7 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
   const identity = await identityResponse.json() as {
     identityMessage: string;
     identityPresentedAt: number;
+    listingVersion: number;
   };
   const identitySignature = Buffer.from(
     ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
@@ -169,6 +171,7 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
   try {
     const response = await POST(request({
       ...base,
+      listingVersion: identity.listingVersion,
       identityPresentedAt: identity.identityPresentedAt,
       identitySignature,
     }));
@@ -218,6 +221,7 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
     ).toString("hex");
     const finalResponse = await POST(request({
       ...base,
+      listingVersion: identity.listingVersion,
       identityPresentedAt: identity.identityPresentedAt,
       identitySignature,
       listingSignature,
@@ -272,12 +276,13 @@ test("publisher uses PA-1 rail resolution and signs the exact staged Listing bef
 });
 
 test("publisher refuses an invalid occupied version without skipping to the next version", async () => {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const walletHex = (message: string) =>
     Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
   const finalInput = {
     ...base,
     serviceId: "invalid-occupied-version",
+    listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt,
     identitySignature: walletHex(identity.identityMessage),
   };
@@ -338,11 +343,12 @@ test("publisher refuses an invalid occupied version without skipping to the next
 
 test("publisher recovers an immutable owner-bound listing instead of creating a duplicate", async () => {
   const identityResponse = await POST(request(base));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const identitySignature = Buffer.from(
     ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
   ).toString("hex");
-  const finalInput = { ...base, serviceId: "immutable-recovery", identityPresentedAt: identity.identityPresentedAt, identitySignature };
+  const finalInput = { ...base, serviceId: "immutable-recovery", listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature };
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -448,12 +454,13 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
 });
 
 test("publisher prepares no transaction unless the node is the pinned deployment", async () => {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const hexSig = (message: string) =>
     Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
   const finalInput = {
     ...base,
     serviceId: "deployment-pin",
+    listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt,
     identitySignature: hexSig(identity.identityMessage),
   };
@@ -518,7 +525,7 @@ test("publisher rejects a metered listing without its deterministic unit", async
 
 test("publisher refuses a new write when existing-publication lookup is indeterminate", async () => {
   const identityResponse = await POST(request(base));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const identitySignature = Buffer.from(
     ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
   ).toString("hex");
@@ -532,6 +539,7 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
   try {
     const response = await POST(request({
       ...base,
+      listingVersion: identity.listingVersion,
       identityPresentedAt: identity.identityPresentedAt,
       identitySignature,
     }));
@@ -544,12 +552,13 @@ test("publisher refuses a new write when existing-publication lookup is indeterm
 });
 
 test("publisher returns no transaction for a listing signature that does not verify", async () => {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 13)));
   const hexSig = (message: string, key = privateKey) =>
     Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), key)).toString("hex");
   const finalInput = {
     ...base,
+    listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt,
     identitySignature: hexSig(identity.identityMessage),
   };
@@ -583,7 +592,7 @@ test("publisher returns no transaction for a listing signature that does not ver
 
 test("publisher withholds a create when the fallback search cannot establish absence", async () => {
   const identityResponse = await POST(request(base));
-  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number };
+  const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const identitySignature = Buffer.from(
     ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
   ).toString("hex");
@@ -600,7 +609,8 @@ test("publisher withholds a create when the fallback search cannot establish abs
     return Response.json({ result: 200, response: 6 });
   };
   try {
-    const response = await POST(request({ ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature }));
+    const response = await POST(request({ ...base, listingVersion: identity.listingVersion,
+      identityPresentedAt: identity.identityPresentedAt, identitySignature }));
     assert.equal(response.status, 503);
     const body = await response.json();
     assert.match(body.error, /could not safely determine.*cannot establish absence/);
@@ -623,20 +633,24 @@ test("LP-3 listing versions are allocated per listingId", async () => {
     generatedAt: 1,
     sellers: [{ primaryClaim: claim, listings: [summary("another-listing", 5), summary(base.serviceId, 2)] }],
   } as never);
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => init?.method === "POST"
     ? Response.json({ result: 200, response: JSON.parse(String(init.body)).params?.[0]?.message === "searchStoragePrograms" ? [] : 0 })
     : new Response(null, { status: 404 });
   try {
-    const preview = async (serviceId: string) => (await (await POST(request({
-      ...base,
-      serviceId,
-      identityPresentedAt: identity.identityPresentedAt,
-      identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey)).toString("hex"),
-    }))).json() as { listing: { listingVersion: number } }).listing.listingVersion;
-    assert.equal(await preview(base.serviceId), 3, "the next version of this listingId");
-    assert.equal(await preview("fresh-listing"), 1, "another listingId's versions are not inherited");
+    /** The version the first step offers, and the one the preview then builds. */
+    const preview = async (serviceId: string) => {
+      const identity = await (await POST(request({ ...base, serviceId }))).json() as {
+        identityMessage: string; identityPresentedAt: number; listingVersion: number;
+      };
+      const built = await (await POST(request({ ...base, serviceId, listingVersion: identity.listingVersion,
+        identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) }))).json() as {
+        listing: { listingVersion: number };
+      };
+      return { offered: identity.listingVersion, built: built.listing.listingVersion };
+    };
+    assert.deepEqual(await preview(base.serviceId), { offered: 3, built: 3 }, "the next version of this listingId");
+    assert.deepEqual(await preview("fresh-listing"), { offered: 1, built: 1 }, "another listingId's versions are not inherited");
   } finally {
     globalThis.fetch = originalFetch;
     store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
@@ -658,8 +672,8 @@ test("publisher emits canonical DEM and x402 registry IDs and rejects phase-name
       const body = { ...base, rails: [railId], pricing: { kind: "fixed", amount: "1", currency } };
       const stage = await POST(request(body));
       assert.equal(stage.status, 200);
-      const identity = await stage.json() as { identityMessage: string; identityPresentedAt: number };
-      const response = await POST(request({ ...body, identityPresentedAt: identity.identityPresentedAt,
+      const identity = await stage.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+      const response = await POST(request({ ...body, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
         identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") }));
       assert.equal(response.status, 200, await response.clone().text());
       const built = await response.json() as { listing: { acceptedRails: unknown; pipeline: unknown[] } };
@@ -698,44 +712,66 @@ const walletSignature = (message: string, key = privateKey) =>
  * preview's when it already ends the flow (a recovered or refused occupied version has no message to sign).
  */
 async function publishAs(input: Record<string, unknown>, key = privateKey): Promise<Response> {
-  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number };
-  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage, key) };
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const authenticated = { ...input, listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage, key) };
   const previewResponse = await POST(request(authenticated));
   const preview = await previewResponse.clone().json() as { message?: string };
   if (preview.message === undefined) return previewResponse;
   return POST(request({ ...authenticated, listingSignature: walletSignature(preview.message, key) }));
 }
 
-const MAX_NONCE_REPLY_BYTES = 1024 * 1024;
-
 test("publisher prepares no transaction unless the account nonce is read within its bounds", async (t) => {
-  let nonceReply: () => Response | Promise<Response> = () => Response.json({ result: 200, response: 0 });
+  // Each deadline is a controllable signal, so a body that stalls until the deadline fires needs no real wait.
+  const deadlines = new Map<AbortSignal, AbortController>();
+  const deadlineLengths: number[] = [];
+  t.mock.method(AbortSignal, "timeout", (ms: number) => {
+    const controller = new AbortController();
+    deadlines.set(controller.signal, controller);
+    deadlineLengths.push(ms);
+    return controller.signal;
+  });
+  const timedOut = () => new DOMException("The operation timed out.", "TimeoutError");
+  type NonceReply = (signal: AbortSignal | undefined) => Response | Promise<Response>;
+  let nonceReply: NonceReply = () => Response.json({ result: 200, response: 0 });
+  const nonceSignalsLive: boolean[] = [];
   t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const deployment = deploymentReply(init);
     if (deployment) return deployment;
     const call = init?.body ? JSON.parse(String(init.body)).params?.[0]?.message : null;
-    return call === "getAddressNonce" ? nonceReply() : Response.json({ result: 200, response: [] });
+    if (call !== "getAddressNonce") return Response.json({ result: 200, response: [] });
+    const signal = init?.signal ?? undefined;
+    nonceSignalsLive.push(signal instanceof AbortSignal && !signal.aborted && deadlines.has(signal));
+    return nonceReply(signal);
   });
   const input = { ...base, serviceId: "nonce-bounds" };
-  const allowed = await publishAs(input);
-  assert.equal(allowed.status, 200);
-  assert.equal((await allowed.json() as { tx: { content: { nonce: number } } }).tx.content.nonce, 1, "allowed control: a valid nonce releases the transaction");
-  for (const [name, reply, error] of [
+  const nonceOf = async () => (await (await publishAs(input)).json() as { tx: { content: { nonce: number } } }).tx.content.nonce;
+  assert.equal(await nonceOf(), 1, "allowed control: a valid nonce releases the transaction");
+  nonceReply = () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER - 1 });
+  assert.equal(await nonceOf(), Number.MAX_SAFE_INTEGER, "the largest nonce whose successor stays exact");
+  const refusals: Array<[string, NonceReply, RegExp]> = [
     ["node refusal", () => new Response("unavailable", { status: 503 }), /HTTP 503/],
-    ["node timeout", () => { throw new DOMException("The operation timed out", "TimeoutError"); }, /did not answer in time/],
+    ["node timeout", () => { throw timedOut(); }, /did not answer in time/],
     ["unreachable node", () => { throw new TypeError("fetch failed"); }, /could not be reached/],
-    ["oversized reply", () => Response.json({ result: 200, response: 0, padding: "x".repeat(MAX_NONCE_REPLY_BYTES) }), /byte limit/],
+    ["oversized reply", () => Response.json({ result: 200, response: 0, padding: "x".repeat(MAX_STORAGE_RESPONSE_BYTES) }), /byte limit/],
     ["non-JSON reply", () => new Response("not json"), /not valid JSON/],
-    ["body stalls after the headers", () => new Response(new ReadableStream({ pull() { throw new DOMException("The operation timed out", "TimeoutError"); } })), /did not answer in time/],
+    ["body stalls until the deadline", (signal) => new Response(new ReadableStream({ pull: () => new Promise<void>((_, reject) => {
+      const deadline = signal && deadlines.get(signal);
+      if (!signal || !deadline) return reject(new Error("the nonce read has no deadline"));
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      deadline.abort(timedOut());
+    }) })), /did not answer in time/],
     ["reply without a body", () => new Response(null), /could not be read/],
     ["error result", () => Response.json({ result: 500, response: 0 }), /result 500/],
+    ["object result", () => Response.json({ result: { toString: null }, response: 0 }), /the node returned an unexpected result/],
     ["null nonce", () => Response.json({ result: 200, response: null }), /invalid account nonce/],
     ["missing nonce", () => Response.json({ result: 200 }), /invalid account nonce/],
     ["string nonce", () => Response.json({ result: 200, response: "7" }), /invalid account nonce/],
     ["negative nonce", () => Response.json({ result: 200, response: -1 }), /invalid account nonce/],
     ["fractional nonce", () => Response.json({ result: 200, response: 1.5 }), /invalid account nonce/],
     ["overflowing nonce", () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER }), /invalid account nonce/],
-  ] as const) {
+  ];
+  for (const [name, reply, error] of refusals) {
     nonceReply = reply;
     const response = await publishAs({ ...input, serviceId: `nonce-bounds-${name.replace(/[^a-z]+/g, "-")}` });
     assert.equal(response.status, 503, name);
@@ -745,6 +781,9 @@ test("publisher prepares no transaction unless the account nonce is read within 
     assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
     assert.equal(body.listing, undefined, name);
   }
+  assert.ok(nonceSignalsLive.length > refusals.length && nonceSignalsLive.every(Boolean),
+    "every nonce read carries its own live deadline");
+  assert.ok(deadlineLengths.includes(15_000), "the nonce deadline is 15 seconds");
 });
 
 test("empty name indexes and advancing nonces withhold a second create for the exact signed Listing", async (t) => {
@@ -869,7 +908,7 @@ test("a signed retry that names its version resolves it after the catalog has in
     assert.equal(retried.exists, true, "the indexed version is resolved, not renumbered");
     assert.equal(retried.tx, null);
     assert.equal(retried.anchorAddress, built.anchorAddress);
-    for (const listingVersion of [0, 3, 1.5, "1"]) {
+    for (const listingVersion of [0, 3, 1.5, "1", null, undefined]) {
       const refused = await POST(request({ ...signed, listingVersion }));
       assert.equal(refused.status, 400, `listingVersion ${JSON.stringify(listingVersion)}`);
       assert.match((await refused.json() as { error: string }).error, /listingVersion must be/);
@@ -905,7 +944,7 @@ test("a signed retry for a version the catalog lists but the chain lookup cannot
     const retried = await POST(request(signed));
     assert.equal(retried.status, 409);
     const body = await retried.json() as { error: string; tx?: unknown };
-    assert.match(body.error, /already lists this version/);
+    assert.match(body.error, /already published this version/);
     assert.equal(body.tx, undefined);
   } finally {
     globalThis.fetch = originalFetch;
@@ -913,26 +952,26 @@ test("a signed retry for a version the catalog lists but the chain lookup cannot
   }
 });
 
-/** Answer only the explicitly modelled read RPCs, never contact a node. */
+// The same table runs against the live route, so the builder and the route cannot drift apart.
+const { POST: routePost } = await import("../app/api/dacs/build-listing/route.js");
+const publishers = { builder: POST, route: routePost };
+
 for (const category of [".services.other", "services.other.", "services..other", ".", ".."]) {
-  test(`publisher rejects empty category segments in ${JSON.stringify(category)} before requesting a signature`, async () => {
-    const originalFetch = globalThis.fetch;
+  test(`publisher rejects empty category segments in ${JSON.stringify(category)} before requesting a signature`, async (t) => {
     let calls = 0;
-    globalThis.fetch = async () => {
+    t.mock.method(globalThis, "fetch", async () => {
       calls += 1;
       throw new Error("category rejection must precede network access");
-    };
-    try {
-      const response = await POST(request({ ...base, category }));
-      assert.equal(response.status, 400);
+    });
+    for (const [publisher, post] of Object.entries(publishers)) {
+      const response = await post(request({ ...base, category }));
+      assert.equal(response.status, 400, publisher);
       const body = await response.json();
-      assert.match(body.error, /category must be dot-notation/);
-      assert.equal(body.identityMessage, undefined);
-      assert.equal(body.tx, undefined);
-      assert.equal(calls, 0);
-    } finally {
-      globalThis.fetch = originalFetch;
+      assert.match(body.error, /category must be dot-notation/, publisher);
+      assert.equal(body.identityMessage, undefined, publisher);
+      assert.equal(body.tx, undefined, publisher);
     }
+    assert.equal(calls, 0);
   });
 }
 
@@ -941,5 +980,97 @@ test("publisher accepts nonempty category segments after normalization", async (
     const response = await POST(request({ ...base, category }));
     assert.equal(response.status, 200);
     assert.ok((await response.json()).identityMessage);
+  }
+});
+
+test("every request after the first must carry the version the first returned, checked before any network read", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    throw new Error("a version refusal must precede network access");
+  });
+  const input = { ...base, serviceId: "version-input" };
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  assert.equal(identity.listingVersion, 1);
+  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+  for (const [stage, body] of Object.entries({ preview: authenticated, signed: { ...authenticated, listingSignature: "ab".repeat(64) } })) {
+    for (const listingVersion of [undefined, 0, -1, 1.5, "1", null, 2]) {
+      const response = await POST(request({ ...body, listingVersion }));
+      assert.equal(response.status, 400, `${stage} ${JSON.stringify(listingVersion)}`);
+      assert.match((await response.json() as { error: string }).error, /listingVersion must be/);
+    }
+  }
+  assert.equal(calls, 0);
+});
+
+test("a Service ID whose versions are exhausted is refused with no network read", async (t) => {
+  const store = await import("../src/catalog/store.js");
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim, displayName: base.name, listings: [{
+    listingId: "exhausted", version: Number.MAX_SAFE_INTEGER, anchor: { kind: "storage-program", locator: `stor-${"e".repeat(40)}` } }] }] } as never);
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    throw new Error("an exhausted version refusal must precede network access");
+  });
+  try {
+    const response = await POST(request({ ...base, serviceId: "exhausted" }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json() as { error: string }).error, /no next listing version/);
+    assert.equal(calls, 0);
+  } finally {
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
+  }
+});
+
+test("an occupied valid version is recovered before, and without, checking a retry's Listing signature", async (t) => {
+  const store = await import("../src/catalog/store.js");
+  const input = { ...base, serviceId: "recover-first" };
+  let published: { anchorAddress: string; programName: string; listing: Record<string, unknown> } | undefined;
+  t.mock.method(globalThis, "fetch", async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    if (init?.method === "POST") {
+      const message = JSON.parse(String(init.body)).params?.[0]?.message;
+      assert.notEqual(published && message, "getAddressNonce", "recovery never reads a write nonce");
+      return Response.json({ result: 200, response: message !== "searchStoragePrograms" ? 0
+        : published ? [{ storageAddress: published.anchorAddress, programName: published.programName }] : [] });
+    }
+    return published && String(url).endsWith(published.anchorAddress)
+      ? Response.json({ success: true, data: published.listing, owner: `0x${keyHex}`, programName: published.programName })
+      : new Response(null, { status: 404 });
+  });
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const authenticated = { ...input, listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+  const preview = await (await POST(request(authenticated))).json() as { message: string };
+  const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
+  const built = await (await POST(request(signed))).json() as NonNullable<typeof published> & { tx: unknown; contentHash: string };
+  assert.ok(built.tx);
+  published = built;
+  type Recovered = { exists: boolean; tx: unknown; anchorAddress: string; contentHash: string; listing: unknown; registration: { displayName: string } };
+  const recoveredBy = async (body: Record<string, unknown>, label: string) => {
+    const response = await POST(request(body));
+    assert.equal(response.status, 200, label);
+    const recovered = await response.json() as Recovered;
+    assert.equal(recovered.exists, true, label);
+    assert.equal(recovered.tx, null, label);
+    assert.equal(recovered.anchorAddress, built.anchorAddress, label);
+    assert.equal(recovered.contentHash, built.contentHash, label);
+    assert.deepEqual(recovered.listing, built.listing, label);
+    return recovered;
+  };
+  try {
+    for (const [label, listingSignature] of Object.entries({
+      "a garbled signature": "ab".repeat(64),
+      "a stale signature over other bytes": walletSignature(`${preview.message}0`),
+      "a value that is not a signature": "zz",
+    })) await recoveredBy({ ...authenticated, listingSignature }, label);
+    // The catalog's display name changes after the preview, so the rebuilt bytes differ from the stored ones.
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim, displayName: "Renamed seller", listings: [{
+      listingId: input.serviceId, version: 1, anchor: { kind: "storage-program", locator: built.anchorAddress } }] }] } as never);
+    const renamed = await recoveredBy(signed, "after a display-name change");
+    assert.equal(renamed.registration.displayName, base.name, "the registration keeps the stored artifact's name");
+  } finally {
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });
   }
 });

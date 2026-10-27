@@ -4,6 +4,7 @@
  *   { claim, serviceId, name, description, rails[], delivery[] }
  * →  identity preimage, then the exact unsigned Listing, then (only after its
  *    wallet signature is verified) a broadcastable anchor transaction.
+ * The first response fixes `listingVersion`; every later request sends it back.
  *
  * For a new version the client wallet-signs `message`; the server verifies the
  * signature and binds that exact artifact plus its hashes into `tx`. When the same owner/name already holds
@@ -95,7 +96,9 @@ async function accountNonce(addressHex: string): Promise<number> {
     // The deadline also covers the body, so a stall after the headers lands here.
     throw new Error(timedOut(error) ? "the node did not answer in time" : "the reply could not be read");
   }
-  if (json?.result !== 200) throw new Error(`the node returned result ${String(json?.result)}`);
+  if (json?.result !== 200) {
+    throw new Error(typeof json?.result === "number" ? `the node returned result ${json.result}` : "the node returned an unexpected result");
+  }
   const nonce = json.response;
   if (typeof nonce !== "number" || !Number.isSafeInteger(nonce) || nonce < 0 || nonce >= Number.MAX_SAFE_INTEGER) {
     throw new Error("the node returned an invalid account nonce");
@@ -162,17 +165,22 @@ return async function POST(req: NextRequest) {
   // Previews are stateless: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
-  const versionFloor = listingVersionFloor(did, serviceId);
-  const nextVersion = Math.max(0, versionFloor, ...priorVersions) + 1;
-  // A retry names the version its signed artifact carries, so it still resolves
-  // that version after the catalog has indexed it, instead of allocating the next.
-  const requestedVersion = body.listingVersion;
-  if (requestedVersion !== undefined && requestedVersion !== nextVersion &&
-    !(Number.isSafeInteger(requestedVersion) && requestedVersion >= 1 &&
-      (requestedVersion <= versionFloor || priorVersions.includes(requestedVersion)))) {
-    return NextResponse.json({ error: "listingVersion must be the next version or one this seller already published" }, { status: 400 });
+  // The durable floor still counts versions whose catalog rows an admission
+  // reset removed. Every version up to `highestKnown` is taken: it is recovered
+  // or refused, never created again. Only `nextVersion` may be created.
+  const highestKnown = Math.max(0, listingVersionFloor(did, serviceId), ...priorVersions);
+  const nextVersion = highestKnown + 1;
+  if (!Number.isSafeInteger(nextVersion)) {
+    return NextResponse.json({ error: "this Service ID has no next listing version; choose a new Service ID" }, { status: 400 });
   }
-  const listingVersion = requestedVersion ?? nextVersion;
+  // The first response fixes the version. Later requests must send it back, so
+  // a retry resolves that version instead of one worked out again from the catalog.
+  const staged = body.identitySignature !== undefined || body.listingSignature !== undefined;
+  const listingVersion: unknown = staged ? body.listingVersion : nextVersion;
+  if (typeof listingVersion !== "number" || !Number.isSafeInteger(listingVersion) ||
+    listingVersion < 1 || listingVersion > nextVersion) {
+    return NextResponse.json({ error: "listingVersion must be the version the first step returned or one this seller already published" }, { status: 400 });
+  }
 
   const category = (body.category ?? "services.other").trim().toLowerCase();
   if (!/^[a-z0-9.-]{1,64}$/.test(category) || category.split(".").some((part) => !part)) {
@@ -344,12 +352,6 @@ return async function POST(req: NextRequest) {
     listing as unknown as ListingDraft,
     "produce",
   );
-  if (
-    payloadCapability.disposition !== "not-applicable" &&
-    payloadCapability.disposition !== "supported"
-  ) {
-    return NextResponse.json({ error: ATTESTED_PAYLOAD_UNSUPPORTED }, { status: 409 });
-  }
 
   // StorageProgram names are producer-held write inputs, not public resolution
   // keys. This deterministic colon-free encoding lets THIS producer recover a
@@ -360,7 +362,8 @@ return async function POST(req: NextRequest) {
   // Earlier /register versions named the program `dacs1-<base64url(logical
   // address)>`. Those versions are still occupied on chain, so the occupancy
   // check reads both names; new programs are only ever created under the
-  // current one.
+  // current one. These are this producer's own names: another producer's
+  // programs are not searched, so absence here does not prove a version is unused.
   const legacyProgramNameFor = (version: number) =>
     `dacs1-${Buffer.from(listingAddress(did, serviceId, version), "utf8").toString("base64url")}`;
   const recoverable = (verified: Awaited<ReturnType<typeof verifyStoredListing>>) => Boolean(
@@ -384,37 +387,6 @@ return async function POST(req: NextRequest) {
   }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
-  let signedCandidate: Record<string, unknown> | undefined;
-  if (body.listingSignature !== undefined) {
-    if (typeof body.listingSignature !== "string") {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
-    }
-    const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
-    const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
-    if (!listingSignatureValue) {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
-    }
-    let listingSignatureValid = false;
-    try {
-      listingSignatureValid = ed25519Verify(
-        Buffer.from(message, "utf8"),
-        Uint8Array.from(Buffer.from(listingSigHex, "hex")),
-        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
-      );
-    } catch { /* malformed signatures fail closed */ }
-    signedCandidate = {
-      ...listing,
-      signature: {
-        algorithm: "ed25519",
-        signer: did,
-        value: listingSignatureValue,
-      },
-    };
-    if (!listingSignatureValid || !isListing(signedCandidate)) {
-      return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
-    }
-  }
-
   const logicalAddress = listingAddress(did, serviceId, listingVersion);
   const chainIdentity = pinnedChainIdentity();
   const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
@@ -428,11 +400,11 @@ return async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
-  // A version slot is write-once: a listed version the name lookup cannot find
+  // A version slot is write-once: a taken version the name lookup cannot find
   // is not free, so no second create may be prepared for it.
-  if (resolution.status === "absent" && priorVersions.includes(listingVersion)) {
+  if (resolution.status === "absent" && listingVersion !== nextVersion) {
     return NextResponse.json(
-      { error: "the catalog already lists this version, but its program was not found under this producer's names; retry once the name index has caught up, or choose a new Service ID" },
+      { error: "this seller already published this version, but its program was not found under this producer's names; no transaction was prepared. Retry once the name index has caught up, or choose a new Service ID" },
       { status: 409 },
     );
   }
@@ -452,6 +424,7 @@ return async function POST(req: NextRequest) {
     }
     // Listing versions are immutable. Recover the already-signed artifact and
     // continue registration; never overwrite it with newly generated bytes.
+    // The rebuilt preview (and any signature over it) plays no part here.
     anchorAddress = resolution.address;
     publishedListing = resolution.record.data;
     publishedHash = verified.contentHash;
@@ -465,7 +438,7 @@ return async function POST(req: NextRequest) {
     }
     // Do not prepare a broadcastable transaction until the wallet has signed
     // the exact artifact returned by the preview response.
-    if (!signedCandidate) {
+    if (body.listingSignature === undefined) {
       return NextResponse.json({
         listing,
         message,
@@ -479,6 +452,33 @@ return async function POST(req: NextRequest) {
         railResolution,
         payloadCapability,
       });
+    }
+    if (typeof body.listingSignature !== "string") {
+      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+    }
+    const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
+    const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
+    if (!listingSignatureValue) {
+      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+    }
+    let listingSignatureValid = false;
+    try {
+      listingSignatureValid = ed25519Verify(
+        Buffer.from(message, "utf8"),
+        Uint8Array.from(Buffer.from(listingSigHex, "hex")),
+        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
+      );
+    } catch { /* malformed signatures fail closed */ }
+    const signedCandidate: Record<string, unknown> = {
+      ...listing,
+      signature: {
+        algorithm: "ed25519",
+        signer: did,
+        value: listingSignatureValue,
+      },
+    };
+    if (!listingSignatureValid || !isListing(signedCandidate)) {
+      return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
     }
     // Broadcasting is the seller's irreversible step, so refuse a node outside
     // the pin here rather than after the write (confirm-listing checks again).
