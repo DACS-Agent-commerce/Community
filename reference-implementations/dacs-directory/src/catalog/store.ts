@@ -542,31 +542,20 @@ export function observedRevocationCandidate(locator: string): Record<string, unk
 export function retainedListingRevocation(hash: string): RevocationBinding | null {
   return getJson<{ binding: RevocationBinding } | null>(`listing-revocation:${hash}`, null)?.binding ?? null;
 }
-/** Return original marker bytes or null; storage errors propagate. Reverify bytes before using signed timing. */
-export function retainedListingRevocationMarker(hash: string): Record<string, unknown> | null {
-  return getJson<{ marker: Record<string, unknown> } | null>(`listing-revocation:${hash}`, null)?.marker ?? null;
-}
 /** Call only after RB-4 verification against the independently verified listing signer. */
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
-  db.transaction(() => {
-    const earlier = retainedListingRevocationMarker(binding.listingContentHash);
-    if (typeof earlier?.revokedAt === "number" && typeof marker.revokedAt === "number" && earlier.revokedAt <= marker.revokedAt) return;
-    setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
-  }).immediate();
+  setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
 }
-const ownerPendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
-  WHERE listing_hash = ? AND owner = ? AND state = 'pending' ORDER BY seq LIMIT ?`);
+const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
 /**
  * Whether the Listing's own owner anchored a marker that no read has settled: unread,
  * backing off or still queued. Anyone may anchor other candidates, so only the owner's count.
- * Candidates in `verified` were verified by the caller's current pass and count as settled.
  * Returns false when the owner is unknown.
  */
-export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null,
-  verified: readonly string[] = []): boolean {
+export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null): boolean {
   if (!listingOwner) return false;
-  const pending = ownerPendingCandidates.all(listingHash, canonicalProgramOwner(listingOwner), verified.length + 1) as Array<{ locator: string }>;
-  return pending.some(({ locator }) => !verified.includes(locator));
+  return ownerPendingCandidate.get(listingHash, canonicalProgramOwner(listingOwner)) !== undefined;
 }
 
 // Earlier releases persisted unreadable candidates as rejected without a
@@ -844,13 +833,11 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
   saveWithdrawalSources(sources);
   return true;
 });
-/** Whether an authenticated source leaves this Listing's withdrawal unsettled; carried markers in `verified` are settled. */
-export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string, verified: readonly string[] = []): boolean =>
+export const hasIncompleteWellKnownWithdrawal = (seller: string, hash: string): boolean =>
   getJson("withdrawal-carriage-replay-required", false) ||
   getJson<string[]>("withdrawal-carriage-replay-hashes", []).includes(hash) || withdrawalSources().some((source) =>
     source.seller === seller && (source.incomplete.includes(hash) || source.incomplete.includes("*") ||
-      (source.provenance !== "legacy" && (source.bindings ?? []).some((binding) => binding.listingContentHash === hash &&
-        !verified.includes(binding.markerAnchor.locator)))));
+      (source.provenance !== "legacy" && (source.bindings ?? []).some((binding) => binding.listingContentHash === hash))));
 export const finishWithdrawalCarriageReplay = db.transaction((): void => {
   // Older v4 databases may still carry the global flag. Successful chain
   // replay clears it independently of each source's authenticated checks.

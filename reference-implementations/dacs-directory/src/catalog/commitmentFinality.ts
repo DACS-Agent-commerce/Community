@@ -33,11 +33,14 @@ export interface CommitmentVerifier {
   verifyReceipt: (receipt: Readonly<AnchorReceipt>, raw: Readonly<Obj>, signal: AbortSignal) => Promise<boolean>;
 }
 
-/** Verified Listing bytes and withdrawal cutoff; null means an unresolved withdrawal. */
+/**
+ * Verified bytes of the exact Listing tuple. Its withdrawal state is not an input: revocation
+ * does not invalidate committed sessions (DACS-1), and a marker's signed `revokedAt` is
+ * seller-chosen, not authenticated consensus time.
+ */
 export interface ListingEvidence {
   locator: string;
   raw: Obj;
-  withdrawnAt?: number | null;
 }
 
 /** Already authenticated agreement/bundle joins consumed by the commitment gate. */
@@ -120,8 +123,6 @@ async function verifyProof(context: CommitmentContext, listing: ListingEvidence,
   }
   if ((typeof validity?.notBefore === "number" && committedAt < validity.notBefore) ||
       (typeof validity?.notAfter === "number" && committedAt > validity.notAfter)) return refused("outside signed Listing validity");
-  if (listing.withdrawnAt === null || (listing.withdrawnAt !== undefined &&
-      (!Number.isFinite(listing.withdrawnAt) || committedAt >= listing.withdrawnAt))) return refused("pre-withdrawal timing is unproven");
   const duration = record(listing.raw.terms)?.deadlineSecAfterCommit;
   if (duration !== undefined && (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0 ||
       typeof context.deadline !== "number" || !Number.isFinite(context.deadline) ||

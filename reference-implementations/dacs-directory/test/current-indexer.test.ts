@@ -1250,7 +1250,7 @@ test("RFQ fixed-price fallback cannot select a center from metered pricing", asy
   }
 });
 
-test("unresolved withdrawal withholds history until authenticated pre-withdrawal timing is known", async t => {
+test("authenticated indeterminate withdrawal hides discovery but retains a committed completed deal", async t => {
   const now = Date.now();
   t.mock.method(Date, "now", () => now);
   const { activeOffer } = await import("../src/catalog/discovery.js");
@@ -1296,22 +1296,18 @@ test("unresolved withdrawal withholds history until authenticated pre-withdrawal
       [listingRef.contentHash], { generatedAt: 1, hash: "c".repeat(64) }, [], "publisher-signature");
     const held = await indexRegistration(reg, before, resolve);
     assert.deepEqual(held.listings, [], "authenticated incomplete withdrawal suppresses new discovery");
-    assert.equal(held.deals[0].refsVerified, false, "unresolved withdrawal has no authenticated cutoff");
-    assert.equal(held.reputation.completed, 0);
+    assert.equal(held.deals[0].refsVerified, true, "historical listing remains available to the evidence graph");
+    assert.deepEqual(held.reputation, before.reputation, "committed completion and reputation are unchanged");
 
     const verified = await verifyListing(fixture.listing); assert.ok(verified);
-    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 100 };
+    // A signed revokedAt before the commitment's consensus time is seller-chosen and erases nothing.
+    const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: listingRef.contentHash, revokedAt: 1 };
     const marker = { ...markerScope, signature: { algorithm: "ed25519", signer: dids[1],
       value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(markerScope)}`),
         privateKeyFromSeed(seeds[1]))).toString("base64url") } };
     const binding = await findValidListingRevocation([locator(807)], verified, 1, async () => marker);
     assert.ok(binding); retainListingRevocation(binding, marker);
-    const incomplete = await indexRegistration(reg, held, resolve);
-    assert.equal(incomplete.listings[0].status, "revoked");
-    assert.equal(incomplete.deals[0].refsVerified, false, "the incomplete source may still carry an earlier cutoff");
-    assert.ok(recordWellKnownWithdrawalCheck("https://history.example", dids[1], [listingRef.contentHash], [],
-      { generatedAt: 2, hash: "d".repeat(64) }, [], "publisher-signature"));
-    const revoked = await indexRegistration(reg, incomplete, resolve);
+    const revoked = await indexRegistration(reg, held, resolve);
     assert.equal(revoked.listings.some(activeOffer), false);
     assert.equal(revoked.listings[0].status, "revoked");
     assert.deepEqual(revoked.listings[0].revocation, binding);
