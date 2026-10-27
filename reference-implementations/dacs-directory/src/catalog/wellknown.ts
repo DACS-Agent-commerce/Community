@@ -15,10 +15,10 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  */
 import { isRevocationBinding } from "@kynesyslabs/dacs/artifacts";
 import { sha256Hex } from "./canonical.js";
+import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
-import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
 import { canonicalSignatureBytes } from "./signatureValue.js";
 import type { BundleBinding, RevocationBinding } from "./types.js";
