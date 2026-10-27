@@ -398,8 +398,10 @@ base64url-patched Buffer).
   exact agreement hash, Listing tuple, pattern and signing-party roster. New records
   use finalized receipt consensus time; legacy signed `committedAt` must equal it.
   That time must fall inside the signed Listing validity window, satisfy its deadline
-  bound, and strictly precede a known signed withdrawal. An unresolved withdrawal
-  withholds credit until its cutoff is authenticated. Expired tuples remain available
+  bound, and strictly precede the earliest signed withdrawal found. Each pass checks
+  every withdrawal candidate in its bounded batch. While an owner-anchored or
+  source-carried marker, or an incomplete authenticated source, is unsettled, credit
+  is withheld, since it may carry an earlier cutoff. Expired tuples remain available
   as historical evidence without returning to discovery; category attribution uses
   the exact tuple. Startup clears older cached deal credit and category hints.
   `EvidenceGraphDeps.commitment` and `indexRegistration`'s final dependency accept a
@@ -457,8 +459,10 @@ base64url-patched Buffer).
   remain stateless. Empty name lookups, nonce advancement, re-signing and elapsed time
   never release another create for a prepared version. An exact repeat of the signed
   request, including one whose first response was lost or one racing it, receives the
-  same saved transaction bytes again. Any other signed retry, or one for a version the
-  catalog already lists, returns HTTP 409 with the saved anchor and no transaction.
+  same saved transaction bytes again; a prepared version keeps the seller display name
+  it was signed with, whatever the catalog shows later. Any other signed retry, or one
+  for a version the catalog already lists, returns HTTP 409 with the saved anchor and
+  no transaction.
   Current owner-bound, signature-verified readback can resume registration without a
   write, including with an expired presentation. Saved preparations never establish
   finality or success and remain retained after readback. There is no automatic

@@ -3,7 +3,7 @@ import test, { type TestContext } from "node:test";
 import "./fixtures/isolated-data-dir.js";
 import { buildCurrentEvidenceGraph, artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
-import { admitRevocationCandidates } from "../src/catalog/store.js";
+import { admitRevocationCandidates, recordWellKnownWithdrawalCheck, retainedListingRevocationMarker } from "../src/catalog/store.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { dids, seeds, maps, sign, locator, vector, payeeBoundVector, bindingFor, installAgreement, registeredDeal, type Obj }
@@ -341,4 +341,58 @@ test("commitment key resolver outages retain their original cause", async () => 
   async () => { throw new Error("session key service timed out"); });
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.reason, /session key service timed out/);
+});
+
+// Each cutoff test signs its own validity window, so its Listing hash, candidates and retained marker are its own.
+const withdrawalMarker = (hash: string, revokedAt: number) => {
+  const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt };
+  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
+  return { ...scope, signature: { algorithm: "ed25519", signer: seller, value } };
+};
+async function creditedAfterWithdrawalAt120(t: TestContext, notBefore: number, at: number) {
+  t.mock.method(Date, "now", () => 200);
+  storage(t);
+  const fixture = await prepared(false, { notBefore });
+  const hash = artifactHash(fixture.listing, "listing");
+  maps.set(locator(at), withdrawalMarker(hash, 120));
+  admitRevocationCandidates(hash, [{ locator: locator(at), owner }]);
+  const first = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110));
+  assert.equal(first.deals[0].refsVerified, true, "a commitment before the only signed withdrawal is credited");
+  return { fixture, hash, first, repeat: () => indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110)) };
+}
+
+test("an earlier signed withdrawal discovered after a later one replaces the retained cutoff", async (t) => {
+  const { hash, repeat } = await creditedAfterWithdrawalAt120(t, 5, 7410);
+  maps.set(locator(7411), withdrawalMarker(hash, 100));
+  admitRevocationCandidates(hash, [{ locator: locator(7411), owner }]);
+  const repeated = await repeat();
+  assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
+  assert.equal(repeated.deals[0].refsVerified, false);
+  assert.equal(repeated.reputation.completed, 0);
+});
+
+test("an unread owner marker withholds credit beside a retained cutoff until a read settles it", async (t) => {
+  const { hash, repeat } = await creditedAfterWithdrawalAt120(t, 6, 7420);
+  admitRevocationCandidates(hash, [{ locator: locator(7421), owner }]);
+  const held = await repeat();
+  assert.equal(held.deals[0].refsVerified, false, "the unread owner marker may carry an earlier cutoff");
+  assert.equal(held.reputation.completed, 0);
+  maps.set(locator(7421), { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt: 90 });
+  t.mock.method(Date, "now", () => 200 + 120_000);
+  const settled = await repeat();
+  assert.equal(settled.deals[0].refsVerified, true, "an unsigned marker is rejected, and the verified owner marker does not hold");
+});
+
+test("an unread marker carried by an authenticated withdrawal source withholds credit beside a retained cutoff", async (t) => {
+  const { hash, first, repeat } = await creditedAfterWithdrawalAt120(t, 7, 7430);
+  const binding = first.listings[0].revocation;
+  assert.ok(binding);
+  const carried = { ...binding, markerAnchor: { kind: "storage-program" as const, locator: locator(7431) } };
+  assert.ok(recordWellKnownWithdrawalCheck("https://cutoff.example", seller, [], [], { generatedAt: 1, hash: "c".repeat(64) }, [carried]));
+  const held = await repeat();
+  assert.equal(held.deals[0].refsVerified, false, "the carried marker may carry an earlier cutoff");
+  maps.set(locator(7431), withdrawalMarker(hash, 130));
+  t.mock.method(Date, "now", () => 200 + 120_000);
+  const settled = await repeat();
+  assert.equal(settled.deals[0].refsVerified, true, "a verified carried marker settles its binding and the earliest cutoff stays 120");
 });

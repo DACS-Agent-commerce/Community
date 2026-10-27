@@ -268,6 +268,26 @@ test("a prepared version the catalog already lists returns its saved anchor and 
   assert.equal(state.nonceReads, 1);
 });
 
+const catalogWithSeller = (displayName) => ({ catalogVersion: "1", generatedAt: clock,
+  sellers: displayName ? [{ primaryClaim: `did:demos:agent:${ownerHex}`, displayName, listings: [] }] : [] });
+for (const [change, before, after] of [
+  ["gains", undefined, "Renamed seller"],
+  ["renames", "Original seller", "Renamed seller"],
+  ["drops", "Original seller", undefined],
+]) {
+  test(`an exact signed repeat gets its saved transaction after the catalog ${change} the seller's display name`, async (t) => {
+    const state = node(t);
+    module.saveCatalog(catalogWithSeller(before));
+    try {
+      const signed = await signedInput(`display-name-${change}`);
+      const first = await prepare(signed);
+      module.saveCatalog(catalogWithSeller(after));
+      await resumed(await post(request(signed)), first);
+    } finally { module.saveCatalog(catalogWithSeller(undefined)); }
+    assert.equal(state.nonceReads, 1, "a repeat never asks for a replacement nonce");
+  });
+}
+
 test("concurrent signed requests return at most one transaction and cannot overwrite its bytes", async (t) => {
   const state = node(t);
   const first = await signedInput("concurrent");
