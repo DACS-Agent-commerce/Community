@@ -366,7 +366,8 @@ return async function POST(req: NextRequest) {
   // address)>`. Those versions are still occupied on chain, so the occupancy
   // check reads both names; new programs are only ever created under the
   // current one. These are this producer's own names: another producer's
-  // programs are not searched, so absence here requires logical resolution below.
+  // programs are not searched. A configured logical resolver strengthens this
+  // check; without one the name-based limitation is accepted (see README).
   const legacyProgramNameFor = (version: number) =>
     `dacs1-${Buffer.from(listingAddress(did, serviceId, version), "utf8").toString("base64url")}`;
   const recoverable = (verified: Awaited<ReturnType<typeof verifyStoredListing>>) => Boolean(
@@ -390,7 +391,7 @@ return async function POST(req: NextRequest) {
       if (legacy.status === "present") programName = legacyName;
     }
   }
-  if (resolution.status === "absent") {
+  if (resolution.status === "absent" && resolveVersion) {
     resolution = await resolveListingVersionOccupancy(logicalAddress, chainIdentity, owner, resolveVersion);
     if (resolution.status === "present") programName = resolution.record.programName ?? programName;
   }
@@ -411,7 +412,7 @@ return async function POST(req: NextRequest) {
   // is not free, so no second create may be prepared for it.
   if (resolution.status === "absent" && listingVersion !== nextVersion) {
     return NextResponse.json(
-      { error: "this seller already published this version, but its native binding could not be recovered; no transaction was prepared. Retry once logical resolution has caught up, or choose a new Service ID" },
+      { error: "this seller already published this version, but its native binding could not be recovered; no transaction was prepared. Retry once the lookup has caught up, or choose a new Service ID" },
       { status: 409 },
     );
   }

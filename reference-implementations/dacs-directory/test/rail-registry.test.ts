@@ -15,7 +15,6 @@ import {
 } from "../src/catalog/listingOptions.js";
 import { resolveListingRails } from "../src/sdkListingValidation.js";
 import { signedRailSnapshot } from "./signed-rail-snapshot.js";
-import { emptyListingOccupancy } from "./fixtures/listing-occupancy.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-rail-registry-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
@@ -104,7 +103,7 @@ test("/register refuses an unverified rail before any signature; a signed-snapsh
       assert.equal(rpcCalls, 0, option.railId);
 
       const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
-      const signedPost = createBuildListingPost(signedRailSnapshot, emptyListingOccupancy);
+      const signedPost = createBuildListingPost(signedRailSnapshot);
       let preview: {
         listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
         railResolution: { disposition: string; reason: string; authorityBasis: string };

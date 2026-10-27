@@ -428,17 +428,21 @@ base64url-patched Buffer).
   otherwise propose the same next version. An occupied version whose owner-held program
   no longer authenticates blocks publication for that listing ID. Recover by publishing
   under a new listing ID; the publisher does not skip the occupied version.
-- **New Listing versions require complete logical occupancy resolution.** The
-  internal builder's `ResolveListingVersion` callback receives the configured chain
-  identity, logical Listing address and abort signal. This server-owned adapter must
-  establish occupancy across all producer names; request fields, catalog absence and
-  empty name searches cannot establish an unused version. A complete, correctly scoped
-  empty result permits preparation; one native binding requires fresh owner, metadata,
+- **New Listing versions use producer-name checks and an optional logical resolver.**
+  Without a resolver, the builder permits creation only when this producer's current
+  and legacy program names are absent and the requested version equals the next
+  known version. Another producer's differently named publication of the same logical
+  version, or a program an empty node search fails to return, is not detected before
+  creation. This is an accepted limitation until the node offers a complete
+  logical-version lookup; today's pinned node has none, so no production resolver is
+  configured. Existing producer-name matches resume through fresh authenticated
+  readback. When configured, the server-owned `ResolveListingVersion` callback receives
+  the logical Listing address, configured chain identity and abort signal and must
+  establish occupancy across all producer names. A complete, correctly scoped empty
+  result permits the next version; one native binding requires fresh owner, metadata,
   tuple and signature verification and resumes the stored Listing without writing.
   Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503.
-  The pinned node has no complete logical-resolution contract, so no production adapter
-  is configured: empty searches withhold creation. Existing producer-name matches can
-  still resume through fresh authenticated readback. Adapters must bound network bytes
+  Request fields cannot supply this authority. Adapters must bound network bytes
   before decoding and honor cancellation; the builder also bounds results and enforces
   a deadline. These checks do not provide an atomic version allocator.
 - **Authenticated Listing preparations survive retries and restarts.** Before the
@@ -513,7 +517,12 @@ headers without wallet authentication, as required by the pinned middleware cont
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
 and cannot establish absence, so an unresolved fallback lookup returns HTTP 503.
 Even an empty nodeCall search cannot establish occupancy across other producers'
-names; creation requires the complete logical-resolution adapter described above.
+names or detect a program the search fails to return. Without a configured resolver,
+the builder accepts this limitation and allows the next version after both producer
+names are absent; it cannot detect those publications before creation. This remains
+an accepted limitation until the node offers a complete logical-version lookup.
+When configured, the logical-resolution adapter described above must establish
+complete occupancy before creation.
 `npm run check:node -- <exact program name>` is a read-only probe (no
 transactions) that reports the storage not-found answer and both search paths, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one

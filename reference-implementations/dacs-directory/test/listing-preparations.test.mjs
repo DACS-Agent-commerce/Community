@@ -38,7 +38,7 @@ function publicationBoundaries() {
 const module = await import(pathToFileURL(bundle).href);
 const rails = [{ railId: "ap2:stripe-paymentintents", railVersion: 1, phaseHandler: "pay-ap2", governanceAnchoring: "in-code", signatureValid: true }];
 const qualifiedEmpty = async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity, nativeAddresses: [] });
-const post = module.createBuildListingPost(rails, qualifiedEmpty);
+const post = module.createBuildListingPost(rails);
 const clock = 1_800_000_000_000;
 const key = createPrivateKey({
   key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, 12)]),
@@ -154,7 +154,7 @@ test("a lost response survives a fresh process with the exact saved transaction 
       if (call.message === 'getAddressNonce') throw new Error('restart must not request a nonce');
       return Response.json({result:200,response:[]});
     };
-    const response = await createBuildListingPost(${JSON.stringify(rails)}, ${qualifiedEmpty.toString()})(new NextRequest('https://directory.example/api/dacs/build-listing',
+    const response = await createBuildListingPost(${JSON.stringify(rails)})(new NextRequest('https://directory.example/api/dacs/build-listing',
       {method:'POST',headers:{'content-type':'application/json'},body:${JSON.stringify(JSON.stringify(signed))}}));
     process.stdout.write(JSON.stringify({status:response.status,body:await response.json()}));
   `], { encoding: "utf8", timeout: 15_000 });
@@ -317,21 +317,53 @@ test("another producer's differently named Listing is recovered before catalog i
   assert.equal(state.nonceReads, 0);
 });
 
-test("empty name searches without a complete logical resolver withhold even a signed create", async (t) => {
+test("empty producer-name searches permit a default preview and one signed create", async (t) => {
   const state = node(t);
   const signed = await signedInput("no-logical-resolver");
-  for (const input of [signed, { ...signed, listingSignature: undefined }]) {
-    const response = await module.createBuildListingPost(rails)(request(input));
-    assert.equal(response.status, 503);
-    const body = await response.json();
-    assert.match(body.error, /no complete logical-version resolver/);
-    assert.equal(body.tx, undefined);
-  }
-  assert.equal(state.nonceReads, 0);
-  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address LIKE ?").get("%:no-logical-resolver:v1").n, 0);
+  const preview = await post(request({ ...signed, listingSignature: undefined }));
+  assert.equal(preview.status, 200);
+  const body = await preview.json();
+  assert.equal(body.exists, false);
+  assert.equal(body.listing.listingVersion, 1);
+  assert.equal(body.tx, null);
+  assert.equal(body.publicationReady, false);
+  assert.equal(state.nonceReads, 0, "preview must not prepare a transaction");
+  const first = await prepare(signed);
+  assert.equal(first.exists, false);
+  assert.equal(first.publicationReady, true);
+  await unresolved(await post(request(signed)), first.anchorAddress);
+  assert.equal(state.nonceReads, 1);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress).n, 1);
 });
 
-test("the API route with trusted rail authority still withholds creation without logical occupancy", async (t) => {
+test("the default handler creates only the next version when a prior version is missing on chain", async (t) => {
+  const state = node(t);
+  const id = "default-next-version";
+  const prior = await signedInput(id);
+  const first = await prepare(prior);
+  const catalog = module.loadCatalog();
+  t.after(() => module.saveCatalog(catalog));
+  module.saveCatalog({ ...catalog, sellers: [{
+    primaryClaim: prior.claim, displayName: "Previously indexed seller", deals: [],
+    listings: [{ listingId: id, version: 1, anchor: { kind: "storage-program", locator: first.anchorAddress } }],
+  }] });
+  const next = await signedInput(id);
+  assert.equal(next.listingVersion, 2);
+  for (const listingSignature of [undefined, prior.listingSignature]) {
+    const response = await post(request({ ...prior, listingSignature }));
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.match(body.error, /already published this version/);
+    assert.equal(body.tx, undefined);
+  }
+  assert.equal((await post(request({ ...next, listingVersion: 3 }))).status, 400);
+  assert.equal(state.nonceReads, 1, "past and future versions never obtain a nonce");
+  const second = await prepare(next);
+  assert.equal(second.listing.listingVersion, 2);
+  assert.equal(state.nonceReads, 2);
+});
+
+test("the API route with trusted rail authority creates on producer-name absence without a resolver", async (t) => {
   const state = node(t);
   const signed = await signedInput("route-logical-occupancy");
   const routeBundle = join(bundleDirectory, "route-with-authority.mjs");
@@ -348,11 +380,39 @@ test("the API route with trusted rail authority still withholds creation without
   });
   const route = await import(pathToFileURL(routeBundle).href);
   const response = await route.POST(request(signed));
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 200);
   const body = await response.json();
-  assert.match(body.error, /no complete logical-version resolver/);
-  assert.equal(body.tx, undefined);
+  assert.equal(body.exists, false);
+  assert.ok(body.tx);
+  assert.equal(state.nonceReads, 1);
+  await unresolved(await route.POST(request(signed)), body.anchorAddress);
+  assert.equal(state.nonceReads, 1);
+});
+
+for (const [name, resolveVersion] of [
+  ["indeterminate", async () => ({ status: "indeterminate", reason: "history index is incomplete" })],
+  ["invalid", async () => null],
+  ["multiple", async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity,
+    nativeAddresses: [`stor-${"71".repeat(20)}`, `stor-${"72".repeat(20)}`] })],
+]) test(`a configured ${name} resolver withholds preview and signed creation`, async (t) => {
+  const state = node(t);
+  const signed = await signedInput(`configured-${name}`);
+  const builder = module.createBuildListingPost(rails, resolveVersion);
+  for (const input of [{ ...signed, listingSignature: undefined }, signed]) {
+    const response = await builder(request(input));
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).tx, undefined);
+  }
   assert.equal(state.nonceReads, 0);
+});
+
+test("a configured complete empty resolver permits the next signed Listing", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("configured-empty");
+  const response = await module.createBuildListingPost(rails, qualifiedEmpty)(request(signed));
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).tx);
+  assert.equal(state.nonceReads, 1);
 });
 
 test("logical occupancy is resolved again on every request without caching success", async (t) => {
@@ -374,7 +434,8 @@ test("logical occupancy is resolved again on every request without caching succe
 test("a request-supplied logical resolution cannot authorize creation", async (t) => {
   const state = node(t);
   const signed = await signedInput("untrusted-occupancy");
-  const response = await module.createBuildListingPost(rails)(request({ ...signed,
+  const builder = module.createBuildListingPost(rails, async () => ({ status: "indeterminate", reason: "history index is incomplete" }));
+  const response = await builder(request({ ...signed,
     occupancy: await qualifiedEmpty("forged", "forged"), nativeAddresses: [] }));
   assert.equal(response.status, 503);
   assert.equal(state.nonceReads, 0);
@@ -407,6 +468,29 @@ test("logical resolver failure preserves its cause", async () => {
   const result = await resolveOccupancy(async () => { throw new Error("history endpoint refused HTTP 403"); });
   assert.equal(result.status, "indeterminate");
   assert.match(result.reason, /history endpoint refused HTTP 403/);
+});
+
+for (const [name, message, cause] of [
+  ["TimeoutError", "", /timed out/],
+  ["AbortError", "", /aborted/],
+  ["TimeoutError", "upstream stopped", /timed out.*upstream stopped/],
+  ["AbortError", "upstream stopped", /aborted.*upstream stopped/],
+]) test(`logical resolver preserves ${name} cause with ${message ? "a message" : "an empty message"}`, async () => {
+  const result = await resolveOccupancy(async () => { throw new DOMException(message, name); });
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, cause);
+});
+
+test("an empty ordinary resolver error retains a nonempty cause", async () => {
+  const result = await resolveOccupancy(async () => { throw new Error(""); });
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /resolver error/);
+});
+
+test("a non-Error resolver failure retains the unknown-cause classification", async () => {
+  const result = await resolveOccupancy(async () => { throw null; });
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /unknown resolver failure/);
 });
 
 test("the caller times out a logical resolver that ignores cancellation", async (t) => {
@@ -469,6 +553,8 @@ test("the logical resolution deadline also cancels a stalled native response bod
 
 for (const [name, respond, cause] of [
   ["timeout", () => { throw new DOMException("deadline", "TimeoutError"); }, /timed out/],
+  ["empty-message timeout", () => { throw new DOMException("", "TimeoutError"); }, /timed out/],
+  ["empty-message abort", () => { throw new DOMException("", "AbortError"); }, /timed out/],
   ["HTTP refusal", () => new Response(null, { status: 403 }), /HTTP 403/],
   ["transport failure", () => { throw new TypeError("fetch failed"); }, /could not be reached/],
   ["malformed JSON", () => new Response("{"), /invalid JSON/],

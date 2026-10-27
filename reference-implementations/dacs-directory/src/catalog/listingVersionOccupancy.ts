@@ -36,7 +36,13 @@ export async function resolveListingVersionOccupancy(logicalAddress: string, cha
   try {
     return await Promise.race([resolveBinding(logicalAddress, chainIdentity, owner, resolve, controller.signal), aborted]);
   } catch (error) {
-    const cause = error instanceof Error ? error.message : "unknown resolver failure";
+    let cause = "unknown resolver failure";
+    if (error instanceof Error) {
+      if (error.name === "TimeoutError") cause = "timed out";
+      else if (error.name === "AbortError") cause = "aborted";
+      else cause = "resolver error";
+      if (error.message) cause += `: ${error.message}`;
+    }
     return uncertain(`logical-version resolution failed: ${cause.slice(0, MAX_CAUSE_LENGTH)}`);
   } finally {
     clearTimeout(timer);
