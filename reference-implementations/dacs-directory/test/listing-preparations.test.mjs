@@ -38,6 +38,13 @@ function publicationBoundaries() {
 const module = await import(pathToFileURL(bundle).href);
 const rails = [{ railId: "ap2:stripe-paymentintents", railVersion: 1, phaseHandler: "pay-ap2", governanceAnchoring: "in-code", signatureValid: true }];
 const qualifiedEmpty = async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity, nativeAddresses: [] });
+const uncertainResolvers = [
+  ["indeterminate", async () => ({ status: "indeterminate", reason: "history index is incomplete" })],
+  ["invalid", async () => null],
+  ["multiple", async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity,
+    nativeAddresses: [`stor-${"71".repeat(20)}`, `stor-${"72".repeat(20)}`] })],
+  ["timed-out", async () => { throw new DOMException("deadline", "TimeoutError"); }],
+];
 const post = module.createBuildListingPost(rails);
 const clock = 1_800_000_000_000;
 const key = createPrivateKey({
@@ -58,7 +65,7 @@ const db = new Database(join(directory, "directory.sqlite"));
 test.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); rmSync(bundleDirectory, { recursive: true, force: true }); });
 
 function node(t) {
-  const state = { nonce: 0, nonceReads: 0, published: null, lookup: "empty" };
+  const state = { nonce: 0, nonceReads: 0, published: null, lookup: "empty", legacyLookup: null };
   t.mock.method(Date, "now", () => clock);
   t.mock.method(globalThis, "fetch", async (url, init) => {
     if (init?.method === "POST") {
@@ -68,11 +75,12 @@ function node(t) {
         return Response.json({ result: 200, response: state.nonce++ });
       }
       assert.equal(call.message, "searchStoragePrograms");
-      if (state.lookup === "failed") return new Response("unavailable", { status: 503 });
-      if (state.lookup === "oversized") return Response.json({ result: 200, response: [], padding: "x".repeat(1024 * 1024) });
+      const lookup = call.data.query.startsWith("dacs1-") && state.legacyLookup ? state.legacyLookup : state.lookup;
+      if (lookup === "failed") return new Response("unavailable", { status: 503 });
+      if (lookup === "oversized") return Response.json({ result: 200, response: [], padding: "x".repeat(1024 * 1024) });
       const found = state.published && call.data.query === state.published.programName;
       const rows = found ? [{ storageAddress: state.published.anchorAddress, programName: state.published.programName }] : [];
-      return Response.json({ result: 200, response: state.lookup === "ambiguous" ? [...rows, ...rows] : rows });
+      return Response.json({ result: 200, response: lookup === "ambiguous" ? [...rows, ...rows] : rows });
     }
     assert.ok(state.published && String(url).endsWith(state.published.anchorAddress));
     return Response.json({ success: true, data: state.published.listing, owner: `0x${ownerHex}`, programName: state.published.programName,
@@ -100,13 +108,23 @@ async function prepare(input) {
   assert.ok(body.tx);
   return body;
 }
-async function unresolved(response, anchor) {
+async function unresolved(response, anchor, lookupReason) {
   assert.equal(response.status, 409);
   const body = await response.json();
   assert.match(body.error, /preparation.*unresolved/i);
+  if (lookupReason) assert.match(body.error, lookupReason, "the real cause of the failed lookup is kept");
   assert.equal(body.anchorAddress, anchor);
   assert.equal(body.tx, undefined);
 }
+async function refusedWithoutAnchor(response, status) {
+  assert.equal(response.status, status);
+  const body = await response.json();
+  assert.equal(body.tx, undefined);
+  assert.equal(body.anchorAddress, undefined);
+  return body;
+}
+const savedRow = (logicalAddress) =>
+  db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address=?").get(logicalAddress);
 async function resumed(response, first) {
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -229,22 +247,112 @@ test("current authenticated readback resumes without a write and later missing r
   assert.equal(state.nonceReads, 1);
 });
 
-test("failed, oversized and ambiguous lookups retain the preparation and withhold a replacement", async (t) => {
+for (const [lookup, reason] of [
+  ["failed", /program-name lookup failed/],
+  ["oversized", /program-name lookup/],
+  ["ambiguous", /multiple owner-bound programs/],
+]) test(`a ${lookup} name lookup reports the saved anchor to a signed retry and releases no transaction`, async (t) => {
   const state = node(t);
-  const signed = await signedInput("uncertain");
+  const signed = await signedInput(`uncertain-${lookup}`);
   const first = await prepare(signed);
-  for (const lookup of ["failed", "oversized", "ambiguous"]) {
-    state.lookup = lookup;
-    state.published = lookup === "ambiguous" ? first : null;
-    const response = await post(request(signed));
-    assert.equal(response.status, 503, lookup);
-    assert.match((await response.json()).error, /could not safely determine/);
-  }
+  const saved = savedRow(first.logicalAddress);
+  state.lookup = lookup;
+  state.published = lookup === "ambiguous" ? first : null;
+  await unresolved(await post(request(signed)), first.anchorAddress, reason);
+  assert.deepEqual(savedRow(first.logicalAddress), saved, "reporting the anchor never rewrites the saved preparation");
   state.lookup = "empty";
   state.published = null;
   await resumed(await post(request(signed)), first);
   assert.equal(state.nonceReads, 1);
 });
+
+test("a failed name lookup keeps HTTP 503 when no preparation is saved", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-unprepared");
+  state.lookup = "failed";
+  const body = await refusedWithoutAnchor(await post(request(signed)), 503);
+  assert.match(body.error, /could not safely determine/);
+  assert.equal(state.nonceReads, 0);
+});
+
+test("a failed legacy-name lookup reports the saved anchor and keeps 503 without a preparation", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-legacy");
+  const unprepared = await signedInput("uncertain-legacy-unprepared");
+  const first = await prepare(signed);
+  state.legacyLookup = "failed";
+  await unresolved(await post(request(signed)), first.anchorAddress, /program-name lookup failed/);
+  await refusedWithoutAnchor(await post(request(unprepared)), 503);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("an exact repeat is not released a transaction while the lookup is indeterminate", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-exact-repeat");
+  const first = await prepare(signed);
+  state.lookup = "failed";
+  for (let repeat = 0; repeat < 2; repeat++) {
+    await unresolved(await post(request(signed)), first.anchorAddress);
+  }
+  assert.equal(state.nonceReads, 1);
+});
+
+test("a differently signed Listing learns only the saved anchor while the lookup is indeterminate", async (t) => {
+  const state = node(t);
+  const first = await prepare(await signedInput("uncertain-changed-candidate"));
+  const changed = await signedInput("uncertain-changed-candidate", { description: "Different signed contents" });
+  state.lookup = "failed";
+  await unresolved(await post(request(changed)), first.anchorAddress);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("a prepared version the catalog lists still reports its saved anchor while the lookup is indeterminate", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-catalog-listed");
+  const first = await prepare(signed);
+  const listing = { listingId: "uncertain-catalog-listed", version: 1, anchor: { kind: "storage-program", locator: `stor-${"a".repeat(40)}` } };
+  module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [{ primaryClaim: `did:demos:agent:${ownerHex}`,
+    displayName: inputFor("uncertain-catalog-listed").name, listings: [listing] }] });
+  t.after(() => module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] }));
+  state.lookup = "failed";
+  await unresolved(await post(request(signed)), first.anchorAddress);
+});
+
+test("an expired signed presentation still learns the saved anchor while the lookup is indeterminate", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-expired");
+  const first = await prepare(signed);
+  t.mock.method(Date, "now", () => clock + 16 * 60_000);
+  state.lookup = "failed";
+  await unresolved(await post(request(signed)), first.anchorAddress);
+});
+
+test("an indeterminate lookup gives the saved anchor only to a request with both valid signatures", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("uncertain-unsigned");
+  await prepare(signed);
+  state.lookup = "failed";
+  const preview = await refusedWithoutAnchor(await post(request({ ...signed, listingSignature: undefined })), 503);
+  assert.match(preview.error, /could not safely determine/);
+  for (const listingSignature of ["malformed", "00".repeat(64), 7]) {
+    await refusedWithoutAnchor(await post(request({ ...signed, listingSignature })), 400);
+  }
+  const badIdentity = await refusedWithoutAnchor(await post(request({ ...signed, identityPresentedAt: clock - 1 })), 400);
+  assert.match(badIdentity.error, /identity presentation signature is invalid/);
+  await refusedWithoutAnchor(await post(request({ ...signed, serviceId: "uncertain-other-service" })), 503);
+});
+
+for (const [name, resolveVersion] of uncertainResolvers) {
+  test(`a configured ${name} resolver reports the saved anchor to a signed retry and releases no transaction`, async (t) => {
+    const state = node(t);
+    const signed = await signedInput(`uncertain-resolver-${name}`);
+    const first = await prepare(signed);
+    const saved = savedRow(first.logicalAddress);
+    await unresolved(await module.createBuildListingPost(rails, resolveVersion)(request(signed)), first.anchorAddress, /logical|incomplete|multiple/);
+    assert.deepEqual(savedRow(first.logicalAddress), saved);
+    assert.equal(state.nonceReads, 1);
+  });
+}
 
 test("a prepared version the catalog already lists returns its saved anchor and never a transaction", async (t) => {
   const state = node(t);
@@ -428,12 +536,7 @@ test("the API route with trusted rail authority creates on producer-name absence
   assert.equal(state.nonceReads, 1);
 });
 
-for (const [name, resolveVersion] of [
-  ["indeterminate", async () => ({ status: "indeterminate", reason: "history index is incomplete" })],
-  ["invalid", async () => null],
-  ["multiple", async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity,
-    nativeAddresses: [`stor-${"71".repeat(20)}`, `stor-${"72".repeat(20)}`] })],
-]) test(`a configured ${name} resolver withholds preview and signed creation`, async (t) => {
+for (const [name, resolveVersion] of uncertainResolvers) test(`a configured ${name} resolver withholds preview and signed creation`, async (t) => {
   const state = node(t);
   const signed = await signedInput(`configured-${name}`);
   const builder = module.createBuildListingPost(rails, resolveVersion);

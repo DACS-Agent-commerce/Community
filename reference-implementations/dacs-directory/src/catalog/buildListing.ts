@@ -419,16 +419,53 @@ return async function POST(req: NextRequest) {
   }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
-  const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
-    error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
+  const lookupUncertain = (reason: string) => `could not safely determine whether this listing version already exists: ${reason}`;
+  const unresolvedPreparation = (anchorAddress: string | undefined, lookupReason?: string) => NextResponse.json({
+    error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create" +
+      (lookupReason === undefined ? "" : `; ${lookupUncertain(lookupReason)}`),
     logicalAddress,
     anchorAddress,
   }, { status: 409 });
+  // The wallet-signed Listing must match the rebuilt one: a retry is answered, even
+  // with only the saved anchor, only after this check passes.
+  const checkListingSignature = (listingSignature: unknown): { signedCandidate: Record<string, unknown> } | { refusal: NextResponse } => {
+    const malformedSignature = { refusal: NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 }) };
+    if (typeof listingSignature !== "string") return malformedSignature;
+    const listingSigHex = listingSignature.replace(/^(0x)+/i, "");
+    const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
+    if (!listingSignatureValue) return malformedSignature;
+    let listingSignatureValid = false;
+    try {
+      listingSignatureValid = ed25519Verify(
+        Buffer.from(message, "utf8"),
+        Uint8Array.from(Buffer.from(listingSigHex, "hex")),
+        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
+      );
+    } catch { /* malformed signatures fail closed */ }
+    const signedCandidate: Record<string, unknown> = {
+      ...listing,
+      signature: {
+        algorithm: "ed25519",
+        signer: did,
+        value: listingSignatureValue,
+      },
+    };
+    if (!listingSignatureValid || !isListing(signedCandidate)) {
+      return { refusal: NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 }) };
+    }
+    return { signedCandidate };
+  };
   if (resolution.status === "indeterminate") {
-    return NextResponse.json(
-      { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
-      { status: 503 },
-    );
+    // While occupancy is unknown no transaction is released, not even a saved one:
+    // the version may be taken. A seller who signed this retry (the identity
+    // signature is already verified) learns only the saved anchor; a preview, or
+    // a version with no preparation, keeps the 503.
+    const saved = body.listingSignature === undefined ? undefined : loadListingPreparation(chainIdentity, logicalAddress);
+    if (saved) {
+      const checked = checkListingSignature(body.listingSignature);
+      return "refusal" in checked ? checked.refusal : unresolvedPreparation(saved.anchorAddress, resolution.reason);
+    }
+    return NextResponse.json({ error: lookupUncertain(resolution.reason) }, { status: 503 });
   }
   // Empty name indexes and advancing nonces do not establish that a returned
   // create failed. Keep the original attempt across retries and restarts.
@@ -483,33 +520,9 @@ return async function POST(req: NextRequest) {
         payloadCapability,
       });
     }
-    if (typeof body.listingSignature !== "string") {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
-    }
-    const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
-    const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
-    if (!listingSignatureValue) {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
-    }
-    let listingSignatureValid = false;
-    try {
-      listingSignatureValid = ed25519Verify(
-        Buffer.from(message, "utf8"),
-        Uint8Array.from(Buffer.from(listingSigHex, "hex")),
-        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
-      );
-    } catch { /* malformed signatures fail closed */ }
-    const signedCandidate: Record<string, unknown> = {
-      ...listing,
-      signature: {
-        algorithm: "ed25519",
-        signer: did,
-        value: listingSignatureValue,
-      },
-    };
-    if (!listingSignatureValid || !isListing(signedCandidate)) {
-      return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
-    }
+    const checked = checkListingSignature(body.listingSignature);
+    if ("refusal" in checked) return checked.refusal;
+    const { signedCandidate } = checked;
     // A retained preparation is never replaced. An exact repeat of its signed
     // Listing, for a version nothing else shows as taken, gets the same saved
     // bytes again, so a lost response cannot strand it; that is no second

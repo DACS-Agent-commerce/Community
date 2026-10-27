@@ -447,7 +447,8 @@ base64url-patched Buffer).
   establish occupancy across all producer names. A complete, correctly scoped empty
   result permits the next version; one native binding requires fresh owner, metadata,
   tuple and signature verification and resumes the stored Listing without writing.
-  Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503.
+  Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503,
+  except for a signed retry of a version with a saved preparation (below).
   Request fields cannot supply this authority. Adapters must bound network bytes
   before decoding and honor cancellation; the builder also bounds results and enforces
   a deadline. These checks do not provide an atomic version allocator.
@@ -459,6 +460,11 @@ base64url-patched Buffer).
   request, including one whose first response was lost or one racing it, receives the
   same saved transaction bytes again. Any other signed retry, or one for a version the
   catalog already lists, returns HTTP 409 with the saved anchor and no transaction.
+  So does any signed retry while the version lookup is indeterminate (a failed,
+  timed-out, oversized or ambiguous name search or resolver), even an exact repeat,
+  because the version may be taken; the reply names the lookup cause. The retry must
+  carry valid identity and Listing signatures (invalid ones get HTTP 400). A preview, or
+  a version with no saved preparation, still gets HTTP 503.
   Current owner-bound, signature-verified readback can resume registration without a
   write, including with an expired presentation. Saved preparations never establish
   finality or success and remain retained after readback. There is no automatic
