@@ -51,6 +51,54 @@ export function listingDiagnosticCoordinates(
     : undefined;
 }
 
+/** What one anchor read shows: no bytes, bytes that fail verification, or a verified Listing and its binding failure. */
+export type ListingAnchorEvidence =
+  | { kind: "unread" }
+  | { kind: "invalid"; code: ListingRejectionCode }
+  | { kind: "verified"; contentHash: string; binding: ListingRejectionCode | null };
+
+export interface ListingNoticeInput {
+  evidence: ListingAnchorEvidence;
+  /** The verified owner-signed registration names this anchor. */
+  ownerSignedAnchor: boolean;
+  /**
+   * Normalized hashes for this anchor: those saved publisher-signed sources declare, whether an older such source
+   * saved none, and the unsigned crawl hash, which counts only when no signed source declares the anchor.
+   */
+  declarations: { signed: readonly string[]; unknown: boolean; unsigned?: string };
+  /** The code of the anchor's current public notice, if it has one. */
+  heldCode?: ListingRejectionCode;
+}
+
+/** Keep the anchor's row as it is, clear it and admit the Listing, or record a rejection. */
+export type ListingNoticeDecision =
+  | { action: "hold" }
+  | { action: "clear" }
+  | { action: "record"; code: ListingRejectionCode; publicNotice: boolean; coordinates: boolean };
+
+/**
+ * Decide an anchor's notice from this pass's read and the saved evidence. A held public notice stands until a read
+ * refutes it: an owner notice yields to any verified Listing, a hash notice once every saved signed declaration
+ * matches the verified hash. Only an owner-signed pointer or a signed declaration makes a new notice public.
+ */
+export function decideListingNotice({ evidence, ownerSignedAnchor, declarations, heldCode }: ListingNoticeInput): ListingNoticeDecision {
+  if (evidence.kind === "unread") return { action: "hold" };
+  const verifiedHash = evidence.kind === "verified" ? evidence.contentHash : undefined;
+  const heldStands = heldCode === "OWNER_CLAIM_BINDING" ? verifiedHash === undefined
+    : heldCode === "DECLARED_CONTENT_HASH_MISMATCH" &&
+      (declarations.unknown || declarations.signed.some((hash) => hash !== verifiedHash));
+  if (heldStands) return { action: "hold" };
+  if (evidence.kind === "invalid") return { action: "record", code: evidence.code, publicNotice: false, coordinates: false };
+  if (evidence.binding) {
+    return { action: "record", code: evidence.binding, coordinates: evidence.binding !== "SELLER_CLAIM_BINDING",
+      publicNotice: evidence.binding === "OWNER_CLAIM_BINDING" && ownerSignedAnchor };
+  }
+  const declared = declarations.signed.length > 0 ? declarations.signed : declarations.unsigned ? [declarations.unsigned] : [];
+  return declared.some((hash) => hash !== evidence.contentHash)
+    ? { action: "record", code: "DECLARED_CONTENT_HASH_MISMATCH", publicNotice: declarations.signed.length > 0, coordinates: true }
+    : { action: "clear" };
+}
+
 export const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
   SELLER_CLAIM_BINDING: "The authenticated listing candidate seller does not match the registration claim.",
   OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
