@@ -249,7 +249,8 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    node reads is journaled with the statement that undoes it. The journal is confirmed in the same
    transaction that saves the scan state and the catalog; when that read fails, the run fails, or a
    crash interrupts it, the next writer undoes the writes. Withdrawal sources a publisher signed
-   (the crawl's declarations) are kept, as are registrations and domains. Each complete pass
+   (the crawl's declarations) are kept, as are registrations and domains; a binding release that a
+   marker read decides is journaled and applied only on commit. Each complete pass
    records the chain it scanned in that same transaction. A state recorded on another chain (a
    re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
    artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin
