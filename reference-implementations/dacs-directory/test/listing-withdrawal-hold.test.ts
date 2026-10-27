@@ -21,7 +21,10 @@ const offline = async (): Promise<never> => { throw new Error("identity unavaila
 const AFTER_BACKOFF = 61_000;
 
 /** How the node answers a marker read; unlisted locators are served from `maps`, or NOT_FOUND. */
-type MarkerReply = "not-found" | "access-denied" | "transport-failure" | "node-error" | "not-an-object";
+type MarkerReply = "not-found" | "access-denied" | "transport-failure" | "node-error"
+  | "not-an-object" | "array-data" | "null-data";
+/** Successful storage envelopes whose `data` cannot be an artifact object. */
+const nonObjectData = new Map<MarkerReply, unknown>([["not-an-object", "not-an-object"], ["array-data", []], ["null-data", null]]);
 const replies = new Map<string, MarkerReply>();
 
 function serveStorage(t: TestContext): void {
@@ -31,7 +34,7 @@ function serveStorage(t: TestContext): void {
     if (reply === "transport-failure") throw new TypeError("fetch failed");
     if (reply === "access-denied") return Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
     if (reply === "node-error") return new Response(null, { status: 503 });
-    if (reply === "not-an-object") return Response.json({ success: true, owner, data: "not-an-object" });
+    if (reply && nonObjectData.has(reply)) return Response.json({ success: true, owner, data: nonObjectData.get(reply) });
     const data = reply === "not-found" ? undefined : maps.get(at);
     return data ? Response.json({ success: true, owner, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
@@ -65,7 +68,7 @@ test("an unread owner marker holds the Listing until a read settles it, by reply
   serveStorage(t);
   const outcomes: Array<[MarkerReply | "readable-invalid", boolean]> = [
     ["not-found", true], ["access-denied", true], ["transport-failure", true], ["node-error", true],
-    ["readable-invalid", false], ["not-an-object", false],
+    ["not-an-object", true], ["array-data", true], ["null-data", true], ["readable-invalid", false],
   ];
   for (const [offset, [reply, held]] of outcomes.map((outcome, n) => [4000 + n * 20, outcome] as const)) {
     const { registration, hash } = await ownListing(`owner-reply-${reply}`, offset);
@@ -82,15 +85,20 @@ test("an unreadable owner marker keeps holding the Listing on a pass inside its 
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
   serveStorage(t);
-  const { registration, hash } = await ownListing("owner-marker-backoff", 4200);
-  const markerAt = locator(4210);
-  admitRevocationCandidates(hash, [{ locator: markerAt, owner }]);
-  assert.equal((await index(registration)).listings.length, 0, "the first pass cannot read the marker");
-  now += 500;
-  assert.equal((await index(registration)).listings.length, 0, "the marker is skipped inside its backoff but still holds");
-  now += AFTER_BACKOFF;
-  maps.set(markerAt, invalidMarker);
-  assert.equal((await index(registration)).listings.length, 1, "a settled read releases the hold");
+  for (const [n, reply] of (["not-found", "not-an-object"] as const).entries()) {
+    const offset = 4200 + n * 40;
+    const { registration, hash } = await ownListing(`owner-marker-backoff-${reply}`, offset);
+    const markerAt = locator(offset + 10);
+    admitRevocationCandidates(hash, [{ locator: markerAt, owner }]);
+    replies.set(markerAt, reply);
+    assert.equal((await index(registration)).listings.length, 0, `${reply}: the first pass cannot read the marker`);
+    now += 500;
+    assert.equal((await index(registration)).listings.length, 0, `${reply}: the marker is skipped inside its backoff but still holds`);
+    now += AFTER_BACKOFF;
+    replies.delete(markerAt);
+    maps.set(markerAt, invalidMarker);
+    assert.equal((await index(registration)).listings.length, 1, `${reply}: a settled read releases the hold`);
+  }
 });
 
 test("an owner marker still queued beyond the per-pass limit holds the Listing until it is read", async (t) => {
@@ -105,9 +113,9 @@ test("an owner marker still queued beyond the per-pass limit holds the Listing u
 
 test("a previously verified marker that can no longer be read holds the Listing; its valid bytes revoke it", async (t) => {
   serveStorage(t);
-  const cases: Array<MarkerReply | "valid"> = ["not-found", "access-denied", "transport-failure", "valid"];
+  const cases: Array<MarkerReply | "valid"> = ["not-found", "access-denied", "transport-failure", "not-an-object", "array-data", "valid"];
   for (const [n, reply] of cases.entries()) {
-    const offset = 4500 + n * 20;
+    const offset = 4500 + n * 15;
     const listingId = `known-marker-${reply}`;
     const { registration, hash } = await ownListing(listingId, offset);
     const markerAt = locator(offset + 10);
@@ -122,7 +130,7 @@ test("a previously verified marker that can no longer be read holds the Listing;
 
 test("an unreadable candidate anchored by someone else cannot hold the Listing", async (t) => {
   serveStorage(t);
-  for (const [n, reply] of (["not-found", "node-error"] as const).entries()) {
+  for (const [n, reply] of (["not-found", "node-error", "not-an-object"] as const).entries()) {
     const offset = 4600 + n * 20;
     const { registration, hash } = await ownListing(`third-party-${reply}`, offset);
     const markerAt = locator(offset + 10);

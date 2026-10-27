@@ -110,15 +110,17 @@ export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
 
 /**
  * Missing or unavailable current bytes cannot reject an older candidate (RB-5/6).
- * A read that yields no artifact, a storage `not found` included, is noted in `unavailable`.
+ * Only an artifact object is a read. Any other reply, a storage `not found` or a node
+ * envelope whose data is not an object included, is noted in `unavailable` and yields null.
  */
 async function readRevocationCandidate(
   locator: string,
   unavailable: Set<string>,
 ): Promise<Record<string, unknown> | null> {
   const read = await readAnchorResult(locator);
-  if (read.status === "absent" || read.status === "unavailable") unavailable.add(locator);
-  return read.status === "present" ? read.record.data : read.status === "invalid" ? {} : null;
+  if (read.status === "present") return read.record.data;
+  unavailable.add(locator);
+  return null;
 }
 
 export function listingBindingRejection(
