@@ -219,6 +219,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
+    // Everything the pass saves from here on is made from node reads: the scan cursor, artifacts,
+    // candidates, replay progress and what indexing records. It stays provisional until the final
+    // chain check passes; a reset above is already final.
+    openChainReadWindow();
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
       knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
@@ -339,8 +343,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
-    // Crawl and seller indexing persist node reads as they go; they are kept only if the check below passes.
-    openChainReadWindow();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
