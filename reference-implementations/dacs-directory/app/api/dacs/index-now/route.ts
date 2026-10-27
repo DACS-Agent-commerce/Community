@@ -2,16 +2,16 @@
  * POST /api/dacs/index-now { claim } — index one registration immediately
  * (fresh publishes shouldn't wait for the next timer pass). Full chain
  * verification and the same chain gate as the batch path. It runs no crawl, so
- * crawl-derived diagnostics remain; verified owner pointer removals can clear
- * owner notices.
+ * crawl-derived diagnostics and retained signed declarations remain; verified
+ * owner pointer removals can clear owner notices.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { requireAdmin } from "@/src/catalog/security";
 import {
-  confirmChainReadWindow, loadCatalog, loadRegistrations, loadScanState, openChainReadWindow, revertChainReadWindow, saveCatalog,
-  withDataLock,
+  confirmChainReadWindow, loadAuthenticatedListingDeclarations, loadCatalog, loadDomains, loadRegistrations, loadScanState,
+  openChainReadWindow, revertChainReadWindow, saveCatalog, withDataLock,
 } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
@@ -35,11 +35,12 @@ export async function POST(req: NextRequest) {
     }
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
+    const authenticatedHashDeclarations = loadAuthenticatedListingDeclarations(claim, loadDomains(), new Set());
     // Indexing persists node reads as it goes; they and the catalog are kept only if the node
     // still serves the gated chain afterwards, and are reverted otherwise or on any failure.
     openChainReadWindow();
     try {
-      const record = await indexRegistration({ ...reg, discoveryIncomplete: true }, prior);
+      const record = await indexRegistration({ ...reg, authenticatedHashDeclarations, discoveryIncomplete: true }, prior);
       const unchanged = await servedChainUnchanged(served.chainIdentity);
       if (!unchanged.ok) return NextResponse.json({ error: `catalog not updated: ${unchanged.cause}` }, { status: unchanged.status });
       confirmChainReadWindow();
