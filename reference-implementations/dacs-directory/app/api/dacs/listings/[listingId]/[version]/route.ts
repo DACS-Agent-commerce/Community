@@ -6,9 +6,9 @@ import {
   readCounterpartyEvidenceFixtureAnchor,
   verifyCounterpartyEvidenceFixtureListing,
 } from "@/src/catalog/counterpartyEvidence";
-import { MAX_CLAIM_QUERY_BYTES, sellerIdentity } from "@/src/catalog/discovery";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
-import { catalogJson } from "@/src/catalog/http";
+import { sellerIdentity } from "@/src/catalog/discovery";
+import { catalogJson, claimQuery } from "@/src/catalog/http";
 import { inspectServicePath, servicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
@@ -17,16 +17,13 @@ export async function GET(
   { params }: { params: Promise<{ listingId: string; version: string }> },
 ) {
   const { listingId, version } = await params;
-  const requestedSeller = req.nextUrl.searchParams.get("seller");
-  if (requestedSeller && Buffer.byteLength(requestedSeller, "utf8") > MAX_CLAIM_QUERY_BYTES) {
-    return NextResponse.json({ error: "seller exceeds 1024 bytes" }, { status: 400 });
-  }
+  const sellerQuery = claimQuery(req.nextUrl.searchParams.get("seller"), "seller");
+  if ("refused" in sellerQuery) return sellerQuery.refused;
+  const requestedSeller = sellerQuery.value;
   const origin = requestBaseUrl(req);
-  const requestedIdentity = requestedSeller ? sellerIdentity(requestedSeller) : undefined;
-  const hit = loadCatalog().sellers
-    .filter((seller) => !requestedIdentity || seller.primaryClaim === requestedIdentity)
-    .flatMap((seller) => seller.listings)
-    .find((listing) => listing.listingId === listingId && String(listing.version) === version);
+  const hit = loadCatalog()
+    .sellers.flatMap((s) => s.listings)
+    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || sellerIdentity(l.seller.primaryClaim) === sellerIdentity(requestedSeller)));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
   if (hit.anchor.kind === "fixture") {
     const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
