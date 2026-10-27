@@ -207,9 +207,11 @@ test("a legacy program for another version only gets this version's saved prepar
   );
 });
 
-test("an unreadable legacy-name lookup withholds the create transaction", async () => {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
-  const finalInput = { ...base, listingVersion: identity.listingVersion,
+/** Sign a fresh request for `serviceId`, then send it while its legacy-name lookup fails; records nonce reads. */
+async function withLegacyLookupDown(serviceId: string, check: (signed: Record<string, unknown>, nonceReads: string[]) => Promise<void>) {
+  const input = { ...base, serviceId };
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const finalInput = { ...input, listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let legacyDown = false;
   const nonceReads: string[] = [];
@@ -220,7 +222,7 @@ test("an unreadable legacy-name lookup withholds the create transaction", async 
     if (init?.method !== "POST") return new Response(null, { status: 404 });
     const call = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> }).params?.[0];
     if (call?.message === "getAddressNonce") nonceReads.push(call.message);
-    if (call?.message === "searchStoragePrograms" && legacyDown && call.data?.query === legacyProgramName(base.serviceId, 1)) {
+    if (call?.message === "searchStoragePrograms" && legacyDown && call.data?.query === legacyProgramName(serviceId, 1)) {
       return new Response("unavailable", { status: 503 });
     }
     return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
@@ -228,13 +230,33 @@ test("an unreadable legacy-name lookup withholds the create transaction", async 
   try {
     const preview = await (await POST(request(finalInput))).json() as { message: string };
     legacyDown = true;
-    const response = await POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
+    await check({ ...finalInput, listingSignature: walletHex(preview.message) }, nonceReads);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("an unreadable legacy-name lookup withholds the create transaction", async () => {
+  await withLegacyLookupDown(base.serviceId, async (signed, nonceReads) => {
+    const response = await createBuildListingPost(signedRailSnapshot)(request(signed));
     assert.equal(response.status, 503);
     const body = await response.json() as Built;
     assert.match(String(body.error), /could not safely determine whether this listing version already exists/);
     assert.equal(body.tx, undefined, "a legacy name that cannot be read may still hold this version");
     assert.deepEqual(nonceReads, [], "no write nonce is requested");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  });
+});
+
+test("a configured resolver decides occupancy when only the legacy-name lookup is unreadable", async () => {
+  await withLegacyLookupDown("legacy-down-resolver", async (signed, nonceReads) => {
+    const withheld = await createBuildListingPost(signedRailSnapshot,
+      async () => ({ status: "indeterminate", reason: "history index is incomplete" }))(request(signed));
+    assert.equal(withheld.status, 503);
+    assert.match(String((await withheld.json() as Built).error), /history index is incomplete/);
+    assert.deepEqual(nonceReads, []);
+    const created = await POST(request(signed));
+    assert.equal(created.status, 200);
+    assert.ok((await created.json() as Built).tx, "a complete empty resolver result permits the create");
+    assert.equal(nonceReads.length, 1);
+  });
 });

@@ -446,7 +446,9 @@ base64url-patched Buffer).
   configured. Existing producer-name matches resume through fresh authenticated
   readback. When configured, the server-owned `ResolveListingVersion` callback receives
   the logical Listing address, configured chain identity and abort signal and must
-  establish occupancy across all producer names. A complete, correctly scoped empty
+  establish occupancy across all producer names. It decides whenever the name lookups
+  recover no owned program, including when they are uncertain, as the pinned node's
+  ACL-filtered fallback search always is. A complete, correctly scoped empty
   result permits the next version; one native binding requires fresh owner, metadata,
   tuple and signature verification and resumes the stored Listing without writing.
   Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503.
@@ -528,7 +530,8 @@ filter ACLs after pagination. A deployed node may also answer it as a `nodeCall`
 only on a recognized "Unknown message" answer. Both public search reads send JSON
 headers without wallet authentication, as required by the pinned middleware contract. The fallback can recover a listing
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
-and cannot establish absence, so an unresolved fallback lookup returns HTTP 503.
+and cannot establish absence, so without a configured resolver an unresolved fallback
+lookup returns HTTP 503.
 Even an empty nodeCall search cannot establish occupancy across other producers'
 names or detect a program the search fails to return. Without a configured resolver,
 the builder accepts this limitation and allows the next version after both producer

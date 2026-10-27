@@ -519,6 +519,46 @@ test("a configured complete empty resolver permits the next signed Listing", asy
   assert.equal(state.nonceReads, 1);
 });
 
+for (const lookup of ["failed", "oversized"]) {
+  test(`a configured resolver decides occupancy after a ${lookup} name lookup`, async (t) => {
+    const state = node(t);
+    const signed = await signedInput(`resolver-after-${lookup}`);
+    state.lookup = lookup;
+    const withheld = await module.createBuildListingPost(rails, async () => ({ status: "indeterminate", reason: "history index is incomplete" }))(request(signed));
+    assert.equal(withheld.status, 503);
+    assert.match((await withheld.json()).error, /history index is incomplete/);
+    assert.equal(state.nonceReads, 0);
+    const created = await module.createBuildListingPost(rails, qualifiedEmpty)(request(signed));
+    assert.equal(created.status, 200);
+    assert.ok((await created.json()).tx);
+    assert.equal(state.nonceReads, 1);
+  });
+}
+
+test("a configured resolver resumes another producer's Listing after a failed name lookup", async (t) => {
+  const state = node(t);
+  const input = inputFor("resolver-resume-after-failed-lookup");
+  const identity = await (await post(request(input))).json();
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: walletSign(identity.identityMessage) };
+  const logicalAddress = `dacs1:${encodeURIComponent(input.claim)}:${input.serviceId}:v1`;
+  const unsigned = { dacsVersion: "1", listingId: input.serviceId, listingVersion: 1,
+    seller: { identity: { presentedBy: input.claim }, displayName: "Independent producer" } };
+  const signature = { algorithm: "ed25519", signer: input.claim,
+    value: Buffer.from(walletSign(`dacs-listing:v1:${contentHash(unsigned)}`), "hex").toString("base64url") };
+  state.published = { programName: "independent-release", anchorAddress: `stor-${"48".repeat(20)}`, logicalAddress,
+    listing: { ...unsigned, signature } };
+  state.lookup = "failed";
+  const response = await module.createBuildListingPost(rails, async (logical, chain) =>
+    ({ status: "complete", logicalAddress: logical, chainIdentity: chain, nativeAddresses: [state.published.anchorAddress] }))(request(authenticated));
+  assert.equal(response.status, 200, await response.clone().text());
+  const body = await response.json();
+  assert.equal(body.exists, true);
+  assert.equal(body.tx, null);
+  assert.deepEqual(body.listing, state.published.listing);
+  assert.equal(state.nonceReads, 0);
+});
+
 test("logical occupancy is resolved again on every request without caching success", async (t) => {
   const state = node(t);
   const signed = await signedInput("changing-occupancy");
