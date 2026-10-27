@@ -367,8 +367,23 @@ test("an earlier signed withdrawal discovered after a later one replaces the ret
   admitRevocationCandidates(hash, [{ locator: locator(7411), owner }]);
   const repeated = await repeat();
   assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
+  assert.equal(repeated.listings[0].revocation?.markerAnchor.locator, locator(7411), "the published binding is the retained cutoff's marker");
   assert.equal(repeated.deals[0].refsVerified, false);
   assert.equal(repeated.reputation.completed, 0);
+});
+
+test("of two signed withdrawals verified in one pass the catalog publishes the earlier, whatever the batch order", async (t) => {
+  t.mock.method(Date, "now", () => 200);
+  storage(t);
+  const fixture = await prepared(false, { notBefore: 8 });
+  const hash = artifactHash(fixture.listing, "listing");
+  maps.set(locator(7440), withdrawalMarker(hash, 120));
+  maps.set(locator(7441), withdrawalMarker(hash, 100));
+  admitRevocationCandidates(hash, [{ locator: locator(7440), owner }, { locator: locator(7441), owner }]);
+  const record = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 110));
+  assert.equal(retainedListingRevocationMarker(hash)?.revokedAt, 100);
+  assert.equal(record.listings[0].revocation?.markerAnchor.locator, locator(7441), "the published binding is the retained cutoff's marker");
+  assert.equal(record.deals[0].refsVerified, false);
 });
 
 test("an unread owner marker withholds credit beside a retained cutoff until a read settles it", async (t) => {
