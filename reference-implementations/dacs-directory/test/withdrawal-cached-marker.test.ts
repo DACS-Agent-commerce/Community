@@ -17,7 +17,7 @@ test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
 for (const change of ['scope', 'signature'] as const) {
-  for (const response of ['repaired', 'missing', 'unavailable', 'malformed', 'rejected', 'unbound', 'cached-valid'] as const) {
+  for (const response of ['repaired', 'missing', 'unavailable', 'malformed', 'not-an-object', 'rejected', 'unbound', 'cached-valid'] as const) {
     test(`cached ${change} rejection requires a current marker read (${response})`, async () => {
       const listingId = `cached-${change}-${response}`;
       const domain = `${listingId}.example`;
@@ -75,6 +75,7 @@ for (const change of ['scope', 'signature'] as const) {
         if (response === 'missing') return Response.json({ success: false, errorCode: 'NOT_FOUND' }, { status: 404 });
         if (response === 'unavailable' || response === 'cached-valid') return Response.json({ success: false }, { status: 503 });
         if (response === 'malformed') return new Response('{');
+        if (response === 'not-an-object') return Response.json({ success: true, owner: `0x${key}`, data: 'not-an-object' });
         return Response.json({ success: true, owner: `0x${key}`, data: stale });
       };
       try {
