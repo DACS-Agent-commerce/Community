@@ -45,7 +45,7 @@ import {
   loadRetryableArtifacts,
   clearChainDerivedArtifacts,
   openChainReadWindow,
-  confirmChainReadWindow,
+  commitChainReadWindow,
   revertChainReadWindow,
   recordArtifact,
   pruneFailureHistory,
@@ -219,6 +219,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
+    // Everything the pass saves from here on is made from node reads: the scan cursor, artifacts,
+    // candidates, replay progress and what indexing records. It stays provisional until the final
+    // chain check passes; a reset above is already final.
+    openChainReadWindow();
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
       knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
@@ -339,8 +343,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
-    // Crawl and seller indexing persist node reads as they go; they are kept only if the check below passes.
-    openChainReadWindow();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -490,19 +492,19 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     const indexChainChange = await chainChange();
     if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
-    confirmChainReadWindow();
-    saveScanState(state);
-
-    // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
-    if (!crawlIncomplete) pruneListingRejections(allRegs);
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
-    if (needsHistoryReplay) {
-      // Stamped together and only after the rebuilt catalog is saved, so an interrupted
-      // replay stays due and index-now refuses until the catalog matches this chain.
-      state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
-      state.chainIdentity = served.chainIdentity;
+    // The scan state, the catalog and every write above are kept together or not at all.
+    commitChainReadWindow(() => {
+      if (needsHistoryReplay) {
+        // Stamped in the transaction that saves the rebuilt catalog, so an interrupted replay
+        // stays due and index-now refuses until the catalog matches this chain.
+        state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
+        state.chainIdentity = served.chainIdentity;
+      }
       saveScanState(state);
-    }
+      // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
+      if (!crawlIncomplete) pruneListingRejections(allRegs);
+      saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 
