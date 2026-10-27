@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { catalogNodeDeployment } from "../src/catalog/listingFinality.js";
 import type { SellerRecord } from "../src/catalog/types.js";
-import { nodeOnChain, onPinnedChain } from "./fixtures/pinned-node.js";
+import { nodeOnChain, nodeServingInTurn, onPinnedChain } from "./fixtures/pinned-node.js";
 
 const dataDirectory = mkdtempSync(join(tmpdir(), "dacs-directory-chain-reset-"));
 const originalFetch = globalThis.fetch;
@@ -241,6 +241,64 @@ test("same-chain tip regression resets only beyond the configured threshold", as
     assert.equal(logs.some((line) => line.includes("chain replacement detected")), reset);
     assert.equal(store.loadScanState().chainIdentity, CHAIN);
   }
+});
+
+// A node re-pointed after the gate: the pass fails before it saves what it read since.
+const CHANGED_CHAIN = "c".repeat(64);
+const servedChainChanged = /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /;
+
+test("a node that changes chain during the history scan fails the pass before its reads are saved", async () => {
+  serveFiveTransactions();
+  store.saveRegistrations([]);
+  store.saveScanState({ ...oldChainState(), chainIdentity: NEW_CHAIN });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+  const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, CHANGED_CHAIN) }), servedChainChanged);
+  assert.deepEqual(store.loadScanState(), before.state);
+  assert.deepEqual(store.loadCatalog(), before.catalog);
+  assert.deepEqual(store.indexerDiagnostics().artifacts, before.artifacts);
+  assert.equal(lastRunRow().status, "failed");
+});
+
+test("a node that changes chain while sellers are indexed saves no catalog and records no chain", async () => {
+  serveFiveTransactions();
+  store.saveRegistrations([]);
+  store.clearChainDerivedArtifacts();
+  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+  const catalog = store.loadCatalog();
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }),
+    servedChainChanged);
+  assert.deepEqual(store.loadCatalog(), catalog);
+  assert.equal(store.loadScanState().chainIdentity, undefined);
+  assert.equal(lastRunRow().status, "failed");
+});
+
+test("a low tip read after the node changed chain does not reset the cache", async () => {
+  serveFiveTransactions();
+  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 2000, lastChainTip: 5,
+    listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
+  const state = store.loadScanState();
+  const logs: string[] = [];
+  await assert.rejects(reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeServingInTurn(NEW_CHAIN, CHANGED_CHAIN) }),
+    servedChainChanged);
+  assert.deepEqual(store.loadScanState(), state);
+  assert.equal(logs.some((line) => line.includes("chain replacement detected")), false);
+  assert.equal(lastRunRow().status, "failed");
+});
+
+test("an anchor backfill read while the node served another chain is deferred, not saved", async () => {
+  serveFiveTransactions();
+  store.saveRegistrations([]);
+  store.clearChainDerivedArtifacts();
+  store.recordArtifact({ locator: `stor-${"9".repeat(40)}`, kind: "bundle", profile: "dacs-v0.1", contentHash: "9".repeat(64),
+    observedAt: 1, data: {} });
+  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 3, listings: {}, deals: {} });
+  const logs: string[] = [];
+  // Gate, history scan, backfill, then indexing: only the backfill saw the other chain.
+  await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN, NEW_CHAIN) });
+  assert.ok(logs.some((line) => /^SR-2 anchor backfill deferred: the served chain changed during the pass: WRONG_CHAIN: /.test(line)));
+  assert.equal(store.loadScanState().anchorBackfillComplete, false, "the backfill's progress is not saved");
 });
 
 test("a pass on a node with build drift logs the warning and completes", async () => {
