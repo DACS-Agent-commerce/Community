@@ -6,7 +6,7 @@
  * owner notices.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { scanStateCurrent, servedCatalogChain } from "@/src/catalog/chainGate";
+import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { requireAdmin } from "@/src/catalog/security";
 import { loadCatalog, loadRegistrations, loadScanState, saveCatalog, withDataLock } from "@/src/catalog/store";
@@ -32,7 +32,10 @@ export async function POST(req: NextRequest) {
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
     const record = await indexRegistration({ ...reg, discoveryIncomplete: true }, prior);
-    const i = catalog.sellers.findIndex((s) => s.primaryClaim === claim);
+    // What was read is saved only if the node still serves the gated chain.
+    const unchanged = await servedChainUnchanged(served.chainIdentity);
+    if (!unchanged.ok) return NextResponse.json({ error: `catalog not updated: ${unchanged.cause}` }, { status: unchanged.status });
+    const i =catalog.sellers.findIndex((s) => s.primaryClaim === claim);
     if (i >= 0) catalog.sellers[i] = record;
     else catalog.sellers.push(record);
     catalog.generatedAt = Date.now();

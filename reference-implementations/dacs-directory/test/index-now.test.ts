@@ -41,10 +41,12 @@ const cleanBuild = { commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false, builtAt:
 type NodeReply = { nodeVersion?: Record<string, unknown>; chain: string; failure?: "http" | "timeout" | "malformed"; historyDown?: boolean };
 let node: NodeReply = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
 let storageReads = 0;
+let onStorageRead = () => {};
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
   if (path.startsWith("/storage-program/")) {
     storageReads++;
+    onStorageRead();
     if (path.slice("/storage-program/".length) !== anchor) return new Response(null, { status: 404 });
     return Response.json({ success: true, owner: `0x${seller.slice(-64)}`, programName: "opaque", data: listing });
   }
@@ -138,4 +140,37 @@ test("index-now answers 409 until a complete pass on this chain is recorded, the
   const response = await indexNow();
   assert.equal(response.status, 200, "one complete reindex makes the state current");
   assert.equal((await response.json()).listings, 1);
+});
+
+test("index-now saves nothing when the node changes chain while the registration is indexed", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.saveScanState(currentState());
+  store.saveCatalog(unchangedCatalog);
+  onStorageRead = () => { node = { ...node, chain: "aa".repeat(32) }; };
+  try {
+    const response = await indexNow();
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json()).error), /^catalog not updated: WRONG_CHAIN: .*not the pinned chain$/);
+    assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+  } finally {
+    onStorageRead = () => {};
+  }
+});
+
+test("index-now refuses after a replay that failed before its catalog was saved", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
+  // A crawled domain makes the failure land after the scan state is saved and before the catalog is.
+  store.saveDomains(["seller.example"]);
+  const failingPass = { log: () => {}, nodeDeployment: onPinnedChain, resolveIdentities: async () => { throw new Error("offline"); },
+    crawlWellKnown: async () => { throw new Error("stopped before the catalog was saved"); } };
+  try {
+    for (const [name, change] of [["re-pin", { chainIdentity: "aa".repeat(32) }], ["legacy state", { chainIdentity: undefined }]] as const) {
+      store.saveScanState({ ...currentState(), ...change });
+      await assert.rejects(reindexAll(failingPass), /stopped before the catalog was saved/, name);
+      await assertRefused(409, notCurrent, name);
+    }
+  } finally {
+    store.saveDomains([]);
+  }
 });
