@@ -375,23 +375,30 @@ export const listingVersionFloor = (seller: string, listingId: string): number =
 // trustworthy reason: 403/404 replies before version 1, and replies whose data
 // is not an object before version 2. Reverify those decisions once, and withhold
 // affected active catalog entries immediately, before the first reindex can run.
+// Withholding follows hasPendingOwnerRevocationCandidate: only a candidate the
+// Listing's own storage owner anchored holds it, so anyone else's cannot hide it.
 // Bump this version whenever a reader change turns a past rejection into an unread.
 const REVOCATION_READ_SCHEMA_VERSION = 2;
 db.transaction(() => {
   if (getJson("revocation-read-schema-version", 0) >= REVOCATION_READ_SCHEMA_VERSION) return;
-  const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
-    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
+  const rejected = db.prepare("SELECT listing_hash, owner FROM revocation_candidates WHERE state='rejected'")
+    .all() as Array<{ listing_hash: string; owner: string | null }>;
+  const ownerHeld = new Set(rejected.flatMap((row) => row.owner ? [`${row.listing_hash}\n${canonicalProgramOwner(row.owner)}`] : []));
+  const anyHeld = new Set(rejected.map((row) => row.listing_hash));
   db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
     SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
       AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
   )`).run();
   db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
-  if (affected.size) {
+  if (rejected.length) {
     const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
-    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
-      ...seller, listings: seller.listings.filter((listing) =>
-        listing.status === "revoked" || !affected.has(listing.contentHash)),
-    })) });
+    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+      // An admitted Listing's storage owner is the seller's own key; a claim without one fails closed.
+      const listingOwner = /[0-9a-fA-F]{64}$/.test(seller.primaryClaim) ? canonicalProgramOwner(seller.primaryClaim) : null;
+      const held = (hash: string) => listingOwner ? ownerHeld.has(`${hash}\n${listingOwner}`) : anyHeld.has(hash);
+      return { ...seller, listings: seller.listings.filter((listing) =>
+        listing.status === "revoked" || listing.anchor?.kind === "fixture" || !held(listing.contentHash)) };
+    }) });
   }
   setJson("revocation-read-schema-version", REVOCATION_READ_SCHEMA_VERSION);
 }).immediate();
