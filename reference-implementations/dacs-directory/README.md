@@ -244,10 +244,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    serves. When the node cannot be read (index-now: 503) or serves a chain other than
    `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
    failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
-   saves what it read, the served chain is read again. Indexing records rejections and revocation
-   progress as it reads; those writes are journaled and undone when that read fails, the run
-   fails, or a crash interrupts it (the next writer undoes them). Each complete pass records the
-   chain it scanned, after its catalog is saved. A state recorded on another chain (a re-pin), a
+   saves its catalog, the served chain is read again. Indexing saves rejections and revocation
+   progress as it reads; when that read fails, the catalog is not saved and the recorded chain is
+   withheld, so index-now refuses and the next reindex replays from genesis. Each complete pass
+   records the chain it scanned, after its catalog is saved. A state recorded on another chain (a re-pin), a
    state with no recorded chain (an upgrade, or an unfinished reset) and a large tip regression
    are reset after a further chain read: cached discoveries, artifacts and retained revocations
    are cleared, no earlier catalog record is used, and history replays from genesis. A re-pin

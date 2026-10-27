@@ -80,6 +80,7 @@ const indexNow = () => POST(new NextRequest("https://directory.example/api/dacs/
 const currentState = () => ({ chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: SCAN_STATE_SCHEMA_VERSION,
   lastSeenTxId: 1, listings: {}, deals: {} });
 const unchangedCatalog = { catalogVersion: "1" as const, generatedAt: 7, sellers: [] };
+const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
 /** The registration was not indexed and the catalog is unchanged. */
 async function assertRefused(status: number, error: RegExp, name: string): Promise<void> {
   storageReads = 0;
@@ -123,7 +124,6 @@ test("index-now treats build drift as a warning on the pinned chain", async () =
 
 test("index-now answers 409 until a complete pass on this chain is recorded, then indexes", async () => {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
   const states: Array<[string, Record<string, unknown>]> = [
     ["another recorded chain", { chainIdentity: "aa".repeat(32) }],
     ["legacy state with no identity", { chainIdentity: undefined }],
@@ -167,7 +167,6 @@ test("index-now saves nothing when the node changes chain while the registration
 
 test("index-now refuses after a replay that failed before its catalog was saved", async () => {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
   // A crawled domain makes the failure land after the scan state is saved and before the catalog is.
   store.saveDomains(["seller.example"]);
   const failingPass = { log: () => {}, nodeDeployment: onPinnedChain, resolveIdentities: async () => { throw new Error("offline"); },
@@ -183,78 +182,47 @@ test("index-now refuses after a replay that failed before its catalog was saved"
   }
 });
 
-// Indexing records rejections and revocation progress as it reads. A writer whose
-// last chain check fails keeps none of them, and reverts a crashed writer's too.
+// Indexing saves rejections and revocation progress as it reads. A writer whose last chain check
+// fails saves no catalog and withholds the recorded chain, so nothing it read is treated as current.
 const offlinePass = { log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
   crawlWellKnown: async () => ({ agents: [], errors: [] }) };
-const badSignature = { ...listing, signature: { ...listing.signature, value: Buffer.alloc(64, 1).toString("base64url") } };
-const rejections = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.map((item) => item.code);
-/** Run `write` with the listing read answered by `stored`, after which the node fails its next chain read. */
-async function withChainLostOnRead<T>(stored: Record<string, unknown>, lost: Partial<NodeReply>, write: () => Promise<T>): Promise<T> {
+/** Run `write` with the node failing its next chain read once the registration's listing has been read. */
+async function withChainLostOnRead<T>(lost: Partial<NodeReply>, write: () => Promise<T>): Promise<T> {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
   store.saveScanState(currentState());
   store.saveCatalog(unchangedCatalog);
-  storedListing = stored;
   onStorageRead = () => { node = { ...node, ...lost }; };
   try {
     return await write();
   } finally {
     onStorageRead = () => {};
-    storedListing = listing;
     node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
   }
 }
 
-test("index-now keeps no rejection it recorded when the node changes chain while indexing", async () => {
-  store.clearChainDerivedArtifacts();
-  const response = await withChainLostOnRead(badSignature, { chain: "aa".repeat(32) }, indexNow);
-  assert.equal(response.status, 409);
-  assert.deepEqual(rejections(), []);
-  assert.deepEqual(store.loadCatalog(), unchangedCatalog);
-});
+for (const [name, lost, status] of [["changes chain", { chain: "aa".repeat(32) }, 409], ["fails its last chain read", { failure: "timeout" }, 503]] as const) {
+  test(`index-now withholds the recorded chain when the node ${name} while indexing`, async () => {
+    const response = await withChainLostOnRead(lost, indexNow);
+    assert.equal(response.status, status);
+    assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+    assert.equal(store.loadScanState().chainIdentity, undefined);
+    await assertRefused(409, notCurrent, name);
+  });
+}
 
-test("index-now keeps an earlier rejection it cleared when the node changes chain while indexing", async () => {
-  store.clearChainDerivedArtifacts();
-  store.recordListingRejection(anchor, seller, "SELLER_CLAIM_BINDING");
-  const response = await withChainLostOnRead(listing, { chain: "aa".repeat(32) }, indexNow);
-  assert.equal(response.status, 409);
-  assert.deepEqual(rejections(), ["SELLER_CLAIM_BINDING"]);
-});
-
-test("index-now keeps no rejection it recorded when its last chain read times out", async () => {
-  store.clearChainDerivedArtifacts();
-  const response = await withChainLostOnRead(badSignature, { failure: "timeout" }, indexNow);
-  assert.equal(response.status, 503);
-  assert.deepEqual(rejections(), []);
-});
-
-test("a batch pass keeps no rejection it recorded when the node changes chain while sellers are indexed", async () => {
-  store.clearChainDerivedArtifacts();
-  await assert.rejects(withChainLostOnRead(badSignature, { chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
+test("a batch pass withholds the recorded chain when the node changes chain while sellers are indexed", async () => {
+  await assert.rejects(withChainLostOnRead({ chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
     /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
-  assert.deepEqual(rejections(), []);
   assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+  assert.equal(store.loadScanState().chainIdentity, undefined);
+  await assertRefused(409, notCurrent, "withheld chain");
 });
 
-test("a writer reverts the unconfirmed writes a crashed writer left behind", async () => {
+test("a complete pass records the chain again after one was withheld", async () => {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  store.clearChainDerivedArtifacts();
-  store.saveScanState(currentState());
-  // A crash after indexing wrote a rejection, before its chain check.
-  store.openChainReadWindow();
-  store.recordListingRejection(anchor, seller, "SELLER_CLAIM_BINDING");
-  storedListing = badSignature;
-  storageReads = 0;
-  try {
-    // A refused writer only reverts: the node now serves another chain.
-    node = { ...node, chain: "aa".repeat(32) };
-    assert.equal((await indexNow()).status, 409);
-    assert.equal(storageReads, 0);
-    assert.deepEqual(rejections(), []);
-  } finally {
-    storedListing = listing;
-    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  }
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.equal((await indexNow()).status, 200);
 });
 
 const marker = `stor-${"2".repeat(40)}`;
