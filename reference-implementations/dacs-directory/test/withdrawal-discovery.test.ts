@@ -7,7 +7,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { contentHash, sha256Hex } from "../src/catalog/canonical.js";
-import { crawlDomain } from "../src/catalog/wellknown.js";
+import { crawlDomain, type WellKnownAgent } from "../src/catalog/wellknown.js";
 import { findValidListingRevocation, verifyListing } from "../src/catalog/listingVerification.js";
 
 const directory = mkdtempSync(join(tmpdir(), "dacs-withdrawal-discovery-"));
@@ -61,14 +61,20 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
         } } }) : raw;
         return { body: JSON.parse(body), raw: body };
       } });
-      assert.ok(!("error" in agent)); assert.equal(agent.withdrawalAuthenticated, false);
+      if ("error" in agent) return agent;
+      assert.equal(agent.withdrawalAuthenticated, false);
       return agent;
     };
     const entries = name === "conflicting rows" ? [active, entry]
       : name === "reversed conflicting rows" ? [entry, active]
         : name === "conflicting hashes" ? [{ ...active, contentHash: "f".repeat(64) }, entry] : [entry];
-    const agents = [await crawl(entries, "seller.example")];
-    if (name === "active mirror control") agents.push(await crawl([active], "mirror.example"));
+    const crawled = [await crawl(entries, "seller.example")];
+    if (name === "active mirror control") crawled.push(await crawl([active], "mirror.example"));
+    const agents = crawled.filter((result): result is WellKnownAgent => !("error" in result));
+    const errors = crawled.filter((result): result is { domain: string; error: string } => "error" in result);
+    // An index declaring one anchor under two hashes is refused whole and reindexed as a failed source.
+    assert.deepEqual(errors, name === "conflicting hashes"
+      ? [{ domain: "seller.example", error: "listings.json has conflicting content hashes for the same anchor" }] : []);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
       if (init?.body) return Response.json({ result: 200, response: [] });
@@ -81,7 +87,7 @@ test("unsigned incomplete withdrawal rows cannot introduce active offers", async
     try {
       store.saveRegistrations([]); store.saveDomains(["seller.example"]);
       await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
-        crawlWellKnown: async () => ({ agents, errors: [] }) });
+        crawlWellKnown: async () => ({ agents, errors }) });
       const response = await GET(new NextRequest("https://directory.example/api/dacs/listings"));
       assert.equal(response.status, 200);
       const { listings } = await response.json();
