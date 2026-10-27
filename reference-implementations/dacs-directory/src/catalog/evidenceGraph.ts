@@ -26,11 +26,7 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
-  /**
-   * `expiredAt` is the `validity.notAfter` of a Listing kept only as expired deal history.
-   */
-  resolveListing: (ref: Record<string, unknown>) =>
-    Promise<{ locator: string; raw: Record<string, unknown>; expiredAt?: number } | null>;
+  resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
@@ -436,12 +432,6 @@ async function verifyCurrentEvidenceGraph(
   const listingHash = normalizedHash(listingRef.contentHash);
   const verifiedListing = listed && await verifyStoredListing(listed.raw, listed.locator, resolveKey);
   if (!verifiedListing || verifiedListing.contentHash !== listingHash) return { ...fail("listing reference failed"), signaturesVerified };
-  // DACS-3 §8.5.2 check 6 / CA-8 requires the commitment's authenticated finalized
-  // receipt time. This reader has no commitment/receipt verifier; neither an
-  // Agreement artifact's anchor nor a bundle's finalisedAt establishes that proof.
-  if (listed.expiredAt !== undefined) {
-    return { ...fail("expired listing requires authenticated commitment finality proof"), signaturesVerified };
-  }
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
