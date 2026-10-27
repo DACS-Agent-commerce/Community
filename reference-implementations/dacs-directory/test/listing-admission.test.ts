@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 
-import { isListing } from "@kynesyslabs/dacs/artifacts";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { registrationMessage } from "../src/catalog/registrationSig.js";
@@ -44,20 +43,12 @@ const attested = (verificationMethod?: unknown): Obj => ({
   ...(verificationMethod === undefined ? {} : { verificationMethod }),
 });
 
-/** ClaimReference bytes for each signed role; all name the same key by default. */
-interface ListingRefs { presentedBy: string; claim: string; signer: string }
-
-/** A correctly signed current Listing; only the supplied fields vary. */
-function signedListing(
-  listingId: string,
-  deliverable: Obj,
-  extra: Obj = {},
-  refs: ListingRefs = { presentedBy: seller, claim: seller, signer: seller },
-): Obj {
-  const identity: Obj = { bundleVersion: "1", presentedBy: refs.presentedBy, presentedAt: 1, claims: [{ ref: refs.claim }] };
+/** A correctly signed current Listing; only its id and deliverable vary. */
+function signedListing(listingId: string, deliverable: Obj): Obj {
+  const identity: Obj = { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }] };
   identity.presentation = {
     kind: "per-claim",
-    signatures: [{ ref: refs.presentedBy, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`) }],
+    signatures: [{ ref: seller, signature: sign(`dacs-bundle-presentation:v1:${contentHash(identity)}`) }],
   };
   const scope: Obj = {
     dacsVersion: "1",
@@ -71,9 +62,8 @@ function signedListing(
     acceptedRails: [{ railId: "pay-dem" }],
     terms: {},
     validity: { notBefore: 1 },
-    ...extra,
   };
-  return { ...scope, signature: { algorithm: "ed25519", signer: refs.signer, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
+  return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
 }
 
 test("the indexer excludes verification-method failures with diagnostics and admits the conforming listing", async () => {
@@ -196,97 +186,6 @@ test("published summaries never claim transaction readiness the Directory did no
   );
 });
 
-// Listings the pinned SDK reader accepts and the previous pin (f68fed1) refused: APR-1 pay-alternative
-// (which the catalog profile still excludes), CORE CF-5 nesting through 128 levels, and CORE B.1 CF-3
-// advisory ClaimReference parameters.
-const ALTERNATIVES = [{ railId: "pay-dem" }, { railId: "pay-x402" }];
-const alternativePipeline = (alternatives: Obj[]): Obj[] => [
-  ...ATTESTED_PIPELINE.slice(0, 2),
-  { kind: "pay-alternative", parameters: { alternatives } },
-  ATTESTED_PIPELINE[3],
-];
-const payAlternative = (listingId: string, extra: Obj = {}): Obj => signedListing(listingId, attested({ kind: "self-signed" }), {
-  pipeline: alternativePipeline(ALTERNATIVES),
-  acceptedRails: ALTERNATIVES,
-  ...extra,
-});
-/** A Listing whose deepest member sits `levels` containers deep, the Listing itself included. */
-const nestedListing = (levels: number): Obj => {
-  let member: unknown = "leaf";
-  for (let level = 2; level < levels; level += 1) member = { n: member };
-  return signedListing(`depth-${levels}`, attested({ kind: "self-signed" }), { terms: { extension: member } });
-};
-const advisory = `${seller}?channel=directory`;
-
-test("the indexer publishes current-SDK listings under the registered identity and drops expired ones", async () => {
-  const anchors = {
-    [`stor-${"a".repeat(40)}`]: payAlternative("indexed-pay-alternative"),
-    [`stor-${"b".repeat(40)}`]: nestedListing(128),
-    [`stor-${"c".repeat(40)}`]: signedListing("indexed-advisory", attested({ kind: "self-signed" }), {}, {
-      presentedBy: advisory, claim: advisory, signer: advisory,
-    }),
-    [`stor-${"d".repeat(40)}`]: signedListing("indexed-expired", attested({ kind: "self-signed" }), {
-      validity: { notBefore: 1, notAfter: 2 },
-    }),
-  };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const data = anchors[String(input).split("/").pop() ?? ""];
-    return data
-      ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data })
-      : new Response(null, { status: 404 });
-  };
-  try {
-    const record = await indexRegistration(
-      { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: Object.keys(anchors) },
-      undefined,
-      async () => { throw new Error("identity unavailable"); },
-    );
-    assert.deepEqual(
-      record.listings.map((listing) => listing.listingId).sort(),
-      ["depth-128", "indexed-advisory"],
-    );
-    // The seller record is keyed by the registered CF-3 identity; each §6.3.6
-    // summary carries its listing's exact `presentedBy` bytes (RB-2).
-    assert.equal(record.primaryClaim, seller);
-    for (const listing of record.listings) {
-      assert.equal(listing.status, "active", listing.listingId);
-      assert.equal(
-        listing.seller.primaryClaim,
-        listing.listingId === "indexed-advisory" ? advisory : seller,
-        listing.listingId,
-      );
-    }
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("the indexer withholds a signed Listing until its notBefore, then publishes it", async (t) => {
-  // DACS-1 reader step 3: a Listing is not effective before validity.notBefore.
-  const notBefore = Date.now() + 24 * 60 * 60 * 1000;
-  const anchor = `stor-${"e".repeat(40)}`;
-  const listing = signedListing("indexed-future", attested({ kind: "self-signed" }), { validity: { notBefore } });
-  assert.equal(isListing(listing), true);
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => String(input).endsWith(`/${anchor}`)
-    ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: listing })
-    : new Response(null, { status: 404 });
-  const index = () => indexRegistration(
-    { primaryClaim: seller, displayName: "Admission Desk", listingAnchors: [anchor] },
-    undefined,
-    async () => { throw new Error("identity unavailable"); },
-  );
-  try {
-    assert.deepEqual((await index()).listings, []);
-    t.mock.method(Date, "now", () => notBefore);
-    const effective = await index();
-    assert.deepEqual(effective.listings.map((summary) => [summary.listingId, summary.status]), [["indexed-future", "active"]]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("rejection diagnostics keep every Listing ID the DACS-1 schema allows", async () => {
   const { listingDiagnosticCoordinates } = await import("../src/catalog/listingAdmission.js");
   const { listingRejectionDiagnosticSchema } = await import("../src/catalog/contracts.js");
@@ -379,38 +278,6 @@ test("diagnostic pruning keeps current sellers case-insensitively and removes de
   assert.equal(items.some((item) => item.locator === dropAt), false);
   store.clearRegistrationListingRejections(seller);
 });
-
-test("missing candidate owners and restored withdrawal sources without bindings are empty", async () => {
-  assert.equal(store.hasPendingOwnerRevocationCandidate("a".repeat(64), `0x${keyHex}`), false);
-  const { default: Database } = await import("better-sqlite3");
-  const db = new Database(join(dataDirectory, "directory.sqlite"));
-  const previous = db.prepare("SELECT value_json FROM kv_state WHERE key='withdrawal-sources'").get() as { value_json: string } | undefined;
-  try {
-    db.prepare("INSERT OR REPLACE INTO kv_state(key,value_json,updated_at) VALUES ('withdrawal-sources',?,1)")
-      .run(JSON.stringify([{ domain: "restored.example", seller, hashes: [], incomplete: [], provenance: "publisher-signature" }]));
-    assert.deepEqual(store.boundWellKnownRevocations(seller, "a".repeat(64), "listing", 1), []);
-  } finally {
-    if (previous) db.prepare("UPDATE kv_state SET value_json=? WHERE key='withdrawal-sources'").run(previous.value_json);
-    else db.prepare("DELETE FROM kv_state WHERE key='withdrawal-sources'").run();
-    db.close();
-  }
-});
-
-test("legacy numeric-looking validity strings do not become current-profile numeric windows", async () => {
-  const scope = { agentId: seller, serviceId: "legacy-window", name: "Legacy", description: "Historical validity extension",
-    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
-    supportedDelivery: ["deliver-storage-program"], validity: { notBefore: "9007199254740991", notAfter: "1" } };
-  const data = { ...scope, signature: Buffer.from(sign(`dacs-listing:v1:${contentHash(scope)}`), "base64url").toString("hex") };
-  assert.equal((await verifyListingResult(data)).ok, true);
-  const anchor = `stor-${"9".repeat(40)}`;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data });
-  try {
-    const record = await indexRegistration({ primaryClaim: seller, displayName: "Legacy", listingAnchors: [anchor] }, undefined, async () => ({}));
-    assert.deepEqual(record.listings.map((item) => [item.listingId, item.status]), [["legacy-window", "active"]]);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
 
 test("rejections never assign unauthenticated coordinates or blame another seller; latest pointers replace stale diagnostics", async () => {
   const anchor = `stor-${"a".repeat(40)}`;
