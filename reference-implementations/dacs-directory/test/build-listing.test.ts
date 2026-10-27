@@ -621,6 +621,48 @@ test("publisher withholds a create when the fallback search cannot establish abs
   }
 });
 
+test("a configured resolver decides occupancy after the pinned node's fallback search", async (t) => {
+  t.mock.method(Date, "now", () => 1_810_000_000_000);
+  const calls: string[] = [];
+  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    const rpc = JSON.parse(String(init?.body));
+    calls.push(rpc.method === "nodeCall" ? rpc.params[0].message : rpc.method);
+    if (rpc.params?.[0]?.message === "searchStoragePrograms") {
+      return Response.json({ result: 200, response: '{ error: "Unknown message"}' });
+    }
+    if (rpc.method === "gcr_routine") return Response.json({ result: 200, response: [] });
+    return Response.json({ result: 200, response: 6 });
+  });
+  let resolved = 0;
+  const completeEmpty = createBuildListingPost(signedRailSnapshot, async (logicalAddress, chainIdentity) => {
+    resolved++;
+    return { status: "complete", logicalAddress, chainIdentity, nativeAddresses: [] };
+  });
+  const uncertain = createBuildListingPost(signedRailSnapshot, async () => ({ status: "indeterminate", reason: "history index is incomplete" }));
+  const input = { ...base, serviceId: "pinned-fallback-resolver" };
+  const identity = await (await completeEmpty(request(input))).json();
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") };
+  const preview = await completeEmpty(request(authenticated));
+  assert.equal(preview.status, 200);
+  const previewBody = await preview.json();
+  assert.equal(previewBody.tx, null);
+  const listingSignature = Buffer.from(ed25519Sign(Buffer.from(previewBody.message), privateKey)).toString("hex");
+  const withheld = await uncertain(request({ ...authenticated, listingSignature }));
+  assert.equal(withheld.status, 503);
+  const withheldBody = await withheld.json();
+  assert.match(withheldBody.error, /history index is incomplete/, "the resolver's own cause is reported");
+  assert.equal(withheldBody.tx, undefined);
+  assert.equal(calls.includes("getAddressNonce"), false);
+  const created = await completeEmpty(request({ ...authenticated, listingSignature }));
+  assert.equal(created.status, 200);
+  assert.ok((await created.json()).tx);
+  assert.equal(resolved, 2);
+  assert.ok(calls.includes("gcr_routine"), "the pinned node's fallback search answered first");
+});
+
 test("LP-3 listing versions are allocated per listingId", async () => {
   const store = await import("../src/catalog/store.js");
   const summary = (listingId: string, version: number) => ({

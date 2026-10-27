@@ -428,7 +428,10 @@ return async function POST(req: NextRequest) {
       if (legacy.status === "present") programName = legacyName;
     }
   }
-  if (resolution.status === "absent" && resolveVersion) {
+  // A configured complete resolver decides whenever no owned program was recovered:
+  // after empty name searches, and after uncertain ones such as the pinned node's
+  // ACL-filtered fallback search, which can never establish absence on its own.
+  if (resolution.status !== "present" && resolveVersion) {
     resolution = await resolveListingVersionOccupancy(logicalAddress, chainIdentity, owner, resolveVersion);
     if (resolution.status === "present") programName = resolution.record.programName ?? programName;
   }
