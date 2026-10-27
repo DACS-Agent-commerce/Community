@@ -128,6 +128,17 @@ function savedTransactionCreating(preparation: ListingPreparation, signedListing
   return isRecord(tx) && envelopeHash === sha256Hex(canonicalize(signedListing)) ? tx : undefined;
 }
 
+/**
+ * The seller display name in a retained preparation's signed Listing, or
+ * undefined if it has none. Throws if the stored JSON cannot be parsed.
+ */
+function preparedDisplayName(preparation: ListingPreparation): string | undefined {
+  const tx: unknown = JSON.parse(preparation.transactionJson);
+  const payload = isRecord(tx) && isRecord(tx.content) && Array.isArray(tx.content.data) ? tx.content.data[1] : undefined;
+  const seller = isRecord(payload) && isRecord(payload.data) && isRecord(payload.data.seller) ? payload.data.seller : undefined;
+  return typeof seller?.displayName === "string" ? seller.displayName : undefined;
+}
+
 export function createBuildListingPost(
   inCodeDefinitions: ReadonlyArray<Omit<(typeof PUBLISHER_IN_CODE_RAIL_DEFINITIONS)[number], "signatureValid"> & { signatureValid: boolean }> = PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
 ) {
@@ -301,6 +312,12 @@ return async function POST(req: NextRequest) {
     );
   } catch { /* malformed keys/signatures fail closed */ }
   if (!identityOk) return NextResponse.json({ error: "identity presentation signature is invalid" }, { status: 400 });
+  const logicalAddress = listingAddress(did, serviceId, listingVersion);
+  const chainIdentity = pinnedChainIdentity();
+  // A prepared version is rebuilt with the display name its seller signed, not
+  // the catalog's current one, so an exact signed repeat still matches its
+  // saved bytes after the catalog gains, renames or drops this seller.
+  const retained = loadListingPreparation(chainIdentity, logicalAddress);
   const pricingTerm = {
     amount,
     currency,
@@ -359,7 +376,7 @@ return async function POST(req: NextRequest) {
           signatures: [{ ref: did, signature: identitySignatureValue }],
         },
       },
-      displayName: knownSeller?.displayName ?? body.name.trim(),
+      displayName: (retained && preparedDisplayName(retained)) ?? knownSeller?.displayName ?? body.name.trim(),
       ...(publicEndpoint ? { publicEndpoint } : {}),
     },
     offering: { title: body.name.trim(), description: body.description.trim(), category, tags, deliverable },
@@ -409,8 +426,6 @@ return async function POST(req: NextRequest) {
   }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
-  const logicalAddress = listingAddress(did, serviceId, listingVersion);
-  const chainIdentity = pinnedChainIdentity();
   const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
     error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
     logicalAddress,
@@ -424,7 +439,7 @@ return async function POST(req: NextRequest) {
   }
   // Empty name indexes and advancing nonces do not establish that a returned
   // create failed. Keep the original attempt across retries and restarts.
-  const preparation = resolution.status === "absent" ? loadListingPreparation(chainIdentity, logicalAddress) : undefined;
+  const preparation = resolution.status === "absent" ? retained : undefined;
   // A version slot is write-once: a taken version the name lookup cannot find
   // is not free, so no second create may be prepared for it. A version this
   // directory prepared reports its saved anchor below instead.
