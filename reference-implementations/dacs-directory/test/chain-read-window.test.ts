@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,4 +100,34 @@ test("a reverted window keeps the publisher-signed withdrawal sources saved insi
   assert.deepEqual(store.savedListingDeclarations(seller).sources, [{ "stor-declared": newHash }]);
   assert.equal(store.wellKnownWithdrawalRevision(), revisionBefore + 1);
   assert.equal(rejections().some(([locator]) => locator === "stor-listing-in-window"), false, "what the node's reads produced is still undone");
+});
+
+const CACHED_ARTIFACTS = 1_000;
+const CACHED_ARTIFACT_CHARACTERS = 120_000;
+const RECOVERY_HEAP_MEGABYTES = 128;
+
+test("recovering a journal that holds many large prior rows needs memory for one row, not for all of them", () => {
+  const recoveryDirectory = mkdtempSync(join(tmpdir(), "dacs-chain-read-window-heap-"));
+  try {
+    // Earlier passes cached large artifacts; a later pass replaces each with a small row, so every undo
+    // statement carries a large prior value. The same process then reverts the window under a small heap.
+    const recovery = spawnSync(process.execPath, [`--max-old-space-size=${RECOVERY_HEAP_MEGABYTES}`, "--import", "tsx", "--input-type=module", "-e", `
+      import Database from "better-sqlite3";
+      import { join } from "node:path";
+      const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
+      const artifact = (index, data) => ({ locator: "stor-cached-" + index, kind: "listing", profile: "p", observedAt: 1, contentHash: data ? "a".repeat(64) : undefined, data });
+      for (let index = 0; index < ${CACHED_ARTIFACTS}; index++) store.recordArtifact(artifact(index, { body: "x".repeat(${CACHED_ARTIFACT_CHARACTERS}) }));
+      store.openChainReadWindow();
+      for (let index = 0; index < ${CACHED_ARTIFACTS}; index++) store.recordArtifact(artifact(index));
+      store.revertChainReadWindow();
+      const check = new Database(join(process.env.DACS_DIRECTORY_DATA, "directory.sqlite"), { readonly: true });
+      const restored = check.prepare("SELECT COUNT(*) count FROM artifacts WHERE length(data_json) > ${CACHED_ARTIFACT_CHARACTERS}").get().count;
+      const journaled = check.prepare("SELECT COUNT(*) count FROM unconfirmed_chain_writes").get().count;
+      console.log(JSON.stringify({ restored, journaled }));
+    `], { encoding: "utf8", timeout: 120_000, env: { ...process.env, DACS_DIRECTORY_DATA: recoveryDirectory } });
+    assert.equal(recovery.status, 0, recovery.stderr.slice(-2_000));
+    assert.deepEqual(JSON.parse(recovery.stdout.trim().split("\n").pop() ?? ""), { restored: CACHED_ARTIFACTS, journaled: 0 });
+  } finally {
+    rmSync(recoveryDirectory, { recursive: true, force: true });
+  }
 });
