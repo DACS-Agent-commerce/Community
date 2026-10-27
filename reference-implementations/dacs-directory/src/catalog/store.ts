@@ -371,11 +371,14 @@ db.transaction(() => {
 export const listingVersionFloor = (seller: string, listingId: string): number =>
   getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {})[listingVersionFloorKey(seller, listingId)] ?? 0;
 
-// Earlier releases persisted unreadable (403/404) candidates as rejected without
-// a trustworthy reason. Reverify those decisions once, and withhold affected
-// active catalog entries immediately, before the first reindex can run.
+// Earlier releases persisted unreadable candidates as rejected without a
+// trustworthy reason: 403/404 replies before version 1, and replies whose data
+// is not an object before version 2. Reverify those decisions once, and withhold
+// affected active catalog entries immediately, before the first reindex can run.
+// Bump this version whenever a reader change turns a past rejection into an unread.
+const REVOCATION_READ_SCHEMA_VERSION = 2;
 db.transaction(() => {
-  if (getJson("revocation-read-schema-version", 0) >= 1) return;
+  if (getJson("revocation-read-schema-version", 0) >= REVOCATION_READ_SCHEMA_VERSION) return;
   const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
     .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
   db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
@@ -390,7 +393,7 @@ db.transaction(() => {
         listing.status === "revoked" || !affected.has(listing.contentHash)),
     })) });
   }
-  setJson("revocation-read-schema-version", 1);
+  setJson("revocation-read-schema-version", REVOCATION_READ_SCHEMA_VERSION);
 }).immediate();
 
 // Keep source-specific upgrade holds even when no candidate was queued. v2 did
