@@ -68,8 +68,9 @@ async function withOccupancy(
   occupy: (v1: V1) => { name: string; data: Record<string, unknown> },
   check: (ctx: { post: () => Promise<Response>; queries: string[] }) => Promise<void>,
 ) {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
-  const finalInput = { ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const finalInput = { ...base, listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let occupied: { name: string; data: Record<string, unknown>; address: string } | null = null;
   const queries: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -158,8 +159,9 @@ test("a legacy program name for another version leaves this version free to publ
 });
 
 test("an unreadable legacy-name lookup withholds the create transaction", async () => {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
-  const finalInput = { ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
+  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const finalInput = { ...base, listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let legacyDown = false;
   const nonceReads: string[] = [];
   const originalFetch = globalThis.fetch;
