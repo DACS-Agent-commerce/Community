@@ -523,13 +523,11 @@ return async function POST(req: NextRequest) {
     // create. Any other retry learns only the saved anchor.
     const savedRelease = (saved: ListingPreparation | undefined) =>
       saved && listingVersion === nextVersion ? savedTransactionCreating(saved, signedCandidate) ?? null : null;
-    if (preparation) {
-      tx = savedRelease(preparation);
-      if (!tx) return unresolvedPreparation(preparation.anchorAddress);
-      anchorAddress = preparation.anchorAddress;
-    } else {
-      // Broadcasting is the seller's irreversible step, so refuse a node outside
-      // the pin here rather than after the write (confirm-listing checks again).
+    // Broadcasting is the seller's irreversible step, so every transaction this
+    // returns, new or saved, first needs the node inside the pin, rather than
+    // only after the write (confirm-listing checks again). A saved anchor alone
+    // is no transaction and needs no node.
+    const nodeOutsidePin = async (): Promise<NextResponse | null> => {
       let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
       try {
         deployment = await pinnedNodeDeployment();
@@ -537,9 +535,18 @@ return async function POST(req: NextRequest) {
         const cause = error instanceof Error ? error.message : "unknown failure";
         return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
       }
-      if (!deployment.ok) {
-        return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
-      }
+      return deployment.ok ? null : NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
+    };
+    if (preparation) {
+      tx = savedRelease(preparation);
+      if (!tx) return unresolvedPreparation(preparation.anchorAddress);
+      const refusal = await nodeOutsidePin();
+      if (refusal) return refusal;
+      anchorAddress = preparation.anchorAddress;
+    } else {
+      // A lost insert race below releases the winner's saved bytes under this same check.
+      const refusal = await nodeOutsidePin();
+      if (refusal) return refusal;
       let nonce: number;
       try {
         nonce = await accountNonce(hex);
