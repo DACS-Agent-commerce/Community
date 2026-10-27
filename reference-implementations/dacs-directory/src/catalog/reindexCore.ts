@@ -44,6 +44,9 @@ import {
   finishScanRun,
   loadRetryableArtifacts,
   clearChainDerivedArtifacts,
+  openChainReadWindow,
+  confirmChainReadWindow,
+  revertChainReadWindow,
   recordArtifact,
   pruneFailureHistory,
   pruneListingRejections,
@@ -81,6 +84,7 @@ export interface ReindexOptions {
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
+  revertChainReadWindow();
   // A refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
   function refuse(error: string): never {
     const { lastSeenTxId } = loadScanState();
@@ -142,19 +146,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  // A legacy state with no recorded identity is not reset; it replays below and keeps its catalog.
+  // Only a state recorded on the served chain holds evidence for it. Another recorded chain, no
+  // recorded chain (a legacy state or an unfinished reset) and a large tip regression all reset.
   const chainReplaced = state.chainIdentity !== undefined && state.chainIdentity !== served.chainIdentity;
-  if (chainReplaced || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
+  const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
+  if (chainReplaced || tipRegressed || state.chainIdentity === undefined) {
     const previousCursor = state.lastSeenTxId;
-    // A low tip read after the gate resets the cache only if the gated chain served it.
-    const changed = chainReplaced ? null : await chainChange();
+    // Every reset follows a read of the gated chain, so a node changing chain resets nothing.
+    const changed = await chainChange();
     if (changed) return refuse(`catalog not updated: ${changed}`);
-    if (chainReplaced) {
-      // The replaced chain's catalog is neither served nor carried into the rebuild. It is emptied
-      // first; until the reset state below is saved, the recorded identity keeps the reset due.
-      prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
-      saveCatalog(prior);
-    }
+    // No earlier catalog record is evidence for the rebuild. A replaced chain's catalog is also
+    // emptied first; until the reset state below is saved, the recorded identity keeps the reset
+    // due. Other resets keep serving the catalog until the rebuild replaces it.
+    prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
+    if (chainReplaced) saveCatalog(prior);
     clearChainDerivedArtifacts();
     state = normalizeScanState({
       // No identity and no current schema: only a complete replay stamps them.
@@ -172,15 +177,16 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     saveScanState(state);
     log(
-      `chain replacement detected: ${chainReplaced ? "the node serves another chain than the recorded one"
-        : `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
+      `${chainReplaced ? "chain replacement detected: the node serves another chain than the recorded one"
+        : tipRegressed ? `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs behind`
+        : "no chain is recorded for the cached state"} cursor ${previousCursor}; ` +
         `cleared chain-derived cache and restarting from genesis`,
     );
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.
   // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
-  // A state with no recorded chain identity replays once, like a schema bump.
+  // A reset state records no chain identity and replays, like a schema bump.
   const needsHistoryReplay = !scanStateCurrent(state, served.chainIdentity);
   // Overflow is recomputed per signer from the replayed bindings.
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
@@ -340,6 +346,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
+    // Crawl and seller indexing persist node reads as they go; they are kept only if the check below passes.
+    openChainReadWindow();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -506,6 +514,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     const indexChainChange = await chainChange();
     if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
+    confirmChainReadWindow();
     saveScanState(state);
 
     // A failed crawl hides the sellers only it discovers; absence from an incomplete pass is not removal.
@@ -524,6 +533,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
   } catch (error) {
+    revertChainReadWindow();
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan?.chainTip,
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });
