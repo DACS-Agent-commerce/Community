@@ -698,6 +698,7 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 // or a crash reverts it. Leases and run history are not journaled, nor are the keys in
 // UNJOURNALED_KEYS.
 db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
+interface UndoStatement { seq: number; undo_sql: string }
 const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence"]);
 /**
  * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
@@ -750,12 +751,17 @@ export const commitChainReadWindow = db.transaction((lastSaves: () => void): voi
 /**
  * Undo every journaled write, newest first, and close the window. Also undoes the writes of a
  * window a crash left open, so every catalog writer calls it under its lease before it reads.
+ * It holds one undo statement at a time: a statement carries a whole prior row, so a journal of
+ * many large rows must not be loaded at once.
  */
 export const revertChainReadWindow = db.transaction((): void => {
   closeChainReadWindow();
-  const undo = db.prepare("SELECT undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC").all() as Array<{ undo_sql: string }>;
-  for (const { undo_sql: statement } of undo) db.exec(statement);
-  db.exec("DELETE FROM unconfirmed_chain_writes");
+  const newestUndo = db.prepare("SELECT seq, undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC LIMIT 1");
+  const forgetUndo = db.prepare("DELETE FROM unconfirmed_chain_writes WHERE seq = ?");
+  for (let undo = newestUndo.get() as UndoStatement | undefined; undo; undo = newestUndo.get() as UndoStatement | undefined) {
+    db.exec(undo.undo_sql);
+    forgetUndo.run(undo.seq);
+  }
 });
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
