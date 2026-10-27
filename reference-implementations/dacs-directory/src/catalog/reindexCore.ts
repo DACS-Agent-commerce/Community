@@ -20,7 +20,7 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
-import { scanStateCurrent, servedCatalogChain } from "./chainGate";
+import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "./chainGate";
 import type { catalogNodeDeployment } from "./listingFinality";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
@@ -81,15 +81,20 @@ export interface ReindexOptions {
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
-  // The refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
-  const served = await servedCatalogChain(opts.nodeDeployment);
-  if (!served.ok) {
-    const error = `catalog not updated: ${served.cause}`;
+  // A refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
+  function refuse(error: string): never {
     const { lastSeenTxId } = loadScanState();
     finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
     throw new Error(error);
   }
+  const served = await servedCatalogChain(opts.nodeDeployment);
+  if (!served.ok) return refuse(`catalog not updated: ${served.cause}`);
   if (served.warning) log(`node build warning: ${served.warning}`);
+  // Node reads made after the gate are persisted only while the node still serves the gated chain.
+  const chainChange = async (): Promise<string | null> => {
+    const again = await servedChainUnchanged(served.chainIdentity, opts.nodeDeployment);
+    return again.ok ? null : `the served chain changed during the pass: ${again.cause}`;
+  };
   const regs: (Registration & { discovered?: boolean })[] = [];
   for (const raw of loadRegistrations()) {
     // The registration and its binding count are checked before any binding is verified;
@@ -141,6 +146,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const chainReplaced = state.chainIdentity !== undefined && state.chainIdentity !== served.chainIdentity;
   if (chainReplaced || (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold))) {
     const previousCursor = state.lastSeenTxId;
+    // A low tip read after the gate resets the cache only if the gated chain served it.
+    const changed = chainReplaced ? null : await chainChange();
+    if (changed) return refuse(`catalog not updated: ${changed}`);
     if (chainReplaced) {
       // The replaced chain's catalog is neither served nor carried into the rebuild. It is emptied
       // first; until the reset state below is saved, the recorded identity keeps the reset due.
@@ -220,6 +228,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
       );
     }
+    const scanChainChange = await chainChange();
+    if (scanChainChange) throw new Error(`catalog not updated: ${scanChainChange}`);
     // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
     // entries are kept and the replay adds or refreshes each owner's entry.
     if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
@@ -302,6 +312,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           maxTxs: configuredBackfillMax,
           budgetMs: configuredBackfillBudget,
         });
+        const backfillChainChange = await chainChange();
+        if (backfillChainChange) throw new Error(backfillChainChange);
         const updated = recordConsensusAnchors(backfill.observations);
         state.anchorBackfillCursor = backfill.nextCursor;
         state.anchorBackfillComplete = backfill.complete;
@@ -326,9 +338,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
-    // Stamped together and only after a complete pass, so an interrupted replay stays due.
-    state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
-    state.chainIdentity = served.chainIdentity;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
     log(
@@ -495,11 +504,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
       cursor: state.reachabilityCursor,
     });
+    const indexChainChange = await chainChange();
+    if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
     saveScanState(state);
 
     // A failed crawl hides the sellers only it discovers; absence from an incomplete pass is not removal.
     if (!crawlIncomplete) pruneListingRejections(allRegs.map((reg) => reg.primaryClaim));
     saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    if (needsHistoryReplay) {
+      // Stamped together and only after the rebuilt catalog is saved, so an interrupted
+      // replay stays due and index-now refuses until the catalog matches this chain.
+      state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
+      state.chainIdentity = served.chainIdentity;
+      saveScanState(state);
+    }
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 
