@@ -469,6 +469,93 @@ async function signedDeclaration(source: string, anchor: string, hash: string | 
 
 const publicListingCount = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
 
+for (const priorNotice of ["none", "owner"] as const) {
+  for (const sourceCount of [1, 2]) {
+    test(`index-now applies ${sourceCount} retained declarations after an unread listing with ${priorNotice} notice`, async () => {
+      const { listing, locators } = await publicListingVector("immediate-retained-source", 2100 + sourceCount * 10 + (priorNotice === "owner" ? 100 : 0));
+      const peer = `https://peer-${sha256Hex(domain).slice(0, 16)}.example`;
+      saveDomains(sourceCount === 1 ? [domain] : [peer, domain]);
+      const stored = registration([locators.listing]);
+      const message = registrationMessage(stored, 1);
+      const signature = Buffer.from(ed25519Sign(Buffer.from(message), privateKeyFromSeed(seeds[1]))).toString("hex");
+      saveRegistrations([{ ...stored, ownerSignature: { message, signedAt: 1, signature } }]);
+      if (priorNotice === "owner") await reindexWith(crawling([], false), `0x${"f".repeat(64)}`);
+      const sources = [await signedDeclaration(domain, locators.listing, "f".repeat(64))];
+      if (sourceCount === 2) sources.unshift(await signedDeclaration(peer, locators.listing, artifactHash(listing, "listing")));
+      await withChainFetch(async () => {
+        const chainFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => String(input).endsWith(locators.listing)
+          ? new Response(null, { status: 503 }) : chainFetch(input, init);
+        await reindexAll({ log: () => {}, resolveIdentities: async () => ({}), crawlWellKnown: crawling(sources, false) });
+      });
+      const before = diagnostics().find((item) => item.locator === locators.listing);
+      assert.equal(before?.code, priorNotice === "owner" ? "OWNER_CLAIM_BINDING" : undefined);
+      // A fresh process must reload source evidence even when no hash notice was ever written.
+      const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import assert from "node:assert/strict";
+        import { readFileSync } from "node:fs";
+        import { NextRequest } from "next/server";
+        import { POST } from "./app/api/dacs/index-now/route.ts";
+        import { indexerDiagnostics, loadCatalog } from "./src/catalog/store.ts";
+        const { listing, anchor, owner, seller } = JSON.parse(readFileSync(0, "utf8"));
+        globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+          : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
+          : new Response(null, { status: 404 });
+        for (let repeat = 0; repeat < 2; repeat++) {
+          const response = await POST(new NextRequest("https://directory.example/api/dacs/index-now",
+            { method: "POST", body: JSON.stringify({ claim: seller }) }));
+          assert.equal(response.status, 200);
+          assert.equal((await response.json()).listings, 0);
+          assert.equal(loadCatalog().sellers.find(item => item.primaryClaim === seller)?.listings.length, 0);
+          const notice = indexerDiagnostics().listingRejectionDiagnostics.items.find(item => item.locator === anchor);
+          assert.equal(notice?.code, "DECLARED_CONTENT_HASH_MISMATCH");
+          assert.equal(notice?.publicNotice, true);
+        }
+      `], { encoding: "utf8", timeout: 30_000,
+        input: JSON.stringify({ listing, anchor: locators.listing, owner, seller: dids[1] }) });
+      assert.equal(restarted.status, 0, restarted.stderr || String(restarted.error));
+      for (let repeat = 0; repeat < 2; repeat++) await withChainFetch(async () => {
+        const response = await indexNow(new NextRequest("https://directory.example/api/dacs/index-now",
+          { method: "POST", body: JSON.stringify({ claim: dids[1] }) }));
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).listings, 0);
+        assert.equal(await publicListingCount(), 0);
+        assert.equal(diagnostics().find((item) => item.locator === locators.listing)?.publicNotice, true);
+      });
+      const corrected = await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing"), 101);
+      await reindexWith(crawling(sourceCount === 1 ? [corrected] : [sources[0], corrected], false));
+      assert.equal(await publicListingCount(), 1, "a full authenticated correction still releases the hold");
+    });
+  }
+}
+
+test("index-now accepts matching retained declarations isolated by seller, anchor and configured origin", async () => {
+  const { listing, locators } = await publicListingVector("immediate-source-isolation", 2300);
+  const foreign = "https://immediate-foreign.example";
+  const retired = "https://immediate-retired.example";
+  saveRegistrations([registration([locators.listing])]);
+  saveDomains([domain, foreign, retired]);
+  await reindexWith(crawling([
+    await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing")),
+    await signedDeclaration(foreign, locators.listing, "f".repeat(64), 100, 0),
+    await signedDeclaration(retired, locators.listing, "f".repeat(64)),
+  ], false));
+  saveDomains([domain, foreign]);
+  // This source's conflict concerns another anchor, not the registered listing.
+  await reindexWith(crawling([
+    await signedDeclaration(domain, locators.listing, artifactHash(listing, "listing"), 101),
+    await signedDeclaration(foreign, rejectedAt("7"), "f".repeat(64), 101),
+  ], false));
+  await withChainFetch(async () => {
+    const response = await indexNow(new NextRequest("https://directory.example/api/dacs/index-now",
+      { method: "POST", body: JSON.stringify({ claim: dids[1] }) }));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).listings, 1);
+    assert.equal(await publicListingCount(), 1);
+    assert.equal(diagnostics().some((item) => item.locator === locators.listing), false);
+  });
+});
+
 for (const mode of ["registered", "crawl-only"] as const) {
   for (const order of ["wrong-first", "wrong-last"] as const) {
     for (const priorNotice of [false, true]) {
