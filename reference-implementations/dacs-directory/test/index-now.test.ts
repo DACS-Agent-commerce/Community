@@ -274,33 +274,96 @@ test("a writer reverts the unconfirmed writes a crashed writer left behind", asy
 });
 
 const marker = `stor-${"2".repeat(40)}`;
-// Each reset of the cached state: a re-pin, a state with no recorded chain, and a large tip regression.
-const resets: Array<[string, Record<string, unknown>, Partial<NodeReply>]> = [
-  ["a re-pin", { chainIdentity: "aa".repeat(32) }, {}],
-  ["a state with no recorded chain", { chainIdentity: undefined }, {}],
-  ["a large tip regression", { lastSeenTxId: 5000, lastChainTip: 5 }, { tip: 5 }],
+const cciBadge = { kind: "web2" as const, platform: "github", handle: "seller", ref: "gh:seller" };
+/**
+ * Index the seller, then record a withdrawal of its Listing verified on an earlier pass: the catalog
+ * record, the retained binding and the scan state. The marker now reads 404. Returns the content hash.
+ */
+async function withdrawnOnEarlierPass(change: Record<string, unknown>): Promise<string> {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.clearChainDerivedArtifacts();
+  store.saveScanState(currentState());
+  store.saveCatalog(unchangedCatalog);
+  assert.equal((await indexNow()).status, 200);
+  const indexed = store.loadCatalog().sellers[0];
+  const { contentHash: hash } = indexed.listings[0];
+  const revocation = { sellerPrimaryClaim: seller, listingId: "svc", listingVersion: 1, listingContentHash: hash,
+    logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:svc:v1`,
+    markerAnchor: { kind: "storage-program" as const, locator: marker }, markerContentHash: "d".repeat(64) };
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 8, sellers: [{ ...indexed, registeredAt: 1, cci: [cciBadge],
+    listings: [{ ...indexed.listings[0], status: "revoked", revocation }] }] });
+  store.retainListingRevocation(revocation, { kind: "listing-revocation" });
+  store.saveScanState({ ...currentState(), verifiedRevocations: { [hash]: [marker] }, ...change });
+  return hash;
+}
+const listingStatus = () => store.loadCatalog().sellers[0].listings[0].status;
+
+test("after a re-pin, the rebuild takes no revocation from the replaced chain's catalog or cache", async () => {
+  const hash = await withdrawnOnEarlierPass({ chainIdentity: "aa".repeat(32) });
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  assert.equal(listingStatus(), "active");
+  assert.equal(store.retainedListingRevocation(hash), null);
+  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+});
+
+// RB-3: a withdrawal verified on an earlier pass of this chain stays in force whatever its marker reads
+// now. Only a different recorded chain proves that evidence foreign; nothing else may drop it.
+test("a state with no recorded chain replays and keeps a verified withdrawal whose marker now reads 404", async () => {
+  const hash = await withdrawnOnEarlierPass({ chainIdentity: undefined });
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  assert.equal(listingStatus(), "revoked");
+  assert.notEqual(store.retainedListingRevocation(hash), null);
+  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+});
+
+test("a same-chain large tip regression keeps a verified withdrawal through the earlier catalog", async () => {
+  await withdrawnOnEarlierPass({ lastSeenTxId: 5000, lastChainTip: 5 });
+  node = { ...node, tip: 5 };
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  assert.equal(listingStatus(), "revoked");
+});
+
+const timedOutWriters: Array<[string, () => Promise<void>]> = [
+  ["index-now", async () => assert.equal((await indexNow()).status, 503)],
+  ["a batch pass", () => assert.rejects(reindexAll(offlinePass), /NODE_TIMEOUT/)],
 ];
-for (const [name, change, reply] of resets) {
-  test(`after ${name}, the rebuild takes no revocation from the earlier catalog or cache`, async () => {
-    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-    store.clearChainDerivedArtifacts();
-    store.saveScanState(currentState());
-    store.saveCatalog(unchangedCatalog);
-    assert.equal((await indexNow()).status, 200);
-    const indexed = store.loadCatalog().sellers[0];
-    const { contentHash: hash } = indexed.listings[0];
-    // Evidence of a marker the configured chain does not hold: the catalog record, the retained binding, the scan state.
-    const revocation = { sellerPrimaryClaim: seller, listingId: "svc", listingVersion: 1, listingContentHash: hash,
-      logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:svc:v1`,
-      markerAnchor: { kind: "storage-program" as const, locator: marker }, markerContentHash: "d".repeat(64) };
-    store.saveCatalog({ catalogVersion: "1", generatedAt: 8,
-      sellers: [{ ...indexed, listings: [{ ...indexed.listings[0], status: "revoked", revocation }] }] });
-    store.retainListingRevocation(revocation, { kind: "listing-revocation" });
-    store.saveScanState({ ...currentState(), verifiedRevocations: { [hash]: [marker] }, ...change });
-    node = { ...node, ...reply };
+for (const [name, timedOut] of timedOutWriters) {
+  test(`after ${name} times out on its last chain read, the next pass keeps a verified withdrawal`, async () => {
+    const hash = await withdrawnOnEarlierPass({});
+    onStorageRead = () => { node = { ...node, failure: "timeout" }; };
+    try {
+      await timedOut();
+    } finally {
+      onStorageRead = () => {};
+      node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+    }
+    assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY, "the refused writes are undone, the chain kept");
     await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
-    assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
-    assert.equal(store.retainedListingRevocation(hash), null);
-    assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+    assert.equal(listingStatus(), "revoked");
+    assert.notEqual(store.retainedListingRevocation(hash), null);
   });
 }
+
+test("a state with no recorded chain whose replay exceeds DACS_SCAN_MAX_TXS fails and deletes nothing", async () => {
+  const hash = await withdrawnOnEarlierPass({ chainIdentity: undefined });
+  const catalog = store.loadCatalog();
+  node = { ...node, tip: 500 };
+  process.env.DACS_SCAN_MAX_TXS = "2";
+  try {
+    await assert.rejects(reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain }), /DACS_SCAN_MAX_TXS=2/);
+  } finally {
+    delete process.env.DACS_SCAN_MAX_TXS;
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  }
+  assert.deepEqual(store.loadCatalog(), catalog);
+  assert.notEqual(store.retainedListingRevocation(hash), null);
+  assert.deepEqual(store.loadScanState().verifiedRevocations?.[hash], [marker]);
+});
+
+test("a state with no recorded chain keeps each seller's registeredAt and badges while identities are offline", async () => {
+  await withdrawnOnEarlierPass({ chainIdentity: undefined });
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  const [rebuilt] = store.loadCatalog().sellers;
+  assert.equal(rebuilt.registeredAt, 1);
+  assert.deepEqual(rebuilt.cci, [cciBadge]);
+});

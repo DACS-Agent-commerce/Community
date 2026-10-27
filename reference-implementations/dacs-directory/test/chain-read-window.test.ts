@@ -102,6 +102,74 @@ test("a reverted window keeps the publisher-signed withdrawal sources saved insi
   assert.equal(rejections().some(([locator]) => locator === "stor-listing-in-window"), false, "what the node's reads produced is still undone");
 });
 
+// A marker read that rejects a publisher-signed binding's marker releases that binding. The release is
+// node-derived: a refused or crashed window must leave the binding holding the Listing.
+const signedSeller = "did:demos:agent:a";
+/** A publisher-signed source at `domain` carrying a binding for `listingHash`, its marker queued. Returns the binding. */
+function signedBindingFor(domain: string, listingHash: string): RevocationBinding {
+  const signed = binding(`stor-marker-${listingHash.slice(0, 8)}`, listingHash);
+  store.recordWellKnownWithdrawalCheck(domain, signedSeller, [listingHash], [], { generatedAt: 1, hash: "c".repeat(64) }, [signed]);
+  store.admitRevocationCandidates(listingHash, [{ locator: signed.markerAnchor.locator }]);
+  return signed;
+}
+const boundCount = (listingHash: string) => store.boundWellKnownRevocations(signedSeller, listingHash, "svc", 1).length;
+const rejectMarker = (signed: RevocationBinding) => store.recordRevocationProgress(signed.listingContentHash,
+  { unread: [], rejected: [signed.markerAnchor.locator] }, [signed], store.wellKnownWithdrawalRevision());
+
+test("a reverted window keeps a signed binding that a marker rejection inside it released", () => {
+  const listingHash = "1".repeat(64);
+  const signed = signedBindingFor("https://reverted-release.example", listingHash);
+  const revision = store.wellKnownWithdrawalRevision();
+  store.openChainReadWindow();
+  rejectMarker(signed);
+  assert.equal(boundCount(listingHash), 0, "the pass itself reads the binding as released");
+  store.revertChainReadWindow();
+  assert.equal(boundCount(listingHash), 1);
+  assert.equal(store.wellKnownWithdrawalRevision(), revision);
+  assert.equal(store.hasPendingRevocationCandidates(listingHash), true);
+});
+
+test("a confirmed window releases the binding its marker rejection released", () => {
+  const listingHash = "2".repeat(64);
+  const signed = signedBindingFor("https://confirmed-release.example", listingHash);
+  const revision = store.wellKnownWithdrawalRevision();
+  store.openChainReadWindow();
+  rejectMarker(signed);
+  store.commitChainReadWindow(() => {});
+  store.revertChainReadWindow();
+  assert.equal(boundCount(listingHash), 0);
+  assert.equal(store.wellKnownWithdrawalRevision(), revision + 1);
+});
+
+test("a release decided before a newer signed source update in the same window is not applied", () => {
+  const listingHash = "3".repeat(64);
+  const domain = "https://updated-source.example";
+  const signed = signedBindingFor(domain, listingHash);
+  store.openChainReadWindow();
+  rejectMarker(signed);
+  store.recordWellKnownWithdrawalCheck(domain, signedSeller, [listingHash], [], { generatedAt: 2, hash: "c".repeat(64) }, []);
+  store.commitChainReadWindow(() => {});
+  assert.equal(boundCount(listingHash), 1, "the stale release waits for a read against the newer source");
+});
+
+test("a writer reverting a window a crash left open restores the binding its marker rejection released", () => {
+  const listingHash = "4".repeat(64);
+  const signed = signedBindingFor("https://crashed-release.example", listingHash);
+  // The crashed process stages the release and exits before its commit.
+  const crashed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
+    const signed = ${JSON.stringify(signed)};
+    store.openChainReadWindow();
+    store.recordRevocationProgress(signed.listingContentHash, { unread: [], rejected: [signed.markerAnchor.locator] },
+      [signed], store.wellKnownWithdrawalRevision());
+    process.exit(0);
+  `], { encoding: "utf8", timeout: 60_000 });
+  assert.equal(crashed.status, 0, crashed.stderr.slice(-2_000));
+  assert.equal(boundCount(listingHash), 0, "the crashed window's release is visible until it is reverted");
+  store.revertChainReadWindow();
+  assert.equal(boundCount(listingHash), 1);
+});
+
 const CACHED_ARTIFACTS = 1_000;
 const CACHED_ARTIFACT_CHARACTERS = 120_000;
 const RECOVERY_HEAP_MEGABYTES = 128;
