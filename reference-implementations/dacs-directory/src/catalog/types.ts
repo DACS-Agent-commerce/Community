@@ -14,17 +14,6 @@ export interface Registration {
   listingAnchors: string[];
   /** Trusted only when populated by the hash-verified well-known crawler. */
   listingContentHashes?: Record<string, string>;
-  /** Accepted publisher hashes by normalized domain; current marks this pass's accepted sources. Null means an older source needs a recrawl. In memory only. */
-  authenticatedHashDeclarations?: Record<string, { hashes: Record<string, string>; current: boolean } | null>;
-  /** The owner signature verified on the registration as stored, before crawl data was merged in; in memory only, never stored. */
-  ownerSignatureVerified?: boolean;
-  /** The listing anchors the owner signed, as stored before crawl data was merged in; in memory only, never stored. */
-  ownerSignedAnchors?: string[];
-  /**
-   * Set when this indexing does not carry the full discovery state (an incomplete crawl, or an immediate
-   * pass that has no crawl): absent anchors and absent declarations prove nothing; in memory only, never stored.
-   */
-  discoveryIncomplete?: boolean;
   /**
    * Deals offered as reputation evidence: bundle refs + the anchor owners
    * (needed to resolve owner-scoped referenced-artifact addresses on the real
@@ -46,6 +35,17 @@ export interface Registration {
    * chain-verified).
    */
   ownerSignature?: { message: string; signature: string; signedAt: number };
+  /**
+   * What the owner signed, verified on the stored registration before crawl data is merged in; null when its
+   * signature does not verify. In memory only, never stored; when absent, indexing verifies the registration given.
+   */
+  ownerSigned?: OwnerSignedRegistration | null;
+}
+
+/** The listing anchors and display name of a registration as its owner signed them. */
+export interface OwnerSignedRegistration {
+  anchors: string[];
+  displayName: string;
 }
 
 /** DACS-5 §10.4.2 signed logical-to-native mapping for one anchored copy. */
