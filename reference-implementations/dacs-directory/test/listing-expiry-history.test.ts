@@ -272,7 +272,7 @@ test("legacy agreement deadlines obey the authenticated commitment-relative List
   }
 });
 
-test("legacy Listing history requires authenticated finality strictly before its signed withdrawal", async (t) => {
+test("a signed withdrawal's revokedAt does not remove authentically committed legacy Listing history", async (t) => {
   t.mock.method(Date, "now", () => 150);
   serveStorage(t);
   maps.clear();
@@ -292,12 +292,13 @@ test("legacy Listing history requires authenticated finality strictly before its
   maps.set(locator(6510), { ...scope, signature: { algorithm: "ed25519", signer: seller, value } });
   assert.equal(typeof hash, "string");
   admitRevocationCandidates(String(hash), [{ locator: locator(6510), owner: `0x${seller.slice(-64)}` }]);
-  for (const [time, accepted] of [[89, true], [90, false], [91, false]] as const) {
+  // The signed revokedAt is seller-chosen, not consensus time, so it is no credit cutoff.
+  for (const time of [89, 90, 91]) {
     const proof = commitmentProof(agreement, bundle.listingRef as Obj, time, true);
     const record = await indexRegistration({ primaryClaim: seller, displayName: "seller", listingAnchors: [listingAt], deals: [deal] },
       undefined, offline, undefined, undefined, undefined,
       { resolve: async () => proof, verifyReceipt: fixtureCommitments.verifyReceipt });
-    assert.equal(record.deals[0].refsVerified, accepted, `legacy commitment at ${time}`);
-    assert.equal(record.reputation.completed, accepted ? 1 : 0);
+    assert.equal(record.deals[0].refsVerified, true, `legacy commitment at ${time}`);
+    assert.equal(record.reputation.completed, 1);
   }
 });

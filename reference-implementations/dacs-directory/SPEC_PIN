@@ -63,9 +63,10 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #
 # Commitment finality: current and legacy deal-credit paths require a server-owned
 # CommitmentVerifier; default indexing refuses credit without one. Signed records,
-# finalized receipt binding, CA-8 consensus time, validity/deadline/withdrawal windows
-# and exact historical tuples are tested in test/commitment-finality.test.ts and
-# test/listing-expiry-history.test.ts. The test receipt authority is not Demos consensus.
+# finalized receipt binding, CA-8 consensus time, validity/deadline windows, credit
+# kept across withdrawal, and exact historical tuples are tested in
+# test/commitment-finality.test.ts and test/listing-expiry-history.test.ts.
+# The test receipt authority is not Demos consensus.
 #
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
