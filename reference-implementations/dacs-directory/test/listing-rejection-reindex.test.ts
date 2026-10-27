@@ -497,8 +497,9 @@ for (const priorNotice of ["none", "owner"] as const) {
         import { NextRequest } from "next/server";
         import { POST } from "./app/api/dacs/index-now/route.ts";
         import { indexerDiagnostics, loadCatalog } from "./src/catalog/store.ts";
+        import { pinnedNodeAnswer } from "./test/fixtures/pinned-node.ts";
         const { listing, anchor, owner, seller } = JSON.parse(readFileSync(0, "utf8"));
-        globalThis.fetch = async (input, init) => init?.body ? Response.json({ result: 200, response: [] })
+        globalThis.fetch = async (input, init) => init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] })
           : String(input).endsWith(anchor) ? Response.json({ success: true, owner, data: listing })
           : new Response(null, { status: 404 });
         for (let repeat = 0; repeat < 2; repeat++) {
