@@ -526,8 +526,9 @@ export function retainListingRevocation(binding: RevocationBinding, marker: Reco
 const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
 /**
- * Whether the listing's own owner anchored a marker that no read has settled yet, whether it is
- * unreadable, backing off or still queued. Anyone else may anchor candidates too, so only the owner's count.
+ * Whether the Listing's own owner anchored a marker that no read has settled: unread,
+ * backing off or still queued. Anyone may anchor other candidates, so only the owner's count.
+ * Returns false when the owner is unknown.
  */
 export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null): boolean {
   if (!listingOwner) return false;
