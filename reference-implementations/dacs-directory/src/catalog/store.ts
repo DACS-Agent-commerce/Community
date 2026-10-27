@@ -641,7 +641,7 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 /**
  * Forget the chain the saved scan state was recorded on. Node reads were saved before the served
  * chain changed, so no recorded chain vouches for them: index-now refuses, and the next reindex
- * clears the chain-derived cache and replays history from genesis.
+ * replays history from genesis.
  */
 export function withholdScanStateChain(): void {
   const state = loadScanState();

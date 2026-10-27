@@ -136,20 +136,24 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  // Only a state recorded on the served chain holds evidence for it. Another recorded chain, no
-  // recorded chain (a legacy state or an unfinished reset) and a large tip regression all reset.
+  // Only a recorded chain other than the served one proves the cached evidence is foreign. No
+  // recorded chain (an upgrade, a withheld chain or an unfinished reset) is not that proof: the
+  // state replays from genesis below, like a schema bump, and keeps its withdrawal evidence. A
+  // verified withdrawal is the seller's signature over that Listing, so keeping it fails closed (RB-3).
   const chainReplaced = state.chainIdentity !== undefined && state.chainIdentity !== served.chainIdentity;
   const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
-  if (chainReplaced || tipRegressed || state.chainIdentity === undefined) {
+  if (chainReplaced || tipRegressed) {
     const previousCursor = state.lastSeenTxId;
     // Every reset follows a read of the gated chain, so a node changing chain resets nothing.
     const changed = await chainChange();
     if (changed) return refuse(`catalog not updated: ${changed}`);
-    // No earlier catalog record is evidence for the rebuild. A replaced chain's catalog is also
-    // emptied first; until the reset state below is saved, the recorded identity keeps the reset
-    // due. Other resets keep serving the catalog until the rebuild replaces it.
-    prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
-    if (chainReplaced) saveCatalog(prior);
+    // A replaced chain's catalog is no evidence for the rebuild and is emptied first; until the
+    // reset state below is saved, the recorded identity keeps the reset due. A tip regression
+    // keeps serving its catalog, and the rebuild falls back on it, until the rebuild replaces it.
+    if (chainReplaced) {
+      prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
+      saveCatalog(prior);
+    }
     clearChainDerivedArtifacts();
     state = normalizeScanState({
       // No identity and no current schema: only a complete replay stamps them.
@@ -168,10 +172,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     saveScanState(state);
     log(
       `${chainReplaced ? "chain replacement detected: the node serves another chain than the recorded one"
-        : tipRegressed ? `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs behind`
-        : "no chain is recorded for the cached state"} cursor ${previousCursor}; ` +
+        : `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
         `cleared chain-derived cache and restarting from genesis`,
     );
+  } else if (state.chainIdentity === undefined) {
+    log("no chain is recorded for the cached state; replaying history from genesis");
   }
   // v9 replays history to recover duplicate programs discarded by older caches.
   // It retains earlier storage classification, binding and consensus-time replays.

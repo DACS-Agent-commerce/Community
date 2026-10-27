@@ -247,11 +247,13 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    saves its catalog, the served chain is read again. Indexing saves rejections and revocation
    progress as it reads; when that read fails, the catalog is not saved and the recorded chain is
    withheld, so index-now refuses and the next reindex replays from genesis. Each complete pass
-   records the chain it scanned, after its catalog is saved. A state recorded on another chain (a re-pin), a
-   state with no recorded chain (an upgrade, or an unfinished reset) and a large tip regression
-   are reset after a further chain read: cached discoveries, artifacts and retained revocations
-   are cleared, no earlier catalog record is used, and history replays from genesis. A re-pin
-   also empties the public catalog first; the others keep serving it until the rebuild is saved.
+   records the chain it scanned, after its catalog is saved. A state recorded on another chain (a
+   re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
+   artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin
+   drops the earlier catalog, emptying the public catalog first; a tip regression keeps serving it
+   until the rebuild is saved. A state with no recorded chain (an upgrade, a withheld chain or an
+   unfinished reset) is not proof of another chain: it replays from genesis and keeps its
+   retained revocations and earlier catalog, so a verified withdrawal stays in force (RB-3).
    A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records no chain, so raise the cap.
    index-now answers 409 until a complete pass on this chain is recorded.
    Revocation markers are recognised by their signed content, never by program name.
