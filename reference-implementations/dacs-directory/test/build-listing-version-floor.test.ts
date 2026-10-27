@@ -9,6 +9,7 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
 import { signedRailSnapshot } from "./signed-rail-snapshot.js";
+import { emptyListingOccupancy } from "./fixtures/listing-occupancy.js";
 
 // The catalog listed versions 1 and 2 of this Listing before the admission
 // reset; the reset keeps version 2 as the floor and removes both rows.
@@ -41,7 +42,7 @@ seeded.close();
 
 const store = await import("../src/catalog/store.js");
 const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
-const POST = createBuildListingPost(signedRailSnapshot);
+const POST = createBuildListingPost(signedRailSnapshot, emptyListingOccupancy);
 
 const cleanBuild = { commit: PINNED_DEMOS_NODE_BUILDS[0], dirty: false, builtAt: "2026-10-14T16:45:24Z" };
 /** Answer the deployment preflight as the pinned build and chain; null for other calls. */

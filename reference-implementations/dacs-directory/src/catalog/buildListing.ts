@@ -42,6 +42,7 @@ import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { importLegacySignatureValue } from "@/src/catalog/signatureValue";
 import { pinnedNodeDeployment } from "@/src/catalog/listingFinality";
 import { pinnedChainIdentity } from "@/src/catalog/nodeDeployment";
+import { resolveListingVersionOccupancy, type ResolveListingVersion } from "@/src/catalog/listingVersionOccupancy";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -106,8 +107,10 @@ async function accountNonce(addressHex: string): Promise<number> {
   return nonce;
 }
 
+/** Build the staged Listing handler with server-owned rail and logical-occupancy authority. */
 export function createBuildListingPost(
   inCodeDefinitions: ReadonlyArray<Omit<(typeof PUBLISHER_IN_CODE_RAIL_DEFINITIONS)[number], "signatureValid"> & { signatureValid: boolean }> = PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
+  resolveVersion?: ResolveListingVersion,
 ) {
 return async function POST(req: NextRequest) {
   const blocked = rateLimit(req, "build-listing", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
@@ -363,7 +366,7 @@ return async function POST(req: NextRequest) {
   // address)>`. Those versions are still occupied on chain, so the occupancy
   // check reads both names; new programs are only ever created under the
   // current one. These are this producer's own names: another producer's
-  // programs are not searched, so absence here does not prove a version is unused.
+  // programs are not searched, so absence here requires logical resolution below.
   const legacyProgramNameFor = (version: number) =>
     `dacs1-${Buffer.from(listingAddress(did, serviceId, version), "utf8").toString("base64url")}`;
   const recoverable = (verified: Awaited<ReturnType<typeof verifyStoredListing>>) => Boolean(
@@ -376,6 +379,8 @@ return async function POST(req: NextRequest) {
   // An occupied but invalid version cannot establish a conforming version
   // sequence. Refuse it below; recovery requires a fresh listing ID.
   let programName = programNameFor(listingVersion);
+  const logicalAddress = listingAddress(did, serviceId, listingVersion);
+  const chainIdentity = pinnedChainIdentity();
   let resolution = await resolveOwnedAnchorByName(programName, owner);
   if (resolution.status === "absent") {
     const legacyName = legacyProgramNameFor(listingVersion);
@@ -385,10 +390,12 @@ return async function POST(req: NextRequest) {
       if (legacy.status === "present") programName = legacyName;
     }
   }
+  if (resolution.status === "absent") {
+    resolution = await resolveListingVersionOccupancy(logicalAddress, chainIdentity, owner, resolveVersion);
+    if (resolution.status === "present") programName = resolution.record.programName ?? programName;
+  }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
-  const logicalAddress = listingAddress(did, serviceId, listingVersion);
-  const chainIdentity = pinnedChainIdentity();
   const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
     error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
     logicalAddress,
@@ -400,11 +407,11 @@ return async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
-  // A version slot is write-once: a taken version the name lookup cannot find
+  // A version slot is write-once: a taken version the resolver cannot find
   // is not free, so no second create may be prepared for it.
   if (resolution.status === "absent" && listingVersion !== nextVersion) {
     return NextResponse.json(
-      { error: "this seller already published this version, but its program was not found under this producer's names; no transaction was prepared. Retry once the name index has caught up, or choose a new Service ID" },
+      { error: "this seller already published this version, but its native binding could not be recovered; no transaction was prepared. Retry once logical resolution has caught up, or choose a new Service ID" },
       { status: 409 },
     );
   }
@@ -432,8 +439,7 @@ return async function POST(req: NextRequest) {
     // Empty name indexes and advancing nonces do not establish that a returned
     // create failed. Keep the original attempt across retries and restarts.
     const preparation = loadListingPreparation(chainIdentity, logicalAddress);
-    if (signedCandidate && preparation) return unresolvedPreparation(preparation.anchorAddress);
-    if (identityExpired) {
+    if (identityExpired && (body.listingSignature === undefined || !preparation)) {
       return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
     }
     // Do not prepare a broadcastable transaction until the wallet has signed
@@ -480,6 +486,7 @@ return async function POST(req: NextRequest) {
     if (!listingSignatureValid || !isListing(signedCandidate)) {
       return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
     }
+    if (preparation) return unresolvedPreparation(preparation.anchorAddress);
     // Broadcasting is the seller's irreversible step, so refuse a node outside
     // the pin here rather than after the write (confirm-listing checks again).
     let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;

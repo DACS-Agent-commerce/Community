@@ -428,6 +428,19 @@ base64url-patched Buffer).
   otherwise propose the same next version. An occupied version whose owner-held program
   no longer authenticates blocks publication for that listing ID. Recover by publishing
   under a new listing ID; the publisher does not skip the occupied version.
+- **New Listing versions require complete logical occupancy resolution.** The
+  internal builder's `ResolveListingVersion` callback receives the configured chain
+  identity, logical Listing address and abort signal. This server-owned adapter must
+  establish occupancy across all producer names; request fields, catalog absence and
+  empty name searches cannot establish an unused version. A complete, correctly scoped
+  empty result permits preparation; one native binding requires fresh owner, metadata,
+  tuple and signature verification and resumes the stored Listing without writing.
+  Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503.
+  The pinned node has no complete logical-resolution contract, so no production adapter
+  is configured: empty searches withhold creation. Existing producer-name matches can
+  still resume through fresh authenticated readback. Adapters must bound network bytes
+  before decoding and honor cancellation; the builder also bounds results and enforces
+  a deadline. These checks do not provide an atomic version allocator.
 - **Authenticated Listing preparations survive retries and restarts.** Before the
   internal builder returns a transaction, it stores the exact transaction and signed
   Listing in SQLite, keyed by configured chain and logical Listing version. Previews
@@ -498,8 +511,9 @@ filter ACLs after pagination. A deployed node may also answer it as a `nodeCall`
 only on a recognized "Unknown message" answer. Both public search reads send JSON
 headers without wallet authentication, as required by the pinned middleware contract. The fallback can recover a listing
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
-and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
-and withholds new publication until a complete search contract is available.
+and cannot establish absence, so an unresolved fallback lookup returns HTTP 503.
+Even an empty nodeCall search cannot establish occupancy across other producers'
+names; creation requires the complete logical-resolution adapter described above.
 `npm run check:node -- <exact program name>` is a read-only probe (no
 transactions) that reports the storage not-found answer and both search paths, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one

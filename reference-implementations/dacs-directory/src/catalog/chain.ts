@@ -10,10 +10,11 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson } from "./artifactLimits.js";
+import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
+const STORAGE_READ_TIMEOUT_MS = 15_000;
 export const LIVE_STORAGE_SALT = "";
 export const LEGACY_STORAGE_SALT = "dacs:v1";
 
@@ -58,18 +59,27 @@ export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
   | { status: "invalid" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; reason: string };
 
-export async function readAnchorResult(address: string): Promise<AnchorRead> {
+function anchorReadFailure(error: unknown): { status: "unavailable"; reason: string } {
+  const reason = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
+    ? "anchor read timed out" : error instanceof StorageResponseTooLarge
+      ? "anchor reply exceeds the byte limit" : error instanceof SyntaxError
+        ? "anchor reply is invalid JSON" : "anchor could not be reached or read";
+  return { status: "unavailable", reason };
+}
+
+/** Read bounded native bytes with a deadline and optional caller cancellation; return classified failures with their cause. */
+export async function readAnchorResult(address: string, signal?: AbortSignal): Promise<AnchorRead> {
   if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
   let res: Response;
   try {
     res = await fetch(`${RPC}/storage-program/${address}`, {
       cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(STORAGE_READ_TIMEOUT_MS)]) : AbortSignal.timeout(STORAGE_READ_TIMEOUT_MS),
     });
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return anchorReadFailure(error);
   }
   // Only the node's own answer is definitive: `{ success: false, errorCode }` with NOT_FOUND on a 404
   // (kynesyslabs/node storageprogram routes). PERMISSION_DENIED on a 403 and any other 4xx, such as a
@@ -77,25 +87,26 @@ export async function readAnchorResult(address: string): Promise<AnchorRead> {
   if (res.status === 404) {
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
-      return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" } : { status: "unavailable" };
-    } catch {
-      return { status: "unavailable" };
+      return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" }
+        : { status: "unavailable", reason: "anchor read returned an unqualified HTTP 404" };
+    } catch (error) {
+      return anchorReadFailure(error);
     }
   }
-  if (!res.ok) return { status: "unavailable" };
+  if (!res.ok) return { status: "unavailable", reason: `anchor read refused HTTP ${res.status}` };
   let json: {
     success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown;
     storageAddress?: string; metadata?: Record<string, unknown>;
   };
   try {
     json = (await storageResponseJson(res)) as typeof json;
-  } catch {
-    return { status: "unavailable" };
+  } catch (error) {
+    return anchorReadFailure(error);
   }
-  if (!json || typeof json !== "object" || !json.success) return { status: "unavailable" };
+  if (!json || typeof json !== "object" || json.success !== true) return { status: "unavailable", reason: "anchor reply did not confirm a successful read" };
   const data = json.data;
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
-  if (boundedJson(data) === null) return { status: "unavailable" };
+  if (boundedJson(data) === null) return { status: "unavailable", reason: "anchor payload exceeds the artifact limits" };
   return {
     status: "present",
     record: {

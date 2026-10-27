@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { build } from "esbuild";
 import Database from "better-sqlite3";
 import { NextRequest } from "next/server.js";
+import { contentHash } from "./fixtures/listing-preparation-boundaries.mjs";
 
 const app = fileURLToPath(new URL("..", import.meta.url));
 const directory = mkdtempSync(join(tmpdir(), "listing-preparations-"));
@@ -16,21 +17,28 @@ const bundleDirectory = mkdtempSync(join(app, "node_modules", ".listing-preparat
 const bundle = join(bundleDirectory, "index.mjs");
 process.env.DACS_DIRECTORY_DATA = directory;
 const boundaries = resolve(app, "test/fixtures/listing-preparation-boundaries.mjs");
+// Keep the cross-producer regression runnable on revisions predating the resolver module.
 await build({
   stdin: { contents: `export * from './src/catalog/buildListing.ts'; export * from './src/catalog/store.ts';
+    ${existsSync(new URL("../src/catalog/listingVersionOccupancy.ts", import.meta.url)) ? "export * from './src/catalog/listingVersionOccupancy.ts';" : ""}
+    export { pinnedChainIdentity } from './src/catalog/nodeDeployment.ts';
     export { POST as routePost } from './app/api/dacs/build-listing/route.ts';`, resolveDir: app },
   outfile: bundle, bundle: true, platform: "node", format: "esm", packages: "external",
-  plugins: [{ name: "publication-boundaries", setup(builder) {
+  plugins: [publicationBoundaries()],
+});
+function publicationBoundaries() {
+  return { name: "publication-boundaries", setup(builder) {
     builder.onResolve({ filter: /^next\/server$/ }, () => ({ path: "next/server.js", external: true }));
     builder.onResolve({ filter: /^@kynesyslabs\/dacs\// }, () => ({ path: boundaries }));
     builder.onResolve({ filter: /\/(sdkListingValidation|listingVerification|listingFinality|registrationSig|wellknown)(\.js)?$/ },
       () => ({ path: boundaries }));
     builder.onResolve({ filter: /^\.\/(wellknown|listingVerification)\.js$/ }, () => ({ path: boundaries }));
-  } }],
-});
+  } };
+}
 const module = await import(pathToFileURL(bundle).href);
 const rails = [{ railId: "ap2:stripe-paymentintents", railVersion: 1, phaseHandler: "pay-ap2", governanceAnchoring: "in-code", signatureValid: true }];
-const post = module.createBuildListingPost(rails);
+const qualifiedEmpty = async (logicalAddress, chainIdentity) => ({ status: "complete", logicalAddress, chainIdentity, nativeAddresses: [] });
+const post = module.createBuildListingPost(rails, qualifiedEmpty);
 const clock = 1_800_000_000_000;
 const key = createPrivateKey({
   key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, 12)]),
@@ -67,7 +75,8 @@ function node(t) {
       return Response.json({ result: 200, response: state.lookup === "ambiguous" ? [...rows, ...rows] : rows });
     }
     assert.ok(state.published && String(url).endsWith(state.published.anchorAddress));
-    return Response.json({ success: true, data: state.published.listing, owner: `0x${ownerHex}`, programName: state.published.programName });
+    return Response.json({ success: true, data: state.published.listing, owner: `0x${ownerHex}`, programName: state.published.programName,
+      metadata: { logicalAddress: state.published.logicalAddress }, ...state.published.storageOverrides });
   });
   return state;
 }
@@ -145,7 +154,7 @@ test("a lost response survives a fresh process with the exact saved transaction 
       if (call.message === 'getAddressNonce') throw new Error('restart must not request a nonce');
       return Response.json({result:200,response:[]});
     };
-    const response = await createBuildListingPost(${JSON.stringify(rails)})(new NextRequest('https://directory.example/api/dacs/build-listing',
+    const response = await createBuildListingPost(${JSON.stringify(rails)}, ${qualifiedEmpty.toString()})(new NextRequest('https://directory.example/api/dacs/build-listing',
       {method:'POST',headers:{'content-type':'application/json'},body:${JSON.stringify(JSON.stringify(signed))}}));
     process.stdout.write(JSON.stringify({status:response.status,body:await response.json()}));
   `], { encoding: "utf8", timeout: 15_000 });
@@ -241,4 +250,203 @@ test("preparation keys isolate logical versions, listing IDs and configured chai
   assert.equal(module.saveListingPreparation("fixture-other-chain", first.logicalAddress,
     { ...preparation, transactionJson: "different" }), false);
   assert.equal(module.loadListingPreparation("fixture-other-chain", first.logicalAddress).transactionJson, preparation.transactionJson);
+});
+
+test("another producer's differently named Listing is recovered before catalog indexing", async (t) => {
+  const state = node(t);
+  const input = inputFor("other-producer");
+  const identity = await (await post(request(input))).json();
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: walletSign(identity.identityMessage) };
+  // An independent producer has already anchored the exact signed logical v1.
+  // Nothing is registered or indexed locally, and neither name search can see it.
+  const logicalAddress = `dacs1:${encodeURIComponent(input.claim)}:${input.serviceId}:v1`;
+  const expected = { programName: "independent-publisher-release", anchorAddress: `stor-${"47".repeat(20)}` };
+  let resolved = false;
+  const resolveVersion = async (logical, chain, signal) => {
+    resolved = true;
+    assert.equal(logical, logicalAddress);
+    assert.equal(chain, module.pinnedChainIdentity());
+    assert.equal(signal.aborted, false);
+    return { status: "complete", logicalAddress: logical, chainIdentity: chain, nativeAddresses: [expected.anchorAddress] };
+  };
+  const unsigned = { dacsVersion: "1", listingId: input.serviceId, listingVersion: 1,
+    seller: { identity: { presentedBy: input.claim }, displayName: "Independent producer" } };
+  const signature = { algorithm: "ed25519", signer: input.claim,
+    value: Buffer.from(walletSign(`dacs-listing:v1:${contentHash(unsigned)}`), "hex").toString("base64url") };
+  state.published = { ...expected, logicalAddress, listing: { ...unsigned, signature } };
+  const [outcome] = await Promise.allSettled([module.createBuildListingPost(rails, resolveVersion)(request(authenticated))]);
+  assert.equal(resolved, true, "empty producer-name lookups must consult logical-version occupancy");
+  if (outcome.status === "rejected") throw outcome.reason;
+  const response = outcome.value;
+  assert.equal(response.status, 200, await response.clone().text());
+  const body = await response.json();
+  assert.equal(body.exists, true);
+  assert.equal(body.tx, null);
+  assert.equal(body.programName, expected.programName);
+  assert.deepEqual(body.listing, state.published.listing);
+  assert.equal(state.nonceReads, 0);
+});
+
+test("empty name searches without a complete logical resolver withhold even a signed create", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("no-logical-resolver");
+  for (const input of [signed, { ...signed, listingSignature: undefined }]) {
+    const response = await module.createBuildListingPost(rails)(request(input));
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.match(body.error, /no complete logical-version resolver/);
+    assert.equal(body.tx, undefined);
+  }
+  assert.equal(state.nonceReads, 0);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address LIKE ?").get("%:no-logical-resolver:v1").n, 0);
+});
+
+test("the API route with trusted rail authority still withholds creation without logical occupancy", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("route-logical-occupancy");
+  const routeBundle = join(bundleDirectory, "route-with-authority.mjs");
+  await build({
+    entryPoints: [join(app, "app/api/dacs/build-listing/route.ts")], outfile: routeBundle,
+    bundle: true, platform: "node", format: "esm", packages: "external",
+    plugins: [publicationBoundaries(), { name: "signed-rail-snapshot", setup(builder) {
+      builder.onResolve({ filter: /\/listingOptions$/ }, () => ({ path: "signed-options", namespace: "fixture" }));
+      builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: `
+        export * from ${JSON.stringify(join(app, "src/catalog/listingOptions.ts"))};
+        export const PUBLISHER_IN_CODE_RAIL_DEFINITIONS = ${JSON.stringify(rails)};
+      `, resolveDir: app }));
+    } }],
+  });
+  const route = await import(pathToFileURL(routeBundle).href);
+  const response = await route.POST(request(signed));
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.match(body.error, /no complete logical-version resolver/);
+  assert.equal(body.tx, undefined);
+  assert.equal(state.nonceReads, 0);
+});
+
+test("logical occupancy is resolved again on every request without caching success", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("changing-occupancy");
+  let calls = 0;
+  const resolveVersion = async (logical, chain) => ++calls === 1 ? qualifiedEmpty(logical, chain)
+    : { status: "indeterminate", reason: "history index is incomplete" };
+  const builder = module.createBuildListingPost(rails, resolveVersion);
+  const first = await builder(request({ ...signed, listingSignature: undefined }));
+  assert.equal(first.status, 200);
+  const later = await builder(request(signed));
+  assert.equal(later.status, 503);
+  assert.match((await later.json()).error, /history index is incomplete/);
+  assert.equal(calls, 2);
+  assert.equal(state.nonceReads, 0);
+});
+
+test("a request-supplied logical resolution cannot authorize creation", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("untrusted-occupancy");
+  const response = await module.createBuildListingPost(rails)(request({ ...signed,
+    occupancy: await qualifiedEmpty("forged", "forged"), nativeAddresses: [] }));
+  assert.equal(response.status, 503);
+  assert.equal(state.nonceReads, 0);
+});
+
+const logical = `dacs1:${encodeURIComponent(`did:demos:agent:${ownerHex}`)}:occupancy-unit:v1`;
+const chain = "fixture-chain";
+const complete = (nativeAddresses = []) => ({ status: "complete", logicalAddress: logical, chainIdentity: chain, nativeAddresses });
+const resolveOccupancy = (resolver) => module.resolveListingVersionOccupancy(logical, chain, `0x${ownerHex}`, resolver);
+
+for (const [name, reply] of [
+  ["missing", null], ["malformed", []], ["incomplete", { status: "partial", nativeAddresses: [] }],
+  ["wrong logical address", { ...complete(), logicalAddress: `${logical}2` }],
+  ["wrong chain", { ...complete(), chainIdentity: "other-chain" }],
+  ["missing locator list", { ...complete(), nativeAddresses: undefined }],
+  ["malformed locator", complete(["not-a-native-address"])],
+  ["ambiguous", complete([`stor-${"71".repeat(20)}`, `stor-${"72".repeat(20)}`])],
+  ["duplicate locator", complete([`stor-${"71".repeat(20)}`, `stor-${"71".repeat(20)}`])],
+  ["oversized", { ...complete(), padding: "x".repeat(1024 * 1024) }],
+]) test(`${name} logical occupancy refuses absence`, async () => {
+  const result = await resolveOccupancy(async () => reply);
+  assert.equal(result.status, "indeterminate");
+});
+
+test("qualified complete logical occupancy can establish an unused version", async () => {
+  assert.deepEqual(await resolveOccupancy(async () => complete()), { status: "absent" });
+});
+
+test("logical resolver failure preserves its cause", async () => {
+  const result = await resolveOccupancy(async () => { throw new Error("history endpoint refused HTTP 403"); });
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /history endpoint refused HTTP 403/);
+});
+
+test("the caller times out a logical resolver that ignores cancellation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let signal;
+  const pending = resolveOccupancy(async (_logical, _chain, abort) => { signal = abort; return new Promise(() => {}); });
+  t.mock.timers.runAll();
+  const result = await pending;
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /timed out/);
+  assert.equal(signal.aborted, true);
+});
+
+const nativeRecord = (overrides = {}) => ({ success: true, data: {}, owner: `0x${ownerHex}`,
+  programName: "independent-publisher", metadata: { logicalAddress: logical }, ...overrides });
+for (const [name, response] of [
+  ["missing anchor", () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })],
+  ["denied anchor", () => new Response(null, { status: 403 })],
+  ["invalid anchor payload", () => Response.json(nativeRecord({ data: [] }))],
+  ["oversized anchor", () => Response.json(nativeRecord({ padding: "x".repeat(1024 * 1024) }))],
+  ["wrong owner", () => Response.json(nativeRecord({ owner: `0x${"74".repeat(32)}` }))],
+  ["missing logical metadata", () => Response.json(nativeRecord({ metadata: {} }))],
+  ["wrong logical metadata", () => Response.json(nativeRecord({ metadata: { logicalAddress: `${logical}2` } }))],
+  ["conflicting logical aliases", () => Response.json(nativeRecord({ metadata: { logicalAddress: logical, logical_address: `${logical}2` } }))],
+  ["wrong native metadata", () => Response.json(nativeRecord({ storageAddress: `stor-${"75".repeat(20)}` }))],
+  ["invalid program name", () => Response.json(nativeRecord({ programName: "invalid:name" }))],
+]) test(`${name} at a logically resolved locator cannot establish absence`, async (t) => {
+  t.mock.method(globalThis, "fetch", response);
+  const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
+  assert.equal(result.status, "indeterminate");
+});
+
+test("native binding resolution accepts the Standard's logical_address metadata spelling", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json(nativeRecord({ metadata: { logical_address: logical } })));
+  const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
+  assert.equal(result.status, "present");
+});
+
+test("the logical resolution deadline also cancels a stalled native response body", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let markStarted;
+  let readSignal;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    readSignal = init.signal;
+    const response = new Response(new ReadableStream({ start(controller) {
+      readSignal.addEventListener("abort", () => controller.error(readSignal.reason), { once: true });
+    } }));
+    markStarted();
+    return response;
+  });
+  const pending = resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
+  await started;
+  t.mock.timers.runAll();
+  const result = await pending;
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /timed out/);
+  assert.equal(readSignal.aborted, true);
+});
+
+for (const [name, respond, cause] of [
+  ["timeout", () => { throw new DOMException("deadline", "TimeoutError"); }, /timed out/],
+  ["HTTP refusal", () => new Response(null, { status: 403 }), /HTTP 403/],
+  ["transport failure", () => { throw new TypeError("fetch failed"); }, /could not be reached/],
+  ["malformed JSON", () => new Response("{"), /invalid JSON/],
+  ["oversized reply", () => Response.json(nativeRecord({ padding: "x".repeat(1024 * 1024) })), /byte limit/],
+]) test(`logical native read preserves its ${name} cause`, async (t) => {
+  t.mock.method(globalThis, "fetch", respond);
+  const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, cause);
 });

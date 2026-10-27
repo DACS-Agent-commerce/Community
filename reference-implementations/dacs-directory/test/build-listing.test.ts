@@ -22,11 +22,12 @@ import { verifyListing } from "../src/catalog/listingVerification.js";
 import { authenticateReadableListingArtifact } from "../vendor/dacs-sdk/dist/agent/discover.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
 import { signedRailSnapshot } from "./signed-rail-snapshot.js";
+import { emptyListingOccupancy } from "./fixtures/listing-occupancy.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
 const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
-const POST = createBuildListingPost(signedRailSnapshot);
+const POST = createBuildListingPost(signedRailSnapshot, emptyListingOccupancy);
 
 // The shipped PA-1 table is unsigned, so the route refuses every rail before
 // these steps (rail-registry.test.ts); here a signed snapshot is modelled.
@@ -745,7 +746,8 @@ test("publisher prepares no transaction unless the account nonce is read within 
     return nonceReply(signal);
   });
   const input = { ...base, serviceId: "nonce-bounds" };
-  const nonceOf = async () => (await (await publishAs(input)).json() as { tx: { content: { nonce: number } } }).tx.content.nonce;
+  let control = 0;
+  const nonceOf = async () => (await (await publishAs({ ...input, serviceId: `nonce-bounds-control-${++control}` })).json() as { tx: { content: { nonce: number } } }).tx.content.nonce;
   assert.equal(await nonceOf(), 1, "allowed control: a valid nonce releases the transaction");
   nonceReply = () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER - 1 });
   assert.equal(await nonceOf(), Number.MAX_SAFE_INTEGER, "the largest nonce whose successor stays exact");
@@ -796,8 +798,8 @@ test("empty name indexes and advancing nonces withhold a second create for the e
     return Response.json({ result: 200, response: call === "searchStoragePrograms" ? [] : nonceReads++ });
   });
   const input = { ...base, serviceId: "durable-preparation" };
-  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number };
-  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
   const preview = await (await POST(request(authenticated))).json() as { message: string };
   const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
   const first = await POST(request(signed));

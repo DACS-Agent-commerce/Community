@@ -4,15 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { contentHash } from "@kynesyslabs/dacs/canonical";
 
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } from "../src/catalog/nodeDeployment.js";
 import { signedRailSnapshot } from "./signed-rail-snapshot.js";
+import { emptyListingOccupancy } from "./fixtures/listing-occupancy.js";
 
 const dataDir = mkdtempSync(join(tmpdir(), "dacs-build-listing-legacy-"));
 process.env.DACS_DIRECTORY_DATA = join(dataDir, "directory.sqlite");
 const { createBuildListingPost } = await import("../src/catalog/buildListing.js");
-const POST = createBuildListingPost(signedRailSnapshot);
+const POST = createBuildListingPost(signedRailSnapshot, emptyListingOccupancy);
 
 test.after(() => {
   rmSync(dataDir, { recursive: true, force: true });
@@ -61,18 +63,19 @@ const walletHex = (message: string) => Buffer.from(ed25519Sign(Buffer.from(messa
 const legacyProgramName = (serviceId: string, version: number) =>
   `dacs1-${Buffer.from(`dacs1:${encodeURIComponent(claim)}:${serviceId}:v${version}`, "utf8").toString("base64url")}`;
 
-type V1 = { programName: string; anchorAddress: string; listing: Record<string, unknown> };
+type V1 = { programName: string; anchorAddress: string; logicalAddress: string; listing: Record<string, unknown> };
 type Built = { exists: boolean; tx: { content: { data: [string, { programName: string }] } } | null; programName: string; error?: string; listing?: unknown };
 
 async function withOccupancy(
   serviceId: string,
   occupy: (v1: V1) => { name: string; data: Record<string, unknown> },
-  check: (ctx: { post: () => Promise<Response>; queries: string[] }) => Promise<void>,
+  check: (ctx: { post: () => Promise<Response>; postWithResolution: () => Promise<Response>; queries: string[] }) => Promise<void>,
 ) {
   const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const finalInput = { ...base, serviceId, listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let occupied: { name: string; data: Record<string, unknown>; address: string } | null = null;
+  let logicalAddress: string | undefined;
   const queries: string[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -92,16 +95,20 @@ async function withOccupancy(
       return Response.json({ result: 200, response: 0 });
     }
     return occupied && String(input).endsWith(occupied.address)
-      ? Response.json({ success: true, data: occupied.data, owner: `0x${keyHex}`, programName: occupied.name })
+      ? Response.json({ success: true, data: occupied.data, owner: `0x${keyHex}`, programName: occupied.name, metadata: { logicalAddress } })
       : new Response(null, { status: 404 });
   };
   try {
     const preview = await (await POST(request(finalInput))).json() as { message: string };
     const post = () => POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
     const v1 = await (await post()).json() as V1;
+    logicalAddress = v1.logicalAddress;
     occupied = { ...occupy(v1), address: v1.anchorAddress };
     queries.length = 0;
-    await check({ post, queries });
+    const postWithResolution = () => createBuildListingPost(signedRailSnapshot, async (logicalAddress, chainIdentity) => ({
+      status: "complete", logicalAddress, chainIdentity, nativeAddresses: occupied ? [occupied.address] : [],
+    }))(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
+    await check({ post, postWithResolution, queries });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -129,6 +136,46 @@ test("a version main's /register anchored under its program name is occupied and
     },
   );
 });
+
+test("logical resolution recovers another producer's exact SDK-valid signed bytes without another write", async (t) => {
+  t.mock.method(Date, "now", () => 1_800_000_000_000);
+  let expected: Record<string, unknown> | undefined;
+  await withOccupancy("independent-sdk-producer", (v1) => {
+    expected = v1.listing;
+    return { name: "another-producer-release-one", data: v1.listing };
+  }, async ({ postWithResolution, queries }) => {
+    const response = await postWithResolution();
+    assert.equal(response.status, 200);
+    const body = await response.json() as Built;
+    assert.equal(body.exists, true);
+    assert.equal(body.tx, null);
+    assert.equal(body.programName, "another-producer-release-one");
+    assert.deepEqual(body.listing, expected);
+    assert.equal(queries.includes("another-producer-release-one"), false, "name indexes do not discover this publication");
+  });
+});
+
+for (const mismatch of ["signature", "version"] as const) {
+  test(`a logically resolved occupied Listing with a mismatched ${mismatch} blocks creation`, async (t) => {
+    t.mock.method(Date, "now", () => 1_800_000_000_000);
+    await withOccupancy(`independent-invalid-${mismatch}`, (v1) => {
+      const { signature: priorSignature, ...scope } = v1.listing;
+      const changed = { ...scope, listingVersion: 2 };
+      const signature = mismatch === "signature" ? priorSignature : {
+        algorithm: "ed25519", signer: claim,
+        value: Buffer.from(walletHex(`dacs-listing:v1:${contentHash(changed)}`), "hex").toString("base64url"),
+      };
+      return { name: "other-producer-occupied", data: { ...changed, signature } };
+    }, async ({ postWithResolution }) => {
+      const response = await postWithResolution();
+      assert.equal(response.status, 409);
+      const body = await response.json() as Built;
+      assert.match(String(body.error), /expected authenticated listing candidate/);
+      assert.equal(body.tx, undefined);
+      assert.equal(body.listing, undefined);
+    });
+  });
+}
 
 test("an authenticated listing under the legacy program name is recovered without a second write", async () => {
   await withOccupancy(
