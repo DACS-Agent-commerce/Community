@@ -108,7 +108,9 @@ test("/register refuses an unverified rail before any signature; a signed-snapsh
         listing: { pipeline: Array<{ kind: string; parameters?: Record<string, unknown> }>; acceptedRails: Array<{ railId: string }> };
         railResolution: { disposition: string; reason: string; authorityBasis: string };
       };
-      const identity = await (await signedPost(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+      const identityResponse = await signedPost(request(base));
+      assert.equal(identityResponse.status, 200, option.railId);
+      const identity = await identityResponse.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
       const response = await signedPost(request({
         ...base,
         listingVersion: identity.listingVersion,
