@@ -107,15 +107,18 @@ async function unresolved(response, anchor) {
   assert.equal(body.anchorAddress, anchor);
   assert.equal(body.tx, undefined);
 }
+async function resumed(response, first) {
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.anchorAddress, first.anchorAddress, "the same signed Listing must never receive a different anchor");
+  assert.equal(JSON.stringify(body.tx), JSON.stringify(first.tx), "the exact saved transaction bytes, never a rebuilt one");
+}
 
-test("empty lookups and advancing account nonces cannot prepare a second anchor for the same signed Listing", async (t) => {
+test("an exact signed repeat after empty lookups and advancing nonces gets the saved transaction, never a second anchor", async (t) => {
   const state = node(t);
   const signed = await signedInput("advancing-nonce");
   const first = await prepare(signed);
-  const repeated = await post(request(signed));
-  if (repeated.ok) assert.equal((await repeated.clone().json()).anchorAddress, first.anchorAddress,
-    "the same signed Listing must never receive a different anchor");
-  await unresolved(repeated, first.anchorAddress);
+  await resumed(await post(request(signed)), first);
   assert.equal(state.nonceReads, 1, "a repeat never asks for a replacement nonce");
 });
 
@@ -138,7 +141,7 @@ test("previews, invalid Listing signatures and the shipped route do not reserve 
   await prepare(signed);
 });
 
-test("a lost response survives a fresh process with the exact saved transaction bytes", async (t) => {
+test("a lost response is released again by a fresh process with the exact saved transaction bytes", async (t) => {
   node(t);
   const signed = await signedInput("restart");
   const first = await prepare(signed);
@@ -160,19 +163,19 @@ test("a lost response survives a fresh process with the exact saved transaction 
   `], { encoding: "utf8", timeout: 15_000 });
   assert.equal(child.status, 0, child.stderr);
   const retried = JSON.parse(child.stdout);
-  assert.equal(retried.status, 409);
+  assert.equal(retried.status, 200);
   assert.equal(retried.body.anchorAddress, first.anchorAddress);
-  assert.equal(retried.body.tx, undefined);
+  assert.equal(JSON.stringify(retried.body.tx), row.transaction_json);
   assert.equal(db.prepare("SELECT transaction_json FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress).transaction_json, row.transaction_json);
 });
 
-test("an expired signed presentation keeps its preparation and cannot authorize a fresh create", async (t) => {
+test("an expired signed presentation gets its saved transaction again and cannot authorize a fresh create", async (t) => {
   node(t);
   const signed = await signedInput("expired-pending");
   const unprepared = await signedInput("expired-new");
   const first = await prepare(signed);
   t.mock.method(Date, "now", () => clock + 16 * 60_000);
-  await unresolved(await post(request(signed)), first.anchorAddress);
+  await resumed(await post(request(signed)), first);
   const response = await post(request(unprepared));
   assert.equal(response.status, 409);
   assert.match((await response.json()).error, /identity presentation expired/);
@@ -189,7 +192,7 @@ test("a retained preparation still validates the retried Listing signature", asy
     assert.equal(body.tx, undefined);
     assert.equal(body.anchorAddress, undefined);
   }
-  await unresolved(await post(request(signed)), first.anchorAddress);
+  await resumed(await post(request(signed)), first);
   assert.equal(state.nonceReads, 1);
 });
 
@@ -222,7 +225,7 @@ test("current authenticated readback resumes without a write and later missing r
   module.clearChainDerivedArtifacts();
   module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] });
   state.published = null;
-  await unresolved(await post(request(signed)), first.anchorAddress);
+  await resumed(await post(request(signed)), first);
   assert.equal(state.nonceReads, 1);
 });
 
@@ -239,7 +242,29 @@ test("failed, oversized and ambiguous lookups retain the preparation and withhol
   }
   state.lookup = "empty";
   state.published = null;
-  await unresolved(await post(request(signed)), first.anchorAddress);
+  await resumed(await post(request(signed)), first);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("a prepared version the catalog already lists returns its saved anchor and never a transaction", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("catalog-listed");
+  const unprepared = await signedInput("catalog-listed-unprepared");
+  const first = await prepare(signed);
+  const listed = (listingId) => ({ listingId, version: 1, anchor: { kind: "storage-program", locator: `stor-${"a".repeat(40)}` } });
+  module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [{ primaryClaim: `did:demos:agent:${ownerHex}`,
+    displayName: inputFor("catalog-listed").name, listings: [listed("catalog-listed"), listed("catalog-listed-unprepared")] }] });
+  try {
+    await unresolved(await post(request(signed)), first.anchorAddress);
+    const resigned = await post(request({ ...signed, identityPresentedAt: clock - 1 }));
+    assert.equal(resigned.status, 400, "a retry must still carry a valid identity signature before learning the anchor");
+    const refused = await post(request(unprepared));
+    assert.equal(refused.status, 409, "allowed control: a listed version this directory never prepared is refused");
+    const body = await refused.json();
+    assert.match(body.error, /already published this version/);
+    assert.equal(body.anchorAddress, undefined);
+    assert.equal(body.tx, undefined);
+  } finally { module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] }); }
   assert.equal(state.nonceReads, 1);
 });
 
@@ -254,6 +279,20 @@ test("concurrent signed requests return at most one transaction and cannot overw
   const row = db.prepare("SELECT transaction_json FROM listing_preparations WHERE logical_address=?").get(winner.logicalAddress);
   assert.equal(row.transaction_json, JSON.stringify(winner.tx));
   assert.equal(bodies.filter((body) => body.tx).length, 1);
+  assert.equal(state.nonceReads, 2, "both requests passed the initial read before the atomic insert");
+});
+
+test("identical concurrent signed requests both receive only the winner's exact saved transaction", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("concurrent-identical");
+  const responses = await Promise.all([post(request(signed)), post(request(signed))]);
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  const bodies = await Promise.all(responses.map((response) => response.json()));
+  const row = db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address=?").get(bodies[0].logicalAddress);
+  for (const body of bodies) {
+    assert.equal(body.anchorAddress, row.anchor_address);
+    assert.equal(JSON.stringify(body.tx), row.transaction_json, "the losing request releases the winner's bytes, not its own");
+  }
   assert.equal(state.nonceReads, 2, "both requests passed the initial read before the atomic insert");
 });
 

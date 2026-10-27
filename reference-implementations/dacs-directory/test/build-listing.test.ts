@@ -745,11 +745,12 @@ test("publisher prepares no transaction unless the account nonce is read within 
     return nonceReply(signal);
   });
   const input = { ...base, serviceId: "nonce-bounds" };
-  let control = 0;
-  const nonceOf = async () => (await (await publishAs({ ...input, serviceId: `nonce-bounds-control-${++control}` })).json() as { tx: { content: { nonce: number } } }).tx.content.nonce;
-  assert.equal(await nonceOf(), 1, "allowed control: a valid nonce releases the transaction");
+  // Each successful control prepares its own Listing: a prepared version is never created again.
+  const nonceOf = async (serviceId: string) =>
+    (await (await publishAs({ ...input, serviceId })).json() as { tx: { content: { nonce: number } } }).tx.content.nonce;
+  assert.equal(await nonceOf("nonce-bounds-first"), 1, "allowed control: a valid nonce releases the transaction");
   nonceReply = () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER - 1 });
-  assert.equal(await nonceOf(), Number.MAX_SAFE_INTEGER, "the largest nonce whose successor stays exact");
+  assert.equal(await nonceOf("nonce-bounds-max"), Number.MAX_SAFE_INTEGER, "the largest nonce whose successor stays exact");
   const refusals: Array<[string, NonceReply, RegExp]> = [
     ["node refusal", () => new Response("unavailable", { status: 503 }), /HTTP 503/],
     ["node timeout", () => { throw timedOut(); }, /did not answer in time/],
@@ -787,7 +788,7 @@ test("publisher prepares no transaction unless the account nonce is read within 
   assert.ok(deadlineLengths.includes(15_000), "the nonce deadline is 15 seconds");
 });
 
-test("empty name indexes and advancing nonces withhold a second create for the exact signed Listing", async (t) => {
+test("with the real SDK, an exact signed repeat after empty name indexes and advancing nonces gets the saved transaction, not a second create", async (t) => {
   t.mock.method(Date, "now", () => 1_810_000_000_000);
   let nonceReads = 0;
   t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -798,18 +799,18 @@ test("empty name indexes and advancing nonces withhold a second create for the e
   });
   const input = { ...base, serviceId: "durable-preparation" };
   const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
-  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+  const authenticated = { ...input, listingVersion: identity.listingVersion,
+    identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
   const preview = await (await POST(request(authenticated))).json() as { message: string };
   const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
   const first = await POST(request(signed));
   assert.equal(first.status, 200);
-  const prepared = await first.json() as { anchorAddress: string };
+  const prepared = await first.json() as { anchorAddress: string; tx: unknown };
   const retry = await POST(request(signed));
-  assert.equal(retry.status, 409);
-  const body = await retry.json() as { error: string; anchorAddress: string; tx?: unknown };
-  assert.match(body.error, /preparation.*unresolved/);
+  assert.equal(retry.status, 200);
+  const body = await retry.json() as { anchorAddress: string; tx: unknown };
   assert.equal(body.anchorAddress, prepared.anchorAddress);
-  assert.equal(body.tx, undefined);
+  assert.equal(JSON.stringify(body.tx), JSON.stringify(prepared.tx), "the saved bytes, not a rebuilt transaction");
   assert.equal(nonceReads, 1);
 });
 
@@ -937,16 +938,18 @@ test("a signed retry for a version the catalog lists but the chain lookup cannot
       identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
     const preview = await (await POST(request(authenticated))).json() as { message: string };
     const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
-    assert.ok(((await (await POST(request(signed))).json()) as { tx: unknown }).tx, "with no catalog row the write is prepared");
+    const prepared = await (await POST(request(signed))).json() as { tx: unknown; anchorAddress: string };
+    assert.ok(prepared.tx, "with no catalog row the write is prepared");
 
     // The catalog now lists that version at an anchor this producer's names do not resolve.
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [{ primaryClaim: claim, displayName: base.name, listings: [{
       listingId: input.serviceId, version: identity.listingVersion, anchor: { kind: "storage-program", locator: "stor-other-anchor" } }] }] } as never);
     const retried = await POST(request(signed));
     assert.equal(retried.status, 409);
-    const body = await retried.json() as { error: string; tx?: unknown };
-    assert.match(body.error, /already published this version/);
-    assert.equal(body.tx, undefined);
+    const body = await retried.json() as { error: string; tx?: unknown; anchorAddress?: string };
+    assert.match(body.error, /preparation.*unresolved/, "the retained preparation is reported, not a generic refusal");
+    assert.equal(body.anchorAddress, prepared.anchorAddress);
+    assert.equal(body.tx, undefined, "a version the catalog lists never gets its transaction again");
   } finally {
     globalThis.fetch = originalFetch;
     store.saveCatalog({ catalogVersion: "1", generatedAt: 2, sellers: [] });

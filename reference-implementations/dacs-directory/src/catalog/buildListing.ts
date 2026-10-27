@@ -35,7 +35,14 @@ import {
 } from "@/src/catalog/chain";
 import { StorageResponseTooLarge, storageResponseJson } from "@/src/catalog/artifactLimits";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
-import { listingVersionFloor, loadCatalog, loadListingPreparation, loadRegistrations, saveListingPreparation } from "@/src/catalog/store";
+import {
+  listingVersionFloor,
+  loadCatalog,
+  loadListingPreparation,
+  loadRegistrations,
+  saveListingPreparation,
+  type ListingPreparation,
+} from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
@@ -105,6 +112,21 @@ async function accountNonce(addressHex: string): Promise<number> {
     throw new Error("the node returned an invalid account nonce");
   }
   return nonce;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The transaction a retained preparation saved, parsed from its exact stored
+ * JSON, when that transaction creates exactly `signedListing`; otherwise
+ * undefined. Throws if the stored JSON cannot be parsed.
+ */
+function savedTransactionCreating(preparation: ListingPreparation, signedListing: Record<string, unknown>): Record<string, unknown> | undefined {
+  const tx: unknown = JSON.parse(preparation.transactionJson);
+  const payload = isRecord(tx) && isRecord(tx.content) && Array.isArray(tx.content.data) ? tx.content.data[1] : undefined;
+  const envelopeHash = isRecord(payload) && isRecord(payload.metadata) ? payload.metadata.envelopeHash : undefined;
+  return isRecord(tx) && envelopeHash === sha256Hex(canonicalize(signedListing)) ? tx : undefined;
 }
 
 /** Build the staged Listing handler with server-owned rail and logical-occupancy authority. */
@@ -408,9 +430,13 @@ return async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
+  // Empty name indexes and advancing nonces do not establish that a returned
+  // create failed. Keep the original attempt across retries and restarts.
+  const preparation = resolution.status === "absent" ? loadListingPreparation(chainIdentity, logicalAddress) : undefined;
   // A version slot is write-once: a taken version the resolver cannot find
-  // is not free, so no second create may be prepared for it.
-  if (resolution.status === "absent" && listingVersion !== nextVersion) {
+  // is not free, so no second create may be prepared for it. A version this
+  // directory prepared reports its saved anchor below instead.
+  if (resolution.status === "absent" && listingVersion !== nextVersion && !preparation) {
     return NextResponse.json(
       { error: "this seller already published this version, but its native binding could not be recovered; no transaction was prepared. Retry once the lookup has caught up, or choose a new Service ID" },
       { status: 409 },
@@ -437,9 +463,6 @@ return async function POST(req: NextRequest) {
     publishedListing = resolution.record.data;
     publishedHash = verified.contentHash;
   } else {
-    // Empty name indexes and advancing nonces do not establish that a returned
-    // create failed. Keep the original attempt across retries and restarts.
-    const preparation = loadListingPreparation(chainIdentity, logicalAddress);
     if (identityExpired && (body.listingSignature === undefined || !preparation)) {
       return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
     }
@@ -487,63 +510,78 @@ return async function POST(req: NextRequest) {
     if (!listingSignatureValid || !isListing(signedCandidate)) {
       return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
     }
-    if (preparation) return unresolvedPreparation(preparation.anchorAddress);
-    // Broadcasting is the seller's irreversible step, so refuse a node outside
-    // the pin here rather than after the write (confirm-listing checks again).
-    let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
-    try {
-      deployment = await pinnedNodeDeployment();
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : "unknown failure";
-      return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
-    }
-    if (!deployment.ok) {
-      return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
-    }
-    let nonce: number;
-    try {
-      nonce = await accountNonce(hex);
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : "unknown failure";
-      return NextResponse.json({ error: `could not read the account nonce (${cause}); no transaction was prepared` }, { status: 503 });
-    }
-    const txNonce = nonce + 1;
-    anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
-    const payload = {
-      operation: "CREATE_STORAGE_PROGRAM",
-      storageAddress: anchorAddress,
-      programName,
-      encoding: "json",
-      data: signedCandidate,
-      metadata: {
-        logicalAddress,
-        contentHash: hash,
-        envelopeHash: sha256Hex(canonicalize(signedCandidate)),
-      },
-      acl: { mode: "public" },
-      salt: LIVE_STORAGE_SALT,
-      storageLocation: "onchain",
-    };
-    tx = {
-      content: {
-        type: "storageProgram",
-        from: owner,
-        to: anchorAddress,
-        amount: 0,
-        data: ["storageProgram", payload],
-        nonce: txNonce,
-        timestamp: Date.now(),
-        transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
-      },
-      signature: null,
-      hash: "",
-      status: "",
-      blockNumber: null,
-    };
-    // Atomic first-writer-wins persistence closes the race between the lookup
-    // above and nonce preparation. A failed commit releases no transaction.
-    if (!saveListingPreparation(chainIdentity, logicalAddress, { anchorAddress, transactionJson: JSON.stringify(tx) })) {
-      return unresolvedPreparation(loadListingPreparation(chainIdentity, logicalAddress)?.anchorAddress);
+    // A retained preparation is never replaced. An exact repeat of its signed
+    // Listing, for a version nothing else shows as taken, gets the same saved
+    // bytes again, so a lost response cannot strand it; that is no second
+    // create. Any other retry learns only the saved anchor.
+    const savedRelease = (saved: ListingPreparation | undefined) =>
+      saved && listingVersion === nextVersion ? savedTransactionCreating(saved, signedCandidate) ?? null : null;
+    if (preparation) {
+      tx = savedRelease(preparation);
+      if (!tx) return unresolvedPreparation(preparation.anchorAddress);
+      anchorAddress = preparation.anchorAddress;
+    } else {
+      // Broadcasting is the seller's irreversible step, so refuse a node outside
+      // the pin here rather than after the write (confirm-listing checks again).
+      let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
+      try {
+        deployment = await pinnedNodeDeployment();
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : "unknown failure";
+        return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
+      }
+      if (!deployment.ok) {
+        return NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
+      }
+      let nonce: number;
+      try {
+        nonce = await accountNonce(hex);
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : "unknown failure";
+        return NextResponse.json({ error: `could not read the account nonce (${cause}); no transaction was prepared` }, { status: 503 });
+      }
+      const txNonce = nonce + 1;
+      anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
+      const payload = {
+        operation: "CREATE_STORAGE_PROGRAM",
+        storageAddress: anchorAddress,
+        programName,
+        encoding: "json",
+        data: signedCandidate,
+        metadata: {
+          logicalAddress,
+          contentHash: hash,
+          envelopeHash: sha256Hex(canonicalize(signedCandidate)),
+        },
+        acl: { mode: "public" },
+        salt: LIVE_STORAGE_SALT,
+        storageLocation: "onchain",
+      };
+      tx = {
+        content: {
+          type: "storageProgram",
+          from: owner,
+          to: anchorAddress,
+          amount: 0,
+          data: ["storageProgram", payload],
+          nonce: txNonce,
+          timestamp: Date.now(),
+          transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
+        },
+        signature: null,
+        hash: "",
+        status: "",
+        blockNumber: null,
+      };
+      // Atomic first-writer-wins persistence closes the race between the lookup
+      // above and nonce preparation. A failed commit releases no transaction;
+      // a lost race releases only the winner's saved bytes, as a repeat would.
+      if (!saveListingPreparation(chainIdentity, logicalAddress, { anchorAddress, transactionJson: JSON.stringify(tx) })) {
+        const winner = loadListingPreparation(chainIdentity, logicalAddress);
+        tx = savedRelease(winner);
+        if (!winner || !tx) return unresolvedPreparation(winner?.anchorAddress);
+        anchorAddress = winner.anchorAddress;
+      }
     }
     publishedListing = signedCandidate;
   }
