@@ -41,17 +41,18 @@ import {
 } from "./listingVerification.js";
 import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
 import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
-import { listingDiagnosticCoordinates } from "./listingAdmission.js";
+import { decideListingNotice, listingDiagnosticCoordinates, type ListingAnchorEvidence } from "./listingAdmission.js";
 import { canonicalDemosAgentClaim, canonicalDemosAgentReference, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
-import { verifyOwnerSignature } from "./registrationSig.js";
+import { ownerSignedRegistration } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
   listingRejectionNoticeCode,
   pruneRegistrationListingRejections,
   hasPendingOwnerRevocationCandidate,
+  savedListingDeclarations,
   observedRevocationCandidate,
   retainedListingRevocation,
   retainedListingRevocationMarker,
@@ -156,12 +157,9 @@ export async function indexRegistration(
   commitment?: CommitmentVerifier,
 ): Promise<SellerRecord> {
   const now = Date.now();
-  const ownerRegistered = reg.ownerSignatureVerified ?? (reg.ownerSignature
-    ? await verifyOwnerSignature(reg, { ignoreFreshness: true }).catch(() => false)
-    : false);
-  // Only an anchor the owner signed is the owner's pointer; the crawl may add others.
-  const ownerSignedAnchors = new Set(reg.ownerSignedAnchors ?? reg.listingAnchors);
-  const rejectedListingAnchors = new Set<string>();
+  // Owner evidence comes from what the owner signed, never from crawl data merged into `reg`.
+  const ownerSigned = reg.ownerSigned === undefined ? await ownerSignedRegistration(reg) : reg.ownerSigned;
+  const displayName = ownerSigned?.displayName ?? reg.displayName;
 
   // ── CCI badges: from the on-chain GCR, never from the payload ────────────
   const hex = canonicalDemosAgentClaim(reg.primaryClaim)?.slice(-64) ?? reg.primaryClaim;
@@ -195,73 +193,34 @@ export async function indexRegistration(
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
   const { verifiedRevocations } = loadScanState();
+  const savedDeclarations = savedListingDeclarations(reg.primaryClaim);
   const normalizedHash = (hash: string) => hash.replace(/^sha256-/, "").toLowerCase();
   for (const anchor of reg.listingAnchors) {
     const anchored = await readAnchorRecord(anchor);
-    if (!anchored) {
-      // An unread anchor cannot clear an earlier rejection or reset its history.
-      rejectedListingAnchors.add(anchor);
-      continue;
+    const verification = anchored ? await verifyStoredListingResult(anchored.data, anchor) : null;
+    const evidence: ListingAnchorEvidence = !anchored || !verification ? { kind: "unread" }
+      : !verification.ok ? { kind: "invalid", code: verification.code }
+      : { kind: "verified", contentHash: verification.value.contentHash,
+          binding: listingBindingRejection(verification.value.sellerClaim, anchored.owner, reg.primaryClaim) };
+    const unsigned = reg.listingContentHashes?.[anchor];
+    const decision = decideListingNotice({
+      evidence,
+      ownerSignedAnchor: ownerSigned?.anchors.includes(anchor) ?? false,
+      declarations: {
+        signed: savedDeclarations.sources.flatMap((hashes) => Object.hasOwn(hashes, anchor) ? [normalizedHash(hashes[anchor])] : []),
+        unknown: savedDeclarations.unknown,
+        unsigned: unsigned ? normalizedHash(unsigned) : undefined,
+      },
+      heldCode: listingRejectionNoticeCode(anchor, reg.primaryClaim),
+    });
+    if (decision.action === "record") {
+      recordListingRejection(anchor, reg.primaryClaim, decision.code, decision.coordinates && verification?.ok
+        ? listingDiagnosticCoordinates(verification.value.scope) : undefined, decision.publicNotice);
     }
-    const sourceDeclarations = Object.values(reg.authenticatedHashDeclarations ?? {});
-    const authenticatedHashes = sourceDeclarations.flatMap((source) => source?.hashes[anchor] ? [normalizedHash(source.hashes[anchor])] : []);
-    const currentDeclaration = sourceDeclarations.some((source) => source?.current && source.hashes[anchor]);
-    const unsignedHash = reg.listingContentHashes?.[anchor];
-    const declaredHashes = authenticatedHashes.length > 0 ? authenticatedHashes : unsignedHash ? [normalizedHash(unsignedHash)] : [];
-    const heldNotice = listingRejectionNoticeCode(anchor, reg.primaryClaim);
-    // A held hash notice waits until this pass knows every authenticated declaration of the anchor: a current
-    // source declares it, every saved source was accepted in this pass, or a complete pass finds no declaration.
-    const declarationsKnown = !sourceDeclarations.includes(null) && (currentDeclaration ||
-      (sourceDeclarations.length > 0 && sourceDeclarations.every((source) => source?.current)) ||
-      (!reg.discoveryIncomplete && declaredHashes.length === 0));
-    if (heldNotice === "DECLARED_CONTENT_HASH_MISMATCH" && !declarationsKnown) {
-      rejectedListingAnchors.add(anchor);
-      continue;
-    }
-    // A held public notice stands until a read refutes it: the owner notice yields to any verified listing,
-    // the hash notice once every authenticated declaration of the anchor matches the verified hash or is withdrawn.
-    const heldNoticeStands = (verifiedHash?: string): boolean => heldNotice === "OWNER_CLAIM_BINDING"
-      ? verifiedHash === undefined
-      : heldNotice === "DECLARED_CONTENT_HASH_MISMATCH" && authenticatedHashes.some((hash) => hash !== verifiedHash);
-    // Fails closed: a listing with no canonical form is rejected like any invalid one.
-    const verification = await verifyStoredListingResult(anchored.data, anchor);
-    if (!verification.ok) {
-      rejectedListingAnchors.add(anchor);
-      if (!heldNoticeStands()) recordListingRejection(anchor, reg.primaryClaim, verification.code);
-      continue;
-    }
+    if (decision.action !== "clear" || !anchored || !verification?.ok) continue;
+    clearListingRejection(anchor, reg.primaryClaim);
     const verified = verification.value;
     const { scope } = verified;
-    const bindingRejection = listingBindingRejection(
-      verified.sellerClaim,
-      anchored.owner,
-      reg.primaryClaim,
-    );
-    if (bindingRejection) {
-      rejectedListingAnchors.add(anchor);
-      if (!heldNoticeStands(verified.contentHash)) {
-        recordListingRejection(
-          anchor,
-          reg.primaryClaim,
-          bindingRejection,
-          bindingRejection === "SELLER_CLAIM_BINDING" ? undefined : listingDiagnosticCoordinates(verified.scope),
-          ownerRegistered && bindingRejection !== "SELLER_CLAIM_BINDING" && ownerSignedAnchors.has(anchor),
-        );
-      }
-      continue;
-    }
-    if (declaredHashes.some((hash) => hash !== verified.contentHash)) {
-      rejectedListingAnchors.add(anchor);
-      recordListingRejection(
-        anchor,
-        reg.primaryClaim,
-        "DECLARED_CONTENT_HASH_MISMATCH",
-        listingDiagnosticCoordinates(verified.scope),
-        authenticatedHashes.length > 0,
-      );
-      continue;
-    }
-    clearListingRejection(anchor, reg.primaryClaim);
     const listingId = typeof scope.listingId === "string" ? scope.listingId
       : typeof scope.serviceId === "string" ? scope.serviceId : "";
     if (!listingId) continue;
@@ -363,7 +322,7 @@ export async function indexRegistration(
       // match the revocation binding against, the exact `presentedBy` bytes.
       seller: {
         primaryClaim: summaryClaim,
-        displayName: reg.displayName,
+        displayName,
       },
       artifactProfile: verified.profile,
       publicEndpoint: safePublicEndpoint(signedSeller?.publicEndpoint),
@@ -390,12 +349,7 @@ export async function indexRegistration(
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
-
-  // Partial discovery cannot prove crawl removals, but verified owner pointers can prove owner removals.
-  if (!reg.discoveryIncomplete || ownerRegistered) {
-    pruneRegistrationListingRejections(reg.primaryClaim, rejectedListingAnchors,
-      reg.discoveryIncomplete ? ownerSignedAnchors : undefined);
-  }
+  pruneRegistrationListingRejections(reg.primaryClaim, reg.listingAnchors, ownerSigned?.anchors);
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
@@ -691,16 +645,15 @@ export async function indexRegistration(
     })(),
   }));
 
-  // Owner badge: re-verify the stored signature each pass (freshness is a
-  // submission-time replay gate only — the cryptographic binding must hold).
   const identityTiers = await Promise.all(identityBundles.map((bundle) => deriveIdentityTier(bundle, resolveRecipe)));
   const identityTier = identityTiers.includes("institutional") ? "institutional"
     : identityTiers.includes("verified") ? "verified" : "self-declared";
 
   return {
     primaryClaim: reg.primaryClaim,
-    ownerRegistered,
-    displayName: reg.displayName,
+    // The owner badge shows only the name the owner signed.
+    ownerRegistered: ownerSigned !== null,
+    displayName,
     identityTier,
     identityLinksPresent: cci.length > 0,
     identityBundle,

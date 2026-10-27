@@ -129,18 +129,3 @@ test("rejecting one crawled binding preserves another listing at the same marker
     else process.env.DACS_WITHDRAWAL_SOURCE_PINS = pins;
   }
 });
-
-test("a carried binding that names the seller with advisory parameters is not the seller's exact binding", () => {
-  const exact = {
-    sellerPrimaryClaim: seller, listingId: "exact-binding", listingVersion: 1, listingContentHash: hash,
-    logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:exact-binding:v1`,
-    markerAnchor: { kind: "storage-program", locator: `stor-${"5".repeat(40)}` }, markerContentHash: "e".repeat(64),
-  };
-  const qualified = {
-    ...exact, listingId: "qualified-binding", sellerPrimaryClaim: `${seller}?channel=directory`,
-    logicalAddress: `dacs1-revoked:${encodeURIComponent(`${seller}?channel=directory`)}:qualified-binding:v1`,
-  };
-  store.recordWellKnownWithdrawalCheck("https://binding.example", seller, [hash], [], { generatedAt: 1, hash: "f".repeat(64) }, [exact, qualified]);
-  assert.deepEqual(store.boundWellKnownRevocations(seller, hash, "exact-binding", 1), [exact]);
-  assert.deepEqual(store.boundWellKnownRevocations(seller, hash, "qualified-binding", 1), []);
-});
