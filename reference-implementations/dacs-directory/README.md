@@ -404,6 +404,17 @@ base64url-patched Buffer).
   otherwise propose the same next version. An occupied version whose owner-held program
   no longer authenticates blocks publication for that listing ID. Recover by publishing
   under a new listing ID; the publisher does not skip the occupied version.
+- **Authenticated Listing preparations survive retries and restarts.** Before the
+  internal builder returns a transaction, it stores the exact transaction and signed
+  Listing in SQLite, keyed by configured chain and logical Listing version. Previews
+  remain stateless. Empty name lookups, nonce advancement, re-signing and elapsed time
+  never release another create for a prepared version. An unresolved signed retry returns
+  HTTP 409 with the saved anchor for read-only recovery; it returns no transaction.
+  Current owner-bound, signature-verified readback can resume registration without a
+  write, including with an expired presentation. Saved preparations never establish
+  finality or success and remain retained after readback. There is no automatic
+  expiry or abandon operation: an unobserved transaction may still execute. Keep the
+  configured persistent data volume through deployments and catalog rebuilds.
 
 ## DACS surface / conformance declaration
 

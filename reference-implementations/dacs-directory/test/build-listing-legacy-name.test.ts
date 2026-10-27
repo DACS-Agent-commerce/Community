@@ -58,18 +58,19 @@ const walletHex = (message: string) => Buffer.from(ed25519Sign(Buffer.from(messa
 // Earlier /register versions named the StorageProgram `dacs1-<base64url(logical address)>`.
 // DACS-1 §6.3.4 versioning (listingVersion monotonic per listingId, versions MUST NOT be
 // skipped) and LP-3 apply to those anchors too, so the occupancy check reads both names.
-const legacyProgramName = (version: number) =>
-  `dacs1-${Buffer.from(`dacs1:${encodeURIComponent(claim)}:${base.serviceId}:v${version}`, "utf8").toString("base64url")}`;
+const legacyProgramName = (serviceId: string, version: number) =>
+  `dacs1-${Buffer.from(`dacs1:${encodeURIComponent(claim)}:${serviceId}:v${version}`, "utf8").toString("base64url")}`;
 
 type V1 = { programName: string; anchorAddress: string; listing: Record<string, unknown> };
 type Built = { exists: boolean; tx: { content: { data: [string, { programName: string }] } } | null; programName: string; error?: string; listing?: unknown };
 
 async function withOccupancy(
+  serviceId: string,
   occupy: (v1: V1) => { name: string; data: Record<string, unknown> },
   check: (ctx: { post: () => Promise<Response>; queries: string[] }) => Promise<void>,
 ) {
   const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number };
-  const finalInput = { ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
+  const finalInput = { ...base, serviceId, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let occupied: { name: string; data: Record<string, unknown>; address: string } | null = null;
   const queries: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -107,11 +108,12 @@ async function withOccupancy(
 
 test("a version main's /register anchored under its program name is occupied and is not published again", async () => {
   await withOccupancy(
+    "legacy-invalid",
     (v1) => {
       const signature = v1.listing.signature as Record<string, unknown> & { value: string };
       // main wrote the wallet's hex into the Listing signature, which no current reader accepts.
       const data = { ...v1.listing, signature: { ...signature, value: Buffer.from(signature.value, "base64url").toString("hex") } };
-      return { name: legacyProgramName(1), data };
+      return { name: legacyProgramName("legacy-invalid", 1), data };
     },
     async ({ post, queries }) => {
       for (let i = 0; i < 2; i++) {
@@ -122,37 +124,37 @@ test("a version main's /register anchored under its program name is occupied and
         assert.equal(body.tx, undefined);
         assert.equal(body.listing, undefined, "no second v1 artifact is issued for signing");
       }
-      assert.ok(queries.includes(legacyProgramName(1)), "the legacy name is looked up");
+      assert.ok(queries.includes(legacyProgramName("legacy-invalid", 1)), "the legacy name is looked up");
     },
   );
 });
 
 test("an authenticated listing under the legacy program name is recovered without a second write", async () => {
   await withOccupancy(
-    (v1) => ({ name: legacyProgramName(1), data: v1.listing }),
+    "legacy-recovery",
+    (v1) => ({ name: legacyProgramName("legacy-recovery", 1), data: v1.listing }),
     async ({ post }) => {
       const response = await post();
       assert.equal(response.status, 200);
       const body = await response.json() as Built;
       assert.equal(body.exists, true);
       assert.equal(body.tx, null, "the recovered version is not written again");
-      assert.equal(body.programName, legacyProgramName(1), "the report names the program that is on chain");
+      assert.equal(body.programName, legacyProgramName("legacy-recovery", 1), "the report names the program that is on chain");
     },
   );
 });
 
-test("a legacy program name for another version leaves this version free to publish", async () => {
+test("a legacy program for another version cannot release an unresolved preparation", async () => {
   await withOccupancy(
-    (v1) => ({ name: legacyProgramName(2), data: v1.listing }),
+    "legacy-other-version",
+    (v1) => ({ name: legacyProgramName("legacy-other-version", 2), data: v1.listing }),
     async ({ post, queries }) => {
       const response = await post();
-      assert.equal(response.status, 200);
+      assert.equal(response.status, 409);
       const body = await response.json() as Built;
-      assert.equal(body.exists, false);
-      assert.ok(body.tx, "an unoccupied version is still published");
-      assert.equal(body.tx.content.data[1].programName, body.programName);
-      assert.notEqual(body.programName, legacyProgramName(1), "new programs are not created under the legacy name");
-      assert.ok(queries.includes(legacyProgramName(1)), "the legacy name is looked up");
+      assert.match(String(body.error), /preparation.*unresolved/);
+      assert.equal(body.tx, undefined);
+      assert.ok(queries.includes(legacyProgramName("legacy-other-version", 1)), "the legacy name is looked up");
     },
   );
 });
@@ -169,7 +171,7 @@ test("an unreadable legacy-name lookup withholds the create transaction", async 
     if (init?.method !== "POST") return new Response(null, { status: 404 });
     const call = (JSON.parse(String(init.body)) as { params?: Array<{ message?: string; data?: { query?: string } }> }).params?.[0];
     if (call?.message === "getAddressNonce") nonceReads.push(call.message);
-    if (call?.message === "searchStoragePrograms" && legacyDown && call.data?.query === legacyProgramName(1)) {
+    if (call?.message === "searchStoragePrograms" && legacyDown && call.data?.query === legacyProgramName(base.serviceId, 1)) {
       return new Response("unavailable", { status: 503 });
     }
     return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });

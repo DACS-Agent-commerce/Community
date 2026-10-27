@@ -277,6 +277,7 @@ test("publisher refuses an invalid occupied version without skipping to the next
     Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("hex");
   const finalInput = {
     ...base,
+    serviceId: "invalid-occupied-version",
     identityPresentedAt: identity.identityPresentedAt,
     identitySignature: walletHex(identity.identityMessage),
   };
@@ -341,7 +342,7 @@ test("publisher recovers an immutable owner-bound listing instead of creating a 
   const identitySignature = Buffer.from(
     ed25519Sign(Buffer.from(identity.identityMessage, "utf8"), privateKey),
   ).toString("hex");
-  const finalInput = { ...base, identityPresentedAt: identity.identityPresentedAt, identitySignature };
+  const finalInput = { ...base, serviceId: "immutable-recovery", identityPresentedAt: identity.identityPresentedAt, identitySignature };
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -736,7 +737,7 @@ test("publisher prepares no transaction unless the account nonce is read within 
     ["overflowing nonce", () => Response.json({ result: 200, response: Number.MAX_SAFE_INTEGER }), /invalid account nonce/],
   ] as const) {
     nonceReply = reply;
-    const response = await publishAs(input);
+    const response = await publishAs({ ...input, serviceId: `nonce-bounds-${name.replace(/[^a-z]+/g, "-")}` });
     assert.equal(response.status, 503, name);
     const body = await response.json() as { error?: string; tx?: unknown; listing?: unknown };
     assert.match(String(body.error), error, name);
@@ -744,6 +745,32 @@ test("publisher prepares no transaction unless the account nonce is read within 
     assert.equal(body.tx, undefined, `${name}: no broadcastable transaction`);
     assert.equal(body.listing, undefined, name);
   }
+});
+
+test("empty name indexes and advancing nonces withhold a second create for the exact signed Listing", async (t) => {
+  t.mock.method(Date, "now", () => 1_810_000_000_000);
+  let nonceReads = 0;
+  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const deployment = deploymentReply(init);
+    if (deployment) return deployment;
+    const call = init?.body ? JSON.parse(String(init.body)).params?.[0]?.message : null;
+    return Response.json({ result: 200, response: call === "searchStoragePrograms" ? [] : nonceReads++ });
+  });
+  const input = { ...base, serviceId: "durable-preparation" };
+  const identity = await (await POST(request(input))).json() as { identityMessage: string; identityPresentedAt: number };
+  const authenticated = { ...input, identityPresentedAt: identity.identityPresentedAt, identitySignature: walletSignature(identity.identityMessage) };
+  const preview = await (await POST(request(authenticated))).json() as { message: string };
+  const signed = { ...authenticated, listingSignature: walletSignature(preview.message) };
+  const first = await POST(request(signed));
+  assert.equal(first.status, 200);
+  const prepared = await first.json() as { anchorAddress: string };
+  const retry = await POST(request(signed));
+  assert.equal(retry.status, 409);
+  const body = await retry.json() as { error: string; anchorAddress: string; tx?: unknown };
+  assert.match(body.error, /preparation.*unresolved/);
+  assert.equal(body.anchorAddress, prepared.anchorAddress);
+  assert.equal(body.tx, undefined);
+  assert.equal(nonceReads, 1);
 });
 
 test("publisher refuses to recover an occupied program that holds another seller, listing or version", async (t) => {

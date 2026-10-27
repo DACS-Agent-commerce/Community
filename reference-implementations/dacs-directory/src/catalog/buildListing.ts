@@ -34,12 +34,13 @@ import {
 } from "@/src/catalog/chain";
 import { StorageResponseTooLarge, storageResponseJson } from "@/src/catalog/artifactLimits";
 import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
-import { listingVersionFloor, loadCatalog, loadRegistrations } from "@/src/catalog/store";
+import { listingVersionFloor, loadCatalog, loadListingPreparation, loadRegistrations, saveListingPreparation } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { importLegacySignatureValue } from "@/src/catalog/signatureValue";
 import { pinnedNodeDeployment } from "@/src/catalog/listingFinality";
+import { pinnedChainIdentity } from "@/src/catalog/nodeDeployment";
 import {
   negotiationPhaseForPricing,
   publishableRail,
@@ -158,7 +159,7 @@ return async function POST(req: NextRequest) {
   const priorVersions = knownSeller?.listings
     .filter((l) => l.listingId === serviceId)
     .map((l) => l.version) ?? [];
-  // Stateless by design: an unauthenticated first-stage request must not
+  // Previews are stateless: an unauthenticated first-stage request must not
   // create mutable state that can block another publisher. Operators must
   // serialize concurrent writes for one seller/listingId (README limitation).
   const versionFloor = listingVersionFloor(did, serviceId);
@@ -240,8 +241,11 @@ return async function POST(req: NextRequest) {
   const serverNow = Date.now();
   const identityPresentedAt = body.identitySignature ? Number(body.identityPresentedAt) : serverNow;
   if (body.identitySignature && (
-    !Number.isSafeInteger(identityPresentedAt) || identityPresentedAt < serverNow - 15 * 60_000 || identityPresentedAt > serverNow + 60_000
+    !Number.isSafeInteger(identityPresentedAt) || identityPresentedAt > serverNow + 60_000
   )) return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
+  // A stale signed presentation can still locate a retained attempt/publication;
+  // only a fresh presentation may authorize a new preparation below.
+  const identityExpired = identityPresentedAt < serverNow - 15 * 60_000;
   const identityScope = {
     bundleVersion: "1",
     presentedBy: did,
@@ -412,6 +416,12 @@ return async function POST(req: NextRequest) {
   }
 
   const logicalAddress = listingAddress(did, serviceId, listingVersion);
+  const chainIdentity = pinnedChainIdentity();
+  const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
+    error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
+    logicalAddress,
+    anchorAddress,
+  }, { status: 409 });
   if (resolution.status === "indeterminate") {
     return NextResponse.json(
       { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
@@ -446,6 +456,13 @@ return async function POST(req: NextRequest) {
     publishedListing = resolution.record.data;
     publishedHash = verified.contentHash;
   } else {
+    // Empty name indexes and advancing nonces do not establish that a returned
+    // create failed. Keep the original attempt across retries and restarts.
+    const preparation = loadListingPreparation(chainIdentity, logicalAddress);
+    if (signedCandidate && preparation) return unresolvedPreparation(preparation.anchorAddress);
+    if (identityExpired) {
+      return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
+    }
     // Do not prepare a broadcastable transaction until the wallet has signed
     // the exact artifact returned by the preview response.
     if (!signedCandidate) {
@@ -515,6 +532,11 @@ return async function POST(req: NextRequest) {
       status: "",
       blockNumber: null,
     };
+    // Atomic first-writer-wins persistence closes the race between the lookup
+    // above and nonce preparation. A failed commit releases no transaction.
+    if (!saveListingPreparation(chainIdentity, logicalAddress, { anchorAddress, transactionJson: JSON.stringify(tx) })) {
+      return unresolvedPreparation(loadListingPreparation(chainIdentity, logicalAddress)?.anchorAddress);
+    }
     publishedListing = signedCandidate;
   }
 

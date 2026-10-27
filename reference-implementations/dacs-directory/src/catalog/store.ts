@@ -76,6 +76,13 @@ db.exec(`
     token TEXT NOT NULL,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS listing_preparations (
+    chain_identity TEXT NOT NULL,
+    logical_address TEXT NOT NULL,
+    anchor_address TEXT NOT NULL,
+    transaction_json TEXT NOT NULL,
+    PRIMARY KEY(chain_identity, logical_address)
+  );
   CREATE TABLE IF NOT EXISTS artifacts (
     locator TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -240,6 +247,30 @@ const setJson = db.transaction((key: string, value: unknown) => {
     ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`)
     .run(key, JSON.stringify(value), Date.now());
 });
+
+/** Exact authenticated create inputs retained for recovery, never proof of success. */
+export interface ListingPreparation {
+  anchorAddress: string;
+  transactionJson: string;
+}
+
+/** Read a retained attempt or undefined; throws on storage failure. */
+export function loadListingPreparation(chainIdentity: string, logicalAddress: string): ListingPreparation | undefined {
+  return db.prepare(`SELECT anchor_address AS anchorAddress, transaction_json AS transactionJson
+    FROM listing_preparations WHERE chain_identity=? AND logical_address=?`)
+    .get(chainIdentity, logicalAddress) as ListingPreparation | undefined;
+}
+
+/**
+ * Commit authenticated inputs before releasing a transaction. Returns false if
+ * another preparation already won; never overwrites it. Throws on storage failure.
+ * Retain even after readback: a later missing read cannot free an immutable version.
+ */
+export function saveListingPreparation(chainIdentity: string, logicalAddress: string, preparation: ListingPreparation): boolean {
+  return db.prepare(`INSERT INTO listing_preparations(chain_identity,logical_address,anchor_address,transaction_json)
+    VALUES (?,?,?,?) ON CONFLICT(chain_identity,logical_address) DO NOTHING`)
+    .run(chainIdentity, logicalAddress, preparation.anchorAddress, preparation.transactionJson).changes === 1;
+}
 
 // One-time, atomic migrations. Legacy files remain as rollback snapshots.
 // Every read-then-write migration starts IMMEDIATE so concurrent fresh
