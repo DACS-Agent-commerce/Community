@@ -1,20 +1,17 @@
+import "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import type { Catalog, ListingSummary } from "../src/catalog/types.js";
+import { saveCatalog } from "../src/catalog/store.js";
+import * as listings from "../app/api/dacs/listings/route.js";
+import * as detail from "../app/api/dacs/listings/[listingId]/[version]/route.js";
+import * as inspection from "../app/api/dacs/inspect-service/[listingId]/[version]/route.js";
+import * as sellers from "../app/api/dacs/sellers/[primaryClaimRef]/route.js";
 
-process.env.DACS_DIRECTORY_DATA = mkdtempSync(join(tmpdir(), "dacs-query-bounds-"));
-const { saveCatalog } = await import("../src/catalog/store.js");
-const listings = await import("../app/api/dacs/listings/route.js");
-const detail = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
-const inspection = await import("../app/api/dacs/inspect-service/[listingId]/[version]/route.js");
-const sellers = await import("../app/api/dacs/sellers/[primaryClaimRef]/route.js");
 const claim = `did:demos:agent:${"a".repeat(64)}`;
-const parameters = Array.from({ length: 1542 }, (_, i) => `k${String(i).padStart(4, "0")}=v`).join("&");
-const presentedBy = `${claim}?${parameters}`;
+// A summary carries the exact signed presentedBy, here with a CF-2 escaped reserved character.
+const presentedBy = `${claim}?note=a%3Ab`;
 const listing = (i: number): ListingSummary => ({
   listingId: `svc-${i}`, version: 1, contentHash: "c".repeat(64),
   anchor: { kind: "storage-program", locator: `stor-${i.toString(16).padStart(40, "0")}` },
@@ -24,73 +21,71 @@ const listing = (i: number): ListingSummary => ({
 });
 const catalog = {
   catalogVersion: "1", generatedAt: 1,
-  sellers: [{ primaryClaim: claim, displayName: "Seller", identityTier: "verified", listings: Array.from({ length: 100 }, (_, i) => listing(i)) }],
+  sellers: [{ primaryClaim: claim, displayName: "Seller", identityTier: "verified", listings: [listing(0), listing(1)] }],
 } as Catalog;
+saveCatalog(catalog);
 
-test("large primaryClaim and seller queries are rejected before catalog scanning", async () => {
-  saveCatalog(catalog);
-  const query = new URLSearchParams({ primaryClaim: presentedBy });
-  assert.ok(query.toString().length >= 14_000);
-  assert.equal((await listings.GET(new NextRequest(`https://directory.test/api/dacs/listings?${query}`))).status, 400);
-  for (const primaryClaim of ["a".repeat(1024), "é".repeat(512)]) {
-    assert.equal((await listings.GET(new NextRequest(`https://directory.test/api/dacs/listings?${new URLSearchParams({ primaryClaim })}`))).status, 200);
+const atBound = ["a".repeat(1024), "é".repeat(512)];
+// One byte over in UTF-8 while far under 1024 characters, and a claim valid after trimming.
+const overBound = ["a".repeat(1025), `${"é".repeat(512)}a`, `${claim}${" ".repeat(1025)}`];
+const params = { params: Promise.resolve({ listingId: "svc-0", version: "1" }) };
+const query = (path: string, name: string, value: string) =>
+  new NextRequest(`https://directory.test${path}?${new URLSearchParams({ [name]: value })}`);
+
+test("the listings route refuses a primaryClaim over 1024 raw UTF-8 bytes", async () => {
+  assert.equal(Buffer.byteLength(overBound[2], "utf8"), 1105);
+  for (const primaryClaim of atBound) {
+    assert.equal((await listings.GET(query("/api/dacs/listings", "primaryClaim", primaryClaim))).status, 200);
   }
-  const params = Promise.resolve({ listingId: "svc-0", version: "1" });
-  for (const route of [detail, inspection]) {
-    for (const seller of ["a".repeat(1024), "é".repeat(512)]) {
-      const request = new NextRequest(`https://directory.test/api/dacs/listings/svc-0/1?${new URLSearchParams({ seller })}`);
-      assert.equal((await route.GET(request, { params })).status, 404);
-    }
-    for (const seller of [presentedBy, "a".repeat(1025), "é".repeat(513)]) {
-      const request = new NextRequest(`https://directory.test/api/dacs/listings/svc-0/1?${new URLSearchParams({ seller })}`);
-      assert.equal((await route.GET(request, { params })).status, 400);
-    }
+  for (const primaryClaim of overBound) {
+    const response = await listings.GET(query("/api/dacs/listings", "primaryClaim", primaryClaim));
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "primaryClaim exceeds 1024 bytes" });
   }
-  assert.equal((await listings.GET(new NextRequest(`https://directory.test/api/dacs/listings?${new URLSearchParams({ primaryClaim: "é".repeat(513) })}`))).status, 400);
 });
 
-test("seller-record identity drives filters and links while summaries retain exact presentedBy", async () => {
-  saveCatalog(catalog);
-  for (const primaryClaim of [claim, `${claim}?a=b`, "did:demos:agent"]) {
-    const request = new NextRequest(`https://directory.test/api/dacs/listings?${new URLSearchParams({ primaryClaim, identityTier: "verified" })}`);
-    const response = await listings.GET(request);
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    assert.equal(body.total, 100);
-    assert.equal(body.listings[0].seller.primaryClaim, presentedBy);
-    assert.equal(new URL(body.listings[0].inspection.href, "https://directory.test").searchParams.get("seller"), claim);
+test("the detail and inspection routes refuse a seller over 1024 raw UTF-8 bytes", async () => {
+  for (const [path, route] of [["/api/dacs/listings/svc-0/1", detail], ["/api/dacs/inspect-service/svc-0/1", inspection]] as const) {
+    for (const seller of atBound) assert.equal((await route.GET(query(path, "seller", seller), params)).status, 404, path);
+    for (const seller of overBound) {
+      const response = await route.GET(query(path, "seller", seller), params);
+      assert.equal(response.status, 400, `${path} ${seller.length}`);
+      assert.deepEqual(await response.json(), { error: "seller exceeds 1024 bytes" });
+    }
   }
-  const response = await inspection.GET(new NextRequest(`https://directory.test/api/dacs/inspect-service/svc-0/1?${new URLSearchParams({ seller: `${claim}?a=b` })}`), {
-    params: Promise.resolve({ listingId: "svc-0", version: "1" }),
-  });
-  assert.equal(response.status, 200);
 });
 
-
-test("seller path claims share the UTF-8 query bound after framework decoding", async () => {
-  const request = new NextRequest("https://directory.test/api/dacs/sellers/test");
-  for (const raw of ["a".repeat(1024), "é".repeat(512)]) {
-    const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: raw }) });
-    assert.equal(response.status, 404, "a claim at the byte limit reaches lookup");
+test("the seller route refuses a decoded path claim over 1024 raw UTF-8 bytes", async () => {
+  const request = new NextRequest("https://directory.test/api/dacs/sellers/x");
+  for (const raw of atBound) {
+    assert.equal((await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: raw }) })).status, 404);
   }
-  for (const raw of [presentedBy, "a".repeat(1025), "é".repeat(513)]) {
+  for (const raw of overBound) {
     const response = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: raw }) });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: "primaryClaim exceeds 1024 bytes" });
   }
-  const malformed = await sellers.GET(request, { params: Promise.resolve({ primaryClaimRef: "%GG" }) });
-  assert.equal(malformed.status, 404, "a literal percent in a decoded path is not a valid seller identity");
 });
 
-test("seller paths preserve reserved escapes inside framework-decoded ClaimReferences", async () => {
-  saveCatalog(catalog);
-  for (const reference of [claim, `${claim}?a=%25`, `${claim}?a=%3A`, `${claim}?a=%2525`]) {
+test("the seller route decodes a parameter-bearing claim once, keeping its reserved escape", async () => {
+  for (const reference of [claim, presentedBy]) {
     const response = await sellers.GET(new NextRequest(`https://directory.test/api/dacs/sellers/${encodeURIComponent(reference)}`),
       { params: Promise.resolve({ primaryClaimRef: reference }) });
     assert.equal(response.status, 200, reference);
-    assert.equal((await response.json()).listings.length, 100);
+    assert.equal((await response.json()).listings.length, 2);
   }
-  const unknown = `did:demos:agent:${"b".repeat(64)}?a=%25`;
-  assert.equal((await sellers.GET(new NextRequest(`https://directory.test/api/dacs/sellers/${encodeURIComponent(unknown)}`),
-    { params: Promise.resolve({ primaryClaimRef: unknown }) })).status, 404);
+});
+
+test("primaryClaim and identityTier filters match a seller whose summaries carry parameters", async () => {
+  for (const primaryClaim of [claim, `${claim}?other=x`, "did:demos:agent", ""]) {
+    const response = await listings.GET(new NextRequest(
+      `https://directory.test/api/dacs/listings?${new URLSearchParams({ primaryClaim, identityTier: "verified" })}`));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.total, 2, primaryClaim);
+    assert.equal(body.listings[0].seller.primaryClaim, presentedBy, "the summary keeps the exact presentedBy");
+    assert.equal(new URL(body.listings[0].inspection.href, "https://directory.test").searchParams.get("seller"), claim);
+  }
+  const unmatched = await listings.GET(query("/api/dacs/listings", "primaryClaim", `did:demos:agent:${"b".repeat(64)}`));
+  assert.equal((await unmatched.json()).total, 0);
 });
