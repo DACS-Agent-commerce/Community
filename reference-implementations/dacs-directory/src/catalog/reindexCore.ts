@@ -44,7 +44,9 @@ import {
   finishScanRun,
   loadRetryableArtifacts,
   clearChainDerivedArtifacts,
-  withholdScanStateChain,
+  openChainReadWindow,
+  confirmChainReadWindow,
+  revertChainReadWindow,
   recordArtifact,
   pruneFailureHistory,
   pruneListingRejections,
@@ -79,6 +81,7 @@ export interface ReindexOptions {
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
+  revertChainReadWindow();
   // A refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
   function refuse(error: string): never {
     const { lastSeenTxId } = loadScanState();
@@ -88,7 +91,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const served = await servedCatalogChain(opts.nodeDeployment);
   if (!served.ok) return refuse(`catalog not updated: ${served.cause}`);
   if (served.warning) log(`node build warning: ${served.warning}`);
-  // Reads made after the gate are saved only after the node is seen to serve the gated chain again.
+  // Node reads made after the gate are persisted only while the node still serves the gated chain.
   const chainChange = async (): Promise<string | null> => {
     const again = await servedChainUnchanged(served.chainIdentity, opts.nodeDeployment);
     return again.ok ? null : `the served chain changed during the pass: ${again.cause}`;
@@ -336,6 +339,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.lastChainTip = scan.chainTip;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
+    // Crawl and seller indexing persist node reads as they go; they are kept only if the check below passes.
+    openChainReadWindow();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
         `+${scan.listings.size} listing(s), +${scan.deals.size} deal(s); ` +
@@ -484,11 +489,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       cursor: state.reachabilityCursor,
     });
     const indexChainChange = await chainChange();
-    if (indexChainChange) {
-      // Indexing saved rejections and revocation progress as it read; none is vouched for any more.
-      withholdScanStateChain();
-      throw new Error(`catalog not updated: ${indexChainChange}`);
-    }
+    if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
+    confirmChainReadWindow();
     saveScanState(state);
 
     // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
@@ -507,6 +509,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
   } catch (error) {
+    revertChainReadWindow();
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan?.chainTip,
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });

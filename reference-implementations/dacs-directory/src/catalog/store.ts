@@ -639,16 +639,58 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM artifacts").run();
   db.prepare("DELETE FROM revocation_candidates").run();
 });
-/**
- * Forget the chain the saved scan state was recorded on. Node reads were saved before the served
- * chain changed, so no recorded chain vouches for them: index-now refuses, and the next reindex
- * clears the chain-derived cache and replays history from genesis.
- */
-export function withholdScanStateChain(): void {
-  const state = loadScanState();
-  delete state.chainIdentity;
-  saveScanState(state);
+
+// A catalog writer persists some node reads while it indexes (rejections, revocation progress,
+// retained markers). Until a later read confirms the node still serves the gated chain, each such
+// write is journaled with the statement that undoes it, in the same transaction, so a failed check
+// or a crash reverts it. Leases, run history, and the registrations and domains that other routes
+// write concurrently are not journaled.
+db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
+const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence"]);
+let journalTriggersCreated = false;
+/** Per-connection triggers, created once every migration has run; they journal only while a window is open. */
+function createJournalTriggers(): void {
+  if (journalTriggersCreated) return;
+  db.exec("CREATE TEMP TABLE IF NOT EXISTS unconfirmed_chain_window (opened INTEGER NOT NULL)");
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+    .map((row) => row.name).filter((name) => !UNJOURNALED_TABLES.has(name));
+  for (const table of tables) {
+    const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => `"${column.name}"`);
+    const oldValues = columns.map((column) => `quote(old.${column})`).join(" || ',' || ");
+    const oldAssignments = columns.map((column) => `'${column}=' || quote(old.${column})`).join(" || ',' || ");
+    const journal = (event: string, row: "old" | "new", undo: string) => db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS
+      journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
+      WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN ('registrations','domains')` : ""}
+      BEGIN INSERT INTO unconfirmed_chain_writes(undo_sql) VALUES (${undo}); END`);
+    journal("INSERT", "new", `'DELETE FROM ${table} WHERE rowid=' || new.rowid`);
+    journal("UPDATE", "old", `'UPDATE ${table} SET ' || ${oldAssignments} || ' WHERE rowid=' || old.rowid`);
+    journal("DELETE", "old", `'INSERT INTO ${table}(rowid,${columns.join(",")}) VALUES(' || old.rowid || ',' || ${oldValues} || ')'`);
+  }
+  journalTriggersCreated = true;
 }
+/** Journal every chain-derived write from now until the window is confirmed or reverted. */
+export function openChainReadWindow(): void {
+  createJournalTriggers();
+  db.prepare("INSERT INTO temp.unconfirmed_chain_window(opened) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)").run();
+}
+const closeChainReadWindow = (): void => {
+  if (journalTriggersCreated) db.exec("DELETE FROM temp.unconfirmed_chain_window");
+};
+/** Keep the window's writes: a chain read after them confirmed the gated chain. */
+export const confirmChainReadWindow = db.transaction((): void => {
+  closeChainReadWindow();
+  db.exec("DELETE FROM unconfirmed_chain_writes");
+});
+/**
+ * Undo every journaled write, newest first, and close the window. Also undoes the writes of a
+ * window a crash left open, so every catalog writer calls it under its lease before it reads.
+ */
+export const revertChainReadWindow = db.transaction((): void => {
+  closeChainReadWindow();
+  const undo = db.prepare("SELECT undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC").all() as Array<{ undo_sql: string }>;
+  for (const { undo_sql: statement } of undo) db.exec(statement);
+  db.exec("DELETE FROM unconfirmed_chain_writes");
+});
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 
