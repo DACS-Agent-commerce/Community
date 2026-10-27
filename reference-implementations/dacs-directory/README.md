@@ -297,8 +297,9 @@ current SDK seller runtime.
    Chain gate: a reindex or `POST /api/dacs/index-now` first reads the chain the node
    serves. When the node cannot be read (index-now: 503) or serves a chain other than
    `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
-   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Each complete pass
-   records the chain it scanned. A re-pin empties the public catalog and replays from
+   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
+   saves what it read, the served chain is read again; if it changed, nothing more is saved and the
+   run fails. Each complete pass records the chain it scanned, after its catalog is saved. A re-pin empties the public catalog and replays from
    genesis; a state with no recorded chain (an upgrade) replays once and keeps its catalog
    meanwhile. A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records nothing, so
    raise the cap. index-now answers 409 until a complete pass on this chain is recorded.
@@ -523,6 +524,10 @@ delay replay completion. Authenticated recrawls must retain each source's index
 timestamp and hash ordering, including after migration. A stored timestamp that is
 incorrectly ahead of the publisher's current index requires explicit operator
 revalidation of that source; an older index cannot silently replace it.
+
+A hosted listings index is rejected if duplicate anchors declare different content
+hashes, including in incomplete rows. Equal hashes remain deduplicated. A rejected
+index cannot replace saved declarations or clear an earlier listing rejection notice.
 
 Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
 fallback) are readable for listing discovery. Their deal evidence remains unverified

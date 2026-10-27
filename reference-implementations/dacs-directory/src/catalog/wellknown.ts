@@ -209,12 +209,21 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
   const withdrawalHashes: string[] = [];
   const incompleteWithdrawalHashes: string[] = [];
   const contentHashes: Record<string, string> = {};
+  const declaredHashes = new Map<string, string>();
   for (const entry of idx.listings ?? []) {
     if (!entry || typeof entry !== "object") { incompleteWithdrawalHashes.push("*"); continue; }
     const hash = typeof entry.contentHash === "string" && /^[0-9a-fA-F]{64}$/.test(entry.contentHash)
       ? entry.contentHash.toLowerCase() : null;
     if (hash) withdrawalHashes.push(hash);
     const locator = entry.anchor?.locator;
+    // Check even incomplete rows before any can be skipped or supply declarations.
+    if (hash && typeof locator === "string" && /^stor-[0-9a-f]{40}$/.test(locator)) {
+      const previous = declaredHashes.get(locator);
+      if (previous && previous !== hash) {
+        return { domain, error: "listings.json has conflicting content hashes for the same anchor" };
+      }
+      declaredHashes.set(locator, hash);
+    }
     const complete = listingIndexEntryIsComplete(entry, seller);
     // Conflicting rows in one index cannot lend active eligibility to each other.
     if (typeof locator === "string" && (!complete || entry.status !== "active")) withdrawalOnlyAnchors.add(locator);
