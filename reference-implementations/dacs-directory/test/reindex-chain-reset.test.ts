@@ -186,15 +186,15 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   serveTwelveTransactions([]);
   process.env.DACS_SCAN_MAX_TXS = "4";
   try {
-    // A legacy cache with no recorded chain stays reset and keeps serving its catalog.
+    // A legacy cache with no recorded chain records none, keeps its discoveries and keeps serving its catalog.
     store.saveRegistrations([]);
     store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 8, listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
     const legacyCatalog = store.loadCatalog();
     await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }), /DACS_SCAN_MAX_TXS=4/);
     assert.equal(store.loadScanState().chainIdentity, undefined);
-    assert.equal(store.loadScanState().schemaVersion, 0);
-    assert.deepEqual(Object.keys(store.loadScanState().listings), []);
+    assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(Object.keys(store.loadScanState().listings), [oldAnchor]);
     assert.deepEqual(store.loadCatalog(), legacyCatalog);
 
     // A re-pin stays reset: no chain, an old schema, an empty catalog.
@@ -214,7 +214,9 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   serveFiveTransactions();
 });
 
-test("a state with no recorded chain replays from genesis without its evidence; the next pass is incremental", async () => {
+// No recorded chain is not proof of another chain (an upgrade, a withheld chain): deleting the evidence
+// would republish a withdrawn Listing whose marker is now unreadable (RB-3), so it replays and keeps it.
+test("a state with no recorded chain replays from genesis and keeps its evidence; the next pass is incremental", async () => {
   const fromTx = () => {
     const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
     try { return (db.prepare("SELECT from_tx FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { from_tx: number }).from_tx; }
@@ -227,10 +229,11 @@ test("a state with no recorded chain replays from genesis without its evidence; 
   const logs: string[] = [];
   await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain });
   assert.equal(fromTx(), 0, "replayed from genesis");
-  assert.ok(logs.some((line) => line.startsWith("no chain is recorded for the cached state")));
-  assert.equal(Object.hasOwn(store.loadScanState().listings, oldAnchor), false, "unrecorded discoveries are not carried");
-  assert.equal(Object.hasOwn(store.loadScanState().verifiedRevocations ?? {}, oldContentHash), false);
-  assert.deepEqual(store.indexerDiagnostics().artifacts, {});
+  assert.ok(logs.includes("no chain is recorded for the cached state; replaying history from genesis"));
+  assert.equal(logs.some((line) => line.includes("cleared chain-derived cache")), false);
+  assert.equal(Object.hasOwn(store.loadScanState().listings, oldAnchor), true, "discoveries are kept");
+  assert.deepEqual(store.loadScanState().verifiedRevocations?.[oldContentHash], [oldMarker]);
+  assert.notDeepEqual(store.indexerDiagnostics().artifacts, {}, "artifacts are kept");
   await reindexAll({ log: () => {}, nodeDeployment: onPinnedChain });
   assert.equal(fromTx(), 1, "the recorded chain makes the next pass incremental");
 });
