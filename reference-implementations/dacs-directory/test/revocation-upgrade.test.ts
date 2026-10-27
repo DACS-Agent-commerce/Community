@@ -62,13 +62,13 @@ const store = await import("../src/catalog/store.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
-test("upgrade requeues prior rejected markers and immediately withholds affected active catalog rows", () => {
+test("upgrade requeues prior rejected markers; candidates of no known owner withhold no row, as in the indexer", () => {
   assert.equal(store.hasPendingRevocationCandidates(hash), true);
   assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), [missing, privateMarker]);
   store.admitRevocationCandidates(hash, [{ locator: missing, contentHash: "d".repeat(64) }]);
   assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), [missing, privateMarker], "same bytes remain queued");
-  assert.deepEqual(store.loadCatalog().sellers[0].listings.map((entry) => entry.listingId), ["unaffected", "revoked"]);
-  assert.equal(store.loadCatalog().sellers[0].listings[1].revocation?.markerContentHash, "f".repeat(64));
+  assert.deepEqual(store.loadCatalog().sellers[0].listings.map((entry) => entry.listingId), ["upgrade", "unaffected", "revoked"]);
+  assert.equal(store.loadCatalog().sellers[0].listings[2].revocation?.markerContentHash, "f".repeat(64));
 });
 
 test("upgraded 403/404 hints gain withdrawal authority only after a recovered marker verifies", async () => {
@@ -107,6 +107,6 @@ test("migration runs once: a newly verified invalid marker stays rejected across
     assert.equal(child.status, 0, child.stderr);
     const actual = JSON.parse(child.stdout);
     assert.equal(actual.pending, false);
-    assert.deepEqual(actual.listings.map((entry: { listingId: string }) => entry.listingId), ["unaffected", "revoked"]);
+    assert.deepEqual(actual.listings.map((entry: { listingId: string }) => entry.listingId), ["upgrade", "unaffected", "revoked"]);
   }
 });

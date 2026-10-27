@@ -4,7 +4,9 @@ import test from "node:test";
 
 import * as React from "react";
 
-import { ListingRejectionNotice, type ListingRejectionDiagnostics } from "../src/components/CatalogStatus.js";
+import {
+  CatalogStatusView, ListingRejectionNotice, type ListingRejectionDiagnostics, type Status,
+} from "../src/components/CatalogStatus.js";
 
 // The app has no react-dom type package; this is the one function the test uses.
 const { renderToStaticMarkup } = createRequire(import.meta.url)("react-dom/server") as {
@@ -52,4 +54,27 @@ test("a retained publisher hash notice describes unresolved pointers from an ear
   assert.match(markup, /Unresolved diagnostics may be retained from an earlier indexing pass/);
   assert.match(markup, /publisher-authenticated hash declarations/);
   assert.doesNotMatch(markup, /owner-submitted|latest indexing pass/);
+});
+
+const status = (generatedAt: number, rejected: ListingRejectionDiagnostics): Status =>
+  ({ generatedAt, syncedToTx: 1, chainLatestTx: 1, txsBehind: 0, indexer: { listingRejectionDiagnostics: rejected } });
+const renderStatus = (value: Status) => renderToStaticMarkup(React.createElement(CatalogStatusView, { status: value }));
+
+test("public notices show before the first catalog save, without a freshness chip", () => {
+  const markup = renderStatus(status(0, { total: 1, publicTotal: 1, items: notices(1) }));
+  assert.match(markup, /1 listing pointer could not be indexed/);
+  assert.doesNotMatch(markup, /sync-chip/);
+  assert.equal(renderStatus(status(0, { total: 1, publicTotal: 0, items: notices(1, false) })), "");
+  assert.match(renderStatus(status(1, { total: 0, publicTotal: 0, items: [] })), /sync-chip/);
+});
+
+test("two registrations' notices for one pointer get distinct list keys", () => {
+  const listKeys = (node: unknown): string[] => {
+    if (!React.isValidElement(node)) return Array.isArray(node) ? node.flatMap(listKeys) : [];
+    const element = node as React.ReactElement<{ children?: unknown }>;
+    return [...(element.type === "li" && element.key !== null ? [element.key] : []), ...listKeys(element.props.children)];
+  };
+  const keys = listKeys(ListingRejectionNotice({ rejected: { total: 2, publicTotal: 2, items: [...notices(1), ...notices(1)] } }));
+  assert.equal(keys.length, 2);
+  assert.equal(new Set(keys).size, 2);
 });
