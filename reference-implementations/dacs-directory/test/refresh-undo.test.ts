@@ -11,6 +11,7 @@ import { reindexAll } from "../src/catalog/reindexCore.js";
 import { SCAN_STATE_SCHEMA_VERSION } from "../src/catalog/scanState.js";
 import { loadScanState, saveCatalog, saveDomains, saveRegistrations, saveScanState } from "../src/catalog/store.js";
 import { nodeServingInTurn, onPinnedChain } from "./fixtures/pinned-node.js";
+import { refuseCatalogWrites } from "./fixtures/refuse-catalog-writes.js";
 
 // A refused or crashed refresh undoes every write it made from node reads, from the first one:
 // the scan cursor, artifacts, candidates and replay progress, not only what indexing writes.
@@ -59,6 +60,18 @@ test("a pass whose last chain read fails leaves the database as it found it", as
     /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
   assert.equal(loadScanState().lastSeenTxId, 1, "the cursor stays where the last complete pass left it");
   assert.equal(snapshot(), before);
+});
+
+test("a pass whose catalog cannot be saved keeps none of its writes", async () => {
+  savePassInputs();
+  const before = snapshot();
+  const allowCatalogWrites = refuseCatalogWrites(isolatedDataDir);
+  try {
+    await assert.rejects(refreshWith(onPinnedChain), /the catalog write failed/);
+  } finally {
+    allowCatalogWrites();
+  }
+  assert.equal(snapshot(), before, "the scan cursor and the catalog are saved together or not at all");
 });
 
 test("a pass killed after it saved the scan cursor is undone by the next writer in a fresh process", async () => {

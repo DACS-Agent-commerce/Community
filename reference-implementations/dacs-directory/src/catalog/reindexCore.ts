@@ -45,7 +45,7 @@ import {
   loadRetryableArtifacts,
   clearChainDerivedArtifacts,
   openChainReadWindow,
-  confirmChainReadWindow,
+  commitChainReadWindow,
   revertChainReadWindow,
   recordArtifact,
   pruneFailureHistory,
@@ -492,19 +492,19 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     const indexChainChange = await chainChange();
     if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
-    confirmChainReadWindow();
-    saveScanState(state);
-
-    // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
-    if (!crawlIncomplete) pruneListingRejections(allRegs);
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
-    if (needsHistoryReplay) {
-      // Stamped together and only after the rebuilt catalog is saved, so an interrupted
-      // replay stays due and index-now refuses until the catalog matches this chain.
-      state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
-      state.chainIdentity = served.chainIdentity;
+    // The scan state, the catalog and every write above are kept together or not at all.
+    commitChainReadWindow(() => {
+      if (needsHistoryReplay) {
+        // Stamped in the transaction that saves the rebuilt catalog, so an interrupted replay
+        // stays due and index-now refuses until the catalog matches this chain.
+        state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
+        state.chainIdentity = served.chainIdentity;
+      }
       saveScanState(state);
-    }
+      // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
+      if (!crawlIncomplete) pruneListingRejections(allRegs);
+      saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 

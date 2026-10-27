@@ -9,7 +9,7 @@ import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/sr
 import { indexRegistration } from "@/src/catalog/indexer";
 import { requireAdmin } from "@/src/catalog/security";
 import {
-  confirmChainReadWindow, loadCatalog, loadRegistrations, loadScanState,
+  commitChainReadWindow, loadCatalog, loadRegistrations, loadScanState,
   openChainReadWindow, revertChainReadWindow, saveCatalog, withDataLock,
 } from "@/src/catalog/store";
 
@@ -41,12 +41,12 @@ export async function POST(req: NextRequest) {
       const record = await indexRegistration(reg, prior);
       const unchanged = await servedChainUnchanged(served.chainIdentity);
       if (!unchanged.ok) return NextResponse.json({ error: `catalog not updated: ${unchanged.cause}` }, { status: unchanged.status });
-      confirmChainReadWindow();
       const i = catalog.sellers.findIndex((s) => s.primaryClaim === claim);
       if (i >= 0) catalog.sellers[i] = record;
       else catalog.sellers.push(record);
       catalog.generatedAt = Date.now();
-      saveCatalog(catalog);
+      // The catalog and the reads behind it are kept together or not at all.
+      commitChainReadWindow(() => saveCatalog(catalog));
       return NextResponse.json({
         ok: true,
         nodeBuildWarning: served.warning,

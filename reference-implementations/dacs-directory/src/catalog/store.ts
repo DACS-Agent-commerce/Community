@@ -684,8 +684,14 @@ export function openChainReadWindow(): void {
 const closeChainReadWindow = (): void => {
   if (journalTriggersCreated) db.exec("DELETE FROM temp.unconfirmed_chain_window");
 };
-/** Keep the window's writes: a chain read after them confirmed the gated chain. */
-export const confirmChainReadWindow = db.transaction((): void => {
+/**
+ * Run the writer's last saves (its scan state and catalog) and keep the window's writes, in one
+ * transaction: a chain read after those writes confirmed the gated chain, so either all of them are
+ * durable or, after a failed save or a crash, none is. A failed save leaves the window open for
+ * `revertChainReadWindow`.
+ */
+export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
+  lastSaves();
   closeChainReadWindow();
   db.exec("DELETE FROM unconfirmed_chain_writes");
 });

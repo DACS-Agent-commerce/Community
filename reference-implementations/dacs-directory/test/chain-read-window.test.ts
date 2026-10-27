@@ -54,12 +54,29 @@ test("a confirmed window keeps its writes, and a later revert undoes nothing", (
   seed();
   store.openChainReadWindow();
   writeEachKind();
-  store.confirmChainReadWindow();
+  store.commitChainReadWindow(() => {});
   store.revertChainReadWindow();
   assert.equal(store.retainedListingRevocation(hash)?.markerAnchor.locator, "stor-old-updated");
   assert.equal(store.retainedListingRevocation(newHash)?.markerAnchor.locator, "stor-new");
   assert.deepEqual(rejections(), [["stor-listing-new", "SELLER_CLAIM_BINDING"]]);
   assert.equal(candidatePending(), true);
+});
+
+test("a commit whose last saves fail keeps none of the window's writes", () => {
+  seed();
+  const catalog = store.loadCatalog();
+  store.openChainReadWindow();
+  writeEachKind();
+  assert.throws(() => store.commitChainReadWindow(() => {
+    store.saveCatalog({ ...catalog, generatedAt: catalog.generatedAt + 1 });
+    throw new Error("the last save failed");
+  }), /the last save failed/);
+  store.revertChainReadWindow();
+  assert.deepEqual(store.loadCatalog(), catalog);
+  assert.equal(store.retainedListingRevocation(hash)?.markerAnchor.locator, "stor-old");
+  assert.equal(store.retainedListingRevocation(newHash), null);
+  assert.deepEqual(rejections(), [["stor-listing-old", "OWNER_CLAIM_BINDING"]]);
+  assert.equal(candidatePending(), false);
 });
 
 test("writes outside a window are not journaled", () => {
