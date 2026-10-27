@@ -136,7 +136,10 @@ test("the publisher numbers a new version after the withheld one", async () => {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
   const base = { claim: seller, serviceId: "allowed-second-key", name: "Upgrade", description: "after the reset",
     rails: ["demos-native:DEM"], delivery: ["deliver-storage-program"], pricing: { kind: "fixed", amount: "1", currency: "DEM" } };
-  const { identityMessage, identityPresentedAt } = await (await call(base)).json();
+  const identityResponse = await call(base);
+  assert.equal(identityResponse.status, 200);
+  const { identityMessage, identityPresentedAt, listingVersion } = await identityResponse.json();
+  assert.equal(listingVersion, 3, "the first step numbers the version after the withheld one");
   const identitySignature = Buffer.from(ed25519Sign(Buffer.from(identityMessage, "utf8"), privateKeyFromSeed(seeds[1]))).toString("hex");
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
@@ -144,7 +147,9 @@ test("the publisher numbers a new version after the withheld one", async () => {
     return Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
   };
   try {
-    const built = await (await call({ ...base, identityPresentedAt, identitySignature })).json();
+    const response = await call({ ...base, listingVersion, identityPresentedAt, identitySignature });
+    assert.equal(response.status, 200);
+    const built = await response.json();
     assert.equal(built.listing.listingVersion, 3);
   } finally {
     globalThis.fetch = originalFetch;
