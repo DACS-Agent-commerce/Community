@@ -18,7 +18,8 @@ process.env.DACS_DIRECTORY_DATA = directory;
 const boundaries = resolve(app, "test/fixtures/listing-preparation-boundaries.mjs");
 await build({
   stdin: { contents: `export * from './src/catalog/buildListing.ts'; export * from './src/catalog/store.ts';
-    export { POST as routePost } from './app/api/dacs/build-listing/route.ts';`, resolveDir: app },
+    export { POST as routePost } from './app/api/dacs/build-listing/route.ts';
+    export { nodeDeployment } from './test/fixtures/listing-preparation-boundaries.mjs';`, resolveDir: app },
   outfile: bundle, bundle: true, platform: "node", format: "esm", packages: "external",
   plugins: [{ name: "publication-boundaries", setup(builder) {
     builder.onResolve({ filter: /^next\/server$/ }, () => ({ path: "next/server.js", external: true }));
@@ -170,6 +171,44 @@ test("an expired signed presentation gets its saved transaction again and cannot
   const response = await post(request(unprepared));
   assert.equal(response.status, 409);
   assert.match((await response.json()).error, /identity presentation expired/);
+});
+
+const pinned = module.nodeDeployment.current;
+const offPinNodes = [
+  ["an unpinned build", { ok: false, reason: "Demos node build fixture+dirty is not pinned" }, 409, /fixture\+dirty is not pinned; no transaction was prepared/],
+  ["another chain", { ok: false, reason: "Demos node serves chain other-chain, not the pinned chain" }, 409, /other-chain, not the pinned chain; no transaction was prepared/],
+  ["an unreadable node", new Error("getNetworkInfo transport failed"), 503, /could not read the Demos node's build and chain \(getNetworkInfo transport failed\)/],
+];
+async function refusedOffPin(t, signed) {
+  t.after(() => { module.nodeDeployment.current = pinned; });
+  for (const [name, deployment, status, cause] of offPinNodes) {
+    module.nodeDeployment.current = deployment;
+    const response = await post(request(signed));
+    assert.equal(response.status, status, name);
+    const body = await response.json();
+    assert.match(body.error, cause, name);
+    assert.equal(body.tx, undefined, name);
+  }
+  module.nodeDeployment.current = pinned;
+}
+
+test("an exact signed repeat gets no saved transaction while the node is off the pin", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("repeat-off-pin");
+  const first = await prepare(signed);
+  await refusedOffPin(t, signed);
+  await resumed(await post(request(signed)), first);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("an expired signed repeat gets no saved transaction while the node is off the pin", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("expired-repeat-off-pin");
+  const first = await prepare(signed);
+  t.mock.method(Date, "now", () => clock + 16 * 60_000);
+  await refusedOffPin(t, signed);
+  await resumed(await post(request(signed)), first);
+  assert.equal(state.nonceReads, 1);
 });
 
 test("a retained preparation still validates the retried Listing signature", async (t) => {

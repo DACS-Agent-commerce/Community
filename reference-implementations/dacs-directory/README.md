@@ -422,7 +422,8 @@ base64url-patched Buffer).
   remain stateless. Empty name lookups, nonce advancement, re-signing and elapsed time
   never release another create for a prepared version. An exact repeat of the signed
   request, including one whose first response was lost or one racing it, receives the
-  same saved transaction bytes again; a prepared version keeps the seller display name
+  same saved transaction bytes again, but only while the configured node reports the
+  pinned build and chain, as for a first release; a prepared version keeps the seller display name
   it was signed with, whatever the catalog shows later. Any other signed retry, or one
   for a version the catalog already lists, returns HTTP 409 with the saved anchor and
   no transaction.
