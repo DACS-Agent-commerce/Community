@@ -3,10 +3,10 @@
  * Normative filters plus q/profile directory extensions.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { discoveryListing, MAX_CLAIM_QUERY_BYTES, primaryClaimPredicate } from "@/src/catalog/discovery";
+import { discoveryListing, primaryClaimMatches, sellerIdentity } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 import { parsePagination } from "@/src/catalog/pagination";
-import { catalogJson } from "@/src/catalog/http";
+import { catalogJson, claimQuery } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 import { artifactProfiles } from "@/src/catalog/contracts";
@@ -17,11 +17,9 @@ export async function GET(req: NextRequest) {
   const rail = q.get("rail");
   const tags = q.getAll("tag");
   const credential = q.get("credential");
-  const primaryClaim = q.get("primaryClaim");
-  if (primaryClaim && Buffer.byteLength(primaryClaim, "utf8") > MAX_CLAIM_QUERY_BYTES) {
-    return NextResponse.json({ error: "primaryClaim exceeds 1024 bytes" }, { status: 400 });
-  }
-  const matchesClaim = primaryClaim ? primaryClaimPredicate(primaryClaim) : undefined;
+  const claimFilter = claimQuery(q.get("primaryClaim"), "primaryClaim");
+  if ("refused" in claimFilter) return claimFilter.refused;
+  const primaryClaim = claimFilter.value;
   const priceMax = q.get("priceMax");
   const minCompletionRate = q.get("minCompletionRate");
   const minRating = q.get("minRating");
@@ -52,13 +50,13 @@ export async function GET(req: NextRequest) {
   const { limit, cursor } = pagination;
 
   const catalog = loadCatalog();
-  // Machine discovery retains authenticated withdrawal tombstones.
+  // Machine discovery retains authenticated withdrawal tombstones. A summary's
+  // primaryClaim keeps its exact presentedBy, so seller filters and links use
+  // the canonical key of the seller record that holds it.
   const all = catalog.sellers
     .filter((seller) => (!identityTier || (seller.identityTier ?? "self-declared") === identityTier) &&
-      (!matchesClaim || matchesClaim(seller.primaryClaim)))
-    .flatMap((seller) => seller.listings
-      .filter(discoveryListing)
-      .map((listing) => ({ listing, identity: seller.primaryClaim })));
+      (!primaryClaim || primaryClaimMatches(seller.primaryClaim, sellerIdentity(primaryClaim))))
+    .flatMap((seller) => seller.listings.filter(discoveryListing).map((listing) => ({ listing, identity: seller.primaryClaim })));
   const filtered = all.filter(({ listing: l }) => {
     if (category && l.offering.category !== category && !l.offering.category.startsWith(category + ".")) return false;
     if (rail && !(l.offering.rails ?? []).includes(rail)) return false;
