@@ -68,3 +68,18 @@ test("writes outside a window are not journaled", () => {
   store.revertChainReadWindow();
   assert.equal(store.retainedListingRevocation(hash)?.markerAnchor.locator, "stor-old-updated");
 });
+
+test("a reverted window keeps the publisher-signed withdrawal sources saved inside it", () => {
+  const seller = "did:demos:agent:a";
+  const source = "https://signed-source.example";
+  store.saveDomains([source]);
+  const revisionBefore = store.wellKnownWithdrawalRevision();
+  store.openChainReadWindow();
+  store.recordWellKnownWithdrawalCheck(source, seller, [], [], { generatedAt: 5, hash: "c".repeat(64) },
+    [], "publisher-signature", { "stor-declared": newHash });
+  store.recordListingRejection("stor-listing-in-window", seller, "SELLER_CLAIM_BINDING");
+  store.revertChainReadWindow();
+  assert.deepEqual(store.savedListingDeclarations(seller).sources, [{ "stor-declared": newHash }]);
+  assert.equal(store.wellKnownWithdrawalRevision(), revisionBefore + 1);
+  assert.equal(rejections().some(([locator]) => locator === "stor-listing-in-window"), false, "what the node's reads produced is still undone");
+});
