@@ -432,8 +432,7 @@ return async function POST(req: NextRequest) {
     // Empty name indexes and advancing nonces do not establish that a returned
     // create failed. Keep the original attempt across retries and restarts.
     const preparation = loadListingPreparation(chainIdentity, logicalAddress);
-    if (signedCandidate && preparation) return unresolvedPreparation(preparation.anchorAddress);
-    if (identityExpired) {
+    if (identityExpired && (body.listingSignature === undefined || !preparation)) {
       return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
     }
     // Do not prepare a broadcastable transaction until the wallet has signed
@@ -480,6 +479,7 @@ return async function POST(req: NextRequest) {
     if (!listingSignatureValid || !isListing(signedCandidate)) {
       return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
     }
+    if (preparation) return unresolvedPreparation(preparation.anchorAddress);
     // Broadcasting is the seller's irreversible step, so refuse a node outside
     // the pin here rather than after the write (confirm-listing checks again).
     let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
