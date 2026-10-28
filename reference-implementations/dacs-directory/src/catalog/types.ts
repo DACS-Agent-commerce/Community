@@ -286,11 +286,14 @@ export interface Catalog {
   sellers: SellerRecord[];
 }
 
+/** Durable evidence provenance; readiness is granted only by a complete publication. */
+export interface CatalogChain { evidenceChain: string; readySchema: number | null }
+
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
-  /** Chain identity of the last complete pass; absent on a legacy or reset state, which replays. */
+  /** Retired persisted label, consumed by catalog-chain migration and omitted from canonical saves. */
   chainIdentity?: string;
-  /** Last complete chain's provenance while freshness is withheld; retained for re-pin detection. */
+  /** Retired provenance label for migration only. */
   withheldChainIdentity?: string;
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
