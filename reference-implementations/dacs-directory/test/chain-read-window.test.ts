@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 import type { RevocationBinding } from "../src/catalog/types.js";
 
 // Writes a catalog writer makes from node reads are journaled until a chain check confirms them.
@@ -150,6 +151,32 @@ test("a release decided before a newer signed source update in the same window i
   store.recordWellKnownWithdrawalCheck(domain, signedSeller, [listingHash], [], { generatedAt: 2, hash: "c".repeat(64) }, []);
   store.commitChainReadWindow(() => {});
   assert.equal(boundCount(listingHash), 1, "the stale release waits for a read against the newer source");
+});
+
+test("many staged binding releases journal a bounded amount, not a growing release list", () => {
+  const listingHash = "5".repeat(64);
+  const count = 400;
+  const domain = "https://bounded-releases.example";
+  const bindings = Array.from({ length: count }, (_, index) =>
+    binding(`stor-release-${String(index).padStart(40, "0")}`, listingHash));
+  store.recordWellKnownWithdrawalCheck(domain, signedSeller, [], [], { generatedAt: 1, hash: "c".repeat(64) }, bindings);
+  store.admitRevocationCandidates(listingHash, bindings.map((signed) => ({ locator: signed.markerAnchor.locator })));
+  const revision = store.wellKnownWithdrawalRevision();
+  store.openChainReadWindow();
+  for (const signed of bindings) store.recordRevocationProgress(listingHash,
+    { unread: [], rejected: [signed.markerAnchor.locator] }, [signed], revision);
+  const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    const { total } = db.prepare("SELECT COALESCE(SUM(length(undo_sql)), 0) total FROM unconfirmed_chain_writes")
+      .get() as { total: number };
+    // Rewriting one growing JSON release list per rejection made this quadratic: 400 releases
+    // journaled over 23 MB here. Individual release rows keep it linear in the rejections.
+    assert.ok(total < count * 4_096, `journaled ${total} bytes of undo SQL for ${count} releases`);
+  } finally {
+    db.close();
+  }
+  store.revertChainReadWindow();
+  assert.equal(boundCount(listingHash), count, "a refused window keeps every binding");
 });
 
 test("a writer reverting a window a crash left open restores the binding its marker rejection released", () => {
