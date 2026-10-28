@@ -290,6 +290,8 @@ export interface Catalog {
 export interface ScanState {
   /** Chain identity of the last complete pass; absent on a legacy or reset state, which replays. */
   chainIdentity?: string;
+  /** Last complete chain's provenance while freshness is withheld; retained for re-pin detection. */
+  withheldChainIdentity?: string;
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;
