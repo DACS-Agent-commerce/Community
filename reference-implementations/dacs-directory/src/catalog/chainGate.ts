@@ -1,11 +1,11 @@
 /**
  * The chain gate both catalog writers pass first: `reindexAll` and
- * POST /api/dacs/index-now. Nothing from a node outside the pinned chain, or
- * from a node that cannot be read, reaches the catalog or the scan state.
+ * POST /api/dacs/index-now. Both invalidate readiness before provisional work
+ * and require a final chain check before atomic publication.
  */
 import { catalogNodeDeployment } from "./listingFinality.js";
 import { SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
-import type { ScanState } from "./types.js";
+import type { CatalogChain, ScanState } from "./types.js";
 
 /** Node-supplied text is cut to this many characters before it is logged or returned. */
 const MAX_CAUSE_TEXT = 200;
@@ -60,5 +60,6 @@ export async function servedChainUnchanged(
 }
 
 /** True only when a complete pass on this chain, at the current schema, produced the scan state and catalog. */
-export const scanStateCurrent = (state: ScanState, chainIdentity: string): boolean =>
-  state.chainIdentity === chainIdentity && state.schemaVersion === SCAN_STATE_SCHEMA_VERSION;
+export const scanStateCurrent = (state: ScanState, chainIdentity: string, control: CatalogChain | null): boolean =>
+  control?.evidenceChain === chainIdentity && control.readySchema === SCAN_STATE_SCHEMA_VERSION &&
+  state.schemaVersion === SCAN_STATE_SCHEMA_VERSION;
