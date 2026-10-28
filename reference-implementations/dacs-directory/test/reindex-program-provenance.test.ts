@@ -74,8 +74,8 @@ test("empty and repeated current bindings resolve while proven duplicates remain
 for (const interruption of ["transport", "cap", "post-scan", "final-check"] as const) {
   test(`${interruption} refusal persists sanitation before adoption and a fresh process recovers attribution`, async () => {
     p.seed({ [p.key(p.agreementName)]: p.staleAt, [p.key("unvisited")]: null });
-    const deployment = interruption === "post-scan" ? nodeServingInTurn(p.chainIdentity, "c".repeat(64))
-      : interruption === "final-check" ? nodeServingInTurn(p.chainIdentity, p.chainIdentity, "c".repeat(64))
+    const deployment = interruption === "post-scan" ? nodeServingInTurn(p.chainIdentity, p.chainIdentity, "c".repeat(64))
+      : interruption === "final-check" ? nodeServingInTurn(p.chainIdentity, p.chainIdentity, p.chainIdentity, "c".repeat(64))
       : nodeOnChain(p.chainIdentity);
     if (interruption === "transport") globalThis.fetch = async () => { throw new Error("transport refused"); };
     if (interruption === "cap") process.env.DACS_SCAN_MAX_TXS = "1";
