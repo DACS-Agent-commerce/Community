@@ -187,6 +187,7 @@ for (const crash of ["thrown", "killed"] as const) {
       `, { listing, anchor: locators.listing, newer });
       assert.equal(run.signal, "SIGKILL", run.stderr);
     }
+    await reindexWith();
     assert.equal((await indexNowFor()).listings, 0);
     assert.equal(notice(locators.listing)?.code, "DECLARED_CONTENT_HASH_MISMATCH");
     assert.equal(notice(locators.listing)?.publicNotice, true);
