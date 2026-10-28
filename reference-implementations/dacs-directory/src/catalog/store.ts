@@ -639,12 +639,12 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM revocation_candidates").run();
 });
 /**
- * Forget the chain the saved scan state was recorded on. Node reads were saved before the served
- * chain changed, so no recorded chain vouches for them: index-now refuses, and the next reindex
- * replays history from genesis.
+ * Withhold freshness after an unconfirmed read. Keep the last complete chain's provenance so a
+ * later re-pin still clears foreign evidence; index-now refuses and batch replays from genesis.
  */
 export function withholdScanStateChain(): void {
   const state = loadScanState();
+  state.withheldChainIdentity = state.chainIdentity ?? state.withheldChainIdentity;
   delete state.chainIdentity;
   saveScanState(state);
 }

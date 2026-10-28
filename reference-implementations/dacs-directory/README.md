@@ -246,7 +246,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
    saves its catalog, the served chain is read again. Indexing saves rejections and revocation
    progress as it reads; when that read fails, the catalog is not saved and the recorded chain is
-   withheld, so index-now refuses and the next reindex replays from genesis. Each complete pass
+   withheld, so index-now refuses and the next reindex replays from genesis. The last complete
+   chain's identity remains as provenance: a later re-pin still clears its foreign evidence.
+   Each complete pass
    records the chain it scanned, after its catalog is saved. A state recorded on another chain (a
    re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
    artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin

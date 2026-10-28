@@ -140,7 +140,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   // recorded chain (an upgrade, a withheld chain or an unfinished reset) is not that proof: the
   // state replays from genesis below, like a schema bump, and keeps its withdrawal evidence. A
   // verified withdrawal is the seller's signature over that Listing, so keeping it fails closed (RB-3).
-  const chainReplaced = state.chainIdentity !== undefined && state.chainIdentity !== served.chainIdentity;
+  const previousChain = state.chainIdentity ?? state.withheldChainIdentity;
+  const chainReplaced = previousChain !== undefined && previousChain !== served.chainIdentity;
   const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
   if (chainReplaced || tipRegressed) {
     const previousCursor = state.lastSeenTxId;
@@ -504,6 +505,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       // replay stays due and index-now refuses until the catalog matches this chain.
       state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
       state.chainIdentity = served.chainIdentity;
+      delete state.withheldChainIdentity;
       saveScanState(state);
     }
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
