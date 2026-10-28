@@ -48,6 +48,7 @@ export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1],
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
+      deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
     } };
@@ -61,7 +62,7 @@ export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1],
       { role: "buyer", bundleHash: "a".repeat(64), primaryClaim: dids[0] },
       { role: "seller", bundleHash: "b".repeat(64), primaryClaim: dids[1] },
     ],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [],
+    phaseSummary: [{ index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [],
     settlementEvidence: [ref(at(3), evidence, "evidence")], ratingRefs: [ref(at(4), rating, "rating")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120 };
   const signatures = [await sign(bundleScope, "bundle", 0, true), await sign(bundleScope, "bundle", 1, true)];
@@ -142,6 +143,7 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     listingRef,
     parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
     terms: {
+      deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
       payoutBindings: [{ railId: "pay-dem", phaseIndex: 2, payeeAddress: dids[1] }],
@@ -151,6 +153,8 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
   const updateListingRef = (raw: Obj) => {
     const scope = signedScope(raw, "bundle");
     scope.listingRef = listingRef;
+    scope.phaseSummary = (scope.phaseSummary as Obj[]).map(phase => phase.kind === "commit-agreement"
+      ? { ...phase, kind: "commit-payee-bound-agreement" } : phase);
     return { ...scope, signatures: raw.signatures, anchoredByRole: raw.anchoredByRole };
   };
   fixture.buyerBundle = updateListingRef(fixture.buyerBundle);

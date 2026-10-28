@@ -59,7 +59,7 @@ test("Listing-bound current deals without authenticated commitment proof receive
   const fixture = await prepared();
   const result = await graph(fixture);
   assert.equal(result.refsVerified, false);
-  assert.equal(result.ok, false);
+  assert.equal(result.refsVerified, false);
   assert.match(result.reason ?? "", /commitment/);
 });
 
@@ -68,7 +68,7 @@ test("both agreement profiles accept finalized commitments signed by the session
     const fixture = await prepared(payee);
     const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 90, legacy);
     const result = await graph(fixture, proof);
-    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.refsVerified, true, result.reason);
   }
 });
 
@@ -89,8 +89,13 @@ test("commitment bindings, signature authority and record discriminators fail cl
     ["missing discriminator", (p) => { delete p.record.finalityCommitmentVersion; }, true],
     ["unsupported discriminator", (p) => { p.record.finalityCommitmentVersion = "2"; }, true],
     ["legacy timestamp on finality record", (p) => { p.record.committedAt = 90; }, true],
+    ["legacy record without timestamp", (p) => { p.record.dacsVersion = "1"; delete p.record.finalityCommitmentVersion; delete p.record.createdAt; delete p.record.signature; }, true],
     ["oversized roster", (p) => { p.record.parties = Array(65).fill(dids[0]); }, true],
     ["oversized reply", (p) => { p.record.extra = "x".repeat(256 * 1024); }, true],
+    ["deep proof", (p) => { let nested: Obj = {}; p.record.extra = nested; for (let i = 0; i < 80; i++) { const child = {}; nested.child = child; nested = child; } }],
+    ["wrong signature domain", (p) => { const { signature: _signature, ...scope } = p.record;
+      (p.record.signature as Obj).value = Buffer.from(ed25519Sign(Buffer.from(`dacs-commitment:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[0]))).toString("base64url");
+      p.receipt.contentHash = contentHash(p.record); signReceipt(p); }],
   ];
   for (const [label, change, resign] of changes) {
     const fixture = await prepared();
@@ -121,27 +126,27 @@ test("receipt fields and node observations cannot substitute for authenticated f
     const fixture = await prepared();
     const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
     change(proof);
-    assert.equal((await graph(fixture, proof)).ok, false, label);
+    assert.equal((await graph(fixture, proof)).refsVerified, false, label);
   }
   const fixture = await prepared();
   const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
-  assert.equal((await graph(fixture, proof, async () => false)).ok, false);
-  assert.equal((await graph(fixture, proof, async () => { throw new Error("proof timeout"); })).ok, false);
+  assert.equal((await graph(fixture, proof, async () => false)).refsVerified, false);
+  assert.equal((await graph(fixture, proof, async () => { throw new Error("proof timeout"); })).refsVerified, false);
 });
 
 test("commit time uses finalized consensus time and enforces both inclusive Listing bounds", async () => {
   for (const legacy of [false, true]) for (const [time, accepted] of [[59, false], [60, true], [100, true], [101, false]] as const) {
     const fixture = await prepared();
     const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, time, legacy);
-    assert.equal((await graph(fixture, proof)).ok, accepted, `${legacy ? "legacy" : "finality"} at ${time}`);
+    assert.equal((await graph(fixture, proof)).refsVerified, accepted, `${legacy ? "legacy" : "finality"} at ${time}`);
   }
   const fixture = await prepared();
   const backdated = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 90, true);
   backdated.receipt.blockRef = { id: "late-block", timestamp: 101 };
   signReceipt(backdated);
-  assert.equal((await graph(fixture, backdated)).ok, false, "signed legacy time cannot backdate a later anchor");
+  assert.equal((await graph(fixture, backdated)).refsVerified, false, "signed legacy time cannot backdate a later anchor");
   const finality = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 101);
-  assert.equal((await graph(fixture, finality)).ok, false, "createdAt and finalisedAt cannot backdate finality");
+  assert.equal((await graph(fixture, finality)).refsVerified, false, "createdAt and finalisedAt cannot backdate finality");
 });
 
 test("commitment-relative deadline is checked against consensus time", async () => {
@@ -156,7 +161,7 @@ test("commitment-relative deadline is checked against consensus time", async () 
     await installAgreement(fixture, { ...signedScope(fixture.agreement, "agreement"), listingRef,
       terms: { ...(fixture.agreement.terms as Obj), deadline } });
     const proof = commitmentProof(fixture.agreement, listingRef);
-    assert.equal((await graph(fixture, proof)).ok, accepted);
+    assert.equal((await graph(fixture, proof)).refsVerified, accepted);
   }
 });
 
@@ -224,7 +229,7 @@ test("proof resolution failures keep their cause and supplied callbacks receive 
         verifyReceipt: fixtureCommitments.verifyReceipt },
     });
     assert.equal(result.refsVerified, false, label);
-    assert.match(result.reason ?? "", label === "missing proof" ? /invalid record/ : /proof lookup timed out/);
+    assert.match(result.reason ?? "", label === "missing proof" ? /invalid record/ : /could not be processed/);
   }
 });
 
@@ -233,9 +238,10 @@ test("a hung commitment adapter is bounded and returns a timeout cause", async (
   const fixture = await prepared();
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let aborted: AbortSignal | undefined;
-  const pending = verifyListingCommitment({ jobId: "proof-job", listingRef: fixture.agreement.listingRef,
-    agreementHash: artifactHash(fixture.agreement, "agreement"), pattern: "fixed-price", parties: dids.slice(0, 2) },
-  { raw: fixture.listing, locator: fixture.locators.listing }, {
+  const { makeCommitmentContext } = await import("../src/catalog/commitmentContext.js");
+  const context = makeCommitmentContext(fixture.buyerBundle, fixture.agreement, { raw: fixture.listing, locator: fixture.locators.listing }, artifactHash(fixture.agreement, "agreement"));
+  assert.ok(context);
+  const pending = verifyListingCommitment(context, {
     resolve: async (_job, signal) => { aborted = signal; return new Promise(() => {}); },
     verifyReceipt: fixtureCommitments.verifyReceipt,
   });
@@ -251,16 +257,16 @@ test("complete additive signed commitment fields survive verification and adapte
   const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
   proof.record.extension = { retained: "signed bytes" };
   signCommitment(proof);
-  assert.equal((await graph(fixture, proof)).ok, true);
+  assert.equal((await graph(fixture, proof)).refsVerified, true);
   proof.record.extension = { retained: "tampered" };
-  assert.equal((await graph(fixture, proof)).ok, false);
+  assert.equal((await graph(fixture, proof)).refsVerified, false);
   const late = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 101);
   const result = await graph(fixture, late, async (receipt, raw, signal) => {
     assert.equal(await fixtureCommitments.verifyReceipt(receipt, raw, signal), true);
     if (receipt.blockRef) receipt.blockRef.timestamp = 90;
     return true;
   });
-  assert.equal(result.ok, false, "policy callback mutations cannot alter the checked snapshot");
+  assert.equal(result.refsVerified, false, "policy callback mutations cannot alter the checked snapshot");
 });
 
 test("startup clears pre-finality cached credit atomically and repeats preserve the cleared state", async (t) => {
@@ -303,26 +309,32 @@ test("an aborted bundle without an authenticated agreement cannot bypass commitm
     signatures: [await sign(scope, "bundle", 0, true), await sign(scope, "bundle", 1, true)] });
   const result = await graph(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj));
   assert.equal(result.refsVerified, false);
-  assert.match(result.reason ?? "", /commitment.*agreement/);
+  assert.match(result.reason ?? "", /lifecycle/);
 });
 
 test("commitment authority may be an authenticated orchestrator outside the buyer/seller roster", async () => {
   const fixture = await prepared();
   const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj, 90, false,
     { claim: dids[2], seed: seeds[2] });
-  assert.equal((await graph(fixture, proof)).ok, true);
+  assert.equal((await graph(fixture, proof)).refsVerified, true);
 });
 
 test("commitment key resolver outages retain their original cause", async () => {
   const { verifyListingCommitment } = await import("../src/catalog/commitmentFinality.js");
   const fixture = await prepared();
   const proof = commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj);
-  const result = await verifyListingCommitment({ jobId: "proof-job", listingRef: fixture.agreement.listingRef,
-    agreementHash: artifactHash(fixture.agreement, "agreement"), pattern: "fixed-price", parties: dids.slice(0, 2) },
-  { raw: fixture.listing, locator: fixture.locators.listing }, { ...fixtureCommitments, resolve: async () => proof },
-  async () => { throw new Error("session key service timed out"); });
+  const { makeCommitmentContext } = await import("../src/catalog/commitmentContext.js");
+  const context = makeCommitmentContext(fixture.buyerBundle, fixture.agreement, { raw: fixture.listing, locator: fixture.locators.listing }, artifactHash(fixture.agreement, "agreement"));
+  assert.ok(context);
+  const failure = new Error("session key service timed out", { cause: new Error("nested key transport cause") });
+  const result = await verifyListingCommitment(context, { ...fixtureCommitments, resolve: async () => proof },
+  async () => { throw failure; });
   assert.equal(result.ok, false);
-  if (!result.ok) assert.match(result.reason, /session key service timed out/);
+  if (!result.ok) {
+    assert.match(result.reason, /could not be processed/);
+    assert.equal(result.cause, failure);
+    assert.match(String(failure.cause), /nested key transport cause/);
+  }
 });
 
 test("an unread marker carried by an authenticated withdrawal source holds discovery but not committed credit", async (t) => {
@@ -354,4 +366,139 @@ test("an incomplete authenticated withdrawal source holds discovery but not comm
   assert.deepEqual(held.listings, [], "the incomplete source holds discovery");
   assert.equal(held.deals[0].refsVerified, true);
   assert.equal(held.reputation.completed, 1);
+});
+
+test("typed historical contexts require complete integer validity, valid deadlines and positive durations", async () => {
+  const { makeCommitmentContext } = await import("../src/catalog/commitmentContext.js");
+  const f = await prepared();
+  const listed = { raw: structuredClone(f.listing), locator: f.locators.listing };
+  const agreementHash = artifactHash(f.agreement, "agreement");
+  const context = () => makeCommitmentContext(f.buyerBundle, f.agreement, listed, agreementHash);
+  for (const validity of [undefined, null, [], {}, { notAfter: 100 }, { notBefore: -1 }, { notBefore: 0.5 },
+    { notBefore: Number.MAX_SAFE_INTEGER + 1 }, { notBefore: 100, notAfter: 99 }, { notBefore: 0, notAfter: -1 },
+    { notBefore: 0, notAfter: 1.5 }, { notBefore: 0, notAfter: Number.MAX_SAFE_INTEGER + 1 }]) {
+    listed.raw.validity = validity;
+    assert.equal(context(), null, JSON.stringify(validity));
+  }
+  listed.raw.validity = { notBefore: 0, notAfter: 100 };
+  for (const deadline of [undefined, null, -1, 1.5, "100", Number.MAX_SAFE_INTEGER + 1]) {
+    (f.agreement.terms as Obj).deadline = deadline;
+    assert.equal(context(), null, String(deadline));
+  }
+  (f.agreement.terms as Obj).deadline = 100;
+  for (const duration of [0, -1, 0.5, "1", Number.MAX_SAFE_INTEGER]) {
+    listed.raw.terms = { deadlineSecAfterCommit: duration };
+    assert.equal(context(), null, String(duration));
+  }
+  listed.raw.terms = { deadlineSecAfterCommit: 1 };
+  for (const parties of [[{ role: "buyer", primaryClaim: dids[0] }, { role: "buyer", primaryClaim: dids[1] }],
+    [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[0] }],
+    [...f.agreement.parties as Obj[], { role: "seller", primaryClaim: dids[2] }]]) {
+    const original = f.agreement.parties; f.agreement.parties = parties;
+    assert.equal(context(), null); f.agreement.parties = original;
+  }
+  assert.ok(context());
+});
+
+test("resolver context mutation and arithmetic overflow cannot change the credit snapshot", async () => {
+  const { makeCommitmentContext } = await import("../src/catalog/commitmentContext.js");
+  const { verifyListingCommitment } = await import("../src/catalog/commitmentFinality.js");
+  const f = await prepared();
+  const proof = commitmentProof(f.agreement, f.agreement.listingRef as Obj, 101);
+  const result = await buildCurrentEvidenceGraph(f.locators.buyer, {
+    read: async at => maps.get(at) ?? null, resolveListing: async () => ({ raw: f.listing, locator: f.locators.listing }),
+    commitment: { ...fixtureCommitments, resolve: async context => {
+      Object.assign(context.validity, { notAfter: 200 }); Object.assign(context.listingRef, { version: 2 }); return proof;
+    } },
+  });
+  assert.equal(result.refsVerified, false);
+  f.listing.validity = { notBefore: 0 }; f.listing.terms = { deadlineSecAfterCommit: 1 };
+  (f.agreement.terms as Obj).deadline = Number.MAX_SAFE_INTEGER;
+  const context = makeCommitmentContext(f.buyerBundle, f.agreement, { raw: f.listing, locator: f.locators.listing }, artifactHash(f.agreement, "agreement"));
+  assert.ok(context);
+  const overflow = commitmentProof(f.agreement, f.agreement.listingRef as Obj, Number.MAX_SAFE_INTEGER);
+  assert.equal((await verifyListingCommitment(context, { ...fixtureCommitments, resolve: async () => overflow })).ok, false);
+});
+
+test("a receipt callback ignoring cancellation is still bounded by the hard deadline", async t => {
+  const { makeCommitmentContext } = await import("../src/catalog/commitmentContext.js");
+  const { verifyListingCommitment } = await import("../src/catalog/commitmentFinality.js");
+  const f = await prepared();
+  const context = makeCommitmentContext(f.buyerBundle, f.agreement, { raw: f.listing, locator: f.locators.listing }, artifactHash(f.agreement, "agreement"));
+  assert.ok(context);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let entered = () => {};
+  const receiptEntered = new Promise<void>(resolve => { entered = resolve; });
+  const pending = verifyListingCommitment(context, { resolve: async () => commitmentProof(f.agreement, f.agreement.listingRef as Obj),
+    verifyReceipt: async () => { entered(); return new Promise(() => {}); } });
+  await receiptEntered; t.mock.timers.runAll();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /timed out/);
+});
+
+test("failed policy-version write rolls back all derived-credit invalidation before fresh-proof recovery", async t => {
+  t.mock.method(Date, "now", () => 150); storage(t);
+  const { spawnSync } = await import("node:child_process");
+  const { default: Database } = await import("better-sqlite3");
+  const { join } = await import("node:path");
+  const store = await import("../src/catalog/store.js");
+  const f = await prepared(false, { notBefore: 4 });
+  const proof = commitmentProof(f.agreement, f.agreement.listingRef as Obj);
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 150, sellers: [await indexed(f, proof)] });
+  const before = store.loadCatalog(); const scan = store.loadScanState();
+  const db = new Database(join(store.DATA_DIR, "directory.sqlite"));
+  db.prepare("UPDATE kv_state SET value_json='1' WHERE key='commitment-finality-schema-version'").run();
+  db.exec("CREATE TRIGGER refuse_credit_version BEFORE INSERT ON kv_state WHEN new.key='commitment-finality-schema-version' BEGIN SELECT RAISE(ABORT, 'credit version refused'); END");
+  const restart = () => spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", "await import('./src/catalog/store.ts')"],
+    { encoding: "utf8", env: process.env, timeout: 30_000 });
+  try {
+    const failed = restart(); assert.notEqual(failed.status, 0); assert.match(failed.stderr, /credit version refused/);
+    assert.deepEqual(store.loadCatalog(), before); assert.deepEqual(store.loadScanState(), scan);
+    assert.deepEqual(db.prepare("SELECT value_json FROM kv_state WHERE key='commitment-finality-schema-version'").get(), { value_json: "1" });
+  } finally { db.exec("DROP TRIGGER refuse_credit_version"); db.close(); }
+  assert.equal(restart().status, 0);
+  assert.equal(store.loadCatalog().sellers[0].deals[0].refsVerified, false);
+  assert.equal((await indexed(f, proof)).deals[0].refsVerified, true);
+});
+
+test("expired and future discovery entries retain exact committed history without reading markers", async t => {
+  t.mock.method(Date, "now", () => 150);
+  for (const [notBefore, notAfter, committedAt] of [[10, 100, 90], [200, 300, 250]]) {
+    const f = await prepared(false, { notBefore, notAfter });
+    const marker = locator(7550 + notBefore); let markerReads = 0;
+    admitRevocationCandidates(artifactHash(f.listing, "listing"), [{ locator: marker, owner }]);
+    t.mock.method(globalThis, "fetch", async (url: Parameters<typeof fetch>[0]) => {
+      const at = String(url).split("/").pop() ?? ""; if (at === marker) markerReads++;
+      const raw = maps.get(at);
+      return raw ? Response.json({ success: true, owner, data: raw }) : new Response(null, { status: 404 });
+    });
+    const record = await indexed(f, commitmentProof(f.agreement, f.agreement.listingRef as Obj, committedAt));
+    assert.deepEqual(record.listings, []); assert.equal(record.deals[0].refsVerified, true); assert.equal(markerReads, 0);
+  }
+});
+
+test("either signed withdrawal marker order and an unread-marker restart retain committed credit", async t => {
+  t.mock.method(Date, "now", () => 200); storage(t);
+  const { spawnSync } = await import("node:child_process");
+  for (const [n, times] of [[0, [-1, 0]], [1, [0, -1]]] as const) {
+    const f = await prepared(false, { notBefore: 30 + n }); const hash = artifactHash(f.listing, "listing");
+    const markers = times.map((time, i) => { const at = locator(7600 + n * 2 + i); maps.set(at, withdrawalMarker(hash, time)); return { locator: at, owner }; });
+    admitRevocationCandidates(hash, markers);
+    const proof = commitmentProof(f.agreement, f.agreement.listingRef as Obj);
+    const record = await indexed(f, proof); assert.equal(record.listings[0].status, "revoked"); assert.equal(record.deals[0].refsVerified, true);
+    const registration = { primaryClaim: seller, displayName: "seller", listingAnchors: [f.locators.listing],
+      deals: [registeredDeal("proof-job", f.locators.buyer, f.locators.seller)], bundleBindings: [
+        await bindingFor("proof-job", "buyer", f.locators.buyer, f.buyerBundle, 0), await bindingFor("proof-job", "seller", f.locators.seller, f.sellerBundle, 1)] };
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from 'node:assert/strict'; import { readFileSync } from 'node:fs';
+      import { indexRegistration } from './src/catalog/indexer.ts'; import { fixtureCommitments } from './test/fixtures/commitment-proof.ts';
+      const input=JSON.parse(readFileSync(0,'utf8')); const programs=new Map(input.programs); Date.now=()=>200;
+      globalThis.fetch=async url=>{ const raw=programs.get(String(url).split('/').pop()); return raw ? Response.json({success:true,owner:input.owner,data:raw}) : new Response(null,{status:404}); };
+      const record=await indexRegistration(input.registration,undefined,async()=>{throw new Error('offline')},undefined,undefined,undefined,{...fixtureCommitments,resolve:async()=>input.proof});
+      assert.equal(record.listings[0].status,'revoked'); assert.equal(record.deals[0].refsVerified,true);
+    `], { encoding: "utf8", timeout: 30_000, env: process.env, input: JSON.stringify({ registration, proof, owner,
+      programs: [...maps].filter(([at]) => !markers.some(marker => marker.locator === at)) }) });
+    assert.equal(child.status, 0, child.stderr);
+  }
 });

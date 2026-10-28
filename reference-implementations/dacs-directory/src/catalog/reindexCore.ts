@@ -57,6 +57,7 @@ import {
 } from "./store";
 import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
+import type { CommitmentVerifier } from "./commitmentFinality";
 
 export interface ReindexSummary {
   sellers: number;
@@ -72,6 +73,8 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /** Server-owned consensus authenticator; omitted deployments withhold committed credit. */
+  commitment?: CommitmentVerifier;
   /** Node deployment read injected by tests; production reads the configured node. */
   nodeDeployment?: typeof catalogNodeDeployment;
   /** Alternate discovery transport for deterministic/offline deployments. */
@@ -460,7 +463,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }).catch((error: unknown) => {
+      }, undefined, opts.commitment).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";

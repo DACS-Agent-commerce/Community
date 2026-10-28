@@ -1,4 +1,4 @@
-import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, ed25519Verify, privateKeyFromSeed, publicKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { buildCurrentEvidenceGraph, artifactHash, type EvidenceGraphDeps } from "../../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../../src/catalog/indexer.js";
@@ -27,11 +27,11 @@ export function signCommitment(proof: CommitmentProof, authority = { claim: dids
   signReceipt(proof);
 }
 
-export function commitmentProof(agreement: Obj, listingRef: Obj, committedAt = 90, legacy = false, authority = { claim: dids[0], seed: seeds[0] }): CommitmentProof {
+export function commitmentProof(agreement: Obj, listingRef: Obj, committedAt = 90, legacy = false, authority = { claim: dids[0], seed: seeds[0] }, signingParties: readonly string[] = [dids[0], dids[1]]): CommitmentProof {
   const current = agreement.agreementVersion === "1" || agreement.payeeBoundAgreementVersion === "1";
   const { signatures: _signatures, ...agreementScope } = agreement;
   const parties = current && Array.isArray(agreement.parties)
-    ? agreement.parties.map((party: Obj) => party.primaryClaim) : [agreement.buyer, agreement.seller];
+    ? [...signingParties] : [agreement.buyer, agreement.seller];
   const record: Obj = { jobId: agreement.jobId, agreementHash: current ? artifactHash(agreement, "agreement") : legacyListingHash(agreementScope),
     listingRef, parties, pattern: agreement.derivedFromPattern ?? agreement.pattern,
     ...(legacy ? { dacsVersion: "1", committedAt } : { finalityCommitmentVersion: "1", createdAt: 1 }) };
@@ -46,13 +46,19 @@ export function commitmentProof(agreement: Obj, listingRef: Obj, committedAt = 9
 }
 
 export const fixtureCommitments: CommitmentVerifier = {
-  resolve: async (jobId) => {
-    const agreement = [...maps.values()].find((raw) => raw.jobId === jobId &&
-      (raw.agreementVersion === "1" || raw.payeeBoundAgreementVersion === "1" || typeof raw.pattern === "string"));
-    const bundle = [...maps.values()].find((raw) => raw.jobId === jobId && raw.bundleVersion === "1");
-    const pin = agreement?.listingRef && typeof agreement.listingRef === "object" ? agreement.listingRef : bundle?.listingRef;
-    return agreement && pin && typeof pin === "object" && !Array.isArray(pin)
-      ? commitmentProof(agreement, pin as Obj) : null;
+  resolve: async (context) => {
+    // Exact authenticated context keys, independent buyer/seller roster; no first-match job lookup.
+    const key = (p: CommitmentProof["record"]) => canonicalize([p.jobId, p.agreementHash, p.listingRef, p.pattern]);
+    const proofs = new Map<string, CommitmentProof>();
+    for (const agreement of maps.values()) {
+      if (agreement.agreementVersion !== "1" && agreement.payeeBoundAgreementVersion !== "1" && typeof agreement.pattern !== "string") continue;
+      const pin = agreement.agreementVersion === "1" || agreement.payeeBoundAgreementVersion === "1"
+        ? agreement.listingRef : context.listingRef;
+      if (!pin || typeof pin !== "object" || Array.isArray(pin)) continue;
+      const proof = commitmentProof(agreement, pin as Obj);
+      proofs.set(key(proof.record), proof);
+    }
+    return proofs.get(canonicalize([context.jobId, context.agreementHash, context.listingRef, context.pattern])) ?? null;
   },
   verifyReceipt: async (receipt) => {
     const { evidence, ...scope } = receipt;
