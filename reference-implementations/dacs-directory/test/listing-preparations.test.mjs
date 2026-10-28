@@ -815,37 +815,61 @@ test("empty producer-name searches permit a default preview and one signed creat
   assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress).n, 1);
 });
 
-test("the default handler creates only the next version when a prior version is missing on chain", async (t) => {
-  const state = node(t);
-  const id = "default-next-version";
-  const prior = await signedInput(id);
-  const first = await prepare(prior);
+function cataloguePriorVersion(t, signed, locator) {
   const catalog = module.loadCatalog();
   t.after(() => module.saveCatalog(catalog));
   module.saveCatalog({ ...catalog, sellers: [{
-    primaryClaim: prior.claim, displayName: "Previously indexed seller", deals: [],
-    listings: [{ listingId: id, version: 1, anchor: { kind: "storage-program", locator: first.anchorAddress } }],
+    primaryClaim: signed.claim, displayName: inputFor(signed.serviceId).name, deals: [],
+    listings: [{ listingId: signed.serviceId, version: 1, anchor: { kind: "storage-program", locator } }],
   }] });
-  const next = await signedInput(id);
-  assert.equal(next.listingVersion, 2);
-  const preview = await post(request({ ...prior, listingSignature: undefined }));
-  assert.equal(preview.status, 200, "a prepared prior version previews its own Listing");
-  assert.equal((await preview.json()).tx, null);
-  await unresolved(await post(request(prior)), first.anchorAddress);
-  // Without a saved preparation, a listed version the lookups cannot find is refused outright.
-  db.prepare("DELETE FROM listing_preparations WHERE logical_address=?").run(first.logicalAddress);
-  for (const listingSignature of [undefined, prior.listingSignature]) {
-    const response = await post(request({ ...prior, listingSignature }));
+}
+
+for (const signedRetry of [false, true]) {
+  test(`a ${signedRetry ? "signed" : "unsigned"} catalogued prepared prior version returns only its immutable anchor`, async (t) => {
+    const state = node(t);
+    const prior = await signedInput(`prepared-prior-${signedRetry}`);
+    const first = await prepare(prior);
+    cataloguePriorVersion(t, prior, first.anchorAddress);
+    const response = await post(request({ ...prior, listingSignature: signedRetry ? prior.listingSignature : undefined }));
+    await unresolved(response, first.anchorAddress, first.logicalAddress);
+    unchangedPreparation(first, state);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress).n, 1);
+  });
+
+  test(`a ${signedRetry ? "signed" : "unsigned"} catalogued prior version never prepared here refuses without reserving`, async (t) => {
+    const state = node(t);
+    // Sign before indexing, without prepare: catalog occupancy and local preparation are independent.
+    const prior = await signedInput(`unprepared-prior-${signedRetry}`);
+    const logicalAddress = `dacs1:${encodeURIComponent(prior.claim)}:${prior.serviceId}:v1`;
+    cataloguePriorVersion(t, prior, `stor-${"a".repeat(40)}`);
+    const response = await post(request({ ...prior, listingSignature: signedRetry ? prior.listingSignature : undefined }));
     assert.equal(response.status, 409);
     const body = await response.json();
     assert.match(body.error, /already published this version/);
-    assert.equal(body.tx, undefined);
-  }
+    for (const field of ["tx", "listing", "message", "anchorAddress"]) assert.equal(body[field], undefined);
+    assert.equal(state.nonceReads, 0);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(logicalAddress).n, 0);
+  });
+}
+
+test("the default handler previews and creates only the next version after catalogued prior occupancy", async (t) => {
+  const state = node(t);
+  const prior = await signedInput("default-next-version");
+  cataloguePriorVersion(t, prior, `stor-${"b".repeat(40)}`);
+  const next = await signedInput(prior.serviceId);
+  assert.equal(next.listingVersion, 2);
+  const previewResponse = await post(request({ ...next, listingSignature: undefined }));
+  assert.equal(previewResponse.status, 200);
+  const preview = await previewResponse.json();
+  assert.equal(preview.listing.listingVersion, 2);
+  assert.equal(preview.tx, null);
+  assert.equal(preview.publicationReady, false);
   assert.equal((await post(request({ ...next, listingVersion: 3 }))).status, 400);
-  assert.equal(state.nonceReads, 1, "past and future versions never obtain a nonce");
-  const second = await prepare(next);
-  assert.equal(second.listing.listingVersion, 2);
-  assert.equal(state.nonceReads, 2);
+  assert.equal(state.nonceReads, 0, "previews and future versions never obtain a nonce");
+  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(preview.logicalAddress).n, 0);
+  const prepared = await prepare(next);
+  assert.equal(prepared.listing.listingVersion, 2);
+  unchangedPreparation(prepared, state);
 });
 
 test("the API route with trusted rail authority creates on producer-name absence without a resolver", async (t) => {
@@ -871,7 +895,15 @@ test("the API route with trusted rail authority creates on producer-name absence
   assert.ok(body.tx);
   assert.equal(state.nonceReads, 1);
   await resumed(await route.POST(request(signed)), body);
-  assert.equal(state.nonceReads, 1);
+  const catalog = module.loadCatalog();
+  t.after(() => module.saveCatalog(catalog));
+  module.saveCatalog({ ...catalog, sellers: [{ primaryClaim: signed.claim,
+    displayName: "Updated catalog display name", listings: [] }] });
+  await resumed(await route.POST(request(signed)), body);
+  t.mock.method(Date, "now", () => clock + 16 * 60_000);
+  await resumed(await route.POST(request(signed)), body);
+  unchangedPreparation(body, state);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address=?").get(body.logicalAddress).n, 1);
 });
 
 for (const [name, resolveVersion] of uncertainResolvers) test(`a configured ${name} resolver withholds preview and signed creation`, async (t) => {
@@ -984,6 +1016,14 @@ test("qualified complete logical occupancy can establish an unused version", asy
   assert.deepEqual(await resolveOccupancy(async () => complete()), { status: "absent" });
 });
 
+test("deeply nested logical occupancy refuses absence before decoding", async () => {
+  let padding = {};
+  for (let depth = 0; depth < 129; depth++) padding = { nested: padding };
+  const result = await resolveOccupancy(async () => ({ ...complete(), padding }));
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /depth limit/);
+});
+
 test("logical resolver failure preserves its cause", async () => {
   const result = await resolveOccupancy(async () => { throw new Error("history endpoint refused HTTP 403"); });
   assert.equal(result.status, "indeterminate");
@@ -1036,7 +1076,13 @@ for (const [name, response] of [
   ["wrong logical metadata", () => Response.json(nativeRecord({ metadata: { logicalAddress: `${logical}2` } }))],
   ["conflicting logical aliases", () => Response.json(nativeRecord({ metadata: { logicalAddress: logical, logical_address: `${logical}2` } }))],
   ["wrong native metadata", () => Response.json(nativeRecord({ storageAddress: `stor-${"75".repeat(20)}` }))],
+  ["missing program name", () => Response.json(nativeRecord({ programName: undefined }))],
+  ["empty program name", () => Response.json(nativeRecord({ programName: "" }))],
+  ["oversized program name", () => Response.json(nativeRecord({ programName: "x".repeat(1025) }))],
   ["invalid program name", () => Response.json(nativeRecord({ programName: "invalid:name" }))],
+  ["truthy string success", () => Response.json(nativeRecord({ success: "false" }))],
+  ["truthy numeric success", () => Response.json(nativeRecord({ success: 1 }))],
+  ["unqualified HTTP 404", () => new Response("missing", { status: 404 })],
 ]) test(`${name} at a logically resolved locator cannot establish absence`, async (t) => {
   t.mock.method(globalThis, "fetch", response);
   const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
@@ -1047,6 +1093,27 @@ test("native binding resolution accepts the Standard's logical_address metadata 
   t.mock.method(globalThis, "fetch", async () => Response.json(nativeRecord({ metadata: { logical_address: logical } })));
   const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
   assert.equal(result.status, "present");
+});
+
+test("the logical resolution deadline cancels a native read stalled before headers", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let markStarted;
+  let readSignal;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  t.mock.method(globalThis, "fetch", (_url, init) => {
+    readSignal = init.signal;
+    markStarted();
+    return new Promise((_resolve, reject) => {
+      readSignal.addEventListener("abort", () => reject(readSignal.reason), { once: true });
+    });
+  });
+  const pending = resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
+  await started;
+  t.mock.timers.runAll();
+  const result = await pending;
+  assert.equal(result.status, "indeterminate");
+  assert.match(result.reason, /timed out/);
+  assert.equal(readSignal.aborted, true);
 });
 
 test("the logical resolution deadline also cancels a stalled native response body", async (t) => {
