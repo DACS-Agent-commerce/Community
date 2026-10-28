@@ -179,6 +179,24 @@ test("many staged binding releases journal a bounded amount, not a growing relea
   assert.equal(boundCount(listingHash), count, "a refused window keeps every binding");
 });
 
+test("a revert restores node-supplied text with an embedded NUL byte for byte", () => {
+  const locator = "stor-nul-owner";
+  const owner = "0xabc\u0000tail";
+  store.recordArtifact({ locator, kind: "listing", profile: "p", owner, observedAt: 1 });
+  store.openChainReadWindow();
+  store.recordArtifact({ locator, kind: "listing", profile: "p", owner: "0xdef", observedAt: 2 });
+  store.revertChainReadWindow();
+  const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
+  try {
+    const row = db.prepare("SELECT owner, hex(owner) h FROM artifacts WHERE locator = ?")
+      .get(locator) as { owner: string; h: string };
+    assert.equal(row.owner, owner, "quote() would have stopped the owner at the NUL");
+    assert.equal(row.h, Buffer.from(owner, "utf8").toString("hex").toUpperCase());
+  } finally {
+    db.close();
+  }
+});
+
 test("a writer reverting a window a crash left open restores the binding its marker rejection released", () => {
   const listingHash = "4".repeat(64);
   const signed = signedBindingFor("https://crashed-release.example", listingHash);

@@ -674,8 +674,13 @@ function createJournalTriggers(): void {
     .map((row) => row.name).filter((name) => !UNJOURNALED_TABLES.has(name));
   for (const table of tables) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => `"${column.name}"`);
-    const oldValues = columns.map((column) => `quote(old.${column})`).join(" || ',' || ");
-    const oldAssignments = columns.map((column) => `'${column}=' || quote(old.${column})`).join(" || ',' || ");
+    // SQLite's quote() stops a text value at its first NUL byte. A node supplies some stored text
+    // (an artifact owner, for one), so carry such text as a hex literal to restore its exact bytes;
+    // plain text stays quoted to keep the journal small.
+    const oldValue = (column: string) => `CASE WHEN typeof(old.${column})='text' AND instr(old.${column}, char(0)) > 0
+      THEN 'CAST(X''' || hex(old.${column}) || ''' AS TEXT)' ELSE quote(old.${column}) END`;
+    const oldValues = columns.map(oldValue).join(" || ',' || ");
+    const oldAssignments = columns.map((column) => `'${column}=' || ${oldValue(column)}`).join(" || ',' || ");
     const journal = (event: string, row: "old" | "new", undo: string) => db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS
       journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
       WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN (${unjournaledKeyList})` : ""}
