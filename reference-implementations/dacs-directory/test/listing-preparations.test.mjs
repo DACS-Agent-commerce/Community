@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import { contentHash } from "./fixtures/listing-preparation-boundaries.mjs";
 
 const app = fileURLToPath(new URL("..", import.meta.url));
 const directory = mkdtempSync(join(tmpdir(), "listing-preparations-"));
-const bundleDirectory = mkdtempSync(join(app, "node_modules", ".listing-preparations-"));
+const bundleDirectory = mkdtempSync(join(app, ".listing-preparations-"));
 const bundle = join(bundleDirectory, "index.mjs");
 process.env.DACS_DIRECTORY_DATA = directory;
 const boundaries = resolve(app, "test/fixtures/listing-preparation-boundaries.mjs");
@@ -29,6 +29,11 @@ await build({
 });
 function publicationBoundaries() {
   return { name: "publication-boundaries", setup(builder) {
+    builder.onLoad({ filter: /[\/]src[\/]catalog[\/]store\.ts$/ }, ({ path }) => ({
+      contents: readFileSync(path, "utf8") + `
+export const preparationJournalTriggers = () => db.prepare("SELECT name FROM sqlite_temp_master WHERE type='trigger' AND name LIKE 'journal_listing_preparations_%'").all();`,
+      loader: "ts", resolveDir: resolve(app, "src/catalog"),
+    }));
     builder.onResolve({ filter: /^next\/server$/ }, () => ({ path: "next/server.js", external: true }));
     builder.onResolve({ filter: /^@kynesyslabs\/dacs\// }, () => ({ path: boundaries }));
     builder.onResolve({ filter: /\/(sdkListingValidation|listingVerification|listingFinality|registrationSig|wellknown)(\.js)?$/ },
@@ -116,6 +121,7 @@ async function unresolved(response, anchor, lookupReason) {
   if (lookupReason) assert.match(body.error, lookupReason, "the real cause of the failed lookup is kept");
   assert.equal(body.anchorAddress, anchor);
   assert.equal(body.tx, undefined);
+  assert.equal(body.message, undefined);
 }
 async function refusedWithoutAnchor(response, status) {
   assert.equal(response.status, status);
@@ -131,6 +137,9 @@ async function resumed(response, first) {
   const body = await response.json();
   assert.equal(body.anchorAddress, first.anchorAddress, "the same signed Listing must never receive a different anchor");
   assert.equal(JSON.stringify(body.tx), JSON.stringify(first.tx), "the exact saved transaction bytes, never a rebuilt one");
+  assert.deepEqual(body.listing, first.listing, "response Listing comes from the saved transaction");
+  assert.equal(body.contentHash, first.contentHash);
+  assert.equal(body.message, `dacs-listing:v1:${first.contentHash}`);
 }
 
 test("an exact signed repeat after empty lookups and advancing nonces gets the saved transaction, never a second anchor", async (t) => {
@@ -144,9 +153,11 @@ test("an exact signed repeat after empty lookups and advancing nonces gets the s
 test("a freshly signed different candidate cannot replace the prepared logical version", async (t) => {
   node(t);
   const original = await signedInput("changed-candidate");
-  const first = await prepare(original);
-  t.mock.method(Date, "now", () => clock + 60_000);
   const changed = await signedInput("changed-candidate", { description: "Different signed contents" });
+  t.mock.method(Date, "now", () => clock + 60_000);
+  const resigned = await signedInput("changed-candidate");
+  const first = await prepare(original);
+  await unresolved(await post(request(resigned)), first.anchorAddress);
   await unresolved(await post(request(changed)), first.anchorAddress);
 });
 
@@ -824,4 +835,177 @@ for (const [name, respond, cause] of [
   const result = await resolveOccupancy(async () => complete([`stor-${"73".repeat(20)}`]));
   assert.equal(result.status, "indeterminate");
   assert.match(result.reason, cause);
+});
+
+
+test("a prepared preview returns only its saved anchor without requesting another Listing signature", async (t) => {
+  node(t);
+  const signed = await signedInput("prepared-preview");
+  const first = await prepare(signed);
+  await unresolved(await post(request({ ...signed, listingSignature: undefined })), first.anchorAddress);
+});
+
+test("an exact repeat uses stored bytes even when valid request fields change with both signatures retained", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("changed-body-same-signatures");
+  const first = await prepare(signed);
+  await resumed(await post(request({ ...signed, name: "New title", description: "New description",
+    category: "services.changed", pricing: { kind: "fixed", amount: "9", currency: "USD" } })), first);
+  assert.equal(state.nonceReads, 1);
+});
+
+test("an invalid identity cannot learn a prepared anchor", async (t) => {
+  node(t);
+  const signed = await signedInput("invalid-prepared-identity");
+  await prepare(signed);
+  const response = await post(request({ ...signed, identitySignature: "00".repeat(64) }));
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.anchorAddress, undefined);
+  assert.equal(body.tx, undefined);
+});
+
+test("an expired valid nonrepeat is refused before any network read and reveals no prepared anchor", async (t) => {
+  node(t);
+  const signed = await signedInput("expired-nonrepeat");
+  const changed = await signedInput("expired-nonrepeat", { description: "Other signed draft" });
+  await prepare(signed);
+  t.mock.method(Date, "now", () => clock + 16 * 60_000);
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("expiry must precede reads"); });
+  const response = await post(request(changed));
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.match(body.error, /identity presentation expired/);
+  assert.equal(body.anchorAddress, undefined);
+  assert.equal(body.tx, undefined);
+});
+
+test("a failed refresh cannot undo a preparation or allow a re-signed replacement", async (t) => {
+  node(t);
+  const signed = await signedInput("refresh-revert");
+  t.mock.method(Date, "now", () => clock + 1);
+  const resigned = await signedInput("refresh-revert");
+  module.openChainReadWindow();
+  const first = await prepare(signed);
+  module.revertChainReadWindow();
+  await resumed(await post(request(signed)), first);
+  await unresolved(await post(request(resigned)), first.anchorAddress);
+});
+
+test("preparations have no undo-journal triggers and persistent UPDATE and DELETE guards", async (t) => {
+  node(t);
+  const first = await prepare(await signedInput("append-only"));
+  module.openChainReadWindow();
+  try {
+    assert.deepEqual(module.preparationJournalTriggers(), []);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='trigger' AND tbl_name='listing_preparations'").get().count, 2);
+    for (const sql of ["UPDATE listing_preparations SET transaction_json='replaced' WHERE logical_address=?",
+      "DELETE FROM listing_preparations WHERE logical_address=?"]) {
+      assert.throws(() => db.prepare(sql).run(first.logicalAddress), /append.only/);
+    }
+  } finally { module.revertChainReadWindow(); }
+});
+
+const childScript = resolve(app, "test/fixtures/listing-preparation-worker.mjs");
+const childArguments = (input, options = {}) => [childScript, bundle, JSON.stringify({ input, rails, clock, ...options })];
+
+test("a crashed refresh window retains the preparation through recovery and refuses a re-signed replacement", async (t) => {
+  node(t);
+  const signed = await signedInput("crashed-window");
+  t.mock.method(Date, "now", () => clock + 1);
+  const resigned = await signedInput("crashed-window");
+  const crashed = spawnSync(process.execPath, childArguments(signed, { crash: true }), { encoding: "utf8", timeout: 15_000 });
+  assert.equal(crashed.status, 77, crashed.stderr);
+  const row = db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address LIKE '%:crashed-window:v1'").get();
+  assert.ok(row, "the child committed the preparation before crashing without a response");
+  module.revertChainReadWindow();
+  const tx = JSON.parse(row.transaction_json);
+  await resumed(await post(request(signed)), { anchorAddress: row.anchor_address, tx, listing: tx.content.data[1].data,
+    contentHash: tx.content.data[1].metadata.contentHash });
+  await unresolved(await post(request(resigned)), row.anchor_address);
+});
+
+async function racingProcesses(inputs) {
+  const children = inputs.map((input, index) => spawn(process.execPath, childArguments(input, { race: true, nonce: index + 10 }),
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
+  try {
+    return await new Promise((resolveResult, reject) => {
+      const ready = new Set();
+      const results = [];
+      const timer = setTimeout(() => reject(new Error("two-process race timed out")), 15_000);
+      for (const child of children) {
+        let errors = "";
+        child.stderr.on("data", (chunk) => { errors += chunk; });
+        child.on("error", reject);
+        child.on("exit", (code) => { if (code !== 0) reject(new Error(`worker exited ${code}: ${errors}`)); });
+        child.on("message", (message) => {
+          if (message.ready) {
+            ready.add(child);
+            if (ready.size === children.length) for (const worker of children) worker.send("continue");
+          } else {
+            results.push(message);
+            if (results.length === children.length) { clearTimeout(timer); resolveResult(results); }
+          }
+        });
+      }
+    });
+  } finally { for (const child of children) child.kill(); }
+}
+for (const identical of [false, true]) {
+  test(`a synchronized two-process ${identical ? "identical" : "different"} request race releases only the winner's bytes`, async (t) => {
+    node(t);
+    const signed = await signedInput(`process-race-${identical}`);
+    const other = identical ? signed : await signedInput(`process-race-${identical}`, { description: "Other process draft" });
+    const results = await racingProcesses([signed, other]);
+    assert.deepEqual(results.map(({ status }) => status).sort(), identical ? [200, 200] : [200, 409]);
+    const winner = results.find(({ body }) => body.tx).body;
+    const row = db.prepare("SELECT transaction_json FROM listing_preparations WHERE logical_address=?").get(winner.logicalAddress);
+    for (const { body } of results) {
+      assert.equal(body.anchorAddress, winner.anchorAddress);
+      if (body.tx) assert.equal(JSON.stringify(body.tx), row.transaction_json);
+    }
+  });
+}
+
+test("the builder isolates configured chains and successive logical versions", async (t) => {
+  node(t);
+  const signed = await signedInput("chain-and-version");
+  const first = await prepare(signed);
+  const configured = process.env.DEMOS_CHAIN_IDENTITY;
+  try {
+    process.env.DEMOS_CHAIN_IDENTITY = "fixture-other-chain";
+    const otherChain = await prepare(signed);
+    assert.notEqual(otherChain.anchorAddress, first.anchorAddress);
+    assert.equal(module.loadListingPreparation("fixture-other-chain", first.logicalAddress).transactionJson, JSON.stringify(otherChain.tx));
+  } finally {
+    if (configured === undefined) delete process.env.DEMOS_CHAIN_IDENTITY;
+    else process.env.DEMOS_CHAIN_IDENTITY = configured;
+  }
+  module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [{ primaryClaim: inputFor("").claim,
+    displayName: inputFor("").name, listings: [{ listingId: "chain-and-version", version: 1,
+      anchor: { kind: "storage-program", locator: first.anchorAddress } }] }] });
+  try {
+    const v2 = await prepare(await signedInput("chain-and-version"));
+    assert.notEqual(v2.logicalAddress, first.logicalAddress);
+    assert.equal(v2.listing.listingVersion, 2);
+    assert.notEqual(v2.anchorAddress, first.anchorAddress);
+  } finally { module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] }); }
+});
+
+
+test("two sellers using the same Listing ID and version have separate preparations", async (t) => {
+  node(t);
+  const first = await prepare(await signedInput("separate-sellers"));
+  const otherKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, 13)]),
+    format: "der", type: "pkcs8" });
+  const otherHex = createPublicKey(otherKey).export({ format: "der", type: "spki" }).subarray(-32).toString("hex");
+  const input = { ...inputFor("separate-sellers"), claim: `did:demos:agent:${otherHex}` };
+  const identity = await (await post(request(input))).json();
+  const otherSign = (message) => sign(null, Buffer.from(message), otherKey).toString("hex");
+  const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: otherSign(identity.identityMessage) };
+  const preview = await (await post(request(authenticated))).json();
+  const other = await prepare({ ...authenticated, listingSignature: otherSign(preview.message) });
+  assert.notEqual(other.logicalAddress, first.logicalAddress);
+  assert.notEqual(other.anchorAddress, first.anchorAddress);
 });
