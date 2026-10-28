@@ -738,9 +738,10 @@ export const commitChainReadWindow = db.transaction((lastSaves: () => void): voi
  * Undo every journaled write, newest first, and close the window. Also undoes the writes of a
  * window a crash left open, so every catalog writer calls it under its lease before it reads.
  * It holds one undo statement at a time: a statement carries a whole prior row, so a journal of
- * many large rows must not be loaded at once.
+ * many large rows must not be loaded at once. It takes the write lock before it reads so a
+ * concurrent commit cannot invalidate its snapshot between the read and the first undo.
  */
-export const revertChainReadWindow = db.transaction((): void => {
+const revertChainReadWindowTransaction = db.transaction((): void => {
   closeChainReadWindow();
   const newestUndo = db.prepare("SELECT seq, undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC LIMIT 1");
   const forgetUndo = db.prepare("DELETE FROM unconfirmed_chain_writes WHERE seq = ?");
@@ -750,6 +751,7 @@ export const revertChainReadWindow = db.transaction((): void => {
   }
   db.exec("DELETE FROM staged_binding_releases");
 });
+export const revertChainReadWindow = (): void => { revertChainReadWindowTransaction.immediate(); };
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 
