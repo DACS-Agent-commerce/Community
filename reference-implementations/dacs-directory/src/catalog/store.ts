@@ -682,16 +682,26 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 // or a crash reverts it. Leases and run history are not journaled, nor are the keys in
 // UNJOURNALED_KEYS.
 db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
+/**
+ * A binding release a marker read decided inside the open window. One row per binding and source
+ * revision keeps each write bounded: rewriting one growing list made the journal grow quadratically.
+ * The table is bookkeeping, not node-derived state, so it is not journaled; commit and revert clear it.
+ */
+db.exec(`CREATE TABLE IF NOT EXISTS staged_binding_releases (
+  binding_key TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  PRIMARY KEY(binding_key, revision)
+)`);
 interface UndoStatement { seq: number; undo_sql: string }
 // Listing preparations retain seller-signed writes, not node reads. A refused or
 // crashed refresh must never undo a transaction already released to its seller.
-const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence", "listing_preparations"]);
+const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "staged_binding_releases", "sqlite_sequence", "listing_preparations"]);
 /**
  * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
  * an undo would drop their saves. Withdrawal sources hold what a publisher signed and served from its
  * own domain, not what the node returned, so a refused chain check says nothing about them; undoing
  * them would let a failed pass publish a listing the publisher had already withdrawn. A marker read
- * that releases one of their bindings is node-derived, so it is staged under a journaled key instead.
+ * that releases one of their bindings is node-derived, so it is staged in its own bookkeeping rows instead.
  */
 const UNJOURNALED_KEYS = ["catalog-chain", "registrations", "domains", "withdrawal-sources", "withdrawal-source-revision"];
 const unjournaledKeyList = UNJOURNALED_KEYS.map((key) => `'${key}'`).join(",");
@@ -704,8 +714,13 @@ function createJournalTriggers(): void {
     .map((row) => row.name).filter((name) => !UNJOURNALED_TABLES.has(name));
   for (const table of tables) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => `"${column.name}"`);
-    const oldValues = columns.map((column) => `quote(old.${column})`).join(" || ',' || ");
-    const oldAssignments = columns.map((column) => `'${column}=' || quote(old.${column})`).join(" || ',' || ");
+    // SQLite's quote() stops a text value at its first NUL byte. A node supplies some stored text
+    // (an artifact owner, for one), so carry such text as a hex literal to restore its exact bytes;
+    // plain text stays quoted to keep the journal small.
+    const oldValue = (column: string) => `CASE WHEN typeof(old.${column})='text' AND instr(old.${column}, char(0)) > 0
+      THEN 'CAST(X''' || hex(old.${column}) || ''' AS TEXT)' ELSE quote(old.${column}) END`;
+    const oldValues = columns.map(oldValue).join(" || ',' || ");
+    const oldAssignments = columns.map((column) => `'${column}=' || ${oldValue(column)}`).join(" || ',' || ");
     const journal = (event: string, row: "old" | "new", undo: string) => db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS
       journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
       WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN (${unjournaledKeyList})` : ""}
@@ -728,14 +743,21 @@ const chainReadWindowOpen = (): boolean =>
   journalTriggersCreated && db.prepare("SELECT 1 FROM temp.unconfirmed_chain_window").get() !== undefined;
 /**
  * Withdrawal bindings a marker rejection released inside the open window, each with the source revision
- * it was decided against. The key is journaled, so a refused or crashed pass drops the release and the
- * binding keeps holding; readers already see it released, as they would outside a window.
+ * it was decided against. The rows are bookkeeping, so a refused or crashed pass drops the release and
+ * the binding keeps holding; readers already see it released, as they would outside a window.
  */
-const STAGED_BINDING_RELEASES_KEY = "withdrawal-binding-releases";
-interface StagedBindingRelease { revision: number; keys: string[] }
-const stagedBindingReleases = (): StagedBindingRelease[] => getJson(STAGED_BINDING_RELEASES_KEY, []);
-const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => setJson(STAGED_BINDING_RELEASES_KEY,
-  [...stagedBindingReleases(), { revision: wellKnownWithdrawalRevision(), keys: [...keys] }]);
+interface StagedBindingRelease { binding_key: string; revision: number }
+const stagedBindingReleases = (): StagedBindingRelease[] =>
+  db.prepare("SELECT binding_key, revision FROM staged_binding_releases").all() as StagedBindingRelease[];
+const stagedBindingReleaseKeys = (): Set<string> =>
+  new Set((db.prepare("SELECT binding_key FROM staged_binding_releases").all() as Array<{ binding_key: string }>)
+    .map((row) => row.binding_key));
+const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => {
+  if (keys.size === 0) return;
+  const revision = wellKnownWithdrawalRevision();
+  const stage = db.prepare("INSERT OR IGNORE INTO staged_binding_releases(binding_key, revision) VALUES (?, ?)");
+  for (const key of keys) stage.run(key, revision);
+};
 /**
  * Run the writer's last saves (its scan state and catalog) and keep the window's writes, in one
  * transaction: a chain read after those writes confirmed the gated chain, so either all of them are
@@ -746,9 +768,9 @@ const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => setJs
 export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
   lastSaves();
   const revision = wellKnownWithdrawalRevision();
-  const released = new Set(stagedBindingReleases().filter((release) => release.revision === revision).flatMap((release) => release.keys));
+  const released = new Set(stagedBindingReleases().filter((release) => release.revision === revision).map((release) => release.binding_key));
   if (released.size > 0) releaseWithdrawalBindings(released);
-  db.prepare("DELETE FROM kv_state WHERE key = ?").run(STAGED_BINDING_RELEASES_KEY);
+  db.exec("DELETE FROM staged_binding_releases");
   closeChainReadWindow();
   db.exec("DELETE FROM unconfirmed_chain_writes");
 });
@@ -756,9 +778,10 @@ export const commitChainReadWindow = db.transaction((lastSaves: () => void): voi
  * Undo every journaled write, newest first, and close the window. Also undoes the writes of a
  * window a crash left open, so every catalog writer calls it under its lease before it reads.
  * It holds one undo statement at a time: a statement carries a whole prior row, so a journal of
- * many large rows must not be loaded at once.
+ * many large rows must not be loaded at once. It takes the write lock before it reads so a
+ * concurrent commit cannot invalidate its snapshot between the read and the first undo.
  */
-export const revertChainReadWindow = db.transaction((): void => {
+const revertChainReadWindowTransaction = db.transaction((): void => {
   closeChainReadWindow();
   const newestUndo = db.prepare("SELECT seq, undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC LIMIT 1");
   const forgetUndo = db.prepare("DELETE FROM unconfirmed_chain_writes WHERE seq = ?");
@@ -766,7 +789,9 @@ export const revertChainReadWindow = db.transaction((): void => {
     db.exec(undo.undo_sql);
     forgetUndo.run(undo.seq);
   }
+  db.exec("DELETE FROM staged_binding_releases");
 });
+export const revertChainReadWindow = (): void => { revertChainReadWindowTransaction.immediate(); };
 /** Read control, consuming retired scanner labels atomically during migration. */
 export const loadCatalogChain = db.transaction((): CatalogChain | null => {
   const control = getJson<CatalogChain | null>("catalog-chain", null);
@@ -811,7 +836,7 @@ interface WithdrawalSource { domain: string; seller: string; hashes: string[]; i
 const storedWithdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
 /** The saved sources, less the bindings a marker rejection in the open window released. */
 const withdrawalSources = (): WithdrawalSource[] => {
-  const released = new Set(stagedBindingReleases().flatMap((release) => release.keys));
+  const released = stagedBindingReleaseKeys();
   const sources = storedWithdrawalSources();
   if (released.size > 0) for (const source of sources) source.bindings = source.bindings?.filter((binding) =>
     !released.has(revocationBindingKey(binding)));

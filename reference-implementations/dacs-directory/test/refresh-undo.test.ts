@@ -9,7 +9,7 @@ import type { catalogNodeDeployment } from "../src/catalog/listingFinality.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
 import { SCAN_STATE_SCHEMA_VERSION } from "../src/catalog/scanState.js";
-import { loadScanState, saveCatalog, saveDomains, saveRegistrations, saveScanState } from "../src/catalog/store.js";
+import { loadCatalogChain, loadScanState, publishCatalogChain, saveDomains, saveRegistrations } from "../src/catalog/store.js";
 import { nodeServingInTurn, onPinnedChain } from "./fixtures/pinned-node.js";
 import { refuseCatalogWrites } from "./fixtures/refuse-catalog-writes.js";
 
@@ -21,19 +21,21 @@ const transactionHistory = [{ id: 5 }, { id: 4 }, { id: 3 }, { id: 2 }, { id: 1 
 globalThis.fetch = async () => Response.json({ result: 200, response: transactionHistory });
 
 const refreshWith = (nodeDeployment: typeof catalogNodeDeployment) => reindexAll({ log: () => {}, nodeDeployment });
-const currentState = () => ({ chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: SCAN_STATE_SCHEMA_VERSION,
+const currentState = () => ({ schemaVersion: SCAN_STATE_SCHEMA_VERSION,
   lastSeenTxId: 1, lastChainTip: 5, listings: {}, deals: {} });
 const savedCatalog = { catalogVersion: "1" as const, generatedAt: 7, sellers: [] };
 /** Run history and leases are never undone; the journal's own table is bookkeeping. */
 const NOT_UNDONE_TABLES = new Set(["scan_runs", "leases", "unconfirmed_chain_writes", "sqlite_sequence"]);
 
-/** Every row of every table that an undo covers, as the database file holds it. */
+/** Exact evidence rows; chain provenance and readiness are asserted separately. */
 function snapshot(): string {
   const db = new Database(join(isolatedDataDir, "directory.sqlite"), { readonly: true });
   try {
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{ name: string }>)
       .map((table) => table.name).filter((name) => !NOT_UNDONE_TABLES.has(name));
-    return JSON.stringify(tables.map((table) => [table, db.prepare(`SELECT rowid, * FROM ${table} ORDER BY rowid`).all()]));
+    return JSON.stringify(tables.map((table) => [table, db.prepare(
+      `SELECT rowid, * FROM ${table}${table === "kv_state" ? " WHERE key != 'catalog-chain'" : ""} ORDER BY rowid`,
+    ).all()]));
   } finally {
     db.close();
   }
@@ -41,8 +43,11 @@ function snapshot(): string {
 function savePassInputs(): void {
   saveRegistrations([]);
   saveDomains([]);
-  saveScanState(currentState());
-  saveCatalog(savedCatalog);
+  publishCatalogChain(savedCatalog, currentState(), PINNED_DEMOS_CHAIN_IDENTITY);
+}
+/** Refusal preserves provenance but requires a complete replay before the cache is current again. */
+function assertReplayRequired(): void {
+  assert.deepEqual(loadCatalogChain(), { evidenceChain: PINNED_DEMOS_CHAIN_IDENTITY, readySchema: null });
 }
 
 test("a pass whose chain holds advances the scan cursor and records it", async () => {
@@ -50,19 +55,21 @@ test("a pass whose chain holds advances the scan cursor and records it", async (
   const before = snapshot();
   await refreshWith(onPinnedChain);
   assert.equal(loadScanState().lastSeenTxId, 3, "finality depth leaves the newest two transactions for replay");
+  assert.deepEqual(loadCatalogChain(), { evidenceChain: PINNED_DEMOS_CHAIN_IDENTITY, readySchema: SCAN_STATE_SCHEMA_VERSION });
   assert.notEqual(snapshot(), before);
 });
 
-test("a pass whose last chain read fails leaves the database as it found it", async () => {
+test("a pass whose last chain read fails restores evidence and requires replay", async () => {
   savePassInputs();
   const before = snapshot();
   await assert.rejects(refreshWith(nodeServingInTurn(PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_CHAIN_IDENTITY, OTHER_CHAIN)),
     /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
   assert.equal(loadScanState().lastSeenTxId, 1, "the cursor stays where the last complete pass left it");
+  assertReplayRequired();
   assert.equal(snapshot(), before);
 });
 
-test("a pass whose catalog cannot be saved keeps none of its writes", async () => {
+test("a pass whose catalog cannot be saved restores evidence and requires replay", async () => {
   savePassInputs();
   const before = snapshot();
   const allowCatalogWrites = refuseCatalogWrites(isolatedDataDir);
@@ -71,6 +78,7 @@ test("a pass whose catalog cannot be saved keeps none of its writes", async () =
   } finally {
     allowCatalogWrites();
   }
+  assertReplayRequired();
   assert.equal(snapshot(), before, "the scan cursor and the catalog are saved together or not at all");
 });
 
@@ -90,5 +98,6 @@ test("a pass killed after it saved the scan cursor is undone by the next writer 
   // A writer that refuses the node still reverts what the killed pass left behind first.
   const refusedNode: typeof catalogNodeDeployment = async () => ({ ok: false, reason: "Demos node serves another chain, not the pinned chain" });
   await assert.rejects(refreshWith(refusedNode), /catalog not updated: WRONG_CHAIN: /);
+  assertReplayRequired();
   assert.equal(snapshot(), before);
 });
