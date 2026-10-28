@@ -85,7 +85,6 @@ const indexNow = () => POST(new NextRequest("https://directory.example/api/dacs/
 const currentState = () => ({ chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: SCAN_STATE_SCHEMA_VERSION,
   lastSeenTxId: 1, listings: {}, deals: {} });
 const unchangedCatalog = { catalogVersion: "1" as const, generatedAt: 7, sellers: [] };
-const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
 /** The registration was not indexed and the catalog is unchanged. */
 async function assertRefused(status: number, error: RegExp, name: string): Promise<void> {
   storageReads = 0;
