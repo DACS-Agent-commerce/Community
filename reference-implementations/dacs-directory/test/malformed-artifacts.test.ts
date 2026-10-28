@@ -348,7 +348,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
     agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
@@ -356,7 +356,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
+    phaseSummary: [{ index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];
@@ -400,14 +400,14 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
     bundleBindings: [currentBinding, ...poisoned.bindings, ...valid.bindings],
   };
   const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
-  const record = await indexRegistration(registration, undefined, offline, undefined, undefined, undefined, {
-    ...fixtureCommitments,
-    resolve: async (jobId) => {
-      const agreement = Object.values({ ...poisoned.programs, ...valid.programs }).map((program) => JSON.parse(program.data) as Obj)
-        .find((raw) => raw.jobId === jobId && raw.agreementVersion === "1");
-      return agreement ? commitmentProof(agreement, agreement.listingRef as Obj, 90, false, { claim: buyer, seed: seeds[0] }) : null;
-    },
-  });
+  const agreements = new Map(Object.values({ ...poisoned.programs, ...valid.programs })
+    .map(program => JSON.parse(program.data) as Obj).filter(raw => raw.agreementVersion === "1")
+    .map(raw => [artifactHash(raw, "agreement"), raw]));
+  const commitment = { ...fixtureCommitments, resolve: async (context: import("../src/catalog/commitmentFinality.js").CommitmentContext) => {
+    const agreement = agreements.get(context.agreementHash);
+    return agreement ? commitmentProof(agreement, context.listingRef, 90, false, { claim: buyer, seed: seeds[0] }, [buyer, seller]) : null;
+  } };
+  const record = await indexRegistration(registration, undefined, offline, undefined, undefined, undefined, commitment);
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
   for (const jobId of ["job-legacy-malformed", "job-current-malformed", "job-poisoned"]) {
@@ -421,12 +421,12 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   assert.equal(byJob.get("job-valid")?.refsVerified, true);
   assert.equal(record.reputation.bundleCount, 1);
   resetIndex([registration], 45);
-  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
+  await reindexAll({ nodeDeployment: onPinnedChain, commitment, log: () => {}, resolveIdentities: offline });
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
-    assert.equal(run.omitted_deals, 0, "the default finality gate refuses these deals before summary extraction");
-    assert.equal(store.loadCatalog().sellers[0].deals.some((deal) => deal.refsVerified), false);
+    assert.equal(run.omitted_deals, 1, "the failed summary is counted in operator diagnostics");
+    assert.equal(store.loadCatalog().sellers[0].deals.some((deal) => deal.refsVerified), true);
   } finally { db.close(); }
 });
 
