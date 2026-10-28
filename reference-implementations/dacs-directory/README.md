@@ -396,7 +396,7 @@ base64url-patched Buffer).
 - **Committed deal credit requires authenticated commitment finality.** Authenticated current
   pre-commit abort copies, including single-signed anchoring copies, retain fault/cancellation
   evidence without a finality adapter. Their phase facts must match the signed Listing
-  before or at a failed commitment attempt, with no settlement, amendments or ratings. Current
+  strictly before commitment, with no agreement reference, settlement, amendments or ratings. Current
   and legacy indexer paths verify the commitment's session-orchestrator signature,
   exact agreement hash, Listing tuple, pattern and signing-party roster. New records
   use finalized receipt consensus time; legacy signed `committedAt` must equal it.

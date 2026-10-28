@@ -32,7 +32,7 @@ const partySignature = (index: number, prefix: string, scope: Obj) =>
 
 const listingScope: Obj = {
   agentId: seller, serviceId: "svc", name: "Service", description: "Legacy service", claimRequirements: [],
-  validity: { notBefore: 0 },
+  validity: { notBefore: 0 }, category: "services.analysis",
   supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-attested-payload"],
 };
 const listing = { ...listingScope, signature: signWith(1, `dacs-listing:v1:${contentHash(listingScope)}`, "hex") };
@@ -482,3 +482,109 @@ test("legacy agreement-less aborts retain the established reader refusal boundar
   ]);
   assert.equal((await indexed(deal)).deals[0].refsVerified, false);
 });
+
+async function historicalRecord(deal: RegisteredDeal, listingAnchors: string[], committedAt = 90, missingProof = false) {
+  let calls = 0;
+  const record = await indexWithoutCommitment({ primaryClaim: seller, displayName: "Seller", listingAnchors, deals: [deal] },
+    undefined, async () => { throw new Error("offline"); }, undefined, undefined, undefined, {
+      ...fixtureCommitments, resolve: async context => {
+        calls++;
+        const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(context.jobId))];
+        return missingProof ? null : commitmentProof(agreement, context.listingRef, committedAt, false, { claim: buyer, seed: seeds[0] });
+      },
+    });
+  return { record, calls };
+}
+for (const outcome of ["completed", "failed-perm"] as const) {
+  test(`authenticated ${outcome} legacy history and category do not depend on discovery pointers`, async () => {
+    const deal = legacyDeal(`history-${outcome}`, [{ role: "buyer", change: b => { b.outcome = outcome === "failed-perm" ? "failed-counterparty" : outcome; } },
+      { role: "seller", change: b => { b.outcome = outcome; } }]);
+    const { record, calls } = await historicalRecord(deal, []);
+    assert.equal(record.deals[0].signatureVerified, true);
+    assert.equal(record.deals[0].refsVerified, true);
+    assert.equal(record.deals[0].sellerOutcome, outcome);
+    assert.equal(record.deals[0].category, "services.analysis");
+    assert.equal(record.reputation.bundleCount, 1);
+    assert.equal(record.reputation.completed, outcome === "completed" ? 1 : 0);
+    assert.equal(calls, 2, "each signed copy qualifies independently");
+  });
+}
+for (const preload of ["unavailable", "32 unrelated pointers"] as const) {
+  test(`legacy history recovers when discovery has ${preload}, also on retry`, async () => {
+    const deal = legacyDeal(`preload-${preload}`, [{ role: "buyer" }, { role: "seller" }]);
+    const anchors = preload === "unavailable" ? [locator(1)] : Array.from({ length: 32 }, (_, i) => locator(100 + i));
+    for (let retry = 0; retry < 2; retry++) {
+      reads.clear(); flaky = new Set(preload === "unavailable" ? [locator(1)] : []);
+      const { record, calls } = await historicalRecord(deal, anchors);
+      assert.equal(record.deals[0].refsVerified, true);
+      assert.equal(record.deals[0].category, "services.analysis");
+      assert.equal(calls, 2);
+    }
+  });
+}
+for (const [committedAt, accepted] of [[59, false], [60, true], [100, true], [101, false]] as const) {
+  test(`empty-pointer history checks signed validity at consensus time ${committedAt}`, async () => {
+    const deal = legacyDeal(`history-time-${committedAt}`, [{ role: "buyer" }, { role: "seller" }]);
+    const scope = { ...listingScope, validity: { notBefore: 60, notAfter: 100 } };
+    const pin = { listingId: "svc", version: 1, contentHash: contentHash(scope) };
+    storage[locator(1)] = { ...scope, signature: signWith(1, `dacs-listing:v1:${contentHash(scope)}`, "hex") };
+    for (const at of [deal.buyerBundleRef, deal.sellerBundleRef!]) {
+      const body: Obj = { ...storage[at], listingRef: pin }; delete body.signatures; delete body.anchoredByRole;
+      storage[at] = { ...body, anchoredByRole: at === deal.buyerBundleRef ? "buyer" : "seller",
+        signatures: [0, 1].map(i => partySignature(i, "dacs-bundle:v1:", body)) };
+    }
+    const { record, calls } = await historicalRecord(deal, [], committedAt);
+    assert.equal(record.deals[0].refsVerified, accepted);
+    assert.equal(record.reputation.completed, accepted ? 1 : 0);
+    assert.equal(calls, 2);
+  });
+}
+
+test("empty-pointer history remains independent under concurrent verification", async () => {
+  const deal = legacyDeal("parallel-history", [{ role: "buyer" }, { role: "seller" }]); flaky.clear();
+  for (const { record, calls } of await Promise.all([historicalRecord(deal, []), historicalRecord(deal, [])])) {
+    assert.equal(record.deals[0].refsVerified, true); assert.equal(calls, 2);
+  }
+});
+
+test("empty-pointer history verifies in a fresh process", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const deal = legacyDeal("restart-history", [{ role: "buyer" }, { role: "seller" }]);
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { readFileSync } from 'node:fs';
+    import { indexRegistration } from './src/catalog/indexer.ts';
+    import { commitmentProof, fixtureCommitments } from './test/fixtures/commitment-proof.ts';
+    const input = JSON.parse(readFileSync(0, 'utf8')); let calls = 0;
+    globalThis.fetch = async url => { const raw=input.storage[String(url).split('/').pop()]; return raw
+      ? Response.json({ success:true, owner:input.owner, data:raw }) : new Response(null,{status:404}); };
+    const record = await indexRegistration(input.registration, undefined, async () => ({}), undefined, undefined, undefined,
+      { ...fixtureCommitments, resolve: async context => { calls++; return commitmentProof(input.agreement, context.listingRef, 90, false,
+        { claim: input.buyer, seed: Uint8Array.from(input.seed) }); } });
+    assert.equal(record.deals[0].refsVerified,true); assert.equal(record.deals[0].category,'services.analysis'); assert.equal(calls,2);
+  `], { input: JSON.stringify({ storage, owner: `0x${seller.slice(-64)}`, buyer, seed: [...seeds[0]],
+    agreement: storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(deal.jobId))],
+    registration: { primaryClaim: seller, displayName: "Seller", listingAnchors: [], deals: [deal] } }), encoding: "utf8", env: process.env, timeout: 30_000 });
+  assert.equal(child.status, 0, child.stderr);
+});
+
+for (const failure of ["missing proof", "Listing signature", "Listing hash", "Listing seller", "copy mismatch"] as const) {
+  test(`empty discovery coverage never weakens ${failure} verification`, async () => {
+    const deal = legacyDeal(`negative-history-${failure}`, [{ role: "buyer" }, { role: "seller" }]);
+    if (failure === "Listing signature") storage[locator(1)] = { ...listing, signature: "00".repeat(64) };
+    if (failure === "Listing hash") storage[locator(1)] = { ...listing, name: "changed" };
+    if (failure === "Listing seller") {
+      const scope = { ...listingScope, agentId: outsider };
+      storage[locator(1)] = { ...scope, signature: signWith(2, `dacs-listing:v1:${contentHash(scope)}`, "hex") };
+      for (const at of [deal.buyerBundleRef, deal.sellerBundleRef!]) {
+        const body: Obj = { ...storage[at], listingRef: { listingId: "svc", version: 1, contentHash: contentHash(scope) } };
+        delete body.signatures; delete body.anchoredByRole;
+        storage[at] = { ...body, anchoredByRole: at === deal.buyerBundleRef ? "buyer" : "seller",
+          signatures: [0, 1].map(i => partySignature(i, "dacs-bundle:v1:", body)) };
+      }
+    }
+    if (failure === "copy mismatch") storage[deal.sellerBundleRef!] = { ...storage[deal.sellerBundleRef!], outcome: "failed-perm" };
+    const { record } = await historicalRecord(deal, [], 90, failure === "missing proof");
+    assert.equal(record.deals[0].refsVerified, false); assert.equal(record.reputation.bundleCount, 0);
+  });
+}
