@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { onPinnedChain } from "./fixtures/pinned-node.js";
+import { nodeOnChain, onPinnedChain } from "./fixtures/pinned-node.js";
 import { refuseCatalogWrites } from "./fixtures/refuse-catalog-writes.js";
 
 // POST /api/dacs/index-now writes the public catalog, so it passes the same
@@ -367,3 +368,34 @@ test("a state with no recorded chain keeps each seller's registeredAt and badges
   assert.equal(rebuilt.registeredAt, 1);
   assert.deepEqual(rebuilt.cci, [cciBadge]);
 });
+
+// Last successful chain provenance must survive every refused writer until a new complete pass.
+for (const [writer, write] of [
+  ["index-now", async () => { assert.ok([409, 503].includes((await indexNow()).status)); }],
+  ["batch", async () => { await assert.rejects(reindexAll(offlinePass), /catalog not updated:/); }],
+] as const) for (const [loss, changed] of [
+  ["chain change", { chain: "aa".repeat(32) }], ["timeout", { failure: "timeout" }],
+] as const) {
+  test(`a re-pin after ${writer} ${loss} clears foreign evidence even when rebuilding fails`, async () => {
+    const hash = await withdrawnOnEarlierPass({});
+    onStorageRead = () => { node = { ...node, ...changed }; };
+    try { await write(); } finally { onStorageRead = () => {}; }
+    const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { loadScanState } from './src/catalog/store.ts';
+      const state = loadScanState();
+      assert.equal(state.chainIdentity ?? state.withheldChainIdentity, ${JSON.stringify(PINNED_DEMOS_CHAIN_IDENTITY)});
+    `], { encoding: "utf8", timeout: 30_000, env: process.env });
+    assert.equal(restarted.status, 0, restarted.stderr);
+    node = { nodeVersion: cleanBuild, chain: "aa".repeat(32), historyDown: true };
+    const repinned = { ...offlinePass, nodeDeployment: nodeOnChain(node.chain) };
+    await assert.rejects(reindexAll(repinned), /chain scan failed/);
+    assert.deepEqual(store.loadCatalog().sellers, [], "foreign catalog is hidden before the failed rebuild");
+    assert.equal(store.retainedListingRevocation(hash), null, "foreign withdrawals are cleared");
+    node = { ...node, historyDown: false };
+    await reindexAll(repinned);
+    assert.equal(listingStatus(), "active", "a restarted rebuild cannot reuse a foreign withdrawal");
+    assert.equal(store.loadScanState().chainIdentity, node.chain);
+    node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  });
+}
