@@ -26,6 +26,9 @@ import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnown
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
+  openChainReadWindow,
+  commitChainReadWindow,
+  revertChainReadWindow,
   loadCatalog,
   loadDomains,
   loadFixtureSeeds,
@@ -38,15 +41,14 @@ import {
   loadWithdrawalCursor,
   saveWithdrawalCursor,
   finishWithdrawalCarriageReplay,
-  saveCatalog,
+  loadCatalogChain,
+  invalidateCatalogChain,
+  resetCatalogChain,
+  publishCatalogChain,
   saveScanState,
   beginScanRun,
   finishScanRun,
   loadRetryableArtifacts,
-  clearChainDerivedArtifacts,
-  openChainReadWindow,
-  commitChainReadWindow,
-  revertChainReadWindow,
   recordArtifact,
   pruneFailureHistory,
   pruneListingRejections,
@@ -79,9 +81,9 @@ export interface ReindexOptions {
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
+  revertChainReadWindow();
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
-  revertChainReadWindow();
   // A refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
   function refuse(error: string): never {
     const { lastSeenTxId } = loadScanState();
@@ -91,39 +93,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const served = await servedCatalogChain(opts.nodeDeployment);
   if (!served.ok) return refuse(`catalog not updated: ${served.cause}`);
   if (served.warning) log(`node build warning: ${served.warning}`);
-  // Node reads made after the gate are persisted only while the node still serves the gated chain.
+  // Reads made after the gate are saved only after the node is seen to serve the gated chain again.
   const chainChange = async (): Promise<string | null> => {
     const again = await servedChainUnchanged(served.chainIdentity, opts.nodeDeployment);
     return again.ok ? null : `the served chain changed during the pass: ${again.cause}`;
   };
-  const regs: (Registration & { discovered?: boolean })[] = [];
-  for (const raw of loadRegistrations()) {
-    // The registration and its binding count are checked before any binding is verified;
-    // admitted bindings are then verified one at a time.
-    const rawBindings: unknown = raw?.bundleBindings;
-    const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
-    let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
-    if (parsed.ok && admitted) {
-      const bindings: BundleBinding[] = [];
-      for (const binding of admitted) {
-        const verified = await verifyBundleBinding(binding);
-        if (verified) bindings.push(verified);
-      }
-      omitted.omittedBindings += admitted.length - bindings.length;
-      parsed = parseRegistration({ ...raw, bundleBindings: bindings });
-    }
-    if (!parsed.ok) {
-      omitted.omittedSellers++;
-      const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
-      log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
-      continue;
-    }
-    // Verified before crawl data is merged in, which changes what the owner signed.
-    regs.push({ ...parsed.value, ownerSigned: await ownerSignedRegistration(parsed.value),
-      ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
-        ? { listingContentHashes: raw.listingContentHashes } : {}),
-    });
-  }
   let prior = loadCatalog();
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
@@ -139,96 +113,92 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  // Only a recorded chain other than the served one proves the cached evidence is foreign. No
-  // recorded chain (an upgrade or an unfinished reset) is not that proof: the
-  // state replays from genesis below, like a schema bump, and keeps its withdrawal evidence. A
-  // verified withdrawal is the seller's signature over that Listing, so keeping it fails closed (RB-3).
-  const previousChain = state.chainIdentity ?? state.withheldChainIdentity;
-  const chainReplaced = previousChain !== undefined && previousChain !== served.chainIdentity;
+  const control = loadCatalogChain();
+  const chainReplaced = control !== null && control.evidenceChain !== served.chainIdentity;
   const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
+  // Decide from the admitted snapshot before clearing readiness for this run.
+  const needsHistoryReplay = chainReplaced || tipRegressed || !scanStateCurrent(state, served.chainIdentity, control);
   if (chainReplaced || tipRegressed) {
     const previousCursor = state.lastSeenTxId;
-    // Every reset follows a read of the gated chain, so a node changing chain resets nothing.
     const changed = await chainChange();
     if (changed) return refuse(`catalog not updated: ${changed}`);
-    // A replaced chain's catalog is no evidence for the rebuild and is emptied first; until the
-    // reset state below is saved, the recorded identity keeps the reset due. A tip regression
-    // keeps serving its catalog, and the rebuild falls back on it, until the rebuild replaces it.
-    if (chainReplaced) {
-      prior = { catalogVersion: "1", generatedAt: Date.now(), sellers: [] };
-      saveCatalog(prior);
-    }
-    clearChainDerivedArtifacts();
-    state = normalizeScanState({
-      // No identity and no current schema: only a complete replay stamps them.
-      schemaVersion: 0,
-      lastSeenTxId: 0,
-      ...(observedChainTip === null ? {} : { lastChainTip: observedChainTip }),
-      listings: {},
-      deals: {},
-      programs: {},
-      revocations: {},
-      verifiedRevocations: {},
-      bundleBindings: {},
-      bundleBindingOverflow: [],
-      anchorBackfillComplete: false,
-    });
-    saveScanState(state);
-    log(
-      `${chainReplaced ? "chain replacement detected: the node serves another chain than the recorded one"
-        : `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
-        `cleared chain-derived cache and restarting from genesis`,
-    );
-  } else if (state.chainIdentity === undefined) {
+    try { state = resetCatalogChain(served.chainIdentity, chainReplaced, observedChainTip); }
+    catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
+    prior = loadCatalog();
+    log(`chain replacement detected: ${chainReplaced ? "the node serves another chain than the recorded one" :
+      `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
+      "cleared chain-derived cache and restarting from genesis");
+  } else if (!control) {
     log("no chain is recorded for the cached state; replaying history from genesis");
   }
-  // v9 replays history to recover duplicate programs discarded by older caches.
-  // It retains earlier storage classification, binding and consensus-time replays.
-  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
-  // A reset state records no chain identity and replays, like a schema bump.
-  const needsHistoryReplay = !scanStateCurrent(state, served.chainIdentity);
-  // Overflow is recomputed per signer from the replayed bindings.
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
   const sinceTxId = needsHistoryReplay ? 0 : Math.max(0, state.lastSeenTxId - overlap);
-  state.verifiedRevocations ??= Object.create(null);
-  state.bundleBindings ??= Object.create(null);
-  state.bundleBindingOverflow ??= [];
-  for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
-    const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
-    omitted.omittedBindings += raw.length - verified.length;
-    state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
-  }
-  // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
-  // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
-  for (const reg of regs) {
-    const verified = reg.bundleBindings ?? [];
-    for (const binding of verified) {
-      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
-      state.bundleBindings[binding.jobId] = bounded.bindings;
-      state.bundleBindingOverflow = [...new Set([
-        ...state.bundleBindingOverflow,
-        ...bounded.overflowKeys,
-      ])].sort();
-    }
-  }
-  for (const seller of prior.sellers) for (const listing of seller.listings) {
-    const locator = listing.revocation?.markerAnchor.locator;
-    if (!locator) continue;
-    const verified = state.verifiedRevocations[listing.contentHash] ?? [];
-    if (!verified.includes(locator)) verified.push(locator);
-    state.verifiedRevocations[listing.contentHash] = verified;
-  }
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
-    // Everything the pass saves from here on is made from node reads: the scan cursor, artifacts,
-    // candidates, replay progress and what indexing records. It stays provisional until the final
-    // chain check passes; a reset above is already final.
+    // Provenance survives every failure; absence of readiness requires full replay next time.
+    invalidateCatalogChain(served.chainIdentity);
     openChainReadWindow();
+    const regs: (Registration & { discovered?: boolean })[] = [];
+    for (const raw of loadRegistrations()) {
+      // The registration and its binding count are checked before any binding is verified;
+      // admitted bindings are then verified one at a time.
+      const rawBindings: unknown = raw?.bundleBindings;
+      const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
+      let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
+      if (parsed.ok && admitted) {
+        const bindings: BundleBinding[] = [];
+        for (const binding of admitted) {
+          const verified = await verifyBundleBinding(binding);
+          if (verified) bindings.push(verified);
+        }
+        omitted.omittedBindings += admitted.length - bindings.length;
+        parsed = parseRegistration({ ...raw, bundleBindings: bindings });
+      }
+      if (!parsed.ok) {
+        omitted.omittedSellers++;
+        const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
+        log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
+        continue;
+      }
+      // Verified before crawl data is merged in, which changes what the owner signed.
+      regs.push({ ...parsed.value, ownerSigned: await ownerSignedRegistration(parsed.value),
+        ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
+          ? { listingContentHashes: raw.listingContentHashes } : {}),
+      });
+    }
+    state.verifiedRevocations ??= Object.create(null);
+    state.bundleBindings ??= Object.create(null);
+    state.bundleBindingOverflow ??= [];
+    for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
+      const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
+      omitted.omittedBindings += raw.length - verified.length;
+      state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
+    }
+    // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
+    // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
+    for (const reg of regs) {
+      const verified = reg.bundleBindings ?? [];
+      for (const binding of verified) {
+        const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+        state.bundleBindings[binding.jobId] = bounded.bindings;
+        state.bundleBindingOverflow = [...new Set([
+          ...state.bundleBindingOverflow,
+          ...bounded.overflowKeys,
+        ])].sort();
+      }
+    }
+    for (const seller of prior.sellers) for (const listing of seller.listings) {
+      const locator = listing.revocation?.markerAnchor.locator;
+      if (!locator) continue;
+      const verified = state.verifiedRevocations[listing.contentHash] ?? [];
+      if (!verified.includes(locator)) verified.push(locator);
+      state.verifiedRevocations[listing.contentHash] = verified;
+    }
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
       knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
@@ -498,19 +468,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     });
     const indexChainChange = await chainChange();
     if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
-    // The scan state, the catalog and every write above are kept together or not at all.
+    // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
     commitChainReadWindow(() => {
-      if (needsHistoryReplay) {
-        // Stamped in the transaction that saves the rebuilt catalog, so an interrupted replay
-        // stays due and index-now refuses until the catalog matches this chain.
-        state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
-        state.chainIdentity = served.chainIdentity;
-        delete state.withheldChainIdentity;
-      }
-      saveScanState(state);
-      // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
       if (!crawlIncomplete) pruneListingRejections(allRegs);
-      saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+      publishCatalogChain({ catalogVersion: "1", generatedAt, sellers: catalogSellers }, state, served.chainIdentity);
     });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
