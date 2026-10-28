@@ -541,7 +541,16 @@ export async function indexRegistration(
       const bindingOk = bundleMatchesRegisteredDeal(bundle, deal, reg.primaryClaim);
       const authenticated = Boolean(verification) && legacyCopyCanVerifyRefs(signaturesOk, bindingOk, bundle?.anchoredByRole, expectedRole);
       let refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
-      const listed = bundle ? await resolveListing({ ...bundle.listingRef }) : null;
+      let listed: ListingEvidence | null = null;
+      if (refsOk && bundle) {
+        const artifact = resolvedArtifacts.find(a => a.kind === "dacs-1-listing");
+        const verified = artifact?.locator ? await verifyStoredListingResult(artifact.raw, artifact.locator) : null;
+        const seller = verified?.ok ? canonicalSigningIdentity(verified.value.sellerClaim) : null;
+        if (artifact?.locator && verified?.ok && verified.value.contentHash === bundle.listingRef.contentHash &&
+            seller && seller === canonicalSigningIdentity(deal.owners.seller)) {
+          listed = { raw: artifact.raw, locator: artifact.locator };
+        } else if (!artifact) listed = await resolveListing({ ...bundle.listingRef });
+      }
       const agreement = resolvedArtifacts.find((artifact) => artifact.kind === "dacs-3-agreement")?.raw;
       let commitmentContext: CommitmentContext | null = null;
       if (refsOk) {
@@ -550,7 +559,7 @@ export async function indexRegistration(
         commitmentContext = context || null;
         refsOk = Boolean(context && (await verifyListingCommitment(context, commitment)).ok);
       }
-      return { verification, bundle, signaturesOk, authenticated, refsOk, commitmentContext, rawBundle, resolvedArtifacts,
+      return { verification, bundle, signaturesOk, authenticated, refsOk, commitmentContext, listed, rawBundle, resolvedArtifacts,
         carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
     };
 
@@ -573,7 +582,7 @@ export async function indexRegistration(
     );
     const cancellationNeutral = isNeutralCancellation(sellerOutcome, cancellation, listingTerms, bundle?.phaseSummary);
     const selectedLocator = authoritative === sellerCopy ? deal.sellerBundleRef! : deal.buyerBundleRef;
-    const legacyListing = strictRefsVerified && bundle ? await resolveListing({ ...bundle.listingRef }) : null;
+    const legacyListing = strictRefsVerified ? authoritative.listed : null;
     dealCandidates.push({
       ...deal,
       signatureVerified: authoritative.signaturesOk,

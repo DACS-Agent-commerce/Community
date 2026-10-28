@@ -279,6 +279,7 @@ test("startup clears pre-finality cached credit atomically and repeats preserve 
   const fixture = await prepared(false, { notBefore: 3 });
   const record = await indexed(fixture, commitmentProof(fixture.agreement, fixture.agreement.listingRef as Obj));
   assert.equal(record.reputation.completed, 1);
+  assert.ok(record.deals[0].ratings?.length, "the authenticated fixture carries a rating");
   store.saveCatalog({ catalogVersion: "1", generatedAt: 150, sellers: [record] });
   const db = new Database(join(store.DATA_DIR, "directory.sqlite"));
   db.prepare("DELETE FROM kv_state WHERE key='commitment-finality-schema-version'").run();
@@ -291,6 +292,7 @@ test("startup clears pre-finality cached credit atomically and repeats preserve 
     return JSON.parse(child.stdout) as ReturnType<typeof store.loadCatalog>;
   };
   const cleared = restart();
+  assert.deepEqual(cleared.sellers[0].deals[0].ratings, []);
   assert.equal(cleared.sellers[0].deals[0].refsVerified, false);
   assert.equal(cleared.sellers[0].deals[0].reputationEligible, false);
   assert.equal(cleared.sellers[0].reputation.completed, 0);
@@ -459,6 +461,7 @@ test("failed policy-version write rolls back all derived-credit invalidation bef
   } finally { db.exec("DROP TRIGGER refuse_credit_version"); db.close(); }
   assert.equal(restart().status, 0);
   assert.equal(store.loadCatalog().sellers[0].deals[0].refsVerified, false);
+  assert.deepEqual(store.loadCatalog().sellers[0].deals[0].ratings, []);
   assert.equal((await indexed(f, proof)).deals[0].refsVerified, true);
 });
 
@@ -501,4 +504,45 @@ test("either signed withdrawal marker order and an unread-marker restart retain 
       programs: [...maps].filter(([at]) => !markers.some(marker => marker.locator === at)) }) });
     assert.equal(child.status, 0, child.stderr);
   }
+});
+
+for (const version of [1, 2]) test(`startup schema ${version} removes cached ratings from storage and seller API across concurrent restarts`, async t => {
+  t.mock.method(Date, "now", () => 150); storage(t);
+  const { spawn } = await import("node:child_process");
+  const { default: Database } = await import("better-sqlite3");
+  const { join } = await import("node:path");
+  const store = await import("../src/catalog/store.js");
+  const f = await prepared(false, { notBefore: 4 });
+  const record = await indexed(f, commitmentProof(f.agreement, f.agreement.listingRef as Obj));
+  assert.ok(record.deals[0].ratings?.length);
+  const records = [record, { ...record, primaryClaim: dids[2] }].map(s => ({ ...s,
+    deals: s.deals.map(d => ({ ...d, ratings: [...(d.ratings ?? []), ...(d.ratings ?? [])],
+      ...(version === 2 ? { refsVerified: false, reputationEligible: false } : {}) })) }));
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 150, sellers: records });
+  const db = new Database(join(store.DATA_DIR, "directory.sqlite"));
+  db.prepare("UPDATE kv_state SET value_json=? WHERE key='commitment-finality-schema-version'").run(JSON.stringify(version)); db.close();
+  const restart = () => new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { NextRequest } from 'next/server';
+      import * as store from './src/catalog/store.ts';
+      import { GET } from './app/api/dacs/sellers/[primaryClaimRef]/route.ts';
+      for (const seller of store.loadCatalog().sellers) {
+        for (const deal of seller.deals) { assert.deepEqual(deal.ratings, []); assert.equal(deal.refsVerified, false); }
+        assert.equal(seller.reputation.completed,0); assert.deepEqual(seller.reputation.observedTransactionalVolume,[]);
+        const response = await GET(new NextRequest('https://directory.example/api/dacs/sellers/'+encodeURIComponent(seller.primaryClaim)),
+          { params: Promise.resolve({ primaryClaimRef:seller.primaryClaim }) });
+        assert.equal(response.status,200); for (const deal of (await response.json()).deals) assert.deepEqual(deal.ratings,[]);
+      }
+    `], { env: process.env });
+    let error = ""; child.stderr.on("data", data => { error += data; });
+    child.on("error", reject); child.on("exit", code => code === 0 ? resolve() : reject(new Error(error)));
+  });
+  await Promise.all([restart(), restart()]);
+  await restart();
+  assert.deepEqual(store.loadCatalog().sellers.map(s => s.registeredAt), records.map(s => s.registeredAt));
+  assert.deepEqual(store.loadCatalog().sellers.map(s => s.deals.map(d => d.buyerBundleRef)), records.map(s => s.deals.map(d => d.buyerBundleRef)));
+  const check = new Database(join(store.DATA_DIR, "directory.sqlite"), { readonly: true });
+  try { assert.deepEqual(check.prepare("SELECT value_json FROM kv_state WHERE key='commitment-finality-schema-version'").get(), { value_json: "3" }); }
+  finally { check.close(); }
 });
