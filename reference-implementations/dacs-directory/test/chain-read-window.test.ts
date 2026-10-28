@@ -148,7 +148,12 @@ test("a release decided before a newer signed source update in the same window i
   const signed = signedBindingFor(domain, listingHash);
   store.openChainReadWindow();
   rejectMarker(signed);
+  assert.equal(boundCount(listingHash), 0, "the current source's release hides the binding");
   store.recordWellKnownWithdrawalCheck(domain, signedSeller, [listingHash], [], { generatedAt: 2, hash: "c".repeat(64) }, []);
+  // The newer source still carries the binding. Its revision invalidates the release, so a
+  // catalog calculated before the commit must already read the binding as holding the Listing.
+  assert.equal(boundCount(listingHash), 1, "a newer source revision makes the stale release invisible");
+  assert.equal(store.hasIncompleteWellKnownWithdrawal(signedSeller, listingHash), true);
   store.commitChainReadWindow(() => {});
   assert.equal(boundCount(listingHash), 1, "the stale release waits for a read against the newer source");
 });
@@ -218,6 +223,11 @@ test("a writer reverting a window a crash left open restores the binding its mar
 const CACHED_ARTIFACTS = 1_000;
 const CACHED_ARTIFACT_CHARACTERS = 120_000;
 const RECOVERY_HEAP_MEGABYTES = 128;
+// A hang guard, not a performance threshold. The child writes 120 MB of prior values in
+// individual FULL-synchronous transactions, so a slow CI disk can need minutes; 600 s is over
+// ten times the measured 48 s on a local disk, while the 128 MB heap still proves the revert
+// holds one undo row at a time.
+const RECOVERY_TIMEOUT_MILLISECONDS = 600_000;
 
 test("recovering a journal that holds many large prior rows needs memory for one row, not for all of them", () => {
   const recoveryDirectory = mkdtempSync(join(tmpdir(), "dacs-chain-read-window-heap-"));
@@ -237,10 +247,33 @@ test("recovering a journal that holds many large prior rows needs memory for one
       const restored = check.prepare("SELECT COUNT(*) count FROM artifacts WHERE length(data_json) > ${CACHED_ARTIFACT_CHARACTERS}").get().count;
       const journaled = check.prepare("SELECT COUNT(*) count FROM unconfirmed_chain_writes").get().count;
       console.log(JSON.stringify({ restored, journaled }));
-    `], { encoding: "utf8", timeout: 120_000, env: { ...process.env, DACS_DIRECTORY_DATA: recoveryDirectory } });
+    `], { encoding: "utf8", timeout: RECOVERY_TIMEOUT_MILLISECONDS, env: { ...process.env, DACS_DIRECTORY_DATA: recoveryDirectory } });
     assert.equal(recovery.status, 0, recovery.stderr.slice(-2_000));
     assert.deepEqual(JSON.parse(recovery.stdout.trim().split("\n").pop() ?? ""), { restored: CACHED_ARTIFACTS, journaled: 0 });
   } finally {
     rmSync(recoveryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("a database an operator analyzed can still open a refresh window", () => {
+  const analyzedDirectory = mkdtempSync(join(tmpdir(), "dacs-chain-read-window-analyzed-"));
+  try {
+    // ANALYZE creates sqlite_stat1/sqlite_stat4, which SQLite refuses to accept triggers on. A fresh
+    // process proves the window skips them instead of failing every refresh at its first write.
+    const analyzed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import Database from "better-sqlite3";
+      import { join } from "node:path";
+      const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
+      const analyzer = new Database(join(process.env.DACS_DIRECTORY_DATA, "directory.sqlite"));
+      analyzer.exec("ANALYZE");
+      analyzer.close();
+      store.openChainReadWindow();
+      store.revertChainReadWindow();
+      console.log("ok");
+    `], { encoding: "utf8", timeout: 60_000, env: { ...process.env, DACS_DIRECTORY_DATA: analyzedDirectory } });
+    assert.equal(analyzed.status, 0, analyzed.stderr.slice(-2_000));
+    assert.equal(analyzed.stdout.trim().split("\n").pop(), "ok");
+  } finally {
+    rmSync(analyzedDirectory, { recursive: true, force: true });
   }
 });
