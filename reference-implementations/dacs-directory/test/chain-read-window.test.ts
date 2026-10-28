@@ -223,6 +223,11 @@ test("a writer reverting a window a crash left open restores the binding its mar
 const CACHED_ARTIFACTS = 1_000;
 const CACHED_ARTIFACT_CHARACTERS = 120_000;
 const RECOVERY_HEAP_MEGABYTES = 128;
+// A hang guard, not a performance threshold. The child writes 120 MB of prior values in
+// individual FULL-synchronous transactions, so a slow CI disk can need minutes; 600 s is over
+// ten times the measured 48 s on a local disk, while the 128 MB heap still proves the revert
+// holds one undo row at a time.
+const RECOVERY_TIMEOUT_MILLISECONDS = 600_000;
 
 test("recovering a journal that holds many large prior rows needs memory for one row, not for all of them", () => {
   const recoveryDirectory = mkdtempSync(join(tmpdir(), "dacs-chain-read-window-heap-"));
@@ -242,7 +247,7 @@ test("recovering a journal that holds many large prior rows needs memory for one
       const restored = check.prepare("SELECT COUNT(*) count FROM artifacts WHERE length(data_json) > ${CACHED_ARTIFACT_CHARACTERS}").get().count;
       const journaled = check.prepare("SELECT COUNT(*) count FROM unconfirmed_chain_writes").get().count;
       console.log(JSON.stringify({ restored, journaled }));
-    `], { encoding: "utf8", timeout: 120_000, env: { ...process.env, DACS_DIRECTORY_DATA: recoveryDirectory } });
+    `], { encoding: "utf8", timeout: RECOVERY_TIMEOUT_MILLISECONDS, env: { ...process.env, DACS_DIRECTORY_DATA: recoveryDirectory } });
     assert.equal(recovery.status, 0, recovery.stderr.slice(-2_000));
     assert.deepEqual(JSON.parse(recovery.stdout.trim().split("\n").pop() ?? ""), { restored: CACHED_ARTIFACTS, journaled: 0 });
   } finally {
