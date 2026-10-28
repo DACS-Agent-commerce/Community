@@ -5,7 +5,10 @@ import { deriveSellerReputation } from "../src/catalog/reputation.js";
 import type { DealRecord } from "../src/catalog/types.js";
 
 const copy = (refsOk = true, outcome = "completed", phaseOutcome = "ok") => ({
-  refsOk,
+  refsOk, authenticated: refsOk,
+  commitmentContext: { jobId: "job", listingRef: { listingId: "svc", version: 1, contentHash: "a".repeat(64) },
+    agreementHash: "b".repeat(64), pattern: "fixed-price" as const, parties: ["buyer", "seller"] as const,
+    deadline: 1000, validity: { notBefore: 0 } },
   bundle: { bundleVersion: "1", outcome, phaseSummary: [{ index: 0, kind: "commit-agreement", outcome: phaseOutcome }] },
 });
 
@@ -107,4 +110,12 @@ test("all six agreeing terminal outcomes are eligible with independent reputatio
   assert.equal(all.completionRate, 1 / 5);
   assert.equal(all.counterpartyAdjustedCompletionRate, 1 / 3);
   assert.equal(all.counterpartyFaultRate, 2 / 5);
+});
+
+test("legacy copies cannot share credit across different commitment contexts", () => {
+  const buyer = copy(); const seller = copy();
+  seller.commitmentContext.agreementHash = "c".repeat(64);
+  const result = reconcileLegacyCopies(buyer, seller);
+  assert.equal(result.authoritative, seller);
+  assert.equal(result.refsVerified, false);
 });

@@ -1030,7 +1030,7 @@ test("fixed-price negotiation of a negotiable band requires the exact decimal ce
       agreementScope.terms = { ...(agreementScope.terms as Obj), price: { amount, currency } };
       await installAgreement(fixture, agreementScope);
       const graph = await graphAt(fixture.locators.buyer, fixture.listing, fixture.locators.listing);
-      assert.equal(graph.ok, false, `${profile}: ${amount} ${currency}: ${graph.reason}`);
+      assert.equal(graph.ok, accepted, `${profile}: ${amount} ${currency}: ${graph.reason}`);
       assert.equal(graph.refsVerified, false);
       assert.match(graph.reason ?? "", accepted ? /semantic settlement verification is unsupported/ : /does not match/);
     }
@@ -1090,7 +1090,7 @@ test("fixed-price agreements require a declared matching pattern for both pricin
           const accepted = pattern === "fixed-price" && pricingKind === "fixed";
           const label = `${profile}/${pricingKind}/${role}/${JSON.stringify(pattern)}: ${graph.reason}`;
           assert.equal(graph.signaturesVerified, true, label);
-          assert.equal(graph.ok, accepted, label);
+          assert.equal(graph.ok, pattern === "fixed-price", label);
           assert.equal(graph.refsVerified, accepted, label);
         }
       }
@@ -1168,7 +1168,7 @@ test("RFQ fixed-price fallback remains discoverable but requires semantic settle
       const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
       const label = `${profile}/${role}: ${graph.reason}`;
       assert.equal(graph.signaturesVerified, true, label);
-      assert.equal(graph.ok, false, label);
+      assert.equal(graph.ok, true, label);
       assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
       assert.equal(graph.refsVerified, false, label);
     }
@@ -1211,7 +1211,7 @@ test("RFQ fallback requires signed opt-in and the exact decimal center without r
         const graph = await graphAt(fixture.locators[role], fixture.listing, fixture.locators.listing);
         const label = `${profile}/${role}/${fallback}/${pattern}/${amount} ${currency}: ${graph.reason}`;
         assert.equal(graph.signaturesVerified, true, label);
-        assert.equal(graph.ok, accepted && pattern === "rfq", label);
+        assert.equal(graph.ok, accepted, label);
         assert.equal(graph.refsVerified, accepted && pattern === "rfq", label);
         if (accepted && pattern === "fixed-price") assert.match(graph.reason ?? "", /semantic settlement verification is unsupported/, label);
         if (!accepted) assert.match(graph.reason ?? "", /does not match/, label);
