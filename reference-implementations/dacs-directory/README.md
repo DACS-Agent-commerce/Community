@@ -240,26 +240,26 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   Chain gate: a reindex or `POST /api/dacs/index-now` first reads the chain the node
-   serves. When the node cannot be read (index-now: 503) or serves a chain other than
-   `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
-   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
-   saves what it read, the served chain is read again. From before its first write (the scan
-   cursor, artifacts, revocation candidates and progress, rejections), everything a pass saves from
-   node reads is journaled with the statement that undoes it. The journal is confirmed in the same
-   transaction that saves the scan state and the catalog; when that read fails, the run fails, or a
-   crash interrupts it, the next writer undoes the writes. Withdrawal sources a publisher signed
-   (the crawl's declarations) are kept, as are registrations and domains; a binding release that a
-   marker read decides is journaled and applied only on commit. Each complete pass
-   records the chain it scanned in that same transaction. A state recorded on another chain (a
-   re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
-   artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin
-   drops the earlier catalog, emptying the public catalog first; a tip regression keeps serving it
-   until the rebuild is saved. A state with no recorded chain (an upgrade or an unfinished reset)
-   is not proof of another chain: it replays from genesis and keeps its retained revocations and
-   earlier catalog, so a verified withdrawal stays in force (RB-3).
-   A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records no chain, so raise the cap.
-   index-now answers 409 until a complete pass on this chain is recorded.
+   Chain gate: reindex and `POST /api/dacs/index-now` first check the served chain.
+   An unreadable node (503) or wrong chain (409) changes no evidence or control;
+   batch failures record their timeout, transport, unreadable-genesis or wrong-chain cause.
+   Build drift is a diagnostic warning. A fixed `catalog-chain` record binds evidence
+   provenance independently of completion. Legacy caches adopt their first admitted chain;
+   older scanner labels migrate without losing known provenance. Both retain withdrawals
+   and the earlier catalog while requiring a full replay.
+   Before provisional work, both writers durably clear readiness. A throw, process death,
+   failed save, final refusal or scan cap leaves provenance intact and requires full replay.
+   Only a complete pass and successful final chain check atomically publish the catalog,
+   scanner/schema and readiness. Index-now requires that completed replay; it cannot finish one.
+   A known replacement is rechecked, then atomically clears foreign catalog, discoveries,
+   artifacts, rejections and retained revocations, resets progress and binds the target chain.
+   Same-chain tip regression resets progress and derived rows while retaining the earlier catalog.
+   A replay exceeding `DACS_SCAN_MAX_TXS` publishes nothing; raise the cap to cover history.
+   Node-derived writes inside a refresh are journaled until the final gate confirms them.
+   Journal completion and catalog/scanner/readiness publication commit in one transaction.
+   Refusal, throw or restart undoes provisional node effects, retaining publisher-signed
+   declarations, registrations and domains. Marker-derived binding releases are staged
+   until commit. Reset provenance and the replay requirement remain outside this undo window.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those

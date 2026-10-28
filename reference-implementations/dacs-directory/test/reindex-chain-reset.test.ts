@@ -25,6 +25,7 @@ process.env.DEMOS_RPC = "https://rpc.example";
 process.env.DACS_SCAN_RESET_THRESHOLD = "1000";
 
 const store = await import("../src/catalog/store.js");
+const { seedScanState, readyChain } = await import("./fixtures/chain-state.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { SCAN_STATE_SCHEMA_VERSION } = await import("../src/catalog/scanState.js");
 
@@ -34,7 +35,7 @@ test.after(() => {
 });
 
 test("reindex clears replaced-chain discoveries and rescans from genesis in one run", async () => {
-  store.saveScanState({
+  seedScanState({
     schemaVersion: 4,
     lastSeenTxId: 147_262,
     // Old releases retained the high cursor but overwrote this observation
@@ -103,7 +104,7 @@ const assertNothingFromOldChain = () => {
 
 test("a node that is refused or cannot be read fails the pass and changes nothing", async () => {
   store.saveRegistrations([]);
-  store.saveScanState(oldChainState());
+  seedScanState(oldChainState());
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "kept", 5);
   const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
@@ -133,21 +134,21 @@ test("a node that is refused or cannot be read fails the pass and changes nothin
 
 test("a re-pin empties the catalog first and carries nothing from the replaced chain into the rebuild", async () => {
   store.saveRegistrations([]);
-  store.saveScanState(oldChainState());
+  seedScanState(oldChainState());
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "old chain", 1);
   // The rebuild's first scan fails: the old catalog is already gone and the reset stays due.
   globalThis.fetch = async () => { throw new Error("node unavailable"); };
   await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(NEW_CHAIN) }), /chain scan failed/);
   assertNothingFromOldChain();
-  assert.equal(store.loadScanState().chainIdentity, undefined);
+  assert.equal(readyChain(), undefined);
   assert.equal(store.loadScanState().schemaVersion, 0);
 
   serveFiveTransactions();
   const logs: string[] = [];
   await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeOnChain(NEW_CHAIN) });
   assertNothingFromOldChain();
-  assert.equal(store.loadScanState().chainIdentity, NEW_CHAIN);
+  assert.equal(readyChain(), NEW_CHAIN);
   assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
   assert.equal(logs.some((line) => line.includes("chain replacement detected")), false, "the replacement is detected once");
 });
@@ -162,10 +163,10 @@ test("a re-pin interrupted after each reset step converges on the next pass", as
     store.saveCatalog(emptyCatalog);
     store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "old chain", 1);
     if (step !== "a") store.clearChainDerivedArtifacts();
-    store.saveScanState(step === "c" ? resetState : oldChainState());
+    seedScanState(step === "c" ? resetState : oldChainState());
     await reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(NEW_CHAIN) });
     assertNothingFromOldChain();
-    assert.equal(store.loadScanState().chainIdentity, NEW_CHAIN, step);
+    assert.equal(readyChain(), NEW_CHAIN, step);
     assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION, step);
   }
 });
@@ -188,19 +189,19 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   try {
     // A legacy cache with no recorded chain records none, keeps its discoveries and keeps serving its catalog.
     store.saveRegistrations([]);
-    store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 8, listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
+    seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 8, listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
     const legacyCatalog = store.loadCatalog();
     await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }), /DACS_SCAN_MAX_TXS=4/);
-    assert.equal(store.loadScanState().chainIdentity, undefined);
+    assert.equal(readyChain(), undefined);
     assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
     assert.deepEqual(Object.keys(store.loadScanState().listings), [oldAnchor]);
     assert.deepEqual(store.loadCatalog(), legacyCatalog);
 
     // A re-pin stays reset: no chain, an old schema, an empty catalog.
-    store.saveScanState(oldChainState());
+    seedScanState(oldChainState());
     await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }), /DACS_SCAN_MAX_TXS=4/);
-    assert.equal(store.loadScanState().chainIdentity, undefined);
+    assert.equal(readyChain(), undefined);
     assert.equal(store.loadScanState().schemaVersion, 0);
     assert.deepEqual(store.loadCatalog().sellers, []);
   } finally {
@@ -208,7 +209,7 @@ test("a replay longer than DACS_SCAN_MAX_TXS fails closed and records no chain u
   }
   // With a cap that covers the history, one pass records the chain and the schema together.
   await reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) });
-  assert.equal(store.loadScanState().chainIdentity, CHAIN);
+  assert.equal(readyChain(), CHAIN);
   assert.equal(store.loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
   assert.equal(store.loadScanState().lastSeenTxId, 10);
   serveFiveTransactions();
@@ -223,7 +224,7 @@ test("a state with no recorded chain replays from genesis and keeps its evidence
     finally { db.close(); }
   };
   store.saveRegistrations([]);
-  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, lastChainTip: 5,
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, lastChainTip: 5,
     listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {}, verifiedRevocations: { [oldContentHash]: [oldMarker] } });
   store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "unknown chain", 1);
   const logs: string[] = [];
@@ -242,7 +243,7 @@ test("a re-pin or legacy reset whose node changes chain before the reset changes
   serveFiveTransactions();
   for (const [name, saved] of [["re-pin", oldChainState()], ["legacy", { ...oldChainState(), chainIdentity: undefined }]] as const) {
     store.saveRegistrations([]);
-    store.saveScanState(saved);
+    seedScanState(saved);
     store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
     store.recordArtifactFailure(`stor-${"c".repeat(40)}`, "listing", "STORAGE_UNREADABLE", "kept", 5);
     const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
@@ -258,13 +259,13 @@ test("same-chain tip regression resets only beyond the configured threshold", as
   const CHAIN = "d".repeat(64);
   for (const [previousTip, reset] of [[2000, true], [500, false]] as const) {
     // An earlier zero-work pass retained the cursor but stored the replacement's low tip.
-    store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: previousTip, lastChainTip: 5,
+    seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: previousTip, lastChainTip: 5,
       listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
     const logs: string[] = [];
     await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeOnChain(CHAIN) });
     assert.equal(Object.hasOwn(store.loadScanState().listings, oldAnchor), !reset);
     assert.equal(logs.some((line) => line.includes("chain replacement detected")), reset);
-    assert.equal(store.loadScanState().chainIdentity, CHAIN);
+    assert.equal(readyChain(), CHAIN);
   }
 });
 
@@ -275,7 +276,7 @@ const servedChainChanged = /catalog not updated: the served chain changed during
 test("a node that changes chain during the history scan fails the pass before its reads are saved", async () => {
   serveFiveTransactions();
   store.saveRegistrations([]);
-  store.saveScanState({ ...oldChainState(), chainIdentity: NEW_CHAIN });
+  seedScanState({ ...oldChainState(), chainIdentity: NEW_CHAIN });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
   await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, CHANGED_CHAIN) }), servedChainChanged);
@@ -289,19 +290,19 @@ test("a node that changes chain while sellers are indexed saves no catalog and r
   serveFiveTransactions();
   store.saveRegistrations([]);
   store.clearChainDerivedArtifacts();
-  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, listings: {}, deals: {} });
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, listings: {}, deals: {} });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   const catalog = store.loadCatalog();
   await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }),
     servedChainChanged);
   assert.deepEqual(store.loadCatalog(), catalog);
-  assert.equal(store.loadScanState().chainIdentity, undefined);
+  assert.equal(readyChain(), undefined);
   assert.equal(lastRunRow().status, "failed");
 });
 
 test("a low tip read after the node changed chain does not reset the cache", async () => {
   serveFiveTransactions();
-  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 2000, lastChainTip: 5,
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 2000, lastChainTip: 5,
     listings: { [oldAnchor]: `0x${"b".repeat(64)}` }, deals: {} });
   const state = store.loadScanState();
   const logs: string[] = [];
@@ -318,7 +319,7 @@ test("an anchor backfill read while the node served another chain is deferred, n
   store.clearChainDerivedArtifacts();
   store.recordArtifact({ locator: `stor-${"9".repeat(40)}`, kind: "bundle", profile: "dacs-v0.1", contentHash: "9".repeat(64),
     observedAt: 1, data: {} });
-  store.saveScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 3, listings: {}, deals: {} });
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 3, listings: {}, deals: {} });
   const logs: string[] = [];
   // Gate, history scan, backfill, then indexing: only the backfill saw the other chain.
   await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN, NEW_CHAIN) });
