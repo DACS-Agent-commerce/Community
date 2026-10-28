@@ -68,5 +68,9 @@ export function currentLifecycle(bundle: Obj, listing: Obj): "pre-commit" | "com
   if (!reached && phases.some(p => Number(p?.index) > boundary)) return "refused";
   const empty = [bundle.settlementEvidence, bundle.amendments ?? [], bundle.ratingRefs ?? []]
     .every(value => Array.isArray(value) && value.length === 0);
-  return abort && !reached ? empty ? "pre-commit" : "refused" : "committed";
+  if (abort && !reached) {
+    if (!empty || phases.some(p => Number(p?.index) >= boundary)) return "refused";
+    return bundle.agreementRef === undefined ? "pre-commit" : "committed";
+  }
+  return "committed";
 }
