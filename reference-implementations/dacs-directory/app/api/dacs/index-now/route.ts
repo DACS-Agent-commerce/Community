@@ -8,10 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { requireAdmin } from "@/src/catalog/security";
-import {
-  commitChainReadWindow, loadCatalog, loadRegistrations, loadScanState,
-  openChainReadWindow, revertChainReadWindow, saveCatalog, withDataLock,
-} from "@/src/catalog/store";
+import { openChainReadWindow, commitChainReadWindow, revertChainReadWindow, loadCatalog, loadRegistrations, loadScanState, loadCatalogChain, invalidateCatalogChain, publishCatalogChain, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
@@ -28,25 +25,26 @@ export async function POST(req: NextRequest) {
     if (!served.ok) return NextResponse.json({ error: `catalog not updated: ${served.cause}` }, { status: served.status });
     // Until a complete pass on this chain has been scanned, older withdrawals may be missing:
     // another recorded chain, a legacy or reset state, an unfinished replay, an old schema.
-    if (!scanStateCurrent(loadScanState(), served.chainIdentity)) {
+    const state = loadScanState();
+    if (!scanStateCurrent(state, served.chainIdentity, loadCatalogChain())) {
       return NextResponse.json({ error: "catalog not updated: no complete reindex on this chain yet; run a full reindex first" },
         { status: 409 });
     }
     const catalog = loadCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
-    // Indexing persists node reads as it goes; they and the catalog are kept only if the node
-    // still serves the gated chain afterwards, and are reverted otherwise or on any failure.
+    invalidateCatalogChain(served.chainIdentity);
     openChainReadWindow();
     try {
       const record = await indexRegistration(reg, prior);
       const unchanged = await servedChainUnchanged(served.chainIdentity);
-      if (!unchanged.ok) return NextResponse.json({ error: `catalog not updated: ${unchanged.cause}` }, { status: unchanged.status });
+      if (!unchanged.ok) {
+        return NextResponse.json({ error: `catalog not updated: ${unchanged.cause}` }, { status: unchanged.status });
+      }
       const i = catalog.sellers.findIndex((s) => s.primaryClaim === claim);
       if (i >= 0) catalog.sellers[i] = record;
       else catalog.sellers.push(record);
       catalog.generatedAt = Date.now();
-      // The catalog and the reads behind it are kept together or not at all.
-      commitChainReadWindow(() => saveCatalog(catalog));
+      commitChainReadWindow(() => publishCatalogChain(catalog, state, served.chainIdentity));
       return NextResponse.json({
         ok: true,
         nodeBuildWarning: served.warning,
