@@ -429,12 +429,11 @@ base64url-patched Buffer).
   binding signed through another ClaimReference/key-resolution method is not carried or
   used until that resolver is configured; it fails closed to `indeterminate` rather
   than being relabelled as verified.
-- **Listing versions are allocated from observed catalog state**, without a mutable
-  in-process lock. Publishers must serialize writes for one `seller + listingId` until
-  the substrate or SDK provides an atomic version allocator; concurrent publishers can
-  otherwise propose the same next version. An occupied version whose owner-held program
-  no longer authenticates blocks publication for that listing ID. Recover by publishing
-  under a new listing ID; the publisher does not skip the occupied version.
+- **Listing versions are allocated from observed catalog state.** Authenticated
+  preparations reserve one create per configured chain and logical version; concurrent
+  publishers cannot replace the first saved transaction. An occupied version whose
+  owner-held program no longer authenticates blocks publication for that listing ID.
+  Recover by publishing under a new listing ID; the publisher never skips a version.
 - **New Listing versions use producer-name checks and an optional logical resolver.**
   Without a resolver, the builder permits creation only when this producer's current
   and legacy program names are absent and the requested version equals the next
@@ -454,22 +453,21 @@ base64url-patched Buffer).
   Request fields cannot supply this authority. Adapters must bound network bytes
   before decoding and honor cancellation; the builder also bounds results and enforces
   a deadline. These checks do not provide an atomic version allocator.
-- **Authenticated Listing preparations survive retries and restarts.** Before the
-  internal builder returns a transaction, it stores the exact transaction and signed
-  Listing in SQLite, keyed by configured chain and logical Listing version. Previews
-  remain stateless. Empty name lookups, nonce advancement, re-signing and elapsed time
-  never release another create for a prepared version. An exact repeat of the signed
-  request, including one whose first response was lost or one racing it, receives the
-  same saved transaction bytes again, but only while the configured node reports the
-  pinned build and chain, as for a first release; a prepared version keeps the seller display name
-  it was signed with, whatever the catalog shows later. Any other signed retry, or one
-  for a version the catalog already lists, returns HTTP 409 with the saved anchor and
-  no transaction.
-  Current owner-bound, signature-verified readback can resume registration without a
-  write, including with an expired presentation. Saved preparations never establish
-  finality or success and remain retained after readback. There is no automatic
-  expiry or abandon operation: an unobserved transaction may still execute. Keep the
-  configured persistent data volume through deployments and catalog rebuilds.
+- **Authenticated Listing preparations survive retries, restarts and catalog reverts.**
+  Before returning a transaction, the builder commits its exact bytes and signed Listing
+  to an append-only SQLite table, separate from the undo journal for node reads.
+  Unprepared previews remain stateless. A preview of a prepared version returns HTTP
+  409 with its saved anchor and no signing message. Empty name lookups, advancing
+  nonces, re-signing and elapsed time never release another create for that version.
+  An exact repeat (same presentation time, identity signature and Listing signature)
+  receives the saved bytes, including with an expired presentation or changed catalog
+  display name, only while the configured node reports the pinned build and chain.
+  Other valid signed retries, and prepared versions the catalog already lists, get 409
+  with the saved anchor and no transaction. Unknown lookups return 503. Authenticated
+  owner-bound readback resumes registration without a write; only exact repeats may
+  use expired identity presentations. Preparations prove neither finality nor success.
+  There is no automatic expiry or abandon: an unobserved transaction may still execute.
+  Keep the persistent data volume through deployments and catalog rebuilds.
 
 ## DACS surface / conformance declaration
 
