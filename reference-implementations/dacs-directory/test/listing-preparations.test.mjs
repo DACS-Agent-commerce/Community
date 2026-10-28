@@ -203,7 +203,7 @@ test("concurrent prepared readback retries succeed only for the saved rail", asy
 
 // Exercise the optional SDK field and every existing rail/handler guard using
 // signed producer fixtures, without changing committed preparation records.
-for (const [name, alter, allowed] of [
+const policyCases = [
   ["missing rails", (listing) => { delete listing.acceptedRails; }, false],
   ["empty rails", (listing) => { listing.acceptedRails = []; }, false],
   ["matching singleton", () => {}, true],
@@ -214,7 +214,8 @@ for (const [name, alter, allowed] of [
   ["wrong handler", (listing) => { listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).kind = "pay-x402"; }, false],
   ["missing parameter", (listing) => { delete listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).parameters; }, false],
   ["wrong parameter", (listing) => { listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).parameters.rail = "x402:default"; }, false],
-]) {
+];
+for (const [name, alter, allowed] of policyCases) {
   test(`saved rail boundary refuses ${name} unless it matches, in both response paths`, async (t) => {
     const state = node(t);
     const signed = await signedInput(`rail-boundary-${name.replaceAll(" ", "-")}`);
@@ -236,6 +237,119 @@ for (const [name, alter, allowed] of [
     if (allowed) await readback(await post(request(signed)), first);
     else await unresolved(await post(request(signed)), first.anchorAddress, first.logicalAddress);
     assert.equal(state.nonceReads, 0);
+  });
+}
+
+async function independentReadback(id, savedRail = authorizedRails[0], returnedRail = authorizedRails[1], alter = () => {}) {
+  const handler = module.createBuildListingPost([savedRail]);
+  const signed = await signedInput(id, { rails: [savedRail.railId] }, handler);
+  const otherHandler = module.createBuildListingPost([returnedRail]);
+  const other = await signedInput(id, { rails: [returnedRail.railId], description: "An independent signed artifact." }, otherHandler);
+  const preview = await (await otherHandler(request({ ...other, listingSignature: undefined }))).json();
+  alter(preview.listing);
+  const { contentHash } = await import(pathToFileURL(boundaries).href);
+  const hash = contentHash(preview.listing);
+  preview.listing.signature = { algorithm: "ed25519", signer: signed.claim,
+    value: Buffer.from(walletSign(`dacs-listing:v1:${hash}`), "hex").toString("base64url") };
+  const returned = { ...preview, contentHash: hash, anchorAddress: `stor-${"c".repeat(40)}` };
+  return { signed, handler, returned };
+}
+
+for (const age of [0, 900_000, 900_001, 960_000]) {
+for (const savedRail of authorizedRails) for (const returnedRail of authorizedRails) {
+  if (savedRail === returnedRail) continue;
+  test(`independent readback ${savedRail.railId} to ${returnedRail.railId} is refused at age ${age}`, async (t) => {
+    const state = node(t);
+    const pair = await independentReadback(`independent-${savedRail.phaseHandler}-${returnedRail.phaseHandler}-${age}`, savedRail, returnedRail);
+    const first = await prepare(pair.signed, pair.handler);
+    t.mock.method(Date, "now", () => clock + age);
+    await resumed(await pair.handler(request(pair.signed)), first);
+    state.published = first;
+    await readback(await pair.handler(request(pair.signed)), first);
+    state.published = pair.returned;
+    await unresolved(await pair.handler(request(pair.signed)), first.anchorAddress, first.logicalAddress);
+    unchangedPreparation(first, state);
+  });
+}
+}
+
+for (const mode of ["identity-only", "legacy-name", "catalogued", "gained-seller", "renamed-seller", "removed-seller"]) {
+  test(`independent readback policy is checked for ${mode} recovery`, async (t) => {
+    const state = node(t);
+    if (mode === "renamed-seller" || mode === "removed-seller") module.saveCatalog(catalogWithSeller("Original seller"));
+    const pair = await independentReadback(`independent-${mode}`);
+    const first = await prepare(pair.signed, pair.handler);
+    if (mode === "legacy-name") pair.returned.programName = `dacs1-${Buffer.from(first.logicalAddress).toString("base64url")}`;
+    if (mode === "catalogued" || mode === "gained-seller" || mode === "renamed-seller") {
+      module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [{ primaryClaim: pair.signed.claim,
+        displayName: "New catalog display name", listings: mode === "catalogued" ? [{ listingId: pair.signed.serviceId,
+          version: 1, anchor: { kind: "storage-program", locator: first.anchorAddress } }] : [] }] });
+    }
+    if (mode === "removed-seller") module.saveCatalog(catalogWithSeller());
+    try {
+      state.published = pair.returned;
+      const input = mode === "identity-only" ? { ...pair.signed, listingSignature: undefined } : pair.signed;
+      await unresolved(await pair.handler(request(input)), first.anchorAddress, first.logicalAddress);
+      unchangedPreparation(first, state);
+    } finally { module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] }); }
+  });
+}
+
+// Boundary fixtures authenticate their signatures but isolate SDK admission;
+// malformed shapes here are policy-unit cases, not SDK-conformance claims.
+for (const [name, alter, allowed] of policyCases) {
+  test(`independent readback policy boundary: ${name}`, async (t) => {
+    const state = node(t);
+    const pair = await independentReadback(`independent-boundary-${name.replaceAll(" ", "-")}`,
+      authorizedRails[0], authorizedRails[0], alter);
+    const first = await prepare(pair.signed, pair.handler);
+    state.published = pair.returned;
+    const response = await pair.handler(request(pair.signed));
+    if (allowed) await readback(response, pair.returned);
+    else await unresolved(response, first.anchorAddress, first.logicalAddress);
+    unchangedPreparation(first, state);
+  });
+}
+
+test("independent readback policy is rechecked after restart and expiry", async (t) => {
+  const state = node(t);
+  const pair = await independentReadback("independent-restart");
+  const first = await prepare(pair.signed, pair.handler);
+  const [matching] = await racingProcesses([pair.signed], { race: false, synchronize: true,
+    forbidNonce: true, published: first, clock: clock + 960_000 });
+  await readback(Response.json(matching.body, { status: matching.status }), first);
+  const [changed] = await racingProcesses([pair.signed], { race: false, synchronize: true,
+    forbidNonce: true, published: pair.returned, clock: clock + 960_000 });
+  await unresolved(Response.json(changed.body, { status: changed.status }), first.anchorAddress, first.logicalAddress);
+  unchangedPreparation(first, state);
+});
+
+test("independent readback policy is rechecked after crashed refresh recovery", async (t) => {
+  const state = node(t);
+  const pair = await independentReadback("independent-crash");
+  const crashed = spawnSync(process.execPath, childArguments(pair.signed, { crash: true }), { encoding: "utf8", timeout: 15_000 });
+  assert.equal(crashed.status, 77, crashed.stderr);
+  const row = db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address=?").get(pair.returned.logicalAddress);
+  assert.ok(row);
+  module.revertChainReadWindow();
+  state.published = pair.returned;
+  await unresolved(await pair.handler(request(pair.signed)), row.anchor_address, pair.returned.logicalAddress);
+  assert.equal(db.prepare("SELECT transaction_json FROM listing_preparations WHERE anchor_address=?").get(row.anchor_address).transaction_json, row.transaction_json);
+  assert.equal(state.nonceReads, 0, "only the crashed worker read a nonce");
+});
+
+for (const processes of [false, true]) {
+  test(`independent readback policy is checked concurrently in ${processes ? "two processes" : "one process"}`, async (t) => {
+    const state = node(t);
+    const pair = await independentReadback(`independent-concurrent-${processes}`);
+    const first = await prepare(pair.signed, pair.handler);
+    state.published = pair.returned;
+    const responses = processes
+      ? (await racingProcesses([pair.signed, pair.signed], { race: false, synchronize: true, forbidNonce: true, published: pair.returned }))
+        .map(({ status, body }) => Response.json(body, { status }))
+      : await Promise.all([pair.handler(request(pair.signed)), pair.handler(request(pair.signed))]);
+    for (const response of responses) await unresolved(response, first.anchorAddress, first.logicalAddress);
+    unchangedPreparation(first, state);
   });
 }
 test("substituting a rail before the first save fails the fresh Listing signature check", async (t) => {
