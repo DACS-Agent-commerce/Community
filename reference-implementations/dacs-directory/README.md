@@ -461,7 +461,9 @@ base64url-patched Buffer).
   nonces, re-signing and elapsed time never release another create for that version.
   An exact repeat (same presentation time, identity signature and Listing signature)
   receives the saved bytes, including with an expired presentation or changed catalog
-  display name, only while the configured node reports the pinned build and chain.
+  display name, only while the configured node reports the pinned build and chain
+  and the saved rail and payment handler match the currently authorized selection.
+  A different rail selection returns only the saved anchor with HTTP 409.
   Other valid signed retries, and prepared versions the catalog already lists, get 409
   with the saved anchor and no transaction. Unknown lookups return 503. Authenticated
   owner-bound readback resumes registration without a write; only exact repeats may
