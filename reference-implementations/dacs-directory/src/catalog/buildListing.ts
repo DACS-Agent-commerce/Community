@@ -484,14 +484,13 @@ return async function POST(req: NextRequest) {
     }
     return deployment.ok ? null : NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
   };
-  // Both transaction release and read-only recovery must bind this request's
-  // authorized rail and handler to the saved Listing's authenticated bytes.
-  const preparationUsesAuthorizedRail = (saved: ReturnType<typeof readPreparation>): boolean => {
-    const savedRails = saved.listing.acceptedRails;
-    const savedPayPhases = saved.listing.pipeline.filter((phase) => phase.kind.startsWith("pay-"));
-    return savedRails?.length === 1 && savedRails[0].railId === selectedRail.railId &&
-      savedPayPhases.length === 1 && savedPayPhases[0].kind === payPhase.kind &&
-      savedPayPhases[0].parameters?.rail === payPhase.parameters.rail;
+  // Bind current authority to each authenticated artifact selected for recovery.
+  const listingUsesAuthorizedRail = (candidate: Listing): boolean => {
+    const candidateRails = candidate.acceptedRails;
+    const candidatePayPhases = candidate.pipeline.filter((phase) => phase.kind.startsWith("pay-"));
+    return candidateRails?.length === 1 && candidateRails[0].railId === selectedRail.railId &&
+      candidatePayPhases.length === 1 && candidatePayPhases[0].kind === payPhase.kind &&
+      candidatePayPhases[0].parameters?.rail === payPhase.parameters.rail;
   };
   const answerPreparedVersion = async (saved: ReturnType<typeof readPreparation>, exact = repeatsPreparation(saved)): Promise<NextResponse | ReturnType<typeof readPreparation>> => {
     if (body.listingSignature === undefined) return unresolvedPreparation(saved.anchorAddress);
@@ -499,7 +498,7 @@ return async function POST(req: NextRequest) {
       const checked = checkListingSignature();
       return "refusal" in checked ? checked.refusal : unresolvedPreparation(saved.anchorAddress);
     }
-    if (!preparationUsesAuthorizedRail(saved)) {
+    if (!listingUsesAuthorizedRail(saved.listing)) {
       return unresolvedPreparation(saved.anchorAddress);
     }
     if (listingVersion !== nextVersion) return unresolvedPreparation(saved.anchorAddress);
@@ -510,13 +509,13 @@ return async function POST(req: NextRequest) {
   const exists = resolution.status === "present";
   if (resolution.status === "present") {
     const verified = await verifyStoredListing(resolution.record.data, resolution.address);
-    if (!verified || !recoverable(verified)) {
+    if (!verified || verified.profile !== "dacs-v0.1" || !recoverable(verified)) {
       return NextResponse.json(
         { error: "the existing owner-bound program does not contain the expected authenticated listing candidate; choose a new Service ID" },
         { status: 409 },
       );
     }
-    if (preparation && !preparationUsesAuthorizedRail(preparation)) {
+    if (preparation && (!listingUsesAuthorizedRail(preparation.listing) || !listingUsesAuthorizedRail(verified.listing))) {
       return unresolvedPreparation(preparation.anchorAddress);
     }
     // Listing versions are immutable. Recover the already-signed artifact and

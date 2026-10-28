@@ -41,7 +41,7 @@ export async function verifyStoredListing(listing) {
   try {
     const key = publicKeyFromRaw(Buffer.from(sellerClaim.split(":").at(-1), "hex"));
     if (!ed25519Verify(Buffer.from(`dacs-listing:v1:${contentHash(scope)}`), Buffer.from(signature.value, "base64url"), key)) return null;
-    return { profile: "dacs-v0.1", scope, sellerClaim, contentHash: contentHash(scope) };
+    return { profile: "dacs-v0.1", listing, scope, sellerClaim, contentHash: contentHash(scope) };
   } catch { return null; }
 }
 // Unrelated store migrations operate on an empty catalog in this harness.
