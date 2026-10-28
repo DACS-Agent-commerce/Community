@@ -490,6 +490,15 @@ return async function POST(req: NextRequest) {
       const checked = checkListingSignature();
       return "refusal" in checked ? checked.refusal : unresolvedPreparation(saved.anchorAddress);
     }
+    // A signature authenticates saved bytes; release still requires the rail
+    // authorized for this request to describe those bytes, including the handler.
+    const savedPayPhases = saved.listing.pipeline.filter((phase) => phase.kind.startsWith("pay-"));
+    if (saved.listing.acceptedRails.length !== 1 ||
+      saved.listing.acceptedRails[0].railId !== selectedRail.railId ||
+      savedPayPhases.length !== 1 || savedPayPhases[0].kind !== payPhase.kind ||
+      savedPayPhases[0].parameters?.rail !== payPhase.parameters.rail) {
+      return unresolvedPreparation(saved.anchorAddress);
+    }
     if (listingVersion !== nextVersion) return unresolvedPreparation(saved.anchorAddress);
     const refusal = await nodeOutsidePin();
     if (refusal) return refusal;

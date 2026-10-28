@@ -77,21 +77,21 @@ function node(t) {
   });
   return state;
 }
-async function signedInput(id, overrides = {}) {
+async function signedInput(id, overrides = {}, handler = post) {
   const input = { ...inputFor(id), ...overrides };
-  const identityResponse = await post(request(input));
+  const identityResponse = await handler(request(input));
   assert.equal(identityResponse.status, 200);
   const identity = await identityResponse.json();
   const authenticated = { ...input, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
     identitySignature: walletSign(identity.identityMessage) };
-  const previewResponse = await post(request(authenticated));
+  const previewResponse = await handler(request(authenticated));
   assert.equal(previewResponse.status, 200);
   const preview = await previewResponse.json();
   assert.equal(preview.tx, null);
   return { ...authenticated, listingSignature: walletSign(preview.message) };
 }
-async function prepare(input) {
-  const response = await post(request(input));
+async function prepare(input, handler = post) {
+  const response = await handler(request(input));
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.ok(body.tx);
@@ -102,8 +102,9 @@ async function unresolved(response, anchor) {
   const body = await response.json();
   assert.match(body.error, /preparation.*unresolved/i);
   assert.equal(body.anchorAddress, anchor);
-  assert.equal(body.tx, undefined);
-  assert.equal(body.message, undefined);
+  for (const field of ["tx", "listing", "message", "publicationReady", "railResolution"]) {
+    assert.equal(body[field], undefined, `${field} must not be released`);
+  }
 }
 async function resumed(response, first) {
   assert.equal(response.status, 200);
@@ -114,6 +115,54 @@ async function resumed(response, first) {
   assert.equal(body.contentHash, first.contentHash);
   assert.equal(body.message, `dacs-listing:v1:${first.contentHash}`);
 }
+
+const authorizedRails = [
+  ...rails,
+  { ...rails[0], railId: "x402:default", phaseHandler: "pay-x402" },
+  { ...rails[0], railId: "demos-native:DEM", phaseHandler: "pay-dem" },
+];
+const railPair = async (id, savedRail = authorizedRails[0], retryRail = authorizedRails[1]) => {
+  const originalHandler = module.createBuildListingPost([savedRail]);
+  const signed = await signedInput(id, { rails: [savedRail.railId] }, originalHandler);
+  const first = await prepare(signed, originalHandler);
+  return { signed, first, originalHandler, retryRail,
+    retryHandler: module.createBuildListingPost([retryRail]), retry: { ...signed, rails: [retryRail.railId] } };
+};
+function unchangedPreparation(first, state) {
+  const row = db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address=?").get(first.logicalAddress);
+  assert.equal(row.anchor_address, first.anchorAddress);
+  assert.equal(row.transaction_json, JSON.stringify(first.tx));
+  assert.equal(state.nonceReads, 1, "retained retries must not request a replacement nonce");
+}
+for (const savedRail of authorizedRails) for (const retryRail of authorizedRails) {
+  if (savedRail === retryRail) continue;
+  test(`a saved ${savedRail.railId} transaction cannot inherit ${retryRail.railId} authority`, async (t) => {
+    const state = node(t);
+    const pair = await railPair(`rail-${savedRail.phaseHandler}-${retryRail.phaseHandler}`, savedRail, retryRail);
+    assert.equal((await pair.retryHandler(request(pair.signed))).status, 409, "the saved rail is no longer authorized");
+    await resumed(await pair.originalHandler(request(pair.signed)), pair.first);
+    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress);
+    unchangedPreparation(pair.first, state);
+  });
+}
+for (const age of [900_000, 900_001, 960_000]) {
+  test(`a mismatching saved rail returns only its anchor at presentation age ${age}`, async (t) => {
+    const state = node(t);
+    const pair = await railPair(`rail-age-${age}`);
+    t.mock.method(Date, "now", () => clock + age);
+    await resumed(await pair.originalHandler(request(pair.signed)), pair.first);
+    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress);
+    unchangedPreparation(pair.first, state);
+  });
+}
+test("substituting a rail before the first save fails the fresh Listing signature check", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("rail-fresh");
+  const response = await module.createBuildListingPost([authorizedRails[1]])(request({ ...signed, rails: [authorizedRails[1].railId] }));
+  assert.equal(response.status, 400);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM listing_preparations WHERE logical_address LIKE '%:rail-fresh:v1'").get().n, 0);
+  assert.equal(state.nonceReads, 0);
+});
 
 test("an exact signed repeat after empty lookups and advancing nonces gets the saved transaction, never a second anchor", async (t) => {
   const state = node(t);
@@ -469,14 +518,14 @@ test("a crashed refresh window retains the preparation through recovery and refu
   await unresolved(await post(request(resigned)), row.anchor_address);
 });
 
-async function racingProcesses(inputs) {
-  const children = inputs.map((input, index) => spawn(process.execPath, childArguments(input, { race: true, nonce: index + 10 }),
+async function racingProcesses(inputs, options = {}) {
+  const children = inputs.map((input, index) => spawn(process.execPath, childArguments(input, { race: true, nonce: index + 10, ...options }),
     { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
   try {
     return await new Promise((resolveResult, reject) => {
       const ready = new Set();
       const results = [];
-      const timer = setTimeout(() => reject(new Error("two-process race timed out")), 15_000);
+      const timer = setTimeout(() => reject(new Error("preparation workers timed out")), 15_000);
       for (const child of children) {
         let errors = "";
         child.stderr.on("data", (chunk) => { errors += chunk; });
@@ -495,6 +544,52 @@ async function racingProcesses(inputs) {
     });
   } finally { for (const child of children) child.kill(); }
 }
+
+test("a fresh process refuses a retained transaction under substituted rail authority", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-restart");
+  const [result] = await racingProcesses([pair.retry], { race: false, synchronize: true, forbidNonce: true, rails: [pair.retryRail] });
+  await unresolved(Response.json(result.body, { status: result.status }), pair.first.anchorAddress);
+  unchangedPreparation(pair.first, state);
+});
+
+test("a reverted refresh preserves the saved rail release check", async (t) => {
+  const state = node(t);
+  module.openChainReadWindow();
+  let pair;
+  try { pair = await railPair("rail-refresh-revert"); }
+  finally { module.revertChainReadWindow(); }
+  await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress);
+  unchangedPreparation(pair.first, state);
+});
+
+test("crash recovery refuses a saved transaction under substituted rail authority", async (t) => {
+  const state = node(t);
+  const signed = await signedInput("rail-crash");
+  const crashed = spawnSync(process.execPath, childArguments(signed, { crash: true }), { encoding: "utf8", timeout: 15_000 });
+  assert.equal(crashed.status, 77, crashed.stderr);
+  const row = db.prepare("SELECT anchor_address, transaction_json FROM listing_preparations WHERE logical_address LIKE '%:rail-crash:v1'").get();
+  assert.ok(row);
+  module.revertChainReadWindow();
+  const response = await module.createBuildListingPost([authorizedRails[1]])(request({ ...signed, rails: [authorizedRails[1].railId] }));
+  await unresolved(response, row.anchor_address);
+  assert.equal(db.prepare("SELECT transaction_json FROM listing_preparations WHERE anchor_address=?").get(row.anchor_address).transaction_json, row.transaction_json);
+  assert.equal(state.nonceReads, 0, "only the crashed worker read a nonce");
+});
+
+for (const processes of [false, true]) {
+  test(`concurrent retained retries with substituted rail authority refuse in ${processes ? "two processes" : "one process"}`, async (t) => {
+    const state = node(t);
+    const pair = await railPair(`rail-concurrent-${processes}`);
+    const responses = processes
+      ? (await racingProcesses([pair.retry, pair.retry], { race: false, synchronize: true, forbidNonce: true, rails: [pair.retryRail] }))
+        .map(({ status, body }) => Response.json(body, { status }))
+      : await Promise.all([pair.retryHandler(request(pair.retry)), pair.retryHandler(request(pair.retry))]);
+    for (const response of responses) await unresolved(response, pair.first.anchorAddress);
+    unchangedPreparation(pair.first, state);
+  });
+}
+
 for (const identical of [false, true]) {
   test(`a synchronized two-process ${identical ? "identical" : "different"} request race releases only the winner's bytes`, async (t) => {
     node(t);

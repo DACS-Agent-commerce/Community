@@ -20,8 +20,11 @@ export const publicKeyFromRaw = (bytes) => createPublicKey({
 });
 export const ed25519Verify = (message, signature, key) => verify(null, message, key, signature);
 export const isListing = (listing) => listing.dacsVersion === "1" && listing.signature?.algorithm === "ed25519";
-export const resolveListingRails = ({ inCodeDefinitions }) => ({
-  disposition: inCodeDefinitions.every((definition) => definition.signatureValid) ? "verified" : "indeterminate",
+export const resolveListingRails = ({ payPhases, acceptedRails, inCodeDefinitions }) => ({
+  disposition: payPhases.length === 1 && acceptedRails.length === 1 &&
+    payPhases[0].rail === acceptedRails[0].railId && inCodeDefinitions.some((definition) =>
+      definition.signatureValid && definition.railId === acceptedRails[0].railId &&
+      definition.phaseHandler === payPhases[0].kind) ? "verified" : "indeterminate",
 });
 export const resolveListingPayloadVerificationCapability = async () => ({ disposition: "not-applicable" });
 /** What the fixture node's deployment check reports; a test may set a refusal or an Error to throw. */
