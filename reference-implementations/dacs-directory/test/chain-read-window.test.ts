@@ -254,3 +254,26 @@ test("recovering a journal that holds many large prior rows needs memory for one
     rmSync(recoveryDirectory, { recursive: true, force: true });
   }
 });
+
+test("a database an operator analyzed can still open a refresh window", () => {
+  const analyzedDirectory = mkdtempSync(join(tmpdir(), "dacs-chain-read-window-analyzed-"));
+  try {
+    // ANALYZE creates sqlite_stat1/sqlite_stat4, which SQLite refuses to accept triggers on. A fresh
+    // process proves the window skips them instead of failing every refresh at its first write.
+    const analyzed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import Database from "better-sqlite3";
+      import { join } from "node:path";
+      const store = await import(${JSON.stringify(new URL("../src/catalog/store.ts", import.meta.url).href)});
+      const analyzer = new Database(join(process.env.DACS_DIRECTORY_DATA, "directory.sqlite"));
+      analyzer.exec("ANALYZE");
+      analyzer.close();
+      store.openChainReadWindow();
+      store.revertChainReadWindow();
+      console.log("ok");
+    `], { encoding: "utf8", timeout: 60_000, env: { ...process.env, DACS_DIRECTORY_DATA: analyzedDirectory } });
+    assert.equal(analyzed.status, 0, analyzed.stderr.slice(-2_000));
+    assert.equal(analyzed.stdout.trim().split("\n").pop(), "ok");
+  } finally {
+    rmSync(analyzedDirectory, { recursive: true, force: true });
+  }
+});

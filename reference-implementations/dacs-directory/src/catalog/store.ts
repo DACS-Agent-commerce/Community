@@ -671,8 +671,10 @@ let journalTriggersCreated = false;
 function createJournalTriggers(): void {
   if (journalTriggersCreated) return;
   db.exec("CREATE TEMP TABLE IF NOT EXISTS unconfirmed_chain_window (opened INTEGER NOT NULL)");
+  // SQLite refuses triggers on its own tables (sqlite_stat1 after ANALYZE, sqlite_sequence),
+  // so an operator-analyzed database must not make every refresh fail at its first write.
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
-    .map((row) => row.name).filter((name) => !UNJOURNALED_TABLES.has(name));
+    .map((row) => row.name).filter((name) => !name.startsWith("sqlite_") && !UNJOURNALED_TABLES.has(name));
   for (const table of tables) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => `"${column.name}"`);
     // SQLite's quote() stops a text value at its first NUL byte. A node supplies some stored text
