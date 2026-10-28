@@ -132,6 +132,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
       "cleared chain-derived cache and restarting from genesis");
   } else if (!control) {
+    // Legacy withdrawals stay retained, but unproven name bindings cannot seed this chain.
+    // Persist sanitation before adoption so an interrupted replay cannot label the old map.
+    state.programs = Object.create(null);
+    saveScanState(state);
     log("no chain is recorded for the cached state; replaying history from genesis");
   }
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
