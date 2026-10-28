@@ -67,9 +67,10 @@ type Built = { exists: boolean; tx: { content: { data: [string, { programName: s
 async function withOccupancy(
   serviceId: string,
   occupy: (v1: V1) => { name: string; data: Record<string, unknown> },
-  check: (ctx: { post: () => Promise<Response>; queries: string[]; v1: V1 }) => Promise<void>,
+  check: (ctx: { post: () => Promise<Response>; queries: string[] }) => Promise<void>,
+  prepareBeforeOccupancy = true,
 ) {
-  const identity = await (await POST(request(base))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const identity = await (await POST(request({ ...base, serviceId }))).json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
   const finalInput = { ...base, serviceId, listingVersion: identity.listingVersion,
     identityPresentedAt: identity.identityPresentedAt, identitySignature: walletHex(identity.identityMessage) };
   let occupied: { name: string; data: Record<string, unknown>; address: string } | null = null;
@@ -96,12 +97,13 @@ async function withOccupancy(
       : new Response(null, { status: 404 });
   };
   try {
-    const preview = await (await POST(request(finalInput))).json() as { message: string };
+    const preview = await (await POST(request(finalInput))).json() as { message: string; programName: string; listing: Record<string, unknown> };
     const post = () => POST(request({ ...finalInput, listingSignature: walletHex(preview.message) }));
-    const v1 = await (await post()).json() as V1;
+    const v1: V1 = prepareBeforeOccupancy ? await (await post()).json() as V1
+      : { programName: preview.programName, listing: preview.listing, anchorAddress: `stor-${"e".repeat(40)}`, tx: null };
     occupied = { ...occupy(v1), address: v1.anchorAddress };
     queries.length = 0;
-    await check({ post, queries, v1 });
+    await check({ post, queries });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -145,18 +147,21 @@ test("an authenticated listing under the legacy program name is recovered withou
   );
 });
 
-test("a legacy program for another version only gets this version's saved preparation back", async () => {
+test("a legacy program name for another version leaves this version free to publish", async () => {
   await withOccupancy(
     "legacy-other-version",
     (v1) => ({ name: legacyProgramName("legacy-other-version", 2), data: v1.listing }),
-    async ({ post, queries, v1 }) => {
+    async ({ post, queries }) => {
       const response = await post();
       assert.equal(response.status, 200);
       const body = await response.json() as Built;
       assert.equal(body.exists, false);
-      assert.equal(JSON.stringify(body.tx), JSON.stringify(v1.tx), "the exact repeat gets the saved v1 bytes, not a new create");
+      assert.ok(body.tx, "an unprepared version is still published");
+      assert.equal(body.tx.content.data[1].programName, body.programName);
+      assert.notEqual(body.programName, legacyProgramName("legacy-other-version", 1), "new programs do not use the legacy name");
       assert.ok(queries.includes(legacyProgramName("legacy-other-version", 1)), "the legacy name is looked up");
     },
+    false,
   );
 });
 

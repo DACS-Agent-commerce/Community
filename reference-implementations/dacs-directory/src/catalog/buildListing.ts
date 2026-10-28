@@ -19,11 +19,12 @@ import {
   canonicalize,
   contentHash,
   listingAddress,
+  stripSignature,
   sha256Hex,
 } from "./canonical.js";
 import { logicalToStorageProgramName } from "@kynesyslabs/dacs/canonical";
 import { ed25519Verify, publicKeyFromRaw } from "@kynesyslabs/dacs/crypto";
-import { isListing, type ListingDraft } from "@kynesyslabs/dacs/artifacts";
+import { isListing, type ListingDraft, type Listing } from "@kynesyslabs/dacs/artifacts";
 import {
   resolveListingPayloadVerificationCapability,
   resolveListingRails,
@@ -113,32 +114,17 @@ async function accountNonce(addressHex: string): Promise<number> {
   return nonce;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/**
- * The transaction a retained preparation saved, parsed from its exact stored
- * JSON, when that transaction creates exactly `signedListing`; otherwise
- * undefined. Throws if the stored JSON cannot be parsed.
- */
-function savedTransactionCreating(preparation: ListingPreparation, signedListing: Record<string, unknown>): Record<string, unknown> | undefined {
-  const tx: unknown = JSON.parse(preparation.transactionJson);
-  const payload = isRecord(tx) && isRecord(tx.content) && Array.isArray(tx.content.data) ? tx.content.data[1] : undefined;
-  const envelopeHash = isRecord(payload) && isRecord(payload.metadata) ? payload.metadata.envelopeHash : undefined;
-  return isRecord(tx) && envelopeHash === sha256Hex(canonicalize(signedListing)) ? tx : undefined;
+// These are this producer's own committed bytes, not an external node response.
+interface PreparedTransaction extends Record<string, unknown> {
+  content: { data: [string, { data: Listing & Record<string, unknown>; metadata: { contentHash: string } }] };
+}
+function readPreparation(preparation: ListingPreparation) {
+  const transaction: PreparedTransaction = JSON.parse(preparation.transactionJson);
+  const payload = transaction.content.data[1];
+  return { ...preparation, transaction, listing: payload.data, hash: payload.metadata.contentHash };
 }
 
-/**
- * The seller display name in a retained preparation's signed Listing, or
- * undefined if it has none. Throws if the stored JSON cannot be parsed.
- */
-function preparedDisplayName(preparation: ListingPreparation): string | undefined {
-  const tx: unknown = JSON.parse(preparation.transactionJson);
-  const payload = isRecord(tx) && isRecord(tx.content) && Array.isArray(tx.content.data) ? tx.content.data[1] : undefined;
-  const seller = isRecord(payload) && isRecord(payload.data) && isRecord(payload.data.seller) ? payload.data.seller : undefined;
-  return typeof seller?.displayName === "string" ? seller.displayName : undefined;
-}
-
+/** Build the staged Listing handler using server-owned rail authority. */
 export function createBuildListingPost(
   inCodeDefinitions: ReadonlyArray<Omit<(typeof PUBLISHER_IN_CODE_RAIL_DEFINITIONS)[number], "signatureValid"> & { signatureValid: boolean }> = PUBLISHER_IN_CODE_RAIL_DEFINITIONS,
 ) {
@@ -195,9 +181,8 @@ return async function POST(req: NextRequest) {
   const priorVersions = knownSeller?.listings
     .filter((l) => l.listingId === serviceId)
     .map((l) => l.version) ?? [];
-  // Previews are stateless: an unauthenticated first-stage request must not
-  // create mutable state that can block another publisher. Operators must
-  // serialize concurrent writes for one seller/listingId (README limitation).
+  // Previews are stateless. Only authenticated signed creates reserve a version,
+  // with the first durable preparation winning across concurrent publishers.
   // The durable floor still counts versions whose catalog rows an admission
   // reset removed. Every version up to `highestKnown` is taken: it is recovered
   // or refused, never created again. Only `nextVersion` may be created.
@@ -284,9 +269,6 @@ return async function POST(req: NextRequest) {
   if (body.identitySignature && (
     !Number.isSafeInteger(identityPresentedAt) || identityPresentedAt > serverNow + 60_000
   )) return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
-  // A stale signed presentation can still locate a retained attempt/publication;
-  // only a fresh presentation may authorize a new preparation below.
-  const identityExpired = identityPresentedAt < serverNow - 15 * 60_000;
   const identityScope = {
     bundleVersion: "1",
     presentedBy: did,
@@ -314,10 +296,29 @@ return async function POST(req: NextRequest) {
   if (!identityOk) return NextResponse.json({ error: "identity presentation signature is invalid" }, { status: 400 });
   const logicalAddress = listingAddress(did, serviceId, listingVersion);
   const chainIdentity = pinnedChainIdentity();
-  // A prepared version is rebuilt with the display name its seller signed, not
-  // the catalog's current one, so an exact signed repeat still matches its
-  // saved bytes after the catalog gains, renames or drops this seller.
   const retained = loadListingPreparation(chainIdentity, logicalAddress);
+  const preparation = retained ? readPreparation(retained) : undefined;
+  const repeatsPreparation = (saved: ReturnType<typeof readPreparation>): boolean => {
+    const identity = saved.listing.seller.identity;
+    const signatureValue = typeof body.listingSignature === "string"
+      ? importLegacySignatureValue(body.listingSignature.replace(/^(0x)+/i, "").toLowerCase(), "lowercase-hex")
+      : undefined;
+    if (!signatureValue || identity.presentedAt !== identityPresentedAt ||
+      identity.presentation.kind !== "per-claim" ||
+      identity.presentation.signatures[0]?.signature !== identitySignatureValue ||
+      saved.listing.signature.value !== signatureValue) return false;
+    try {
+      return ed25519Verify(
+        Buffer.from(LISTING_SEPARATOR + contentHash(stripSignature(saved.listing)), "utf8"),
+        Uint8Array.from(Buffer.from(signatureValue, "base64url")),
+        publicKeyFromRaw(Uint8Array.from(Buffer.from(hex, "hex"))),
+      );
+    } catch { return false; }
+  };
+  const exactRepeat = preparation ? repeatsPreparation(preparation) : false;
+  if (identityPresentedAt < serverNow - 15 * 60_000 && !exactRepeat) {
+    return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
+  }
   const pricingTerm = {
     amount,
     currency,
@@ -376,7 +377,7 @@ return async function POST(req: NextRequest) {
           signatures: [{ ref: did, signature: identitySignatureValue }],
         },
       },
-      displayName: (retained && preparedDisplayName(retained)) ?? knownSeller?.displayName ?? body.name.trim(),
+      displayName: knownSeller?.displayName ?? body.name.trim(),
       ...(publicEndpoint ? { publicEndpoint } : {}),
     },
     offering: { title: body.name.trim(), description: body.description.trim(), category, tags, deliverable },
@@ -426,77 +427,29 @@ return async function POST(req: NextRequest) {
   }
   const hash = contentHash(listing as Record<string, unknown>);
   const message = LISTING_SEPARATOR + hash; // §B.7 signing preimage, pure ASCII
-  const unresolvedPreparation = (anchorAddress: string | undefined) => NextResponse.json({
-    error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
-    logicalAddress,
-    anchorAddress,
-  }, { status: 409 });
   if (resolution.status === "indeterminate") {
     return NextResponse.json(
       { error: `could not safely determine whether this listing version already exists: ${resolution.reason}` },
       { status: 503 },
     );
   }
-  // Empty name indexes and advancing nonces do not establish that a returned
-  // create failed. Keep the original attempt across retries and restarts.
-  const preparation = resolution.status === "absent" ? retained : undefined;
-  // A version slot is write-once: a taken version the name lookup cannot find
-  // is not free, so no second create may be prepared for it. A version this
-  // directory prepared reports its saved anchor below instead.
-  if (resolution.status === "absent" && listingVersion !== nextVersion && !preparation) {
-    return NextResponse.json(
-      { error: "this seller already published this version, but its program was not found under this producer's names; no transaction was prepared. Retry once the name index has caught up, or choose a new Service ID" },
-      { status: 409 },
-    );
-  }
-
   let anchorAddress: string;
   let publishedListing: Record<string, unknown> = listing;
   let publishedHash = hash;
   let tx: Record<string, unknown> | null = null;
-  const exists = resolution.status === "present";
-  if (resolution.status === "present") {
-    const verified = await verifyStoredListing(resolution.record.data, resolution.address);
-    if (!verified || !recoverable(verified)) {
-      return NextResponse.json(
-        { error: "the existing owner-bound program does not contain the expected authenticated listing candidate; choose a new Service ID" },
-        { status: 409 },
-      );
-    }
-    // Listing versions are immutable. Recover the already-signed artifact and
-    // continue registration; never overwrite it with newly generated bytes.
-    // The rebuilt preview (and any signature over it) plays no part here.
-    anchorAddress = resolution.address;
-    publishedListing = resolution.record.data;
-    publishedHash = verified.contentHash;
-  } else {
-    if (identityExpired && (body.listingSignature === undefined || !preparation)) {
-      return NextResponse.json({ error: "identity presentation expired; restart the publish step" }, { status: 409 });
-    }
-    // Do not prepare a broadcastable transaction until the wallet has signed
-    // the exact artifact returned by the preview response.
-    if (body.listingSignature === undefined) {
-      return NextResponse.json({
-        listing,
-        message,
-        contentHash: hash,
-        artifactProfile: "dacs-v0.1",
-        logicalAddress,
-        programName,
-        exists: false,
-        tx: null,
-        publicationReady: false,
-        railResolution,
-        payloadCapability,
-      });
-    }
+  const unresolvedPreparation = (anchor: string) => NextResponse.json({
+    error: "this listing version has a saved transaction preparation whose outcome is unresolved; recover its anchor before preparing another create",
+    logicalAddress,
+    anchorAddress: anchor,
+  }, { status: 409 });
+  const checkListingSignature = (): { signedCandidate: Record<string, unknown> } | { refusal: NextResponse } => {
     if (typeof body.listingSignature !== "string") {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+      return { refusal: NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 }) };
     }
     const listingSigHex = body.listingSignature.replace(/^(0x)+/i, "");
     const listingSignatureValue = importLegacySignatureValue(listingSigHex.toLowerCase(), "lowercase-hex");
     if (!listingSignatureValue) {
-      return NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 });
+      return { refusal: NextResponse.json({ error: "listing signature must be a 64-byte Ed25519 signature" }, { status: 400 }) };
     }
     let listingSignatureValid = false;
     try {
@@ -515,89 +468,133 @@ return async function POST(req: NextRequest) {
       },
     };
     if (!listingSignatureValid || !isListing(signedCandidate)) {
-      return NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 });
+      return { refusal: NextResponse.json({ error: "the signed listing failed current SDK validation" }, { status: 400 }) };
     }
-    // A retained preparation is never replaced. An exact repeat of its signed
-    // Listing, for a version nothing else shows as taken, gets the same saved
-    // bytes again, so a lost response cannot strand it; that is no second
-    // create. Any other retry learns only the saved anchor.
-    const savedRelease = (saved: ListingPreparation | undefined) =>
-      saved && listingVersion === nextVersion ? savedTransactionCreating(saved, signedCandidate) ?? null : null;
-    // Broadcasting is the seller's irreversible step, so every transaction this
-    // returns, new or saved, first needs the node inside the pin, rather than
-    // only after the write (confirm-listing checks again). A saved anchor alone
-    // is no transaction and needs no node.
-    const nodeOutsidePin = async (): Promise<NextResponse | null> => {
-      let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
-      try {
-        deployment = await pinnedNodeDeployment();
-      } catch (error) {
-        const cause = error instanceof Error ? error.message : "unknown failure";
-        return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
-      }
-      return deployment.ok ? null : NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
-    };
-    if (preparation) {
-      tx = savedRelease(preparation);
-      if (!tx) return unresolvedPreparation(preparation.anchorAddress);
-      const refusal = await nodeOutsidePin();
-      if (refusal) return refusal;
-      anchorAddress = preparation.anchorAddress;
-    } else {
-      // A lost insert race below releases the winner's saved bytes under this same check.
-      const refusal = await nodeOutsidePin();
-      if (refusal) return refusal;
-      let nonce: number;
-      try {
-        nonce = await accountNonce(hex);
-      } catch (error) {
-        const cause = error instanceof Error ? error.message : "unknown failure";
-        return NextResponse.json({ error: `could not read the account nonce (${cause}); no transaction was prepared` }, { status: 503 });
-      }
-      const txNonce = nonce + 1;
-      anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
-      const payload = {
-        operation: "CREATE_STORAGE_PROGRAM",
-        storageAddress: anchorAddress,
+    return { signedCandidate };
+  };
+  const nodeOutsidePin = async (): Promise<NextResponse | null> => {
+    // Broadcasting is the seller's irreversible step, so refuse a node outside
+    // the pin here rather than after the write (confirm-listing checks again).
+    let deployment: Awaited<ReturnType<typeof pinnedNodeDeployment>>;
+    try {
+      deployment = await pinnedNodeDeployment();
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : "unknown failure";
+      return NextResponse.json({ error: `could not read the Demos node's build and chain (${cause}); no transaction was prepared` }, { status: 503 });
+    }
+    return deployment.ok ? null : NextResponse.json({ error: `${deployment.reason}; no transaction was prepared` }, { status: 409 });
+  };
+  const answerPreparedVersion = async (saved: ReturnType<typeof readPreparation>, exact = repeatsPreparation(saved)): Promise<NextResponse | ReturnType<typeof readPreparation>> => {
+    if (body.listingSignature === undefined) return unresolvedPreparation(saved.anchorAddress);
+    if (!exact) {
+      const checked = checkListingSignature();
+      return "refusal" in checked ? checked.refusal : unresolvedPreparation(saved.anchorAddress);
+    }
+    if (listingVersion !== nextVersion) return unresolvedPreparation(saved.anchorAddress);
+    const refusal = await nodeOutsidePin();
+    if (refusal) return refusal;
+    return saved;
+  };
+  const exists = resolution.status === "present";
+  if (resolution.status === "present") {
+    const verified = await verifyStoredListing(resolution.record.data, resolution.address);
+    if (!verified || !recoverable(verified)) {
+      return NextResponse.json(
+        { error: "the existing owner-bound program does not contain the expected authenticated listing candidate; choose a new Service ID" },
+        { status: 409 },
+      );
+    }
+    // Listing versions are immutable. Recover the already-signed artifact and
+    // continue registration; never overwrite it with newly generated bytes.
+    // The rebuilt preview (and any signature over it) plays no part here.
+    anchorAddress = resolution.address;
+    publishedListing = resolution.record.data;
+    publishedHash = verified.contentHash;
+  } else if (preparation) {
+    const answer = await answerPreparedVersion(preparation, exactRepeat);
+    if (answer instanceof NextResponse) return answer;
+    ({ anchorAddress, transaction: tx, listing: publishedListing, hash: publishedHash } = answer);
+  } else {
+    // A version slot is write-once: a taken version the name lookup cannot find
+    // is not free, so no second create may be prepared for it.
+    if (listingVersion !== nextVersion) {
+      return NextResponse.json(
+        { error: "this seller already published this version, but its program was not found under this producer's names; no transaction was prepared. Retry once the name index has caught up, or choose a new Service ID" },
+        { status: 409 },
+      );
+    }
+
+    // Do not prepare a broadcastable transaction until the wallet has signed
+    // the exact artifact returned by the preview response.
+    if (body.listingSignature === undefined) {
+      return NextResponse.json({
+        listing,
+        message,
+        contentHash: hash,
+        artifactProfile: "dacs-v0.1",
+        logicalAddress,
         programName,
-        encoding: "json",
-        data: signedCandidate,
-        metadata: {
-          logicalAddress,
-          contentHash: hash,
-          envelopeHash: sha256Hex(canonicalize(signedCandidate)),
-        },
-        acl: { mode: "public" },
-        salt: LIVE_STORAGE_SALT,
-        storageLocation: "onchain",
-      };
-      tx = {
-        content: {
-          type: "storageProgram",
-          from: owner,
-          to: anchorAddress,
-          amount: 0,
-          data: ["storageProgram", payload],
-          nonce: txNonce,
-          timestamp: Date.now(),
-          transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
-        },
-        signature: null,
-        hash: "",
-        status: "",
-        blockNumber: null,
-      };
-      // Atomic first-writer-wins persistence closes the race between the lookup
-      // above and nonce preparation. A failed commit releases no transaction;
-      // a lost race releases only the winner's saved bytes, as a repeat would.
-      if (!saveListingPreparation(chainIdentity, logicalAddress, { anchorAddress, transactionJson: JSON.stringify(tx) })) {
-        const winner = loadListingPreparation(chainIdentity, logicalAddress);
-        tx = savedRelease(winner);
-        if (!winner || !tx) return unresolvedPreparation(winner?.anchorAddress);
-        anchorAddress = winner.anchorAddress;
-      }
+        exists: false,
+        tx: null,
+        publicationReady: false,
+        railResolution,
+        payloadCapability,
+      });
     }
+    const checked = checkListingSignature();
+    if ("refusal" in checked) return checked.refusal;
+    const { signedCandidate } = checked;
+    const refusal = await nodeOutsidePin();
+    if (refusal) return refusal;
+    let nonce: number;
+    try {
+      nonce = await accountNonce(hex);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : "unknown failure";
+      return NextResponse.json({ error: `could not read the account nonce (${cause}); no transaction was prepared` }, { status: 503 });
+    }
+    const txNonce = nonce + 1;
+    anchorAddress = deriveStorageAddress(owner, programName, txNonce, LIVE_STORAGE_SALT);
+    const payload = {
+      operation: "CREATE_STORAGE_PROGRAM",
+      storageAddress: anchorAddress,
+      programName,
+      encoding: "json",
+      data: signedCandidate,
+      metadata: {
+        logicalAddress,
+        contentHash: hash,
+        envelopeHash: sha256Hex(canonicalize(signedCandidate)),
+      },
+      acl: { mode: "public" },
+      salt: LIVE_STORAGE_SALT,
+      storageLocation: "onchain",
+    };
+    tx = {
+      content: {
+        type: "storageProgram",
+        from: owner,
+        to: anchorAddress,
+        amount: 0,
+        data: ["storageProgram", payload],
+        nonce: txNonce,
+        timestamp: Date.now(),
+        transaction_fee: { network_fee: 0, rpc_fee: 0, additional_fee: 0, rpc_address: null },
+      },
+      signature: null,
+      hash: "",
+      status: "",
+      blockNumber: null,
+    };
     publishedListing = signedCandidate;
+    // Persist before release. A racing loser answers using only the winner's bytes.
+    if (!saveListingPreparation(chainIdentity, logicalAddress, { anchorAddress, transactionJson: JSON.stringify(tx) })) {
+      const winner = loadListingPreparation(chainIdentity, logicalAddress);
+      if (!winner) throw new Error("the winning Listing preparation could not be read");
+      const answer = await answerPreparedVersion(readPreparation(winner));
+      if (answer instanceof NextResponse) return answer;
+      ({ anchorAddress, transaction: tx, listing: publishedListing, hash: publishedHash } = answer);
+    }
   }
 
   const priorRegistration = loadRegistrations().find((r) => r.primaryClaim === did);
@@ -622,7 +619,7 @@ return async function POST(req: NextRequest) {
 
   return NextResponse.json({
     listing: publishedListing,
-    ...(exists ? {} : { message }),
+    ...(exists ? {} : { message: LISTING_SEPARATOR + publishedHash }),
     contentHash: publishedHash,
     artifactProfile: "dacs-v0.1",
     logicalAddress,

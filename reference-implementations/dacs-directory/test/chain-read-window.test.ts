@@ -51,6 +51,14 @@ test("a reverted window restores every journaled table and keeps registrations a
   assert.deepEqual(store.loadDomains(), ["registered-meanwhile.example"]);
 });
 
+test("a reverted window keeps seller-signed Listing preparations saved inside it", () => {
+  const preparation = { anchorAddress: "stor-seller-write", transactionJson: '{"signed":"seller-write"}' };
+  store.openChainReadWindow();
+  assert.equal(store.saveListingPreparation("chain-a", "seller-write:v1", preparation), true);
+  store.revertChainReadWindow();
+  assert.deepEqual(store.loadListingPreparation("chain-a", "seller-write:v1"), preparation);
+});
+
 test("a confirmed window keeps its writes, and a later revert undoes nothing", () => {
   seed();
   store.openChainReadWindow();

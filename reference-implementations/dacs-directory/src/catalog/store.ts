@@ -83,6 +83,12 @@ db.exec(`
     transaction_json TEXT NOT NULL,
     PRIMARY KEY(chain_identity, logical_address)
   );
+  CREATE TRIGGER IF NOT EXISTS listing_preparations_no_update
+    BEFORE UPDATE ON listing_preparations
+    BEGIN SELECT RAISE(ABORT, 'Listing preparations are append-only'); END;
+  CREATE TRIGGER IF NOT EXISTS listing_preparations_no_delete
+    BEFORE DELETE ON listing_preparations
+    BEGIN SELECT RAISE(ABORT, 'Listing preparations are append-only'); END;
   CREATE TABLE IF NOT EXISTS artifacts (
     locator TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -690,7 +696,9 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
 // UNJOURNALED_KEYS.
 db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
 interface UndoStatement { seq: number; undo_sql: string }
-const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence"]);
+// Listing preparations retain seller-signed writes, not node reads. A refused or
+// crashed refresh must never undo a transaction already released to its seller.
+const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "sqlite_sequence", "listing_preparations"]);
 /**
  * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
  * an undo would drop their saves. Withdrawal sources hold what a publisher signed and served from its
