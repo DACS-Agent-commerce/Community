@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +17,9 @@ process.env.DACS_DIRECTORY_DATA = dataDirectory;
 process.env.DACS_ADMIN_TOKEN = "index-now-admin";
 delete process.env.DEMOS_NODE_BUILDS;
 delete process.env.DEMOS_CHAIN_IDENTITY;
+const { findValidListingRevocation, verifyStoredListing } = await import("../src/catalog/listingVerification.js");
 const store = await import("../src/catalog/store.js");
+const { seedScanState, readyChain } = await import("./fixtures/chain-state.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { SCAN_STATE_SCHEMA_VERSION } = await import("../src/catalog/scanState.js");
 const { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } = await import("../src/catalog/nodeDeployment.js");
@@ -97,7 +100,7 @@ async function assertRefused(status: number, error: RegExp, name: string): Promi
 
 test("index-now refuses another chain or an unreadable node, each with its own cause", async () => {
   store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
-  store.saveScanState(currentState());
+  seedScanState(currentState());
   const cases: Array<[string, NodeReply, number, RegExp]> = [
     ["another chain", { nodeVersion: cleanBuild, chain: "aa".repeat(32) }, 409, /^catalog not updated: WRONG_CHAIN: .*not the pinned chain$/],
     ["HTTP failure", { chain: PINNED_DEMOS_CHAIN_IDENTITY, failure: "http" }, 503, /^catalog not updated: NODE_TRANSPORT: /],
@@ -111,7 +114,7 @@ test("index-now refuses another chain or an unreadable node, each with its own c
 });
 
 test("index-now treats build drift as a warning on the pinned chain", async () => {
-  store.saveScanState(currentState());
+  seedScanState(currentState());
   for (const nodeVersion of [{ ...cleanBuild, dirty: true }, { ...cleanBuild, commit: "f".repeat(40) }, undefined, cleanBuild]) {
     node = { nodeVersion, chain: PINNED_DEMOS_CHAIN_IDENTITY };
     const response = await indexNow();
@@ -132,12 +135,12 @@ test("index-now answers 409 until a complete pass on this chain is recorded, the
     ["old schema version", { schemaVersion: SCAN_STATE_SCHEMA_VERSION - 1 }],
   ];
   for (const [name, change] of states) {
-    store.saveScanState({ ...currentState(), ...change });
+    seedScanState({ ...currentState(), ...change });
     await assertRefused(409, notCurrent, name);
   }
 
   // A real re-pin whose replay fails leaves the state reset.
-  store.saveScanState({ ...currentState(), chainIdentity: "aa".repeat(32) });
+  seedScanState({ ...currentState(), chainIdentity: "aa".repeat(32) });
   node = { ...node, historyDown: true };
   const pass = { log: () => {}, nodeDeployment: onPinnedChain, resolveIdentities: async () => { throw new Error("offline"); },
     crawlWellKnown: async () => ({ agents: [], errors: [] }) };
@@ -153,7 +156,7 @@ test("index-now answers 409 until a complete pass on this chain is recorded, the
 
 test("index-now saves nothing when the node changes chain while the registration is indexed", async () => {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  store.saveScanState(currentState());
+  seedScanState(currentState());
   store.saveCatalog(unchangedCatalog);
   onStorageRead = () => { node = { ...node, chain: "aa".repeat(32) }; };
   try {
@@ -174,7 +177,7 @@ test("index-now refuses after a replay that failed before its catalog was saved"
     crawlWellKnown: async () => { throw new Error("stopped before the catalog was saved"); } };
   try {
     for (const [name, change] of [["re-pin", { chainIdentity: "aa".repeat(32) }], ["legacy state", { chainIdentity: undefined }]] as const) {
-      store.saveScanState({ ...currentState(), ...change });
+      seedScanState({ ...currentState(), ...change });
       await assert.rejects(reindexAll(failingPass), /stopped before the catalog was saved/, name);
       await assertRefused(409, notCurrent, name);
     }
@@ -190,7 +193,7 @@ const offlinePass = { log: () => {}, resolveIdentities: async () => { throw new 
 /** Run `write` with the node failing its next chain read once the registration's listing has been read. */
 async function withChainLostOnRead<T>(lost: Partial<NodeReply>, write: () => Promise<T>): Promise<T> {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
-  store.saveScanState(currentState());
+  seedScanState(currentState());
   store.saveCatalog(unchangedCatalog);
   onStorageRead = () => { node = { ...node, ...lost }; };
   try {
@@ -206,7 +209,7 @@ for (const [name, lost, status] of [["changes chain", { chain: "aa".repeat(32) }
     const response = await withChainLostOnRead(lost, indexNow);
     assert.equal(response.status, status);
     assert.deepEqual(store.loadCatalog(), unchangedCatalog);
-    assert.equal(store.loadScanState().chainIdentity, undefined);
+    assert.equal(readyChain(), undefined);
     await assertRefused(409, notCurrent, name);
   });
 }
@@ -215,14 +218,14 @@ test("a batch pass withholds the recorded chain when the node changes chain whil
   await assert.rejects(withChainLostOnRead({ chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
     /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
   assert.deepEqual(store.loadCatalog(), unchangedCatalog);
-  assert.equal(store.loadScanState().chainIdentity, undefined);
+  assert.equal(readyChain(), undefined);
   await assertRefused(409, notCurrent, "withheld chain");
 });
 
 test("a complete pass records the chain again after one was withheld", async () => {
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
   await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
-  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.equal(readyChain(), PINNED_DEMOS_CHAIN_IDENTITY);
   assert.equal((await indexNow()).status, 200);
 });
 
@@ -233,20 +236,25 @@ const cciBadge = { kind: "web2" as const, platform: "github", handle: "seller", 
  * record, the retained binding and the scan state. The marker now reads 404. Returns the content hash.
  */
 async function withdrawnOnEarlierPass(change: Record<string, unknown>): Promise<string> {
+  store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
   node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
   store.clearChainDerivedArtifacts();
-  store.saveScanState(currentState());
+  seedScanState(currentState());
   store.saveCatalog(unchangedCatalog);
   assert.equal((await indexNow()).status, 200);
   const indexed = store.loadCatalog().sellers[0];
   const { contentHash: hash } = indexed.listings[0];
-  const revocation = { sellerPrimaryClaim: seller, listingId: "svc", listingVersion: 1, listingContentHash: hash,
-    logicalAddress: `dacs1-revoked:${encodeURIComponent(seller)}:svc:v1`,
-    markerAnchor: { kind: "storage-program" as const, locator: marker }, markerContentHash: "d".repeat(64) };
+  const verified = await verifyStoredListing(listing, anchor);
+  assert.ok(verified);
+  const scope = { listingId: "svc", listingVersion: 1, listingContentHash: hash, revokedAt: 1 };
+  const signedMarker = { ...scope, signature: { algorithm: "ed25519", signer: seller,
+    value: Buffer.from(await ed25519Sign(Buffer.from("dacs-revocation:v1:" + contentHash(scope)), privateKeyFromSeed(seed))).toString("base64url") } };
+  const revocation = await findValidListingRevocation([marker], verified, 1, async () => signedMarker);
+  assert.ok(revocation, "the retained withdrawal is cryptographically verified");
   store.saveCatalog({ catalogVersion: "1", generatedAt: 8, sellers: [{ ...indexed, registeredAt: 1, cci: [cciBadge],
     listings: [{ ...indexed.listings[0], status: "revoked", revocation }] }] });
-  store.retainListingRevocation(revocation, { kind: "listing-revocation" });
-  store.saveScanState({ ...currentState(), verifiedRevocations: { [hash]: [marker] }, ...change });
+  store.retainListingRevocation(revocation, signedMarker);
+  seedScanState({ ...currentState(), verifiedRevocations: { [hash]: [marker] }, ...change });
   return hash;
 }
 const listingStatus = () => store.loadCatalog().sellers[0].listings[0].status;
@@ -256,7 +264,7 @@ test("after a re-pin, the rebuild takes no revocation from the replaced chain's 
   await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
   assert.equal(listingStatus(), "active");
   assert.equal(store.retainedListingRevocation(hash), null);
-  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.equal(readyChain(), PINNED_DEMOS_CHAIN_IDENTITY);
 });
 
 // RB-3: a withdrawal verified on an earlier pass of this chain stays in force whatever its marker reads
@@ -266,7 +274,7 @@ test("a state with no recorded chain replays and keeps a verified withdrawal who
   await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
   assert.equal(listingStatus(), "revoked");
   assert.notEqual(store.retainedListingRevocation(hash), null);
-  assert.equal(store.loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.equal(readyChain(), PINNED_DEMOS_CHAIN_IDENTITY);
 });
 
 test("a same-chain large tip regression keeps a verified withdrawal through the earlier catalog", async () => {
@@ -290,7 +298,7 @@ for (const [name, timedOut] of timedOutWriters) {
       onStorageRead = () => {};
       node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
     }
-    assert.equal(store.loadScanState().chainIdentity, undefined, "the chain is withheld");
+    assert.equal(readyChain(), undefined, "the chain is withheld");
     await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
     assert.equal(listingStatus(), "revoked");
     assert.notEqual(store.retainedListingRevocation(hash), null);
@@ -334,9 +342,8 @@ for (const [writer, write] of [
     try { await write(); } finally { onStorageRead = () => {}; }
     const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
       import assert from 'node:assert/strict';
-      import { loadScanState } from './src/catalog/store.ts';
-      const state = loadScanState();
-      assert.equal(state.chainIdentity ?? state.withheldChainIdentity, ${JSON.stringify(PINNED_DEMOS_CHAIN_IDENTITY)});
+      import { loadCatalogChain } from './src/catalog/store.ts';
+      assert.equal(loadCatalogChain()?.evidenceChain, ${JSON.stringify(PINNED_DEMOS_CHAIN_IDENTITY)});
     `], { encoding: "utf8", timeout: 30_000, env: process.env });
     assert.equal(restarted.status, 0, restarted.stderr);
     node = { nodeVersion: cleanBuild, chain: "aa".repeat(32), historyDown: true };
@@ -347,7 +354,86 @@ for (const [writer, write] of [
     node = { ...node, historyDown: false };
     await reindexAll(repinned);
     assert.equal(listingStatus(), "active", "a restarted rebuild cannot reuse a foreign withdrawal");
-    assert.equal(store.loadScanState().chainIdentity, node.chain);
+    assert.equal(readyChain(), node.chain);
     node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  });
+}
+
+for (const interruption of ["same-chain reset", "replacement reset", "legacy adoption"] as const) {
+  test(`a failed ${interruption} retains provenance across restart and another re-pin`, async () => {
+    const hash = await withdrawnOnEarlierPass(interruption === "legacy adoption" ? { chainIdentity: undefined } : {});
+    store.saveDomains(["interrupted.example"]);
+    const intermediate = interruption === "replacement reset" ? "bb".repeat(32) : PINNED_DEMOS_CHAIN_IDENTITY;
+    if (interruption === "same-chain reset") {
+      store.saveScanState({ ...store.loadScanState(), lastSeenTxId: 5000, lastChainTip: 5 });
+      node = { ...node, tip: 5 };
+    }
+    try {
+      await assert.rejects(reindexAll({ ...offlinePass, nodeDeployment: nodeOnChain(intermediate),
+        crawlWellKnown: async () => {
+          store.recordArtifactFailure("stor-" + "7".repeat(40), "listing", "STORAGE_UNREADABLE", "intermediate chain", 1);
+          store.recordListingRejection("stor-" + "8".repeat(40), seller, "OWNER_CLAIM_BINDING", { listingId: "svc", listingVersion: 1 }, true);
+          store.admitRevocationCandidates(hash, [{ locator: "stor-" + "9".repeat(40) }]);
+          throw new Error("interrupted replay");
+        } }), /interrupted replay/);
+      const restarted = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import assert from 'node:assert/strict';
+        import { reindexAll } from './src/catalog/reindexCore.ts';
+        import * as store from './src/catalog/store.ts';
+        import { nodeOnChain } from './test/fixtures/pinned-node.ts';
+        globalThis.fetch = async () => Response.json({ result: 503 });
+        await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain('cc'.repeat(32)) }), /chain scan failed/);
+        assert.deepEqual(store.loadCatalog().sellers, [], 'foreign catalog, badges and withdrawals must be cleared');
+        assert.equal(store.retainedListingRevocation(${JSON.stringify(hash)}), null);
+        assert.deepEqual(Object.keys(store.loadScanState().listings), []);
+        assert.deepEqual(store.indexerDiagnostics().artifacts, {});
+      `], { encoding: "utf8", timeout: 30_000, env: process.env });
+      assert.equal(restarted.status, 0, restarted.stderr);
+    } finally { store.saveDomains([]); node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY }; }
+  });
+}
+
+for (const writer of ["batch", "index-now"] as const) {
+  test(`${writer} publication failure retains provenance and requires replay`, async () => {
+    await withdrawnOnEarlierPass({});
+    const before = store.loadCatalog();
+    const db = new Database(join(dataDirectory, "directory.sqlite"));
+    db.exec(`CREATE TRIGGER refuse_ready BEFORE UPDATE ON kv_state
+      WHEN new.key='catalog-chain' AND json_extract(new.value_json,'$.readySchema') IS NOT NULL
+      BEGIN SELECT RAISE(ABORT,'publication refused'); END`);
+    try {
+      await assert.rejects(writer === "batch" ? reindexAll(offlinePass) : indexNow(), /publication refused/);
+      assert.deepEqual(store.loadCatalog(), before);
+      assert.equal(readyChain(), undefined);
+      assert.equal(store.loadCatalogChain()?.evidenceChain, PINNED_DEMOS_CHAIN_IDENTITY);
+    } finally { db.exec("DROP TRIGGER refuse_ready"); db.close(); }
+    await assertRefused(409, notCurrent, "failed publication cannot complete replay");
+    await reindexAll(offlinePass);
+    assert.equal((await indexNow()).status, 200);
+  });
+
+  test(`${writer} process death during indexing preserves withdrawals and requires replay`, async (context) => {
+    const hash = await withdrawnOnEarlierPass({});
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import { NextRequest } from 'next/server';
+      import { POST } from './app/api/dacs/index-now/route.ts';
+      import { reindexAll } from './src/catalog/reindexCore.ts';
+      import { pinnedNodeAnswer } from './test/fixtures/pinned-node.ts';
+      globalThis.fetch = async (input, init) => {
+        if (String(input).includes('/storage-program/')) process.kill(process.pid, 'SIGKILL');
+        return pinnedNodeAnswer(init?.body) ?? Response.json({ result: 200, response: [] });
+      };
+      ${writer === "batch" ? "await reindexAll({ log: () => {}, resolveIdentities: async () => ({}), crawlWellKnown: async () => ({ agents: [], errors: [] }) });"
+        : `await POST(new NextRequest('https://directory.example/api/dacs/index-now', { method: 'POST', headers: { authorization: 'Bearer index-now-admin' }, body: JSON.stringify({ claim: '${seller}' }) }));`}
+    `], { encoding: "utf8", timeout: 30_000, env: process.env });
+    assert.equal(child.signal, "SIGKILL", child.stderr);
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() + 121_000 });
+    assert.equal(readyChain(), undefined);
+    assert.equal(store.loadCatalogChain()?.evidenceChain, PINNED_DEMOS_CHAIN_IDENTITY);
+    assert.notEqual(store.retainedListingRevocation(hash), null);
+    assert.equal((await indexNow()).status, 409);
+    await reindexAll(offlinePass);
+    assert.equal(listingStatus(), "revoked");
+    assert.equal((await indexNow()).status, 200);
   });
 }

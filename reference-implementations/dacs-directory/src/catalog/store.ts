@@ -1,13 +1,13 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
 import { boundedJson } from "./artifactLimits.js";
-import { canonicalProgramOwner, normalizeScanState } from "./scanState.js";
+import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
+import type { Catalog, CatalogChain, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { bindsListingTuple, normalizeSubmittedDomain, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
 import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
@@ -624,7 +624,8 @@ export const loadScanState = () => normalizeScanState(getJson("scan-state", { la
 export const saveScanState = db.transaction((state: ScanState): void => {
   const normalized = normalizeScanState(state);
   ingestLegacyRevocations(normalized.revocations);
-  setJson("scan-state", { ...normalized, revocations: {} });
+  const { chainIdentity: retiredChain, withheldChainIdentity: retiredWithheld, ...canonical } = normalized;
+  setJson("scan-state", { ...canonical, revocations: {} });
 });
 /**
  * Remove active cache rows that belong to a replaced chain. Registrations and
@@ -638,16 +639,38 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM artifacts").run();
   db.prepare("DELETE FROM revocation_candidates").run();
 });
-/**
- * Withhold freshness after an unconfirmed read. Keep the last complete chain's provenance so a
- * later re-pin still clears foreign evidence; index-now refuses and batch replays from genesis.
- */
-export function withholdScanStateChain(): void {
+/** Read control, consuming retired scanner labels atomically during migration. */
+export const loadCatalogChain = db.transaction((): CatalogChain | null => {
+  const control = getJson<CatalogChain | null>("catalog-chain", null);
+  if (control) return control;
   const state = loadScanState();
-  state.withheldChainIdentity = state.chainIdentity ?? state.withheldChainIdentity;
-  delete state.chainIdentity;
+  const evidenceChain = state.chainIdentity ?? state.withheldChainIdentity;
+  if (evidenceChain === undefined) return null;
+  const migrated = { evidenceChain, readySchema: state.chainIdentity ? state.schemaVersion ?? null : null };
+  setJson("catalog-chain", migrated);
   saveScanState(state);
-}
+  return migrated;
+});
+/** Bind/adopt evidence before provisional work; only publication can grant readiness. */
+export const invalidateCatalogChain = (evidenceChain: string): void =>
+  setJson("catalog-chain", { evidenceChain, readySchema: null });
+/** Reset progress, explicit derived evidence and replacement catalog in one durable transition. */
+export const resetCatalogChain = db.transaction((evidenceChain: string, replacement: boolean, tip: number | null) => {
+  clearChainDerivedArtifacts();
+  if (replacement) saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [] });
+  const state = normalizeScanState({ schemaVersion: 0, lastSeenTxId: 0,
+    ...(tip === null ? {} : { lastChainTip: tip }), listings: {}, deals: {}, programs: {},
+    revocations: {}, verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: false });
+  saveScanState(state);
+  invalidateCatalogChain(evidenceChain);
+  return state;
+});
+/** Publish a completed pass's catalog, scanner/schema and readiness atomically; throws on failed storage. */
+export const publishCatalogChain = db.transaction((catalog: Catalog, state: ScanState, evidenceChain: string): void => {
+  saveScanState({ ...state, schemaVersion: SCAN_STATE_SCHEMA_VERSION });
+  saveCatalog(catalog);
+  setJson("catalog-chain", { evidenceChain, readySchema: SCAN_STATE_SCHEMA_VERSION });
+});
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 

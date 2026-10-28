@@ -240,24 +240,21 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
-   Chain gate: a reindex or `POST /api/dacs/index-now` first reads the chain the node
-   serves. When the node cannot be read (index-now: 503) or serves a chain other than
-   `DEMOS_CHAIN_IDENTITY` (409), it changes nothing; a refused reindex is recorded as a
-   failed run with its cause (timeout, transport, unreadable genesis, wrong chain). Before either
-   saves its catalog, the served chain is read again. Indexing saves rejections and revocation
-   progress as it reads; when that read fails, the catalog is not saved and the recorded chain is
-   withheld, so index-now refuses and the next reindex replays from genesis. The last complete
-   chain's identity remains as provenance: a later re-pin still clears its foreign evidence.
-   Each complete pass
-   records the chain it scanned, after its catalog is saved. A state recorded on another chain (a
-   re-pin) and a large tip regression are reset after a further chain read: cached discoveries,
-   artifacts and retained revocations are cleared and history replays from genesis. Only a re-pin
-   drops the earlier catalog, emptying the public catalog first; a tip regression keeps serving it
-   until the rebuild is saved. A state with no recorded chain (an upgrade, a withheld chain or an
-   unfinished reset) is not proof of another chain: it replays from genesis and keeps its
-   retained revocations and earlier catalog, so a verified withdrawal stays in force (RB-3).
-   A replay longer than `DACS_SCAN_MAX_TXS` fails closed and records no chain, so raise the cap.
-   index-now answers 409 until a complete pass on this chain is recorded.
+   Chain gate: reindex and `POST /api/dacs/index-now` first check the served chain.
+   An unreadable node (503) or wrong chain (409) changes no evidence or control;
+   batch failures record their timeout, transport, unreadable-genesis or wrong-chain cause.
+   Build drift is a diagnostic warning. A fixed `catalog-chain` record binds evidence
+   provenance independently of completion. Legacy caches adopt their first admitted chain;
+   older scanner labels migrate without losing known provenance. Both retain withdrawals
+   and the earlier catalog while requiring a full replay.
+   Before provisional work, both writers durably clear readiness. A throw, process death,
+   failed save, final refusal or scan cap leaves provenance intact and requires full replay.
+   Only a complete pass and successful final chain check atomically publish the catalog,
+   scanner/schema and readiness. Index-now requires that completed replay; it cannot finish one.
+   A known replacement is rechecked, then atomically clears foreign catalog, discoveries,
+   artifacts, rejections and retained revocations, resets progress and binds the target chain.
+   Same-chain tip regression resets progress and derived rows while retaining the earlier catalog.
+   A replay exceeding `DACS_SCAN_MAX_TXS` publishes nothing; raise the cap to cover history.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those
