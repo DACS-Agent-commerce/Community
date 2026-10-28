@@ -148,7 +148,12 @@ test("a release decided before a newer signed source update in the same window i
   const signed = signedBindingFor(domain, listingHash);
   store.openChainReadWindow();
   rejectMarker(signed);
+  assert.equal(boundCount(listingHash), 0, "the current source's release hides the binding");
   store.recordWellKnownWithdrawalCheck(domain, signedSeller, [listingHash], [], { generatedAt: 2, hash: "c".repeat(64) }, []);
+  // The newer source still carries the binding. Its revision invalidates the release, so a
+  // catalog calculated before the commit must already read the binding as holding the Listing.
+  assert.equal(boundCount(listingHash), 1, "a newer source revision makes the stale release invisible");
+  assert.equal(store.hasIncompleteWellKnownWithdrawal(signedSeller, listingHash), true);
   store.commitChainReadWindow(() => {});
   assert.equal(boundCount(listingHash), 1, "the stale release waits for a read against the newer source");
 });

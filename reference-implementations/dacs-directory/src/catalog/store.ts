@@ -710,8 +710,14 @@ const chainReadWindowOpen = (): boolean =>
 interface StagedBindingRelease { binding_key: string; revision: number }
 const stagedBindingReleases = (): StagedBindingRelease[] =>
   db.prepare("SELECT binding_key, revision FROM staged_binding_releases").all() as StagedBindingRelease[];
+/**
+ * The staged releases a reader may act on: only those decided against the current source
+ * revision. A newer signed source declaration may carry the binding again, so a release
+ * decided before it is stale and must not hide the binding from the pass's own reads.
+ */
 const stagedBindingReleaseKeys = (): Set<string> =>
-  new Set((db.prepare("SELECT binding_key FROM staged_binding_releases").all() as Array<{ binding_key: string }>)
+  new Set((db.prepare("SELECT binding_key FROM staged_binding_releases WHERE revision = ?")
+    .all(wellKnownWithdrawalRevision()) as Array<{ binding_key: string }>)
     .map((row) => row.binding_key));
 const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => {
   if (keys.size === 0) return;
