@@ -279,7 +279,7 @@ test("a node that changes chain during the history scan fails the pass before it
   seedScanState({ ...oldChainState(), chainIdentity: NEW_CHAIN });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   const before = { state: store.loadScanState(), catalog: store.loadCatalog(), artifacts: store.indexerDiagnostics().artifacts };
-  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, CHANGED_CHAIN) }), servedChainChanged);
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }), servedChainChanged);
   assert.deepEqual(store.loadScanState(), before.state);
   assert.deepEqual(store.loadCatalog(), before.catalog);
   assert.deepEqual(store.indexerDiagnostics().artifacts, before.artifacts);
@@ -293,7 +293,7 @@ test("a node that changes chain while sellers are indexed saves no catalog and r
   seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 3, listings: {}, deals: {} });
   store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
   const catalog = store.loadCatalog();
-  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }),
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }),
     servedChainChanged);
   assert.deepEqual(store.loadCatalog(), catalog);
   assert.equal(readyChain(), undefined);
@@ -321,8 +321,8 @@ test("an anchor backfill read while the node served another chain is deferred, n
     observedAt: 1, data: {} });
   seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: NEW_CHAIN, lastSeenTxId: 3, listings: {}, deals: {} });
   const logs: string[] = [];
-  // Gate, history scan, backfill, then indexing: only the backfill saw the other chain.
-  await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN, NEW_CHAIN) });
+  // Gate, admission, history scan, backfill, then indexing: only the backfill saw the other chain.
+  await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN, NEW_CHAIN) });
   assert.ok(logs.some((line) => /^SR-2 anchor backfill deferred: the served chain changed during the pass: WRONG_CHAIN: /.test(line)));
   assert.equal(store.loadScanState().anchorBackfillComplete, false, "the backfill's progress is not saved");
 });

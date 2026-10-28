@@ -116,6 +116,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
+  // Confirm admission before control migration, legacy sanitation or a reset can persist.
+  const admissionChange = await chainChange();
+  if (admissionChange) return refuse(`catalog not updated: ${admissionChange}`);
   const control = loadCatalogChain();
   const chainReplaced = control !== null && control.evidenceChain !== served.chainIdentity;
   const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
@@ -123,8 +126,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const needsHistoryReplay = chainReplaced || tipRegressed || !scanStateCurrent(state, served.chainIdentity, control);
   if (chainReplaced || tipRegressed) {
     const previousCursor = state.lastSeenTxId;
-    const changed = await chainChange();
-    if (changed) return refuse(`catalog not updated: ${changed}`);
     try { state = resetCatalogChain(served.chainIdentity, chainReplaced, observedChainTip); }
     catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
     prior = loadCatalog();
