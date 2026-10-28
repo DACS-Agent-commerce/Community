@@ -1,3 +1,5 @@
+import type { CommitmentContext } from "./commitmentContext.js";
+import { canonicalize } from "./canonical.js";
 import { flipOutcome } from "./reputation.js";
 import type { EvidenceGraph } from "./evidenceGraph.js";
 import type { RegisteredDeal } from "./types.js";
@@ -82,7 +84,8 @@ export function reconcileCurrentCopies(
     buyerOk && sellerOk && currentBundleCopiesDiverge(buyerGraph.bundle, sellerGraph!.bundle),
   );
   const authoritative = sellerOk ? sellerGraph! : buyerGraph;
-  const refsVerified = Boolean(sellerOk && buyerOk && !divergent && authoritative.refsVerified);
+  const refsVerified = Boolean(sellerOk && buyerOk && !divergent && buyerGraph.refsVerified && sellerGraph?.refsVerified &&
+    buyerGraph.credit && sellerGraph.credit && canonicalize(buyerGraph.credit) === canonicalize(sellerGraph.credit));
   const sellerOutcome = sellerRelativeOutcome(authoritative, sellerClaim);
   const selectedLocator = authoritative === sellerGraph ? deal.sellerBundleRef! : deal.buyerBundleRef;
   return {
@@ -107,7 +110,7 @@ export function legacyCopyCanVerifyRefs(
 }
 
 /** Keep the two-copy and terminal-outcome gates independent of SDK reference support. */
-export function reconcileLegacyCopies<T extends { refsOk: boolean; bundle?: { outcome?: string } }>(
+export function reconcileLegacyCopies<T extends { refsOk: boolean; authenticated?: boolean; bundle?: { outcome?: string }; commitmentContext?: CommitmentContext | null }>(
   buyerCopy: T,
   sellerCopy: T | null,
 ) {
@@ -118,9 +121,11 @@ export function reconcileLegacyCopies<T extends { refsOk: boolean; bundle?: { ou
       sellerCopy.bundle as unknown as Record<string, unknown>,
     ),
   );
-  const authoritative = sellerCopy?.refsOk ? sellerCopy : buyerCopy;
+  const authoritative = sellerCopy?.authenticated ? sellerCopy : buyerCopy;
   const bothBundlesPresent = Boolean(buyerCopy.bundle && sellerCopy?.bundle);
-  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && bothBundlesPresent && !divergent;
+  const refsVerified = buyerCopy.refsOk && Boolean(sellerCopy?.refsOk) && bothBundlesPresent && !divergent &&
+    Boolean(buyerCopy.commitmentContext && sellerCopy?.commitmentContext &&
+      canonicalize(buyerCopy.commitmentContext) === canonicalize(sellerCopy.commitmentContext));
   const sellerOutcome = authoritative === sellerCopy
     ? authoritative.bundle?.outcome : flipOutcome(authoritative.bundle?.outcome);
   const currentOutcomes = new Set(["completed", "failed-perm", "failed-counterparty", "failed-substrate", "aborted-by-self", "aborted-by-other"]);

@@ -32,6 +32,7 @@ const partySignature = (index: number, prefix: string, scope: Obj) =>
 
 const listingScope: Obj = {
   agentId: seller, serviceId: "svc", name: "Service", description: "Legacy service", claimRequirements: [],
+  validity: { notBefore: 0 },
   supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"], supportedDelivery: ["deliver-attested-payload"],
 };
 const listing = { ...listingScope, signature: signWith(1, `dacs-listing:v1:${contentHash(listingScope)}`, "hex") };
@@ -41,10 +42,10 @@ function indexRegistration(...args: Parameters<typeof indexWithoutCommitment>) {
   const [registration, prior, identities, recipes, omitted, legacy] = args;
   return indexWithoutCommitment(registration, prior, identities, recipes, omitted, legacy, {
     ...fixtureCommitments,
-    resolve: async (jobId) => {
+    resolve: async (context) => {
+      const { jobId } = context;
       const agreement = storage[deriveAnchorAddress(buyer, legacySessionAnchorName.agreement(jobId))];
-      const bundle = Object.values(storage).find((raw) => raw.jobId === jobId && raw.bundleVersion === "1");
-      return agreement && bundle ? commitmentProof(agreement, bundle.listingRef as Obj, 90, false, { claim: buyer, seed: seeds[0] }) : null;
+      return agreement ? commitmentProof(agreement, context.listingRef, 90, false, { claim: buyer, seed: seeds[0] }) : null;
     },
   });
 }
@@ -393,8 +394,8 @@ test("legacy vet references read the buyer's historical verifyrecord separately 
     assert.equal(reads.get(wrongAt) ?? 0, 0, "no alternate name can substitute for the historical producer name");
     assert.equal(reads.get(agreementAt), copies, "agreement dispatch remains separate");
     assert.equal(reads.get(evidenceAt), copies, "evidence dispatch remains separate");
-    // Without a refs-verified seller copy the buyer copy is selected, and a missing one has no signature verdict.
-    assert.equal(record.deals[0].signatureVerified, mode !== "invalid-signatures" && !sellerCopyOnly, jobId);
+    // Authentication selects metadata independently of unsupported vet references or proof credit.
+    assert.equal(record.deals[0].signatureVerified, mode !== "invalid-signatures", jobId);
     // This release has no authenticated session recipe/composite adapter. A
     // shaped and signed record alone cannot establish a completed vet graph.
     assert.equal(record.deals[0].refsVerified, false, mode);
@@ -450,4 +451,34 @@ test("legacy Listing member-name hashing agrees in admission, references and sig
     if (tamper) storage[locator(1)]["e\u0301"] = "modified";
     assert.equal((await indexed(registered)).reputation.bundleCount, tamper ? 0 : 1);
   }
+});
+
+test("legacy signature standing survives a missing proof when only the seller copy authenticates", async () => {
+  const deal = legacyDeal("legacy-signature-only", [{ role: "buyer", signers: [] }, { role: "seller" }]);
+  const record = await indexWithoutCommitment({ primaryClaim: seller, displayName: "seller", listingAnchors: [locator(1)], deals: [deal] },
+    undefined, async () => { throw new Error("offline"); });
+  assert.equal(record.deals[0].signatureVerified, true);
+  assert.equal(record.deals[0].anchoredByRole, "seller");
+  assert.ok(record.deals[0].bundleContentHash);
+  assert.equal(record.deals[0].refsVerified, false);
+  storage = {};
+});
+
+for (const validity of [undefined, {}]) test(`legacy history refuses ${validity === undefined ? "missing" : "empty"} signed validity`, async () => {
+  const scope = { ...listingScope }; delete scope.validity; if (validity) scope.validity = validity;
+  const pin = { listingId: "svc", version: 1, contentHash: contentHash(scope) };
+  const deal = legacyDeal(`legacy-invalid-validity-${validity === undefined}`, [
+    { role: "buyer", change: body => { body.listingRef = pin; } }, { role: "seller", change: body => { body.listingRef = pin; } },
+  ]);
+  storage[locator(1)] = { ...scope, signature: signWith(1, `dacs-listing:v1:${contentHash(scope)}`, "hex") };
+  assert.ok(await verifyListing(storage[locator(1)]), "historical reader admits this compatibility shape");
+  assert.equal((await indexed(deal)).deals[0].refsVerified, false);
+});
+
+test("legacy agreement-less aborts retain the established reader refusal boundary", async () => {
+  const deal = legacyDeal("legacy-no-agreement", [
+    { role: "buyer", change: body => { delete body.agreementRef; body.outcome = "aborted-by-other"; body.phaseSummary = []; } },
+    { role: "seller", change: body => { delete body.agreementRef; body.outcome = "aborted-by-self"; body.phaseSummary = []; } },
+  ]);
+  assert.equal((await indexed(deal)).deals[0].refsVerified, false);
 });

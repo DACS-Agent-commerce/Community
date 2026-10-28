@@ -27,7 +27,7 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Seller publication | DACS-1 §6.3.4 | The browser publisher is omitted from this release. `/register` explains discovery-pointer submission and offers read-only recovery of saved anchors. Publication through another client requires a verified finalized AnchorReceipt (LP-1), and for pay-bearing listings verified rail authority (LP-6). The internal builder checks rail authority (LP-6) and prepares a transaction; its `publicationReady` flag means a transaction was prepared, not that it is final, so it does not satisfy LP-1. `confirm-listing` requires a transaction hash and reports only an unauthenticated node observation, never a receipt. `POST /api/dacs/register` accepts bounded pointer sets; the indexer independently authenticates each anchor. |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | authenticated commitment-finality gate (requires a trusted adapter; otherwise no Listing-bound credit), logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
+| Reputation derivation | DACS-5 §10.4–§10.5 | authenticated commitment-finality gate (requires a trusted adapter; otherwise only authenticated pre-commit terminal evidence), logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, ratings, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -393,7 +393,10 @@ base64url-patched Buffer).
   identifies each excluded deal; `/api/dacs/status` reports the cached count as
   `legacyVetUnsupportedDeals`. An authenticated session-bound composite verifier is
   required before these deals can count.
-- **Listing-bound deal credit requires authenticated commitment finality.** Current
+- **Committed deal credit requires authenticated commitment finality.** Authenticated current
+  pre-commit abort copies, including single-signed anchoring copies, retain fault/cancellation
+  evidence without a finality adapter. Their phase facts must match the signed Listing
+  before or at a failed commitment attempt, with no settlement, amendments or ratings. Current
   and legacy indexer paths verify the commitment's session-orchestrator signature,
   exact agreement hash, Listing tuple, pattern and signing-party roster. New records
   use finalized receipt consensus time; legacy signed `committedAt` must equal it.
@@ -402,14 +405,14 @@ base64url-patched Buffer).
   signed `revokedAt` is chosen by the seller rather than authenticated consensus time,
   and an unsettled withdrawal holds only discovery. Expired tuples remain available
   as historical evidence without returning to discovery; category attribution uses
-  the exact tuple. Startup clears older cached deal credit and category hints.
-  `EvidenceGraphDeps.commitment` and `indexRegistration`'s final dependency accept a
+  the exact tuple. Startup clears older cached deal credit and Listing reputation hints.
+  `EvidenceGraphDeps.commitment`, `ReindexOptions.commitment` and `indexRegistration`'s final dependency accept a
   server-owned `CommitmentVerifier`: it must resolve authenticated session authority
-  and immutable native commitment content, and independently verify the original
+  and immutable native commitment content for the exact authenticated context, and independently verify the original
   finalized receipt evidence, including network/profile, transaction, writer and nonce.
   Its network reads must bound bytes before decoding and honor the supplied deadline.
   This app ships without a Demos consensus authenticator, so its default indexer
-  refuses Listing-bound credit. Node observations, saved verdicts, signatures alone
+  withholds committed credit. Node observations, saved verdicts, signatures alone
   and injected candidate timestamps cannot enable credit. Tests use a separate signed
   fixture finality profile; that profile does not authenticate Demos consensus.
 - **Authority proof integration is pending.** Current graph and identity-tier paths

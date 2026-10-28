@@ -68,6 +68,7 @@ import {
   throwIfInfrastructureError,
 } from "./store.js";
 import { deriveSellerReputation, isNeutralCancellation } from "./reputation.js";
+import { makeCommitmentContext, type CommitmentContext } from "./commitmentContext.js";
 import { verifyListingCommitment, type CommitmentVerifier, type ListingEvidence } from "./commitmentFinality.js";
 import { agreementPrice, buildCurrentEvidenceGraph, type EvidenceGraph } from "./evidenceGraph.js";
 import { agreementRail } from "./agreementMetadata.js";
@@ -143,7 +144,7 @@ export function listingBindingRejection(
  *
  * `resolveIdentities` defaults to the narrow authenticated GCR call in gcr.ts;
  * tests may inject a deterministic resolver. `commitment` is a server-owned
- * authenticator for finalized commitments; omitting it withholds Listing-bound credit.
+ * authenticator for finalized commitments; omitting it withholds committed credit.
  */
 export async function indexRegistration(
   reg: Registration,
@@ -226,8 +227,10 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    // Discovery checks this window after retaining authenticated historical evidence.
+    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
+    if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
+    if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
     // those anchored by the listing's own owner first. Only one batch is ever selected.
@@ -290,11 +293,6 @@ export async function indexRegistration(
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
-    // Past sessions still verify against the exact tuple, whatever its revocation state (DACS-1:
-    // revocation does not invalidate committed sessions) and after expiry; both affect discovery only.
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
-    if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
-    if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     if (verified.profile === "dacs-v0.1" && signedSeller?.identity && typeof signedSeller.identity === "object") {
       identityBundle = signedSeller.identity as Record<string, unknown>;
       identityBundles.push(identityBundle);
@@ -404,7 +402,7 @@ export async function indexRegistration(
           : [];
         const roleHolder = parties.find((party) => party.role === binding.role)?.primaryClaim;
         if (
-          !graph.ok || graph.bundle.jobId !== binding.jobId ||
+          !graph.ok || !graph.signaturesVerified || graph.bundle.jobId !== binding.jobId ||
           graph.bundle.anchoredByRole !== binding.role ||
           typeof roleHolder !== "string" ||
           canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
@@ -465,7 +463,7 @@ export async function indexRegistration(
       const { authoritative, buyerOk, sellerOk, refsVerified, sellerOutcome, selectedLocator } =
         reconcileCurrentCopies(resolvedDeal, reg.primaryClaim, buyerGraph, sellerGraph);
       const parties = Array.isArray(authoritative?.bundle.parties) ? authoritative.bundle.parties as Array<Record<string, unknown>> : [];
-      const ratings = (authoritative?.ratings ?? []).filter((rating) =>
+      const ratings = (refsVerified ? authoritative?.ratings ?? [] : []).filter((rating) =>
         rating.jobId === deal.jobId && parties.some((party) =>
           typeof party.primaryClaim === "string" && typeof rating.rater === "string" &&
           canonicalSigningIdentity(party.primaryClaim) === canonicalSigningIdentity(rating.rater)),
@@ -545,14 +543,14 @@ export async function indexRegistration(
       let refsOk = verification && authenticated ? await refsPassStrictPolicy(verification, resolvedArtifacts) : false;
       const listed = bundle ? await resolveListing({ ...bundle.listingRef }) : null;
       const agreement = resolvedArtifacts.find((artifact) => artifact.kind === "dacs-3-agreement")?.raw;
+      let commitmentContext: CommitmentContext | null = null;
       if (refsOk) {
-        const result = bundle && listed && agreement && await verifyListingCommitment({ jobId: bundle.jobId,
-          listingRef: bundle.listingRef, agreementHash: bundle.agreementRef?.contentHash ?? "",
-          pattern: agreement.pattern, parties: [agreement.buyer, agreement.seller],
-          deadline: typeof agreement.expiresAt === "string" ? Date.parse(agreement.expiresAt) : undefined }, listed, commitment);
-        refsOk = Boolean(result && result.ok);
+        const context = bundle && listed && agreement && makeCommitmentContext(
+          rawBundle ?? {}, agreement, listed, bundle.agreementRef?.contentHash ?? "", true);
+        commitmentContext = context || null;
+        refsOk = Boolean(context && (await verifyListingCommitment(context, commitment)).ok);
       }
-      return { verification, bundle, signaturesOk, refsOk, rawBundle, resolvedArtifacts,
+      return { verification, bundle, signaturesOk, authenticated, refsOk, commitmentContext, rawBundle, resolvedArtifacts,
         carriesVetRecords: authenticated && Boolean(bundle?.vetRecords.length) };
     };
 
