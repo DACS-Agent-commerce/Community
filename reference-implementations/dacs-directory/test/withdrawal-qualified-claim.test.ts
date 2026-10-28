@@ -13,6 +13,7 @@ import {
   saveRegistrations,
 } from "../src/catalog/store.js";
 import { dids, locator, seeds, vector } from "./fixtures/current-evidence.js";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 
 const presentedBy = `${dids[1]}?channel=directory`;
 const { listing } = await vector("qualified-withdrawal", 0, presentedBy);
@@ -123,7 +124,7 @@ test("a retained qualified binding re-attaches its crawled anchor in a full rein
   try {
     saveRegistrations([]);
     saveDomains([crawled.domain]);
-    await reindexAll({ log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [crawled], errors: [] }) });
+    await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [crawled], errors: [] }) });
     const summary = loadCatalog().sellers.flatMap((seller) => seller.listings).find((listing) => listing.contentHash === retained.contentHash);
     assert.deepEqual([summary?.seller.primaryClaim, summary?.status, summary?.revocation], [retainedBy, "revoked", retainedBinding]);
   } finally { globalThis.fetch = originalFetch; }
