@@ -404,15 +404,15 @@ db.transaction(() => {
 // Old catalog verdicts predate commitment authentication. Clear only derived deal
 // credit atomically; retain Listing discovery, withdrawal evidence and scan pointers.
 db.transaction(() => {
-  if (getJson("commitment-finality-schema-version", 0) >= 2) return;
+  if (getJson("commitment-finality-schema-version", 0) >= 3) return;
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
   setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
-    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }));
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false, ratings: [] }));
     return { ...seller, deals,
       listings: seller.listings.map(({ reputationHint: _unprovenHint, ...listing }) => listing),
       reputation: deriveSellerReputation(deals, 0, catalog.generatedAt) };
   }) });
-  setJson("commitment-finality-schema-version", 2);
+  setJson("commitment-finality-schema-version", 3);
 }).immediate();
 
 /**

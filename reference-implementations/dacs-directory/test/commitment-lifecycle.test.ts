@@ -44,27 +44,28 @@ async function abortFixture(payee: boolean, fault: boolean, agreement: boolean, 
 }
 for (const payee of [false, true]) for (const fault of [false, true]) for (const agreement of [false, true])
 for (const phases of ["empty", "negotiate", "failed-commit"] as const) for (const single of [false, true]) {
-  test(`pre-commit ${payee ? "payee" : "legacy agreement"}/${fault ? "fault" : "bundle"}/${agreement ? "agreement" : "no agreement"}/${phases}/${single ? "single" : "both"} retains fault credit`, async () => {
+  test(`pre-commit ${payee ? "payee" : "legacy agreement"}/${fault ? "fault" : "bundle"}/${agreement ? "agreement" : "no agreement"}/${phases}/${single ? "single" : "both"} checks the commitment boundary`, async () => {
     const f = await abortFixture(payee, fault, agreement, phases, single);
     let calls = 0;
     const forbidden = { resolve: async () => { calls++; throw new Error("must not resolve"); }, verifyReceipt: async () => { calls++; return false; } };
     const buyer = await buildCurrentEvidenceGraph(f.locators.buyer, deps(f, forbidden));
     const seller = await buildCurrentEvidenceGraph(f.locators.seller, deps(f, forbidden));
     const reconciled = reconcileCurrentCopies(registeredDeal("precommit", f.locators.buyer, f.locators.seller), dids[1], buyer, seller);
-    assert.equal(reconciled.refsVerified, true, buyer.reason ?? seller.reason);
-    assert.equal(reconciled.sellerOutcome, "aborted-by-self");
-    assert.equal(calls, 0);
-    assert.equal((await buildCurrentEvidenceGraph(f.locators.buyer, deps(f))).refsVerified, true);
+    const precommit = !agreement && phases !== "failed-commit";
+    assert.equal(reconciled.refsVerified, precommit, buyer.reason ?? seller.reason);
+    if (precommit) assert.equal(reconciled.sellerOutcome, "aborted-by-self");
+    if (precommit || phases === "failed-commit") assert.equal(calls, 0);
+    assert.equal((await buildCurrentEvidenceGraph(f.locators.buyer, deps(f))).refsVerified, precommit);
   });
 }
 
 for (const payee of [false, true]) for (const fault of [false, true])
 test(`pre-commit vet references and neutral cancellation retain denominators (${payee}/${fault})`, async () => {
-  const f = await abortFixture(payee, fault, true, "failed-commit", true);
+  const f = await abortFixture(payee, fault, false, "negotiate", true);
   await listing(f, scope => { scope.terms = { cancellationPolicy: "pre-commit" }; });
   const scope: Obj = { recordVersion: "1", jobId: "precommit", evaluatedParty: dids[1], overallDecision: "fail", freshness: [], dealSpecific: [], supplementary: [] };
   const vet = { ...scope, signature: await sign(scope, "composite", 0) }; maps.set(locator(8199), vet);
-  await bundles(f, body => { body.vetRecords = [ref(locator(8199), vet, "composite")]; body.cancellation = { claimedPolicy: "pre-commit" }; }, true);
+  await bundles(f, body => { delete body.agreementRef; body.vetRecords = [ref(locator(8199), vet, "composite")]; body.cancellation = { claimedPolicy: "pre-commit" }; }, true);
   const result = await buildCurrentEvidenceGraph(f.locators.seller, deps(f));
   assert.equal(result.refsVerified, true, result.reason);
   assert.equal(result.artifacts.some(a => a.kind === "composite"), true);
@@ -147,7 +148,7 @@ test("each copy needs its own proof and the exact same authenticated commitment 
 
 test("one completed deal plus one seller-fault pre-commit abort stays at 0.5 over two agreements", async t => {
   t.mock.method(Date, "now", () => 150);
-  const aborted = await abortFixture(false, true, true, "negotiate", true);
+  const aborted = await abortFixture(false, true, false, "negotiate", true);
   const saved = new Map(maps);
   const completed = await vector("completed", 8500);
   for (const [at, raw] of saved) maps.set(at, raw);
@@ -176,4 +177,15 @@ test("pre-commit invalid signatures and conflicting terminal copies cannot earn 
   assert.equal(reconcileCurrentCopies(registeredDeal("precommit", f.locators.buyer, f.locators.seller), dids[1], buyer, seller).refsVerified, false);
   maps.set(f.locators.buyer, { ...f.buyerBundle, signatures: [] });
   assert.equal((await buildCurrentEvidenceGraph(f.locators.buyer, deps(f))).refsVerified, false);
+});
+
+for (const payee of [false, true]) test(`an agreement-bearing abort uses authenticated commitment proof (${payee})`, async () => {
+  const f = await abortFixture(payee, false, true, "negotiate", false);
+  const proof = commitmentProof(f.agreement, f.agreement.listingRef as Obj);
+  let calls = 0;
+  const verifier = { ...fixtureCommitments, resolve: async () => { calls++; return proof; } };
+  const buyer = await buildCurrentEvidenceGraph(f.locators.buyer, deps(f, verifier));
+  const seller = await buildCurrentEvidenceGraph(f.locators.seller, deps(f, verifier));
+  assert.equal(buyer.refsVerified, true, buyer.reason); assert.equal(seller.refsVerified, true, seller.reason);
+  assert.equal(calls, 2, "agreement-bearing copies each qualify their own commitment");
 });
