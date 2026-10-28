@@ -193,6 +193,7 @@ test("index-now refuses after a replay that failed before its catalog was saved"
 // last chain check fails keeps none of them, and reverts a crashed writer's too.
 const offlinePass = { log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
   crawlWellKnown: async () => ({ agents: [], errors: [] }) };
+const notCurrent = /^catalog not updated: no complete reindex on this chain yet; run a full reindex first$/;
 const badSignature = { ...listing, signature: { ...listing.signature, value: Buffer.alloc(64, 1).toString("base64url") } };
 const rejections = () => store.indexerDiagnostics().listingRejectionDiagnostics.items.map((item) => item.code);
 /** Run `write` with the listing read answered by `stored`, after which the node fails its next chain read. */
@@ -217,6 +218,24 @@ test("index-now keeps no rejection it recorded when the node changes chain while
   assert.equal(response.status, 409);
   assert.deepEqual(rejections(), []);
   assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+});
+
+for (const [name, lost, status] of [["changes chain", { chain: "aa".repeat(32) }, 409], ["fails its last chain read", { failure: "timeout" }, 503]] as const) {
+  test(`index-now withholds the recorded chain when the node ${name} while indexing`, async () => {
+    const response = await withChainLostOnRead(listing, lost, indexNow);
+    assert.equal(response.status, status);
+    assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+    assert.equal(readyChain(), undefined);
+    await assertRefused(409, notCurrent, name);
+  });
+}
+
+test("a batch pass withholds the recorded chain when the node changes chain while sellers are indexed", async () => {
+  await assert.rejects(withChainLostOnRead(listing, { chain: "aa".repeat(32) }, () => reindexAll(offlinePass)),
+    /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /);
+  assert.deepEqual(store.loadCatalog(), unchangedCatalog);
+  assert.equal(readyChain(), undefined);
+  await assertRefused(409, notCurrent, "withheld chain");
 });
 
 test("index-now keeps an earlier rejection it cleared when the node changes chain while indexing", async () => {
@@ -276,6 +295,13 @@ test("a writer reverts the unconfirmed writes a crashed writer left behind", asy
     storedListing = listing;
     node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
   }
+});
+
+test("a complete pass records the chain again after one was withheld", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  await reindexAll({ ...offlinePass, nodeDeployment: onPinnedChain });
+  assert.equal(readyChain(), PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.equal((await indexNow()).status, 200);
 });
 
 const marker = `stor-${"2".repeat(40)}`;
