@@ -6,7 +6,7 @@ import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "../s
 import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 import { reindexAll, type ReindexOptions } from "../src/catalog/reindexCore.js";
 import { SCAN_STATE_SCHEMA_VERSION } from "../src/catalog/scanState.js";
-import { loadScanState, saveRegistrations, saveScanState } from "../src/catalog/store.js";
+import { loadScanState, loadCatalogChain, saveRegistrations, saveScanState } from "../src/catalog/store.js";
 import { nodeOnChain, onPinnedChain, pinnedNodeAnswer } from "./fixtures/pinned-node.js";
 
 const OTHER_CHAIN = "aa".repeat(32);
@@ -68,13 +68,14 @@ test("the second read refuses a node that now serves another chain or cannot be 
   assert.deepEqual(unreadable, { ok: false, status: 503, cause: "NODE_TRANSPORT: fetch failed" });
 });
 
-test("a scan state is current only when a complete pass on this chain wrote the current schema", () => {
-  const state = { lastSeenTxId: 1, listings: {}, deals: {} };
-  assert.equal(scanStateCurrent({ ...state, chainIdentity: OTHER_CHAIN, schemaVersion: SCAN_STATE_SCHEMA_VERSION }, OTHER_CHAIN), true);
-  assert.equal(scanStateCurrent({ ...state, chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: SCAN_STATE_SCHEMA_VERSION }, OTHER_CHAIN), false);
-  assert.equal(scanStateCurrent({ ...state, schemaVersion: SCAN_STATE_SCHEMA_VERSION }, OTHER_CHAIN), false, "legacy or reset: no identity");
-  assert.equal(scanStateCurrent({ ...state, chainIdentity: OTHER_CHAIN, schemaVersion: 0 }, OTHER_CHAIN), false);
-  assert.equal(scanStateCurrent({ ...state, chainIdentity: OTHER_CHAIN, schemaVersion: SCAN_STATE_SCHEMA_VERSION - 1 }, OTHER_CHAIN), false);
+test("readiness requires matching durable provenance, ready schema and scanner schema", () => {
+  const state = { lastSeenTxId: 1, listings: {}, deals: {}, schemaVersion: SCAN_STATE_SCHEMA_VERSION };
+  const control = { evidenceChain: OTHER_CHAIN, readySchema: SCAN_STATE_SCHEMA_VERSION };
+  assert.equal(scanStateCurrent(state, OTHER_CHAIN, control), true);
+  assert.equal(scanStateCurrent(state, PINNED_DEMOS_CHAIN_IDENTITY, control), false);
+  assert.equal(scanStateCurrent(state, OTHER_CHAIN, null), false);
+  assert.equal(scanStateCurrent(state, OTHER_CHAIN, { ...control, readySchema: null }), false);
+  assert.equal(scanStateCurrent({ ...state, schemaVersion: 0 }, OTHER_CHAIN, control), false);
 });
 
 test("a reindex with no injected deployment reads the pinned chain from the node and records it", async () => {
@@ -82,7 +83,8 @@ test("a reindex with no injected deployment reads the pinned chain from the node
   saveScanState({ lastSeenTxId: 0, listings: {}, deals: {} });
   node(pinnedNodeAnswer);
   await reindexAll({ log: () => {}, crawlWellKnown: async () => ({ agents: [], errors: [] }) });
-  assert.equal(loadScanState().chainIdentity, PINNED_DEMOS_CHAIN_IDENTITY);
+  assert.deepEqual(loadCatalogChain(), { evidenceChain: PINNED_DEMOS_CHAIN_IDENTITY, readySchema: SCAN_STATE_SCHEMA_VERSION });
+  assert.equal(loadScanState().chainIdentity, undefined, "canonical scanner saves retire identity fields");
   assert.equal(loadScanState().schemaVersion, SCAN_STATE_SCHEMA_VERSION);
 });
 
