@@ -255,11 +255,10 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    artifacts, rejections and retained revocations, resets progress and binds the target chain.
    Same-chain tip regression resets progress and derived rows while retaining the earlier catalog.
    A replay exceeding `DACS_SCAN_MAX_TXS` publishes nothing; raise the cap to cover history.
-   Node-derived writes inside a refresh are journaled until the final gate confirms them.
-   Journal completion and catalog/scanner/readiness publication commit in one transaction.
-   Refusal, throw or restart undoes provisional node effects, retaining publisher-signed
-   declarations, registrations and domains. Marker-derived binding releases are staged
-   until commit. Reset provenance and the replay requirement remain outside this undo window.
+   Provisional node-derived writes are journaled until the final chain check and publication.
+   Refusal, failed storage or process death reverts those writes; a restarted writer recovers
+   the journal before its gate. Durable chain provenance and readiness invalidation stay outside
+   that window, as do publisher-signed source declarations and concurrent registration saves.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those
