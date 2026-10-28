@@ -96,15 +96,35 @@ test("equal duplicate rows retain one active anchor and one declaration", async 
   assert.deepEqual(result.withdrawalHashes, [firstHash]);
 });
 
-test("equal normalized hashes do not conflict or promote an incomplete row", async () => {
-  for (const rows of [[row(firstHash), row(firstHash.toUpperCase())], [row(firstHash.toUpperCase()), row(firstHash)]]) {
-    const result = await crawlDomain(domain, hosted(rows, true));
-    assert.ok(!("error" in result));
-    assert.deepEqual(result.contentHashes, { [anchor]: firstHash });
-    assert.deepEqual(result.activeListingAnchors, []);
-    assert.deepEqual(result.incompleteWithdrawalHashes, [firstHash]);
+for (const signed of [false, true]) {
+  for (const reverse of [false, true]) {
+    test(`equal normalized hashes retain complete active rows (signed ${signed}, reversed ${reverse})`, async () => {
+      const rows = [row(firstHash), row(firstHash.toUpperCase())];
+      const result = await crawlDomain(domain, hosted(reverse ? rows.toReversed() : rows, signed));
+      assert.ok(!("error" in result));
+      assert.deepEqual(result.contentHashes, { [anchor]: firstHash });
+      assert.deepEqual(result.activeListingAnchors, [anchor]);
+      assert.deepEqual(result.incompleteWithdrawalHashes, []);
+    });
+
+    for (const [name, extra] of [
+      ["missing listing ID", { listingId: undefined }],
+      ["invalid version", { version: 0 }],
+      ["missing summary", { summary: undefined }],
+      ["unknown status", { status: "unknown" }],
+      ["unsupported anchor kind", { anchor: { kind: "unknown", locator: anchor } }],
+    ]) {
+      test(`equal normalized hashes do not promote ${name} (signed ${signed}, reversed ${reverse})`, async () => {
+        const rows = [row(firstHash), row(firstHash.toUpperCase(), extra)];
+        const result = await crawlDomain(domain, hosted(reverse ? rows.toReversed() : rows, signed));
+        assert.ok(!("error" in result));
+        assert.deepEqual(result.contentHashes, { [anchor]: firstHash });
+        assert.deepEqual(result.activeListingAnchors, []);
+        assert.deepEqual(result.incompleteWithdrawalHashes, [firstHash]);
+      });
+    }
   }
-});
+}
 
 test("different anchors can declare the same or different hashes", async () => {
   const otherAnchor = `stor-${"3".repeat(40)}`;
