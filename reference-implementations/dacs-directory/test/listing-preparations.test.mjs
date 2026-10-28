@@ -597,11 +597,12 @@ test("an exact repeat is not released a transaction while the lookup is indeterm
 
 test("a differently signed Listing learns only the saved anchor while the lookup is indeterminate", async (t) => {
   const state = node(t);
-  const first = await prepare(await signedInput("uncertain-changed-candidate"));
+  const signed = await signedInput("uncertain-changed-candidate");
   const changed = await signedInput("uncertain-changed-candidate", { description: "Different signed contents" });
+  const first = await prepare(signed);
   state.lookup = "failed";
-  await unresolved(await post(request(changed)), first.anchorAddress);
-  assert.equal(state.nonceReads, 1);
+  await unresolved(await post(request(changed)), first.anchorAddress, first.logicalAddress);
+  unchangedPreparation(first, state);
 });
 
 test("a prepared version the catalog lists still reports its saved anchor while the lookup is indeterminate", async (t) => {
