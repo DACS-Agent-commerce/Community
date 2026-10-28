@@ -106,11 +106,12 @@ async function prepare(input, handler = post) {
   assert.ok(body.tx);
   return body;
 }
-async function unresolved(response, anchor) {
+async function unresolved(response, anchor, logicalAddress) {
   assert.equal(response.status, 409);
   const body = await response.json();
   assert.match(body.error, /preparation.*unresolved/i);
   assert.equal(body.anchorAddress, anchor);
+  if (logicalAddress) assert.equal(body.logicalAddress, logicalAddress);
   for (const field of ["tx", "listing", "message", "publicationReady", "railResolution"]) {
     assert.equal(body[field], undefined, `${field} must not be released`);
   }
@@ -143,25 +144,107 @@ function unchangedPreparation(first, state) {
   assert.equal(row.transaction_json, JSON.stringify(first.tx));
   assert.equal(state.nonceReads, 1, "retained retries must not request a replacement nonce");
 }
+async function readback(response, first) {
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.exists, true);
+  assert.equal(body.anchorAddress, first.anchorAddress);
+  assert.deepEqual(body.listing, first.listing);
+  assert.equal(body.tx, null);
+}
+for (const age of [0, 900_000, 900_001, 960_000]) {
 for (const savedRail of authorizedRails) for (const retryRail of authorizedRails) {
   if (savedRail === retryRail) continue;
-  test(`a saved ${savedRail.railId} transaction cannot inherit ${retryRail.railId} authority`, async (t) => {
+  test(`saved ${savedRail.railId} refuses ${retryRail.railId} authority before and after readback at age ${age}`, async (t) => {
     const state = node(t);
-    const pair = await railPair(`rail-${savedRail.phaseHandler}-${retryRail.phaseHandler}`, savedRail, retryRail);
+    const pair = await railPair(`rail-${savedRail.phaseHandler}-${retryRail.phaseHandler}-${age}`, savedRail, retryRail);
+    t.mock.method(Date, "now", () => clock + age);
     assert.equal((await pair.retryHandler(request(pair.signed))).status, 409, "the saved rail is no longer authorized");
     await resumed(await pair.originalHandler(request(pair.signed)), pair.first);
-    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress);
+    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress, pair.first.logicalAddress);
+    state.published = pair.first;
+    await readback(await pair.originalHandler(request(pair.signed)), pair.first);
+    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress, pair.first.logicalAddress);
     unchangedPreparation(pair.first, state);
   });
 }
-for (const age of [900_000, 900_001, 960_000]) {
-  test(`a mismatching saved rail returns only its anchor at presentation age ${age}`, async (t) => {
+}
+test("identity-only prepared readback still binds the saved rail", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-readback-identity");
+  state.published = pair.first;
+  await readback(await pair.originalHandler(request({ ...pair.signed, listingSignature: undefined })), pair.first);
+  await unresolved(await pair.retryHandler(request({ ...pair.retry, listingSignature: undefined })),
+    pair.first.anchorAddress, pair.first.logicalAddress);
+  unchangedPreparation(pair.first, state);
+});
+test("an already catalogued prepared version keeps read-only recovery bound to its rail", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-readback-older");
+  state.published = pair.first;
+  module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [{ primaryClaim: inputFor("").claim,
+    displayName: inputFor("").name, listings: [{ listingId: pair.signed.serviceId, version: 1,
+      anchor: { kind: "storage-program", locator: pair.first.anchorAddress } }] }] });
+  try {
+    await readback(await pair.originalHandler(request(pair.signed)), pair.first);
+    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress, pair.first.logicalAddress);
+  } finally { module.saveCatalog({ catalogVersion: "1", generatedAt: clock, sellers: [] }); }
+  unchangedPreparation(pair.first, state);
+});
+test("legacy-name prepared readback still binds the saved rail", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-readback-legacy");
+  state.published = { ...pair.first, programName: `dacs1-${Buffer.from(pair.first.logicalAddress).toString("base64url")}` };
+  await readback(await pair.originalHandler(request(pair.signed)), pair.first);
+  await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress, pair.first.logicalAddress);
+  unchangedPreparation(pair.first, state);
+});
+test("concurrent prepared readback retries succeed only for the saved rail", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-readback-concurrent");
+  state.published = pair.first;
+  const responses = await Promise.all([pair.originalHandler(request(pair.signed)),
+    pair.retryHandler(request(pair.retry)), pair.retryHandler(request(pair.retry))]);
+  await readback(responses[0], pair.first);
+  for (const response of responses.slice(1)) await unresolved(response, pair.first.anchorAddress, pair.first.logicalAddress);
+  unchangedPreparation(pair.first, state);
+});
+
+// Exercise the optional SDK field and every existing rail/handler guard using
+// signed producer fixtures, without changing committed preparation records.
+for (const [name, alter, allowed] of [
+  ["missing rails", (listing) => { delete listing.acceptedRails; }, false],
+  ["empty rails", (listing) => { listing.acceptedRails = []; }, false],
+  ["matching singleton", () => {}, true],
+  ["multiple rails", (listing) => { listing.acceptedRails.push({ ...listing.acceptedRails[0] }); }, false],
+  ["wrong rail", (listing) => { listing.acceptedRails[0].railId = "x402:default"; }, false],
+  ["missing handler", (listing) => { listing.pipeline = listing.pipeline.filter((phase) => !phase.kind.startsWith("pay-")); }, false],
+  ["extra handler", (listing) => { listing.pipeline.push(listing.pipeline.find((phase) => phase.kind.startsWith("pay-"))); }, false],
+  ["wrong handler", (listing) => { listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).kind = "pay-x402"; }, false],
+  ["missing parameter", (listing) => { delete listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).parameters; }, false],
+  ["wrong parameter", (listing) => { listing.pipeline.find((phase) => phase.kind.startsWith("pay-")).parameters.rail = "x402:default"; }, false],
+]) {
+  test(`saved rail boundary refuses ${name} unless it matches, in both response paths`, async (t) => {
     const state = node(t);
-    const pair = await railPair(`rail-age-${age}`);
-    t.mock.method(Date, "now", () => clock + age);
-    await resumed(await pair.originalHandler(request(pair.signed)), pair.first);
-    await unresolved(await pair.retryHandler(request(pair.retry)), pair.first.anchorAddress);
-    unchangedPreparation(pair.first, state);
+    const signed = await signedInput(`rail-boundary-${name.replaceAll(" ", "-")}`);
+    const preview = await (await post(request({ ...signed, listingSignature: undefined }))).json();
+    const listing = preview.listing;
+    alter(listing);
+    const { contentHash } = await import(pathToFileURL(boundaries).href);
+    const hash = contentHash(listing);
+    signed.listingSignature = walletSign(`dacs-listing:v1:${hash}`);
+    listing.signature = { algorithm: "ed25519", signer: signed.claim, value: Buffer.from(signed.listingSignature, "hex").toString("base64url") };
+    const first = { ...preview, listing, contentHash: hash, anchorAddress: `stor-${"b".repeat(40)}`,
+      tx: { content: { data: ["storageProgram", { data: listing, metadata: { contentHash: hash } }] } } };
+    const chain = process.env.DEMOS_CHAIN_IDENTITY ?? "d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc";
+    assert.equal(module.saveListingPreparation(chain, first.logicalAddress,
+      { anchorAddress: first.anchorAddress, transactionJson: JSON.stringify(first.tx) }), true);
+    if (allowed) await resumed(await post(request(signed)), first);
+    else await unresolved(await post(request(signed)), first.anchorAddress, first.logicalAddress);
+    state.published = first;
+    if (allowed) await readback(await post(request(signed)), first);
+    else await unresolved(await post(request(signed)), first.anchorAddress, first.logicalAddress);
+    assert.equal(state.nonceReads, 0);
   });
 }
 test("substituting a rail before the first save fails the fresh Listing signature check", async (t) => {
@@ -890,6 +973,18 @@ test("a fresh process refuses a retained transaction under substituted rail auth
   const pair = await railPair("rail-restart");
   const [result] = await racingProcesses([pair.retry], { race: false, synchronize: true, forbidNonce: true, rails: [pair.retryRail] });
   await unresolved(Response.json(result.body, { status: result.status }), pair.first.anchorAddress);
+  unchangedPreparation(pair.first, state);
+});
+
+test("a restarted process binds expired prepared readback to the saved rail", async (t) => {
+  const state = node(t);
+  const pair = await railPair("rail-readback-restart");
+  const [matching] = await racingProcesses([pair.signed], { race: false, synchronize: true,
+    forbidNonce: true, published: pair.first, clock: clock + 960_000 });
+  await readback(Response.json(matching.body, { status: matching.status }), pair.first);
+  const [changed] = await racingProcesses([pair.retry], { race: false, synchronize: true,
+    forbidNonce: true, published: pair.first, clock: clock + 960_000, rails: [pair.retryRail] });
+  await unresolved(Response.json(changed.body, { status: changed.status }), pair.first.anchorAddress, pair.first.logicalAddress);
   unchangedPreparation(pair.first, state);
 });
 
