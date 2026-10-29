@@ -1,17 +1,37 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { canonicalize, contentHash } from "@kynesyslabs/dacs/canonical";
+import { isListing, readListingArtifact } from "@kynesyslabs/dacs/artifacts";
+import { canonicalize, contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { identityBundleHash } from "@kynesyslabs/dacs/identity";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
-import { verifyListing } from "../src/catalog/listingVerification.js";
+import {
+  findValidListingRevocation,
+  revocationLogicalAddress,
+  verifyListing,
+  verifyListingResult,
+} from "../src/catalog/listingVerification.js";
+import { sdkIdentityPresentationVerifier, sdkListingSignatureVerifier } from "../src/catalog/sdkReaderVerifiers.js";
+import { checkListingRevocation } from "../vendor/dacs-sdk/dist/agent/listingValidation.js";
+import { LISTING_REJECTION_MESSAGES } from "../src/catalog/listingAdmission.js";
 
 const seed = Uint8Array.from(Buffer.from("11".repeat(32), "hex"));
 const privateKey = privateKeyFromSeed(seed);
 const publicKeyHex = Buffer.from(rawPublicKey(publicKeyFromSeed(seed))).toString("hex");
 const claim = `did:demos:agent:${publicKeyHex}`;
+const liveInvalidMethods = JSON.parse(readFileSync(
+  new URL("./fixtures/live-invalid-verification-methods.json", import.meta.url),
+  "utf8",
+)) as Array<{
+  listingId: string;
+  listingVersion: number;
+  locator: string;
+  verificationMethod: string;
+}>;
 
 function signMessage(message: string): string {
   return Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey)).toString("base64url");
@@ -20,9 +40,12 @@ function signMessage(message: string): string {
 function signedCurrentListing(
   extra: Record<string, unknown> = {},
   signingClaim = claim,
+  hashScope: (scope: Record<string, unknown>) => string = contentHash,
 ): Record<string, unknown> {
   const identity: Record<string, unknown> = {
-    bundleVersion: "1", presentedAt: 1, presentedBy: signingClaim,
+    bundleVersion: "1",
+    presentedBy: signingClaim,
+    presentedAt: 1,
     claims: [{ ref: signingClaim, kind: "signing-key" }],
   };
   identity.presentation = {
@@ -67,17 +90,40 @@ function signedCurrentListing(
     signature: {
       algorithm: "ed25519",
       signer: signingClaim,
-      value: signMessage(`dacs-listing:v1:${contentHash(scope)}`),
+      value: signMessage(`dacs-listing:v1:${hashScope(scope)}`),
     },
   };
 }
 
-test("verifyListing canonicalizes mixed-case DID scheme spelling on read", async () => {
+test("verifyListing applies the SDK shape gate to the exact signed bytes, including DID scheme case", async () => {
   const mixedCaseClaim = `DID:demos:agent:${publicKeyHex}`;
-  const verified = await verifyListing(signedCurrentListing({}, mixedCaseClaim));
+  const everyRole = signedCurrentListing({}, mixedCaseClaim);
+  const lowercase = signedCurrentListing();
+  // The signature envelope is outside the signed scope, so this value stays cryptographically valid.
+  const signerOnly = {
+    ...lowercase,
+    signature: { ...(lowercase.signature as Record<string, unknown>), signer: mixedCaseClaim },
+  };
 
-  assert.equal(verified?.signer, claim);
-  assert.equal(verified?.sellerClaim, claim);
+  for (const listing of [everyRole, signerOnly]) {
+    assert.equal(isListing(listing), false, "the pinned SDK reader rejects it at step 1");
+    assert.deepEqual(await verifyListingResult(listing), { ok: false, code: "NORMATIVE_LISTING_INVALID" });
+  }
+  assert.equal((await verifyListing(lowercase))?.signer, claim);
+});
+
+test("a current Listing signature must be CORE §B.7 SIG-6 base64url, never raw hex", async () => {
+  const listing = signedCurrentListing();
+  const signature = listing.signature as Record<string, unknown> & { value: string };
+  const hex = Buffer.from(signature.value, "base64url").toString("hex");
+  const withValue = (value: string) => ({ ...listing, signature: { ...signature, value } });
+
+  assert.equal(isListing(withValue(hex)), true, "128 hex characters are also valid base64url text");
+  assert.deepEqual(await verifyListingResult(withValue(hex)), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.deepEqual(await verifyListingResult(withValue(hex.toUpperCase())), { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.equal((await verifyListingResult(withValue(`0x${hex}`))).ok, false);
+  assert.equal((await verifyListingResult(withValue(`${signature.value}==`))).ok, false);
+  assert.equal((await verifyListingResult(listing)).ok, true);
 });
 
 test("verifyListing rejects suffix-shaped aliases even when their signatures are valid", async () => {
@@ -121,6 +167,61 @@ test("verifyListing refuses unknown executable phase kinds even with a valid sig
   });
 
   assert.equal(await verifyListing(listing), null);
+});
+
+test("live x402 string verification methods fail closed under the normative SDK validator", async () => {
+  for (const fixture of liveInvalidMethods) {
+    const listing = signedCurrentListing({
+      listingId: fixture.listingId,
+      listingVersion: fixture.listingVersion,
+      offering: {
+        title: fixture.listingId,
+        description: `Regression fixture for ${fixture.locator}.`,
+        category: "services.test",
+        tags: ["x402"],
+        deliverable: {
+          kind: "attested-payload",
+          payloadFormat: "application/json",
+          verificationMethod: fixture.verificationMethod,
+        },
+      },
+      pipeline: [
+        { kind: "negotiate-fixed-price" },
+        { kind: "commit-agreement" },
+        { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+        { kind: "deliver-attested-payload" },
+      ],
+    });
+
+    assert.equal(isListing(listing), false, fixture.listingId);
+    assert.deepEqual(await verifyListingResult(listing), {
+      ok: false,
+      code: "VERIFICATION_METHOD_INVALID",
+    });
+    assert.equal(await verifyListing(listing), null);
+  }
+
+  const structured = signedCurrentListing({
+    offering: {
+      title: "Structured verification method",
+      description: "A registered DACS-2 verification-method variant.",
+      category: "services.test",
+      tags: ["x402"],
+      deliverable: {
+        kind: "attested-payload",
+        payloadFormat: "application/json",
+        verificationMethod: { kind: "self-signed" },
+      },
+    },
+    pipeline: [
+      { kind: "negotiate-fixed-price" },
+      { kind: "commit-agreement" },
+      { kind: "pay-x402", parameters: { rail: "pay-x402" } },
+      { kind: "deliver-attested-payload" },
+    ],
+  });
+  assert.equal(isListing(structured), true);
+  assert.equal((await verifyListingResult(structured)).ok, true);
 });
 
 test("verifyListing requires exactly one adjacent supported commitment phase", async () => {
@@ -182,7 +283,10 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
   assert.ok(await verifyListing(listing));
   assert.ok(await verifyListing(signedCurrentListing({
     pricing: metered,
-    pipeline: [{ kind: "negotiate-rfq", parameters: RFQ }, ...pipeline.slice(1)],
+    pipeline: [{
+      kind: "negotiate-rfq",
+      parameters: { maxTurns: 2, timeoutSec: 60 },
+    }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })));
   assert.equal(await verifyListing(signedCurrentListing({
@@ -200,6 +304,173 @@ test("verifyListing accepts normative metered pricing bound to an AP2 rail", asy
     pipeline: [{ kind: "negotiate-sealed-envelope" }, ...pipeline.slice(1)],
     acceptedRails: [{ railId: "ap2:stripe-paymentintents" }],
   })), null);
+});
+
+test("RB-2: a published revocation binding carries the exact presentedBy bytes an SDK reader compares", async () => {
+  const presentedBy = `${claim}?channel=directory`;
+  const listing = signedCurrentListing({}, presentedBy);
+  const verified = await verifyListing(listing);
+  assert.ok(verified);
+  const scope = { listingId: "sig5-preserve-unknown", listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  // RB-1: the marker signer repeats the listing signer exactly.
+  const marker = { ...scope, signature: { algorithm: "ed25519", signer: presentedBy, value: signMessage(`dacs-revocation:v1:${contentHash(scope)}`) } };
+  const binding = await findValidListingRevocation(["marker"], verified, 1, async () => marker);
+  assert.ok(binding);
+  assert.equal(binding.sellerPrimaryClaim, presentedBy);
+  assert.equal(binding.logicalAddress, revocationLogicalAddress(presentedBy, "sig5-preserve-unknown", 1));
+  const sdk = await checkListingRevocation(listing as never, verified.contentHash, {
+    nowMs: () => 2,
+    surfaces: [{ kind: "catalog", status: "revoked", catalogObservedAt: 2, binding }],
+    readMarker: async () => marker,
+    verifyMarkerSignature: sdkListingSignatureVerifier(),
+  });
+  assert.equal(sdk.disposition, "revoked", JSON.stringify(sdk));
+});
+
+test("RB-1: revocations require the exact Listing signer reference, including advisory parameters", async () => {
+  const signer = `${claim}?purpose=listing`;
+  const listing = signedCurrentListing({}, signer);
+  const verified = await verifyListing(listing);
+  assert.ok(verified);
+  const scope = { listingId: "sig5-preserve-unknown", listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const marker = (reference: string) => ({ ...scope, signature: {
+    algorithm: "ed25519", signer: reference, value: signMessage(`dacs-revocation:v1:${contentHash(scope)}`),
+  } });
+  const binding = await findValidListingRevocation(["marker"], verified, 1, async () => marker(signer));
+  assert.ok(binding, "an exactly matching qualified signer may revoke");
+  for (const reference of [signer, claim, `${claim}?purpose=other`]) {
+    const candidate = marker(reference);
+    const sdk = await checkListingRevocation(listing as never, verified.contentHash, {
+      nowMs: () => 2,
+      surfaces: [{ kind: "catalog", status: "revoked", catalogObservedAt: 2, binding }],
+      readMarker: async () => candidate,
+      verifyMarkerSignature: sdkListingSignatureVerifier(),
+    });
+    assert.equal(sdk.disposition, reference === signer ? "revoked" : "indeterminate");
+    assert.equal(Boolean(await findValidListingRevocation(["marker"], verified, 1, async () => candidate)),
+      sdk.disposition === "revoked", reference);
+  }
+});
+
+test("RB-1: a second authorized seller key may sign and revoke its Listing", async () => {
+  const secondSeed = Uint8Array.from(Buffer.alloc(32, 29));
+  const secondKey = privateKeyFromSeed(secondSeed);
+  const secondClaim = `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(secondSeed))).toString("hex")}?purpose=listing`;
+  const identity: Record<string, unknown> = {
+    bundleVersion: "1", presentedBy: claim, presentedAt: 1,
+    claims: [{ ref: claim, kind: "signing-key" }, { ref: secondClaim, kind: "signing-key" }],
+  };
+  identity.presentation = { kind: "per-claim", signatures: [{
+    ref: claim, signature: signMessage(`dacs-bundle-presentation:v1:${contentHash(identity)}`),
+  }] };
+  const { signature: _, ...scope } = signedCurrentListing({ seller: { displayName: "Two keys", identity } });
+  const signSecond = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message), secondKey)).toString("base64url");
+  const raw = { ...scope, signature: {
+    algorithm: "ed25519", signer: secondClaim, value: signSecond(`dacs-listing:v1:${contentHash(scope)}`),
+  } };
+  const verified = await verifyListing(raw);
+  assert.ok(verified, "LP-2 permits any key in seller.identity.claims");
+  const markerScope = { listingId: scope.listingId, listingVersion: 1, listingContentHash: verified.contentHash, revokedAt: 1 };
+  const marker = { ...markerScope, signature: {
+    algorithm: "ed25519", signer: secondClaim, value: signSecond(`dacs-revocation:v1:${contentHash(markerScope)}`),
+  } };
+  assert.ok(await findValidListingRevocation(["marker"], verified, 1, async () => marker));
+  const primaryMarker = { ...markerScope, signature: {
+    algorithm: "ed25519", signer: claim, value: signMessage(`dacs-revocation:v1:${contentHash(markerScope)}`),
+  } };
+  assert.equal(await findValidListingRevocation(["marker"], verified, 1, async () => primaryMarker), null);
+});
+
+test("the identity presentation signs the §6.3.2 bundle_hash, which keeps a top-level signature member", async () => {
+  const listingWith = (presentationHash: (bundle: Record<string, unknown>) => string) => {
+    const identity: Record<string, unknown> = {
+      bundleVersion: "1",
+      presentedBy: claim,
+      presentedAt: 1,
+      claims: [{ ref: claim, kind: "signing-key" }],
+      signature: "bundle content, not a signature envelope",
+    };
+    identity.presentation = {
+      kind: "per-claim",
+      signatures: [{ ref: claim, signature: signMessage(`dacs-bundle-presentation:v1:${presentationHash(identity)}`) }],
+    };
+    const { signature: _signature, ...scope } = signedCurrentListing();
+    const signedScope = { ...scope, seller: { ...(scope.seller as Record<string, unknown>), identity } };
+    return {
+      ...signedScope,
+      signature: { algorithm: "ed25519", signer: claim, value: signMessage(`dacs-listing:v1:${contentHash(signedScope)}`) },
+    };
+  };
+  assert.ok(await verifyListing(listingWith(identityBundleHash as never)), "SDK identityBundleHash");
+  assert.equal(await verifyListing(listingWith(contentHash)), null, "contentHash strips the signature member");
+});
+
+test("admission reads the identity presentation: exact presentedBy entry, base64url or /register hex", async () => {
+  // DACS-1 §6.3.2 and CORE §B.7 leave the per-claim signature's encoding open.
+  // Directory and its SDK adapter accept the Standard vector's Base64 and
+  // historical wallet hex alongside Base64URL, all over the same signed bytes.
+  const signatureBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), privateKey));
+  const otherKey = privateKeyFromSeed(Uint8Array.from(Buffer.alloc(32, 99)));
+  const otherBytes = (message: string) => Buffer.from(ed25519Sign(Buffer.from(message, "utf8"), otherKey));
+  const cases: Record<string, [(message: string) => { ref: string; signature: string }, boolean, boolean]> = {
+    "canonical base64url under the exact presentedBy": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64url") }), true, true],
+    "raw hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex") }), true, true],
+    "uppercase hex": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("hex").toUpperCase() }), true, true],
+    "base64url by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("base64url") }), false, false],
+    "raw hex by another key": [(message) => ({ ref: claim, signature: otherBytes(message).toString("hex") }), false, false],
+    "raw hex over other bytes": [(message) => ({ ref: claim, signature: signatureBytes(`${message}0`).toString("hex") }), false, false],
+    "0x-prefixed hex": [(message) => ({ ref: claim, signature: `0x${signatureBytes(message).toString("hex")}` }), false, false],
+    "padded base64": [(message) => ({ ref: claim, signature: signatureBytes(message).toString("base64") }), true, true],
+    // CF-3: advisory parameters do not change the identity, so the entry still belongs to presentedBy.
+    "presentedBy with an advisory parameter as the entry ref": [(message) => ({ ref: `${claim}?channel=directory`, signature: signatureBytes(message).toString("base64url") }), true, true],
+    "another claim as the entry ref": [(message) => ({ ref: `did:demos:agent:${"ab".repeat(32)}`, signature: signatureBytes(message).toString("base64url") }), false, false],
+  };
+  for (const [label, [entry, sdkAccepted, accepted]] of Object.entries(cases)) {
+    const identity: Record<string, unknown> = {
+      bundleVersion: "1",
+      presentedBy: claim,
+      presentedAt: 1,
+      claims: [{ ref: claim, kind: "signing-key" }],
+    };
+    const message = `dacs-bundle-presentation:v1:${identityBundleHash(identity as never)}`;
+    identity.presentation = { kind: "per-claim", signatures: [entry(message)] };
+    const { signature: _signature, ...scope } = signedCurrentListing();
+    const signedScope = { ...scope, seller: { ...(scope.seller as Record<string, unknown>), identity } };
+    const listing = {
+      ...signedScope,
+      signature: { algorithm: "ed25519", signer: claim, value: signMessage(`dacs-listing:v1:${contentHash(signedScope)}`) },
+    };
+    const sdkAccepts = await sdkIdentityPresentationVerifier()({
+      bundle: identity as never,
+      signedBytes: Buffer.from(message, "utf8"),
+    });
+    assert.equal(sdkAccepts, sdkAccepted, `SDK reader: ${label}`);
+    const result = await verifyListingResult(listing);
+    if (accepted) assert.equal(result.ok, true, label);
+    else assert.deepEqual(result, { ok: false, code: "IDENTITY_PRESENTATION_INVALID" }, label);
+  }
+});
+
+
+test("legacy Listing admission preserves the SDK draft size policy, excluding no valid signature bytes", async () => {
+  const scope = {
+    agentId: claim, serviceId: "legacy-size", name: "Legacy size boundary", description: "",
+    claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
+    supportedDelivery: ["deliver-attested-payload"],
+  };
+  const signed = (description: string) => {
+    const body = { ...scope, description };
+    return { ...body, signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${contentHash(body)}`, "utf8"), privateKey)).toString("hex") };
+  };
+  const overhead = Buffer.byteLength(canonicalize(scope), "utf8");
+  for (const description of ["a".repeat(16_300 - overhead), "a".repeat(16_385), "é".repeat(8_193)]) {
+    const raw = signed(description);
+    assert.ok(Buffer.byteLength(JSON.stringify(raw), "utf8") > 16_384);
+    assert.equal(readListingArtifact(raw)?.compatibility, "legacy-mvp");
+    assert.equal((await verifyListingResult(raw)).ok, true);
+    assert.deepEqual(await verifyListingResult({ ...raw, description: `${description}!` }),
+      { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
 });
 
 const RFQ = { maxTurns: 6, timeoutSec: 300 };
@@ -316,20 +587,23 @@ test("schema conformance: recognised listing members must have their DACS-1/3/4 
   for (const [name, extra] of Object.entries(rejected)) assert.equal(await verifyListing(signedCurrentListing(extra)), null, name);
 });
 
-test("LR-2 caps the canonical form at 16,384 bytes, signature omitted, not the raw JSON", async () => {
-  const unsigned = (listing: Record<string, unknown>) => {
-    const scope = { ...listing };
-    delete scope.signature;
-    return Buffer.byteLength(canonicalize(scope), "utf8");
-  };
+const stripEnvelope = (listing: Record<string, unknown>): Record<string, unknown> => {
+  const scope = { ...listing };
+  delete scope.signature;
+  return scope;
+};
+
+test("LR-2 caps the canonical Listing without its signature", async () => {
+  const canonicalBytes = (listing: Record<string, unknown>) => Buffer.byteLength(canonicalize(listing), "utf8");
   const sized = (bytes: number) => signedCurrentListing({
-    padding: "x".repeat(bytes - unsigned(signedCurrentListing({ padding: "" }))),
+    padding: "x".repeat(bytes - canonicalBytes(stripEnvelope(signedCurrentListing({ padding: "" })))),
   });
   const atCap = sized(16_384);
-  assert.equal(unsigned(atCap), 16_384);
-  assert.ok(Buffer.byteLength(JSON.stringify(atCap), "utf8") > 16_384, "the raw JSON with its signature is larger");
+  assert.equal(canonicalBytes(stripEnvelope(atCap)), 16_384);
+  assert.ok(canonicalBytes(atCap) > 16_384);
   assert.ok(await verifyListing(atCap));
   assert.equal(await verifyListing(sized(16_385)), null);
+  assert.match(LISTING_REJECTION_MESSAGES.NORMATIVE_LISTING_INVALID, /16,384-byte.*signature omitted/);
   // NFC composition shrinks the canonical form below the raw bytes; a composition exclusion grows it.
   const composing = signedCurrentListing({ padding: "é".repeat(5_000) });
   assert.ok(Buffer.byteLength(JSON.stringify(composing), "utf8") > 16_384);
@@ -383,6 +657,17 @@ test("negotiable bounds and metered units retain their independent schema types"
   }
 });
 
+/** Canonical JSON text written without the SDK: members sorted by key, strings escaped by JSON.stringify. */
+function handBuiltCanonicalText(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(handBuiltCanonicalText).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const members = value as Record<string, unknown>;
+    return `{${Object.keys(members).sort().map((key) => `${JSON.stringify(key)}:${handBuiltCanonicalText(members[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+const handBuiltHash = (scope: Record<string, unknown>) => createHash("sha256").update(handBuiltCanonicalText(scope)).digest("hex");
+
 test("shared canonicalization and listing verification reject lone surrogates in signed keys and values", async () => {
   const guarded = await import("../src/catalog/canonical.js");
   for (const surrogate of ["\ud800", "\udfff"]) {
@@ -390,9 +675,11 @@ test("shared canonicalization and listing verification reject lone surrogates in
       for (const canonical of [guarded.canonicalize, guarded.contentHash]) {
         assert.throws(() => canonical(extra), /invalid Unicode/);
       }
-      // The pinned SDK can sign these bytes; the actual Directory caller must refuse them.
-      const raw = signedCurrentListing(extra);
-      assert.equal(await verifyListing(raw).catch(() => null), null);
+      // The pinned SDK cannot canonicalize, so cannot sign, these bytes; the Directory reader refuses them too.
+      assert.throws(() => signedCurrentListing(extra), /not stable wire JSON|surrogate/);
+      // An older SDK could sign over a hand-built canonical text; the Directory reader must still refuse that.
+      const raw = signedCurrentListing(extra, claim, handBuiltHash);
+      assert.deepEqual(await verifyListingResult(raw), { ok: false, code: "NORMATIVE_LISTING_INVALID" });
     }
   }
   const valid = { nested: { ["\ud83d\ude00"]: "\ud83d\ude00" } };
@@ -410,4 +697,83 @@ test("independently signed storage-program listing accepts the explicit public a
   assert.equal(await verifyListing({ ...fixture.listing,
     offering: { ...fixture.listing.offering, deliverable: { kind: "storage-program", accessModel: "unknown" } },
   }), null);
+});
+
+test("legacy listing schema, signature decoding, and signed-scope tampering keep their rejection codes", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  assert.equal((await verifyListingResult(fixture.data)).ok, true);
+  assert.deepEqual(await verifyListingResult({}), { ok: false, code: "LEGACY_LISTING_INVALID" });
+  assert.deepEqual(await verifyListingResult({ ...fixture.data, signature: "malformed" }),
+    { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  assert.deepEqual(await verifyListingResult({ ...fixture.data, description: "tampered after signing" }),
+    { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  const valid = { algorithm: "ed25519", signer: fixture.data.agentId, value: fixture.data.signature };
+  assert.equal((await verifyListingResult({ ...fixture.data, signature: valid })).ok, true);
+  for (const change of [{ algorithm: "unsupported" }, { signer: null }, { signer: 7 }, { value: null }, { value: {} }]) {
+    assert.deepEqual(await verifyListingResult({ ...fixture.data, signature: { ...valid, ...change } }),
+      { ok: false, code: "LISTING_SIGNATURE_INVALID" });
+  }
+});
+
+test("neither legacy signature envelope bypasses the schema gate on authentically signed bytes", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  const { signature: _signature, ...original } = fixture.data;
+  for (const supportedDelivery of [original.supportedDelivery, 7]) {
+    const scope = { ...original, agentId: claim, supportedDelivery };
+    const value = signMessage(`dacs-listing:v1:${contentHash(scope)}`);
+    for (const signature of [Buffer.from(value, "base64url").toString("hex"),
+      { algorithm: "ed25519", signer: claim, value }]) {
+      const result = await verifyListingResult({ ...scope, signature });
+      if (supportedDelivery === 7) {
+        assert.deepEqual(result, { ok: false, code: "LEGACY_LISTING_INVALID" });
+      } else {
+        assert.equal(result.ok, true);
+        assert.equal(result.ok && result.value.signer, claim);
+      }
+    }
+  }
+});
+
+test("the Listing signer is the key that verified the signature, not a later lookup", async () => {
+  const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
+  let calls = 0;
+  const result = await verifyListingResult(signedCurrentListing(), async (ref, algorithm) => {
+    const resolved = await resolveDemosPrimaryClaimKey(ref, algorithm);
+    // A later answer would carry another canonical claim for the same key.
+    return resolved && ++calls > 1 ? { ...resolved, canonicalClaim: `did:demos:agent:${"f".repeat(64)}` } : resolved;
+  });
+  assert.equal(calls, 2, "one lookup for the signature and one for the presentation");
+  assert.ok(result.ok);
+  assert.equal(result.value.signer, claim);
+});
+
+test("a key resolver that changes the Listing during verification cannot authenticate the change", async () => {
+  const { resolveDemosPrimaryClaimKey } = await import("../src/catalog/primaryClaimKey.js");
+  const listing = signedCurrentListing();
+  const signedTitle = (listing.offering as Record<string, unknown>).title;
+  const signedHash = contentHash(stripSignature(listing));
+  const result = await verifyListingResult(listing, async (ref, algorithm) => {
+    (listing.offering as Record<string, unknown>).title = "UNSIGNED TAMPER";
+    return resolveDemosPrimaryClaimKey(ref, algorithm);
+  });
+  assert.ok(result.ok);
+  assert.equal((result.value.scope.offering as Record<string, unknown>).title, signedTitle);
+  assert.equal(result.value.contentHash, signedHash);
+});
+
+test("legacy Listing hashing preserves draft NFC member-name semantics without changing current Listings", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/reviewbot-listing-anchor.json", import.meta.url), "utf8"));
+  const { signature: _, ...original } = fixture.data;
+  const scope = { ...original, agentId: claim, metadata: { ["e\u0301"]: "bound value" } };
+  // Independent historical preimage: SDK 44d8ff2 normalized member names before sorting.
+  const normalized = { ...scope, metadata: { "é": "bound value" } };
+  const historicalHash = contentHash(normalized);
+  assert.notEqual(historicalHash, contentHash(scope));
+  const listing = { ...scope, signature: signMessage(`dacs-listing:v1:${historicalHash}`) };
+  const verified = await verifyListing(listing);
+  assert.equal(verified?.profile, "legacy-sdk-v0.1");
+  assert.equal(verified?.contentHash, historicalHash);
+  assert.equal(await verifyListing({ ...listing, metadata: { ["e\u0301"]: "tampered" } }), null);
+  const current = signedCurrentListing({ metadata: { ["e\u0301"]: "current value" } });
+  assert.equal((await verifyListing(current))?.contentHash, contentHash(current));
 });

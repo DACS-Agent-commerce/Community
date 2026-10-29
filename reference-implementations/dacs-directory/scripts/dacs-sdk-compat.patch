@@ -1,0 +1,367 @@
+diff --git a/src/agent/verifyBundleCore.ts b/src/agent/verifyBundleCore.ts
+index 9a0d7dff..dc47632b 100644
+--- a/src/agent/verifyBundleCore.ts
++++ b/src/agent/verifyBundleCore.ts
+@@ -1,7 +1,8 @@
+ import { types as nodeTypes } from "node:util";
+ 
+-import { contentHash, stripSignature } from "../canonical/index.js";
++import { canonicalize, sha256Hex, contentHash, stripSignature } from "../canonical/index.js";
+ import {
+   snapshotCanonicalJson,
+   snapshotCanonicalJsonRead,
++  snapshotWireJsonRead,
+ } from "../canonical/snapshot.js";
+@@ -622,3 +623,3 @@
+   try {
+-    return snapshotCanonicalJsonRead(
++    return snapshotWireJsonRead(
+       value as Record<string, unknown>,
+@@ -629,6 +629,22 @@ function snapshotDependencyRecord(
+   }
+ }
+ 
++/** Frozen SDK-MVP hashing: normalize member names before stable sorting. */
++function legacyContentHash(value: unknown): string {
++  const serialize = (child: unknown): string => {
++    if (Array.isArray(child)) return `[${child.map(serialize).join(",")}]`;
++    if (child !== null && typeof child === "object") {
++      const entries = Object.entries(child).filter(([, item]) => item !== undefined)
++        .map(([key, item]) => [key.normalize("NFC"), item] as const)
++        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
++      return `{${entries.map(([key, item]) => `${canonicalize(key)}:${serialize(item)}`).join(",")}}`;
++    }
++    if (typeof child === "number" && !Number.isSafeInteger(child)) throw new Error("legacy canonical form requires safe integers");
++    return canonicalize(child);
++  };
++  return sha256Hex(serialize(value));
++}
++
+ /** Shape/hash-check one resolved artifact before attempting authentication. */
+ function checkArtifact(
+   kind: string,
+@@ -636,11 +652,12 @@ function checkArtifact(
+   expectedHash: string,
+   validateScope: (v: Record<string, unknown>) => boolean,
+   resolved: Record<string, unknown> | null,
++  hash = contentHash,
+ ): RefCheck {
+   if (!resolved) return { kind, id, verdict: "missing" };
+   const scope = stripSignature(resolved) as Record<string, unknown>;
+   if (!validateScope(scope)) return { kind, id, verdict: "invalid-shape" };
+-  if (contentHash(scope) !== expectedHash)
++  if (hash(scope) !== expectedHash)
+     return { kind, id, verdict: "hash-mismatch" };
+   return { kind, id, verdict: "ok" };
+ }
+@@ -827,7 +844,7 @@ async function authenticateComponentReference(
+ }
+ 
+ /** Authenticate the SDK's explicitly isolated pre-ComponentSignature format. */
+-async function authenticateLegacyHexReference(
++async function authenticateLegacyListingReference(
+   artifact: Record<string, unknown>,
+   separator: DomainSeparator,
+   signer: string | null,
+@@ -836,15 +853,19 @@ async function authenticateLegacyHexReference(
+   if (!Object.prototype.hasOwnProperty.call(artifact, "signature")) {
+     return { verdict: "missing" };
+   }
+-  if (
+-    typeof artifact.signature !== "string" ||
+-    !/^[0-9a-f]{128}$/.test(artifact.signature)
+-  ) {
+-    return { verdict: "malformed", reason: "invalid-legacy-hex-signature" };
++  const signature = typeof artifact.signature === "string"
++    ? { algorithm: "ed25519", signer, value: artifact.signature }
++    : artifact.signature as { algorithm?: unknown; signer?: unknown; value?: unknown } | null;
++  const encoded = legacySignatureValue(signature?.value);
++  if (!signature || signature.algorithm !== "ed25519" || encoded === null) {
++    return { verdict: "malformed", reason: "invalid-legacy-listing-signature" };
+   }
+   if (!signer) {
+     return { verdict: "unresolved", reason: "legacy-signer-unresolved" };
+   }
++  if (typeof signature.signer !== "string" || !sameCanonicalClaimIdentity(signature.signer, signer)) {
++    return { verdict: "malformed", reason: "invalid-legacy-listing-signature" };
++  }
+   let key: Uint8Array | null;
+   try {
+     key = await deps.resolvePublicKey(signer);
+@@ -859,12 +880,12 @@ async function authenticateLegacyHexReference(
+   }
+   const message = signedBytes(
+     separator,
+-    contentHash(stripSignature(artifact)),
++    legacyContentHash(stripSignature(artifact)),
+   );
+   try {
+     const valid = await deps.verify(
+       Uint8Array.from(message),
+-      Uint8Array.from(Buffer.from(artifact.signature, "hex")),
++      Uint8Array.from(Buffer.from(encoded, "base64url")),
+       Uint8Array.from(key),
+     );
+     return valid
+@@ -900,10 +921,13 @@ function isAgreementSignatureShape(value: unknown): value is AgreementSignature
+ async function authenticateAgreementReference(
+   artifact: Record<string, unknown>,
+   deps: VerifyBundleDeps,
++  legacy = false,
+ ): Promise<RefSignatureCheck> {
+   const scope = stripSignature(artifact) as Record<string, unknown>;
+-  const claims = agreementRoleClaims(scope);
+-  if (!claims || !isAgreementScope(scope)) {
++  const claims = legacy && isLegacyMvpAgreementDocument(scope)
++    ? { buyer: scope.buyer, seller: scope.seller }
++    : agreementRoleClaims(scope);
++  if (!claims || (legacy ? !isLegacyMvpAgreementDocument(scope) : !isAgreementScope(scope))) {
+     return { verdict: "malformed", reason: "invalid-agreement-scope" };
+   }
+   if (!Object.prototype.hasOwnProperty.call(artifact, "signatures")) {
+@@ -915,11 +939,18 @@ async function authenticateAgreementReference(
+   if (artifact.signatures.length === 0) {
+     return { verdict: "missing", reason: "agreement-signatures-empty" };
+   }
+-  if (!artifact.signatures.every(isAgreementSignatureShape)) {
++  const rawSignatures = legacy
++    ? artifact.signatures.map(entry => {
++        if (!entry || typeof entry !== "object") return entry;
++        const value = legacySignatureValue((entry as { value?: unknown }).value);
++        return value === null ? entry : { ...entry, value };
++      })
++    : artifact.signatures;
++  if (!rawSignatures.every(isAgreementSignatureShape)) {
+     return { verdict: "malformed", reason: "malformed-agreement-signature" };
+   }
+ 
+-  const signatures = artifact.signatures as AgreementSignature[];
++  const signatures = rawSignatures as AgreementSignature[];
+   const required = [claims.buyer, claims.seller];
+   const seen = new Set<string>();
+   const authenticatedSigners: string[] = [];
+@@ -958,7 +989,7 @@ async function authenticateAgreementReference(
+   )
+     ? ARTIFACT_SEPARATORS.PayeeBoundAgreementDocument
+     : ARTIFACT_SEPARATORS.AgreementDocument;
+-  const message = signedBytes(separator, contentHash(scope));
++  const message = signedBytes(separator, legacy ? legacyContentHash(scope) : contentHash(scope));
+   for (const signature of signatures) {
+     if (signature.algorithm !== "ed25519") {
+       return {
+@@ -1006,6 +1037,60 @@ async function authenticateAgreementReference(
+   return { verdict: "valid", signers: authenticatedSigners };
+ }
+ 
++/**
++ * Decode only the frozen historical SDK profile's signature spellings: 128 hex
++ * digits with at most one `0x` prefix, or canonical unpadded Base64URL of 64
++ * bytes. Any other spelling is refused, never normalised.
++ */
++function legacySignatureValue(value: unknown): string | null {
++  if (typeof value !== "string") return null;
++  const hex = /^(?:0x)?([0-9a-f]{128})$/i.exec(value)?.[1];
++  if (hex !== undefined) return Buffer.from(hex, "hex").toString("base64url");
++  // 64 bytes is exactly 86 unpadded Base64URL characters; re-encoding must round-trip.
++  return /^[A-Za-z0-9_-]{86}$/.test(value) && Buffer.from(value, "base64url").toString("base64url") === value
++    ? value
++    : null;
++}
++
++/** Historical SDK-MVP evidence has no current semantic-verifier contract. */
++async function authenticateLegacyEvidence(
++  artifact: Record<string, unknown>,
++  bundle: ReadableAttestationBundle,
++  deps: VerifyBundleDeps,
++): Promise<RefSignatureCheck> {
++  if (artifact.signature !== undefined && artifact.signatures !== undefined) {
++    return { verdict: "malformed", reason: "ambiguous-legacy-signatures" };
++  }
++  const entries = artifact.signatures ?? (artifact.signature ? [artifact.signature] : []);
++  if (!Array.isArray(entries) || entries.length === 0) return { verdict: "missing" };
++  // DACS-4 §9.7: evidence is signed by the phase orchestrator. The frozen
++  // SDK-MVP producer runs phases as the buyer; an explicit orchestrator role
++  // in the co-signed roster takes precedence. Current graphs use their
++  // authenticated session authority callback below instead.
++  const orchestrators = bundle.parties.filter(party => party.role === "orchestrator");
++  const buyers = bundle.parties.filter(party => party.role === "buyer");
++  const authority = orchestrators.length === 1 ? orchestrators[0]?.primaryClaim
++    : orchestrators.length === 0 && buyers.length === 1 ? buyers[0]?.primaryClaim : null;
++  if (!authority) return { verdict: "unresolved" };
++  const signers: string[] = [];
++  for (const entry of entries) {
++    if (!entry || typeof entry !== "object" || entry.algorithm !== "ed25519") return { verdict: "malformed" };
++    const signer = entry.signer ?? entry.party;
++    const value = legacySignatureValue(entry.value);
++    if (typeof signer !== "string" || value === null) return { verdict: "malformed" };
++    if (!sameCanonicalClaimIdentity(authority, signer)) return { verdict: "invalid" };
++    const bytes = Uint8Array.from(Buffer.from(value, "base64url"));
++    if (bytes.length !== 64) return { verdict: "malformed" };
++    try {
++      const key = await deps.resolvePublicKey(signer);
++      if (!key || key.length !== 32) return { verdict: "unresolved" };
++      if (!await deps.verify(signedBytes(ARTIFACT_SEPARATORS.SettlementEvidence, legacyContentHash(stripSignature(artifact))), bytes, key)) return { verdict: "invalid" };
++    } catch { return { verdict: "unresolved" }; }
++    signers.push(signer);
++  }
++  return { verdict: "valid", signers };
++}
++
+ function bundlePartySignerClaims(
+   bundle: ReadableAttestationBundle,
+ ): ReadonlySet<string> | null {
+@@ -1019,10 +1104,32 @@ function isNormativeListingScope(v: Record<string, unknown>): boolean {
+   return isListingDraft(scope);
+ }
+ 
++/** The draft SDK checked only a Listing's required members, never its pricing or listingVersion. */
++function isHistoricalListing(
++  scope: Record<string, unknown>,
++): scope is Record<string, unknown> & { agentId: string } {
++  return isLegacyMvpListing({ ...scope, pricing: undefined, listingVersion: undefined });
++}
++
++/**
++ * The draft SDK wrote a finality object, with finalityBlocks, for every
++ * settlement outcome; the frozen validator accepts neither on its own.
++ */
++function isHistoricalSettlementEvidence(value: unknown): boolean {
++  if (isLegacyMvpSettlementEvidence(value)) return true;
++  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
++  const evidence = value as Record<string, unknown>;
++  const finality = evidence.settlementFinality;
++  if (typeof finality !== "object" || finality === null || Array.isArray(finality)) return false;
++  const { finalityBlocks, ...finalityWithoutBlocks } = finality as Record<string, unknown>;
++  return (evidence.outcome === "success" || evidence.outcome === "failure") &&
++    Number.isSafeInteger(finalityBlocks) && (finalityBlocks as number) >= 0 &&
++    isLegacyMvpSettlementEvidence({ ...evidence, outcome: "success", settlementFinality: finalityWithoutBlocks });
++}
++
+ /** Historical SDK bundles may read only the isolated MVP Listing scope. */
+ function isLegacyMvpListingScope(v: Record<string, unknown>): boolean {
+-  const scope = stripSignature(v);
+-  return isLegacyMvpListing(scope);
++  return isHistoricalListing(stripSignature(v));
+ }
+ 
+ function exactListingPin(value: unknown): ListingPin | null {
+@@ -1410,7 +1517,7 @@ export async function verifyBundleCore(
+       : isFaultBundle(bundle as unknown as Record<string, unknown>)
+         ? ARTIFACT_SEPARATORS.FaultAttestationBundle
+         : ARTIFACT_SEPARATORS.AttestationBundle,
+-    contentHash(scope),
++    isNormativeGraph ? contentHash(scope) : legacyContentHash(scope),
+   );
+ 
+   const sigs = Array.isArray(raw["signatures"])
+@@ -1544,3 +1651,3 @@
+       try {
+-        value = snapshotCanonicalJsonRead(
++        value = snapshotWireJsonRead(
+           resolved.value,
+@@ -1563,6 +1670,7 @@ export async function verifyBundleCore(
+       ref.contentHash,
+       validateScope,
+       value,
++      isLegacyMvpAttestationRef(ref) ? legacyContentHash : contentHash,
+     );
+     return {
+       check:
+@@ -1581,10 +1689,7 @@ export async function verifyBundleCore(
+         ? isLegacyMvpAgreementDocument
+         : isAgreementScope,
+       isLegacyMvpAttestationRef(bundle.agreementRef)
+-        ? async () => ({
+-            verdict: "missing" as const,
+-            reason: "legacy-agreement-signatures-missing",
+-          })
++        ? (artifact) => authenticateAgreementReference(artifact, deps, true)
+         : (artifact) => authenticateAgreementReference(artifact, deps),
+     );
+     if (
+@@ -1714,7 +1819,7 @@ export async function verifyBundleCore(
+       ev,
+       isLegacyMvpAttestationRef(ev)
+         ? (value) =>
+-            isLegacyMvpSettlementEvidence(value) ||
++            isHistoricalSettlementEvidence(value) ||
+             isSettlementEvidenceScope(value)
+         : isSettlementEvidenceScope,
+     );
+@@ -1726,7 +1831,9 @@ export async function verifyBundleCore(
+     ) {
+       evidence.check.verdict = "invalid-binding";
+     }
+-    if (evidence.check.verdict === "ok" && evidence.value) {
++    if (evidence.check.verdict === "ok" && evidence.value && !isNormativeGraph && isLegacyMvpGraph && isLegacyMvpAttestationRef(ev) && isHistoricalSettlementEvidence(evidence.value)) {
++      evidence.check = attachSignatureCheck(evidence.check, await authenticateLegacyEvidence(evidence.value, bundle, deps));
++    } else if (evidence.check.verdict === "ok" && evidence.value) {
+       let decision: unknown;
+       let authorizedSigner: string | null = null;
+       try {
+@@ -1962,6 +2069,7 @@ export async function verifyBundleCore(
+         ? isNormativeListingScope
+         : isLegacyMvpListingScope,
+       listing,
++      listingUsesNormativeScope ? contentHash : legacyContentHash,
+     );
+     if (listingCheck.verdict === "ok" && listing && listingUsesNormativeScope) {
+       const listingScope = stripSignature(listing) as {
+@@ -1986,14 +2094,13 @@ export async function verifyBundleCore(
+       const listingScope = stripSignature(listing) as Record<string, unknown>;
+       const publisher = isListingDraft(listingScope)
+         ? listingScope.seller.identity.presentedBy
+-        : isLegacyMvpListing(listingScope)
++        : isHistoricalListing(listingScope)
+           ? listingScope.agentId
+           : null;
+       listingCheck = attachSignatureCheck(
+         listingCheck,
+-        isLegacyMvpListing(listingScope) &&
+-          typeof listing.signature === "string"
+-          ? await authenticateLegacyHexReference(
++        isHistoricalListing(listingScope)
++          ? await authenticateLegacyListingReference(
+               listing,
+               ARTIFACT_SEPARATORS.Listing,
+               publisher,
+diff --git a/src/artifacts/validators.ts b/src/artifacts/validators.ts
+index 7743f4e9..41099dd9 100644
+--- a/src/artifacts/validators.ts
++++ b/src/artifacts/validators.ts
+@@ -720,7 +720,7 @@ export function isListingTerms(v: unknown): v is ListingTerms {
+     (v.acceptanceModel === undefined || v.acceptanceModel === "auto-accept") &&
+     (v.cancellationPolicy === undefined ||
+       isOneOf(["none", "pre-commit", "with-fee"], v.cancellationPolicy)) &&
+-    (v.retentionYears === undefined || isPositiveSafeInt(v.retentionYears)) &&
++    (v.retentionYears === undefined || isSafeUint(v.retentionYears)) &&
+     (v.transcriptDisclosurePolicy === undefined ||
+       isOneOf(
+         [
+@@ -939,7 +939,7 @@ export function isListingEnvelope(v: unknown): v is ListingEnvelope {
+     return false;
+   }
+   try {
+-    return Buffer.byteLength(canonicalize(v), "utf8") <= 16_384; // LR-2 size cap.
++    return Buffer.byteLength(canonicalize(stripSignature(v)), "utf8") <= 16_384; // LR-2 size cap.
+   } catch {
+     return false;
+   }
+diff --git a/src/canonical/hash.ts b/src/canonical/hash.ts
+--- a/src/canonical/hash.ts
++++ b/src/canonical/hash.ts
+@@ -3,3 +3,3 @@
+ import { canonicalize } from "./jcs.js";
+-import { snapshotCanonicalJsonRead } from "./snapshot.js";
++import { snapshotWireJsonRead } from "./snapshot.js";
+
+@@ -15,3 +15,3 @@
+ export function stripSignature<T extends Record<string, unknown>>(doc: T): Partial<T> {
+-  const snapshot = snapshotCanonicalJsonRead(doc, "signed artifact");
++  const snapshot = snapshotWireJsonRead(doc, "signed artifact");
+   if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+@@ -23,3 +23,3 @@
+   // dispatching through Object.prototype.__proto__ and disappearing. The
+-  // The canonical snapshot normalises CF-1 string values while preserving
++  // The wire snapshot preserves insertion order and strings, as well as
+   // member names exactly, and ensures the returned normal-prototype object owns

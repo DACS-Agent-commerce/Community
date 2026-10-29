@@ -60,11 +60,10 @@ building whatever the SDK checkout happens to contain. It builds only after
   [ -z "$(git -C "$sdk" status --porcelain)" ] \
     || die "$sdk has local changes; inspect them, do not overwrite them"
 
-  git -C "$sdk" fetch --depth 1 origin "$sdk_rev"
-  git -C "$sdk" checkout --detach "$sdk_rev"
-  [ "$(git -C "$sdk" rev-parse HEAD)" = "$sdk_rev" ] || die "$sdk is not at $sdk_rev"
-
-  (cd "$sdk" && npm ci --no-audit --no-fund && npm run build)
+  # The same installer as CI checks the source/Standard pins, applies the
+  # digest-pinned compatibility patch, rebuilds into an empty dist, and verifies
+  # SDK_DIST_SHA256 before writing the revision marker.
+  DACS_SKIP_APP_INSTALL=1 bash scripts/setup-sdk.sh
   npm ci --no-audit --no-fund
 )
 ```

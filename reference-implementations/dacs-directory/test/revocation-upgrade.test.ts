@@ -35,7 +35,7 @@ const seeded = new Database(dbPath);
 // Exact old candidate schema, which recorded unavailable reads as rejected.
 seeded.exec(`
   CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
-  INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0);
+  INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0), ('listing-admission-schema-version','1',0);
   CREATE TABLE revocation_candidates (
     listing_hash TEXT NOT NULL, locator TEXT NOT NULL, owner TEXT, content_hash TEXT,
     seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator)
@@ -50,7 +50,11 @@ seeded.prepare("INSERT INTO kv_state VALUES ('catalog',?,0)").run(JSON.stringify
   catalogVersion: "1", generatedAt: 100, sellers: [{ primaryClaim: claim, deals: [], listings: [
     { listingId: "upgrade", contentHash: hash, status: "active" },
     { listingId: "unaffected", contentHash: otherHash, status: "active" },
-    { listingId: "revoked", contentHash: revokedHash, status: "revoked", revocationBinding: { markerContentHash: "f".repeat(64) } },
+    { listingId: "revoked", version: 1, contentHash: revokedHash, status: "revoked", seller: { primaryClaim: claim }, revocationBinding: {
+      sellerPrimaryClaim: claim, listingId: "revoked", listingVersion: 1, listingContentHash: revokedHash,
+      logicalAddress: `dacs1-revoked:${encodeURIComponent(claim)}:revoked:v1`,
+      markerAnchor: { kind: "storage-program", locator: at("5") }, markerContentHash: "f".repeat(64),
+    } },
   ] }],
 }));
 seeded.close();
@@ -58,13 +62,13 @@ const store = await import("../src/catalog/store.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 test.after(() => rmSync(directory, { recursive: true, force: true }));
 
-test("upgrade requeues prior rejected markers and immediately withholds affected active catalog rows", () => {
+test("upgrade requeues prior rejected markers; candidates of no known owner withhold no row, as in the indexer", () => {
   assert.equal(store.hasPendingRevocationCandidates(hash), true);
   assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), [missing, privateMarker]);
   store.admitRevocationCandidates(hash, [{ locator: missing, contentHash: "d".repeat(64) }]);
   assert.deepEqual(store.nextRevocationCandidates(hash, null, 16), [missing, privateMarker], "same bytes remain queued");
-  assert.deepEqual(store.loadCatalog().sellers[0].listings.map((entry) => entry.listingId), ["unaffected", "revoked"]);
-  assert.equal(store.loadCatalog().sellers[0].listings[1].revocation?.markerContentHash, "f".repeat(64));
+  assert.deepEqual(store.loadCatalog().sellers[0].listings.map((entry) => entry.listingId), ["upgrade", "unaffected", "revoked"]);
+  assert.equal(store.loadCatalog().sellers[0].listings[2].revocation?.markerContentHash, "f".repeat(64));
 });
 
 test("upgraded 403/404 hints gain withdrawal authority only after a recovered marker verifies", async () => {
@@ -103,6 +107,6 @@ test("migration runs once: a newly verified invalid marker stays rejected across
     assert.equal(child.status, 0, child.stderr);
     const actual = JSON.parse(child.stdout);
     assert.equal(actual.pending, false);
-    assert.deepEqual(actual.listings.map((entry: { listingId: string }) => entry.listingId), ["unaffected", "revoked"]);
+    assert.deepEqual(actual.listings.map((entry: { listingId: string }) => entry.listingId), ["upgrade", "unaffected", "revoked"]);
   }
 });

@@ -14,6 +14,7 @@ import { revocationLogicalAddress } from "./listingVerification.js";
  * must equal the claimed seller). Per-domain failures never poison the pass.
  */
 import { sha256Hex } from "./canonical.js";
+import { sameCanonicalClaimIdentity } from "@kynesyslabs/dacs/identity";
 import { boundedPublicHttpsRequest, isPrivateAddress, validatePublicHttpsUrl } from "./boundedHttps.js";
 import { verifyBundleBinding } from "./bundleBinding.js";
 import { verifyPrimaryClaimSignature } from "./primaryClaimKey.js";
@@ -61,16 +62,30 @@ interface ListingIndex {
   }>;
 }
 
+/**
+ * RB-2: a binding is complete for one Listing tuple only when it names that seller, the
+ * logical address derived from it, and a well-formed marker anchor and hash.
+ */
+export function bindsListingTuple(
+  binding: unknown, seller: string, tuple: { listingId: string; version: number; contentHash: string },
+): binding is RevocationBinding {
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
+  const candidate = binding as Partial<RevocationBinding>;
+  return candidate.sellerPrimaryClaim === seller &&
+    candidate.listingId === tuple.listingId && candidate.listingVersion === tuple.version &&
+    candidate.listingContentHash === tuple.contentHash &&
+    candidate.logicalAddress === revocationLogicalAddress(seller, tuple.listingId, tuple.version) &&
+    candidate.markerAnchor?.kind === "storage-program" && typeof candidate.markerAnchor.locator === "string" &&
+    /^stor-[0-9a-f]{40}$/.test(candidate.markerAnchor.locator) && typeof candidate.markerContentHash === "string" &&
+    /^[0-9a-f]{64}$/.test(candidate.markerContentHash);
+}
+
 /** A carried binding can resolve a withdrawal even when the surrounding metadata is incomplete. */
 function listingIndexRevocation(entry: NonNullable<ListingIndex["listings"]>[number], seller: string): RevocationBinding | null {
-  const hash = entry.contentHash.toLowerCase();
+  const tuple = { listingId: entry.listingId, version: Number(entry.version), contentHash: entry.contentHash.toLowerCase() };
   const binding = entry.revocation;
-  return binding && typeof binding === "object" && !Array.isArray(binding) && binding.sellerPrimaryClaim === seller &&
-    binding.listingId === entry.listingId && binding.listingVersion === entry.version && binding.listingContentHash === hash &&
-    binding.logicalAddress === revocationLogicalAddress(seller, entry.listingId, Number(entry.version)) &&
-    binding.markerAnchor?.kind === "storage-program" && typeof binding.markerAnchor.locator === "string" &&
-    /^stor-[0-9a-f]{40}$/.test(binding.markerAnchor.locator) && typeof binding.markerContentHash === "string" &&
-    /^[0-9a-f]{64}$/.test(binding.markerContentHash) ? binding : null;
+  if (typeof binding?.sellerPrimaryClaim !== "string" || !sameCanonicalClaimIdentity(binding.sellerPrimaryClaim, seller)) return null;
+  return bindsListingTuple(binding, binding.sellerPrimaryClaim, tuple) ? binding : null;
 }
 
 /** Whether this record completes a withdrawal check; discovery alone grants no authority. */
@@ -189,12 +204,21 @@ export async function crawlDomain(domain: string, deps: { fetchJson?: typeof fet
   const withdrawalHashes: string[] = [];
   const incompleteWithdrawalHashes: string[] = [];
   const contentHashes: Record<string, string> = {};
+  const declaredHashes = new Map<string, string>();
   for (const entry of idx.listings ?? []) {
     if (!entry || typeof entry !== "object") { incompleteWithdrawalHashes.push("*"); continue; }
     const hash = typeof entry.contentHash === "string" && /^[0-9a-fA-F]{64}$/.test(entry.contentHash)
       ? entry.contentHash.toLowerCase() : null;
     if (hash) withdrawalHashes.push(hash);
     const locator = entry.anchor?.locator;
+    // Check even incomplete rows before any can be skipped or supply declarations.
+    if (hash && typeof locator === "string" && /^stor-[0-9a-f]{40}$/.test(locator)) {
+      const previous = declaredHashes.get(locator);
+      if (previous && previous !== hash) {
+        return { domain, error: "listings.json has conflicting content hashes for the same anchor" };
+      }
+      declaredHashes.set(locator, hash);
+    }
     const complete = listingIndexEntryIsComplete(entry, seller);
     // Conflicting rows in one index cannot lend active eligibility to each other.
     if (typeof locator === "string" && (!complete || entry.status !== "active")) withdrawalOnlyAnchors.add(locator);
