@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +35,7 @@ const crawl = async (listings: unknown[]) => {
 const visible = () => store.loadCatalog().sellers.flatMap(s => s.listings).filter(activeOffer);
 const run = async (listings: unknown[]) => {
   const agent = await crawl(listings);
-  await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
     crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
   return agent;
 };

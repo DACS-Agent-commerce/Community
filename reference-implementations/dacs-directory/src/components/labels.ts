@@ -1,6 +1,7 @@
 /** Human labels for the spec's kebab-case rail / delivery / negotiation ids. */
 export const RAIL_LABELS: Record<string, string> = {
   "demos-native:DEM": "DEM",
+  // DACS-4 §9.4.2: the generic x402 rail; the signed price names its currency.
   "x402:default": "x402",
   "pay-dem": "DEM",
   "pay-x402": "x402",

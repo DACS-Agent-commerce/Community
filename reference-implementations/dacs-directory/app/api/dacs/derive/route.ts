@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readAnchorRecord } from "@/src/catalog/chain";
 import { loadCatalog } from "@/src/catalog/store";
-import { ownerClaim, verifyStoredListing } from "@/src/catalog/listingVerification";
+import { listingTitle, ownerClaim, verifyStoredListing } from "@/src/catalog/listingVerification";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -32,6 +32,6 @@ export async function GET(req: NextRequest) {
     found: !!anchored,
     valid,
     ownedByClaim: valid,
-    title: verified?.listing.name ?? null,
+    title: valid && verified ? listingTitle(verified) : null,
   });
 }

@@ -47,6 +47,30 @@ export function canonicalSignatureBytes(value: unknown, length = ED25519_SIGNATU
   return bytes.length === length && canonicalSignatureValue(bytes) === value ? bytes : null;
 }
 
+/**
+ * DACS-1 §6.3.2 per-claim PresentationSignature `signature` bytes, or null.
+ * This bare string is not one of the SIG-6 envelope values above, and neither
+ * §6.3.2 nor CORE §B.7 fixes its encoding. Supported producers write these spellings:
+ * SDK sellers write canonical unpadded
+ * Base64URL; `/register` since c07560b (main f13f233 included) wrote the
+ * wallet's 128 hex digits. Their lengths differ (86 and 128 characters), so a
+ * value has at most one reading. The pinned Standard additionally writes
+ * canonical padded standard Base64. Whitespace, `0x`, malformed padding and
+ * non-zero residual bits are rejected in all supported encodings.
+ */
+export function presentationSignatureBytes(value: unknown, length = ED25519_SIGNATURE_BYTES): Uint8Array | null {
+  if (typeof value === "string" && value.length === length * 2 && /^[0-9a-fA-F]*$/.test(value)) {
+    return Uint8Array.from({ length }, (_, index) => parseInt(value.slice(index * 2, index * 2 + 2), 16));
+  }
+  const canonical = canonicalSignatureBytes(value, length);
+  if (canonical) return canonical;
+  // DACS-1 §6.3.2 leaves the bare presentation encoding open. The pinned
+  // Standard's passing Listing vector uses padded standard Base64.
+  const imported = typeof value === "string"
+    ? importLegacySignatureValue(value, "standard-base64-padded", length) : null;
+  return imported ? canonicalSignatureBytes(imported, length) : null;
+}
+
 /** Source encodings the SIG-6 legacy-import path accepts when declared out of band. */
 export type LegacySignatureEncoding = "lowercase-hex" | "standard-base64-padded";
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import https from "node:https";
@@ -100,7 +101,7 @@ const DOMAIN = "93.184.216.34";
 httpsAnswers.set("/.well-known/agent.json", { status: 200, body: JSON.stringify({ name: "A2A-only agent", skills: [{ id: "chat" }] }) });
 store.saveRegistrations([{ primaryClaim: dids[SELLER], displayName: "Route seller", listingAnchors: [locator(1)] }]);
 store.saveDomains([DOMAIN]);
-await reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("identity unavailable"); } });
+await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("identity unavailable"); } });
 
 /** A request with no credentials of any kind. */
 const anonymous = (path: string) => new NextRequest(`http://localhost${path}`);
@@ -116,7 +117,7 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
   assert.equal((await detail.json() as Obj).serviceId, "svc");
 
   const seller = await sellerRoute.GET(anonymous(`/api/dacs/sellers/${encodeURIComponent(dids[SELLER])}`),
-    { params: Promise.resolve({ primaryClaimRef: encodeURIComponent(dids[SELLER]) }) });
+    { params: Promise.resolve({ primaryClaimRef: dids[SELLER] }) });
   assert.equal(seller.status, 200);
   assert.equal(((await seller.json() as { listings: Obj[] }).listings).length, 1);
 
@@ -180,7 +181,7 @@ test("well-known binding ingestion preserves all 40 records through reindex and 
   const priorOverflow = bundleBindingOverflowKey("prior-job", "buyer", dids[BUYER]);
   store.saveScanState({ ...priorState, schemaVersion: 10, bundleBindings: { ...priorState.bundleBindings, [jobId]: bindings.slice(0, 5) as never },
     bundleBindingOverflow: [...(priorState.bundleBindingOverflow ?? []), priorOverflow] });
-  await reindexAll({ log: () => {}, resolveIdentities: async () => [] });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => [] });
   assert.ok(store.loadScanState().bundleBindingOverflow?.includes(priorOverflow));
   assert.equal(store.loadScanState().bundleBindings?.[jobId]?.length, 40);
   assert.ok(store.loadScanState().bundleBindingOverflow?.includes(bundleBindingOverflowKey(jobId, "seller", dids[SELLER])));

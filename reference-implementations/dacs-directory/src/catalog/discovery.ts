@@ -1,4 +1,29 @@
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import type { Catalog, ListingSummary, SellerRecord } from "./types.js";
+
+/**
+ * CF-3 identity of a ClaimReference: its scheme and identifier, with advisory
+ * parameters dropped. A current summary's `seller.primaryClaim` carries the
+ * Listing's exact `presentedBy` bytes; seller records, lookups and links use
+ * this identity, so a primaryClaim with parameters still resolves.
+ */
+export const sellerIdentity = (claim: string): string => canonicalDemosAgentClaim(claim) ?? claim;
+
+/** Largest ClaimReference, in UTF-8 bytes, that a summary publishes or a query accepts. */
+export const MAX_CLAIM_QUERY_BYTES = 1024;
+
+/** Whether a ClaimReference, measured exactly as given (untrimmed), is over MAX_CLAIM_QUERY_BYTES in UTF-8. */
+export const exceedsClaimBound = (claim: string): boolean =>
+  new TextEncoder().encode(claim).byteLength > MAX_CLAIM_QUERY_BYTES;
+
+/**
+ * The one publication gate for a summary's exact seller reference: the reason
+ * the summary is withheld, or null when it can be published. A withheld
+ * summary's signed Listing still serves as deal evidence.
+ */
+export function summaryPublicationRefusal(summaryClaim: string): string | null {
+  return exceedsClaimBound(summaryClaim) ? `seller reference exceeds ${MAX_CLAIM_QUERY_BYTES} bytes` : null;
+}
 
 /** Historical rail aliases are retained for evidence. A current offer needs
  * at least one rail other than those aliases, or a pipeline without payment. */

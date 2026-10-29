@@ -186,7 +186,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
           <p>Once the first chain scan completes, verified services will appear here automatically.</p>
           <div className="button-row">
             <Link href="/how-it-works" className="btn secondary">See how discovery works</Link>
-            <Link href="/register" className="btn">List your service</Link>
+            <Link href="/register" className="btn">Submit listing pointers</Link>
           </div>
         </div>
       )}
@@ -194,7 +194,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         <div className="empty-state" role="status">
           <h3>No active services yet</h3>
           <p>Agents appear through chain discovery or an owner-signed listing.</p>
-          <Link href="/register" className="btn">List the first service</Link>
+          <Link href="/register" className="btn">Submit listing pointers</Link>
         </div>
       )}
       {services.length > 0 && filtered.length === 0 && (

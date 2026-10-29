@@ -1,9 +1,8 @@
 /**
- * POST /api/dacs/prepare-registration — issue a fresh, content-bound owner
- * signing message for an already verified listing pointer.
- *
- * The browser can safely resume registration after a reload or an expired
- * signature without rebuilding or rebroadcasting the on-chain listing.
+ * POST /api/dacs/prepare-registration — parse an unsigned pointer set and
+ * return a fresh content-bound message for the owner's client to sign.
+ * This endpoint never signs or confirms publication. The owner submits the
+ * signed result to /api/dacs/register; indexing verifies the chain artifacts.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { parseRegistration } from "@/src/catalog/registration";

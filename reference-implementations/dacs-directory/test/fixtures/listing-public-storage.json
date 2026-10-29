@@ -3,7 +3,7 @@
     "generator": "Node.js crypto Ed25519 with independent JCS; ASCII strings and integer numbers",
     "seedDerivation": "SHA-256 of DACS Directory nested phase metadata public test fixture"
   },
-  "contentHash": "536f78d7f07b29af08619449b1ff134b391c94e32545aab6483896663c3e936c",
+  "contentHash": "7c6fed916e00857add9945c35de5f77d6ff0c1256f1a9cac26e87177cae20983",
   "listing": {
     "dacsVersion": "1",
     "listingVersion": 1,
@@ -27,7 +27,7 @@
           "signatures": [
             {
               "ref": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102",
-              "signature": "fb4269bbfc2786ab468f8ca26de8fb5f3cd7248343458edbfda2ad1f7d17fe97eecae1d9cf96f73bc7a78bdda122d3ab524a83e41ade7118ce296d3afbf6dc0b"
+              "signature": "-0Jpu_wnhqtGj4yibej7XzzXJINDRY7b_aKtH30X_pfuyuHZz5b3O8eni92hItOrUkqD5BrecRjOKW06-_bcCw"
             }
           ]
         }
@@ -49,44 +49,16 @@
     },
     "pipeline": [
       {
-        "kind": "vet-credentials",
-        "parameters": {
-          "future": {
-            "label": "inert",
-            "values": [
-              1,
-              2
-            ]
-          }
-        }
+        "kind": "vet-credentials"
       },
       {
-        "kind": "negotiate-fixed-price",
-        "parameters": {}
+        "kind": "negotiate-fixed-price"
       },
       {
-        "kind": "commit-agreement",
-        "parameters": {
-          "future": {
-            "label": "inert",
-            "values": [
-              1,
-              2
-            ]
-          }
-        }
+        "kind": "commit-agreement"
       },
       {
-        "kind": "deliver-storage-program",
-        "parameters": {
-          "future": {
-            "label": "inert",
-            "values": [
-              1,
-              2
-            ]
-          }
-        }
+        "kind": "deliver-storage-program"
       },
       {
         "kind": "rate",
@@ -116,7 +88,7 @@
     "signature": {
       "algorithm": "ed25519",
       "signer": "did:demos:agent:5d5b94afc2789d2b93854da9e8e64323dd5ab2928af459fa24b3cf1620861102",
-      "value": "F98wqsfGlovKrFTqbb8GT_x90RRIGtM_g2-sg5VfgpjOyXUrVtFCPpT75ILgdfBLN3Blsfy-qSt6AbGQcoAYCg"
+      "value": "37i73pPreINIfrfuOhLkumVZh6higSqIQl1WKtyyWP8bbXibpyZXD05HINV9bmuc0cX3Ikkc2qmQr0-wWfMQBw"
     }
   }
 }
