@@ -455,7 +455,15 @@ async function verifyCurrentEvidenceGraph(
     bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: false, artifacts,
     agreement, listing: listed.raw, ratings: artifacts.filter(artifact => artifact.kind === "rating").map(artifact => artifact.raw) };
   const lifecycle = currentLifecycle(raw, listed.raw);
-  if (lifecycle === "pre-commit") return { ...authenticated, refsVerified: true, credit: { kind: "pre-commit" } };
+  if (lifecycle === "pre-commit") {
+    const validity = rec(listed.raw.validity);
+    const now = Date.now();
+    if ((typeof validity?.notBefore === "number" && validity.notBefore > now) ||
+        (typeof validity?.notAfter === "number" && validity.notAfter < now)) {
+      return { ...authenticated, reason: "pre-commit Listing is outside signed validity" };
+    }
+    return { ...authenticated, refsVerified: true, credit: { kind: "pre-commit" } };
+  }
   if (lifecycle === "refused" || !agreement) return { ...authenticated, reason: "unsupported terminal lifecycle" };
   const context = makeCommitmentContext(raw, agreement, listed, artifactHash(agreement, "agreement"));
   if (!context) return { ...authenticated, reason: "invalid commitment context" };
