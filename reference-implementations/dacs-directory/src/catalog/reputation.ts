@@ -1,5 +1,6 @@
 import type { DealRecord, SellerRecord } from "./types.js";
 import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetricPolicy.js";
+import { canonicalSigningIdentity } from "./claimRef.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -86,6 +87,16 @@ export function deriveSellerReputation(
       locator: deal.anchoredByRole === "buyer" ? deal.buyerBundleRef : deal.sellerBundleRef ?? deal.buyerBundleRef,
     },
   })).sort((a, b) => byteOrder(a.contentHash, b.contentHash));
+  const ratingByDirection = new Map<string, NonNullable<DealRecord["ratings"]>[number]>();
+  for (const deal of scoped) for (const rating of deal.ratings ?? []) {
+    const rater = canonicalSigningIdentity(rating.rater);
+    const target = canonicalSigningIdentity(rating.target);
+    if (target !== canonicalSigningIdentity(deal.owners.seller) || rater === target) continue;
+    const key = `${rater}\n${deal.jobId}\n${rating.targetRole}`;
+    const prior = ratingByDirection.get(key);
+    if (!prior || rating.ratedAt > prior.ratedAt || (rating.ratedAt === prior.ratedAt && rating.contentHash > prior.contentHash)) ratingByDirection.set(key, rating);
+  }
+  const sellerRatings = [...ratingByDirection.values()].filter((rating) => rating.targetRole === "seller").map((rating) => rating.value);
   const completedWithPrice = scoped.filter((deal) => deal.sellerOutcome === "completed" && deal.agreementPrice);
   const amounts = new Map<string, string[]>();
   for (const deal of completedWithPrice) {

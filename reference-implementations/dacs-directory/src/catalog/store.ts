@@ -1,16 +1,26 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
 import { boundedJson } from "./artifactLimits.js";
-import { canonicalProgramOwner, normalizeScanState } from "./scanState.js";
+import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, Registration, RevocationBinding, ScanState } from "./types.js";
-import { revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import type { Catalog, CatalogChain, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
+import { bindsListingTuple, normalizeSubmittedDomain, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
+import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
 import { projectTestnetCatalog } from "./testnetMetrics.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
+import {
+  LISTING_REJECTION_MESSAGES,
+  LISTING_REJECTION_GUIDANCE,
+  type ListingDiagnosticCoordinates,
+  type ListingRejectionCode,
+} from "./listingAdmission.js";
+
+export type { ListingRejectionCode } from "./listingAdmission.js";
 
 export const DATA_DIR = process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data");
 const DB_PATH = join(DATA_DIR, "directory.sqlite");
@@ -67,6 +77,19 @@ db.exec(`
     token TEXT NOT NULL,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS listing_preparations (
+    chain_identity TEXT NOT NULL,
+    logical_address TEXT NOT NULL,
+    anchor_address TEXT NOT NULL,
+    transaction_json TEXT NOT NULL,
+    PRIMARY KEY(chain_identity, logical_address)
+  );
+  CREATE TRIGGER IF NOT EXISTS listing_preparations_no_update
+    BEFORE UPDATE ON listing_preparations
+    BEGIN SELECT RAISE(ABORT, 'Listing preparations are append-only'); END;
+  CREATE TRIGGER IF NOT EXISTS listing_preparations_no_delete
+    BEFORE DELETE ON listing_preparations
+    BEGIN SELECT RAISE(ABORT, 'Listing preparations are append-only'); END;
   CREATE TABLE IF NOT EXISTS artifacts (
     locator TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -119,6 +142,8 @@ db.exec(`
     locator TEXT NOT NULL,
     registration_claim TEXT NOT NULL,
     reason_code TEXT NOT NULL,
+    listing_id TEXT,
+    listing_version INTEGER,
     occurrences INTEGER NOT NULL DEFAULT 1,
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
@@ -149,6 +174,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS revocation_candidates_owner_idx
     ON revocation_candidates(listing_hash, owner, seq) WHERE state = 'pending';
 `);
+
+// BEGIN IMMEDIATE serializes the read-then-DDL upgrade across app/indexer
+// processes. A deferred transaction can let both readers observe the old
+// schema and then fail one upgrader immediately with SQLITE_BUSY.
+db.transaction(() => {
+  const listingRejectionColumns = new Set(
+    (db.prepare("PRAGMA table_info(listing_rejections)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!listingRejectionColumns.has("listing_id")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_id TEXT");
+  }
+  if (!listingRejectionColumns.has("listing_version")) {
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN listing_version INTEGER");
+  }
+  if (!listingRejectionColumns.has("public_notice")) {
+    // Earlier coordinates were not authenticated; never promote them to notices.
+    db.exec("ALTER TABLE listing_rejections ADD COLUMN public_notice INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE listing_rejections SET listing_id = NULL, listing_version = NULL");
+  }
+}).immediate();
 
 // Add internal omission counters without changing the public diagnostic projection.
 db.transaction(() => {
@@ -210,7 +255,33 @@ const setJson = db.transaction((key: string, value: unknown) => {
     .run(key, JSON.stringify(value), Date.now());
 });
 
-// One-time, atomic migration. Legacy files remain as rollback snapshots.
+/** Exact authenticated create inputs retained for recovery, never proof of success. */
+export interface ListingPreparation {
+  anchorAddress: string;
+  transactionJson: string;
+}
+
+/** Read a retained attempt or undefined; throws on storage failure. */
+export function loadListingPreparation(chainIdentity: string, logicalAddress: string): ListingPreparation | undefined {
+  return db.prepare(`SELECT anchor_address AS anchorAddress, transaction_json AS transactionJson
+    FROM listing_preparations WHERE chain_identity=? AND logical_address=?`)
+    .get(chainIdentity, logicalAddress) as ListingPreparation | undefined;
+}
+
+/**
+ * Commit authenticated inputs before releasing a transaction. Returns false if
+ * another preparation already won; never overwrites it. Throws on storage failure.
+ * Retain even after readback: a later missing read cannot free an immutable version.
+ */
+export function saveListingPreparation(chainIdentity: string, logicalAddress: string, preparation: ListingPreparation): boolean {
+  return db.prepare(`INSERT INTO listing_preparations(chain_identity,logical_address,anchor_address,transaction_json)
+    VALUES (?,?,?,?) ON CONFLICT(chain_identity,logical_address) DO NOTHING`)
+    .run(chainIdentity, logicalAddress, preparation.anchorAddress, preparation.transactionJson).changes === 1;
+}
+
+// One-time, atomic migrations. Legacy files remain as rollback snapshots.
+// Every read-then-write migration starts IMMEDIATE so concurrent fresh
+// processes queue before observing state instead of racing a DEFERRED upgrade.
 if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db.transaction(() => {
   setJson("catalog", readLegacy<Catalog>(LEGACY.catalog, { catalogVersion: "1", generatedAt: 0, sellers: [] }));
   setJson("registrations", readLegacy<Registration[]>(LEGACY.registrations, []));
@@ -218,7 +289,7 @@ if (!(db.prepare("SELECT 1 FROM kv_state WHERE key='schema-version'").get())) db
   setJson("domains", readLegacy<string[]>(LEGACY.domains, []));
   setJson("fixtures", readLegacy<FixtureSeed[]>(LEGACY.fixtures, []));
   setJson("schema-version", 1);
-})();
+}).immediate();
 
 // Every persisted anchor time written before this migration came from the
 // transaction's producer-controlled timestamp. Remove both the artifact rows
@@ -243,29 +314,114 @@ if (getJson("sr2-anchor-schema-version", 0) < 2) db.transaction(() => {
     }),
   });
   setJson("sr2-anchor-schema-version", 2);
-})();
-
-// Earlier releases persisted unreadable (403/404) candidates as rejected without
-// a trustworthy reason. Reverify those decisions once, and withhold affected
-// active catalog entries immediately, before the first reindex can run.
-db.transaction(() => {
-  if (getJson("revocation-read-schema-version", 0) >= 1) return;
-  const affected = new Set((db.prepare("SELECT DISTINCT listing_hash FROM revocation_candidates WHERE state='rejected'")
-    .all() as Array<{ listing_hash: string }>).map((row) => row.listing_hash));
-  db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
-    SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
-      AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
-  )`).run();
-  db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
-  if (affected.size) {
-    const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
-    setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => ({
-      ...seller, listings: seller.listings.filter((listing) =>
-        listing.status === "revoked" || !affected.has(listing.contentHash)),
-    })) });
-  }
-  setJson("revocation-read-schema-version", 1);
 }).immediate();
+
+// Early Directory builds exposed the internal name `revocationBinding` in
+// ListingSummary. DACS-1 uses `revocation`; migrate persisted catalogs once so
+// every public surface and restart path now emits the normative wire field.
+// A binding is promoted only when it is complete and names this very Listing;
+// a revoked row without one stays out of discovery until a reindex rebuilds it.
+const bindsListing = (binding: Partial<RevocationBinding> | undefined, listing: ListingSummary): binding is RevocationBinding =>
+  typeof binding?.sellerPrimaryClaim === "string" && typeof listing.seller?.primaryClaim === "string" &&
+  sellerIdentity(binding.sellerPrimaryClaim) === sellerIdentity(listing.seller.primaryClaim) &&
+  bindsListingTuple(binding, binding.sellerPrimaryClaim, { listingId: listing.listingId, version: listing.version, contentHash: listing.contentHash });
+if (getJson("listing-summary-revocation-schema-version", 0) < 1) db.transaction(() => {
+  type LegacyListingSummary = ListingSummary & { revocationBinding?: RevocationBinding };
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => {
+        const { revocationBinding, revocation: stored, ...current } = listing as LegacyListingSummary;
+        const revocation = [stored, revocationBinding].find((binding) => bindsListing(binding, listing));
+        return {
+          ...current,
+          ...(current.status === "revoked" && revocation ? { revocation } : {}),
+        };
+      }),
+    })),
+  });
+  setJson("listing-summary-revocation-schema-version", 1);
+}).immediate();
+
+// Catalog authentication is deliberately narrower than the current SDK's
+// buyer-local LR-1..LR-3 decision. Persist that distinction on every existing
+// summary so old catalogs cannot imply transaction readiness after upgrade.
+if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction(() => {
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", {
+    ...catalog,
+    sellers: catalog.sellers.map((seller) => ({
+      ...seller,
+      listings: seller.listings.map((listing) => ({
+        ...listing,
+        transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
+      })),
+    })),
+  });
+  setJson("listing-summary-readiness-schema-version", 1);
+}).immediate();
+
+// Cached admission decisions predate the current Listing reader (including
+// DACS-4 §9.6.3 DPA-1). A readiness label cannot validate their original bytes.
+// Withhold active summaries, and every cached deal verdict, until a successful
+// reindex authenticates them with this reader. Keep
+// registration/scan pointers and authenticated tombstones so outages cannot
+// restore stale offers or erase withdrawal history. Fixture
+// listings are not chain admission decisions and stay. The highest version of
+// each chain Listing, tombstones included, is kept privately so the publisher
+// still numbers a new version after it even when a later reindex drops the
+// row. Bump this version whenever a reader change invalidates earlier
+// admission decisions.
+const LISTING_VERSION_FLOORS_KEY = "listing-version-floors";
+const listingVersionFloorKey = (seller: string, listingId: string): string => `${seller}\n${listingId}`;
+db.transaction(() => {
+  if (getJson("listing-admission-schema-version", 0) >= 1) return;
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  const floors = getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {});
+  // Persisted rows predate any shape guarantee: a row without an anchor is
+  // withheld like any other unauthenticated one, never a reason to stop startup.
+  const retained = (listing: ListingSummary): boolean =>
+    listing.status === "revoked" || listing.anchor?.kind === "fixture";
+  for (const seller of catalog.sellers) for (const listing of seller.listings.filter((entry) => entry.anchor?.kind !== "fixture")) {
+    if (typeof listing.listingId !== "string" || !Number.isSafeInteger(listing.version) || listing.version < 1) continue;
+    const key = listingVersionFloorKey(seller.primaryClaim, listing.listingId);
+    floors[key] = Math.max(floors[key] ?? 0, listing.version);
+  }
+  setJson(LISTING_VERSION_FLOORS_KEY, floors);
+  // A deal's verdict was reached with a Listing reader that no longer applies,
+  // and a deal does not record which Listing it was checked against (it may be
+  // a revoked one, or one with no summary). Every cached verdict is withheld
+  // and the reputation counted from them is recomputed.
+  const windowEnd = catalog.generatedAt || Date.now();
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }));
+    return { ...seller, deals, listings: seller.listings.filter(retained), reputation: deriveSellerReputation(deals, 0, windowEnd) };
+  }) });
+  setJson("listing-admission-schema-version", 1);
+}).immediate();
+
+// Old catalog verdicts predate commitment authentication. Clear only derived deal
+// credit atomically; retain Listing discovery, withdrawal evidence and scan pointers.
+db.transaction(() => {
+  if (getJson("commitment-finality-schema-version", 0) >= 3) return;
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false, ratings: [] }));
+    return { ...seller, deals,
+      listings: seller.listings.map(({ reputationHint: _unprovenHint, ...listing }) => listing),
+      reputation: deriveSellerReputation(deals, 0, catalog.generatedAt) };
+  }) });
+  setJson("commitment-finality-schema-version", 3);
+}).immediate();
+
+/**
+ * The highest version of a seller's Listing that a past admission reset
+ * withheld from the catalog, or 0. The publisher numbers new versions after it.
+ */
+export const listingVersionFloor = (seller: string, listingId: string): number =>
+  getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {})[listingVersionFloorKey(seller, listingId)] ?? 0;
 
 // Keep source-specific upgrade holds even when no candidate was queued. v2 did
 // not retain source provenance, so only an authenticated recrawl can release it.
@@ -397,6 +553,48 @@ export function retainedListingRevocation(hash: string): RevocationBinding | nul
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
   setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
 }
+const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
+/**
+ * Whether the Listing's own owner anchored a marker that no read has settled: unread,
+ * backing off or still queued. Anyone may anchor other candidates, so only the owner's count.
+ * Returns false when the owner is unknown.
+ */
+export function hasPendingOwnerRevocationCandidate(listingHash: string, listingOwner: string | null): boolean {
+  if (!listingOwner) return false;
+  return ownerPendingCandidate.get(listingHash, canonicalProgramOwner(listingOwner)) !== undefined;
+}
+
+// Earlier releases persisted unreadable candidates as rejected without a
+// trustworthy reason: 403/404 replies before version 1, and replies whose data
+// is not an object before version 2. Reverify those decisions once. Those releases
+// also never held an offer for an unsettled candidate, so after the requeue (and
+// the scan-state queue import above) withhold exactly the active catalog entries
+// the live hold rule holds, before the first reindex can run. Stored owners are
+// respelled the way that rule looks them up.
+// Bump this version whenever a reader change turns a past rejection into an unread.
+const REVOCATION_READ_SCHEMA_VERSION = 2;
+db.transaction(() => {
+  if (getJson("revocation-read-schema-version", 0) >= REVOCATION_READ_SCHEMA_VERSION) return;
+  const respell = db.prepare("UPDATE revocation_candidates SET owner=? WHERE owner=?");
+  for (const { owner } of db.prepare("SELECT DISTINCT owner FROM revocation_candidates WHERE owner IS NOT NULL").all() as Array<{ owner: string }>) {
+    if (canonicalProgramOwner(owner) !== owner) respell.run(canonicalProgramOwner(owner), owner);
+  }
+  db.prepare(`DELETE FROM revocation_candidate_retries WHERE EXISTS (
+    SELECT 1 FROM revocation_candidates c WHERE c.listing_hash=revocation_candidate_retries.listing_hash
+      AND c.locator=revocation_candidate_retries.locator AND c.state='rejected'
+  )`).run();
+  db.prepare("UPDATE revocation_candidates SET state='pending' WHERE state='rejected'").run();
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    // An admitted Listing's storage owner is the seller's own key; a claim without one fails closed.
+    const listingOwner = /[0-9a-fA-F]{64}$/.test(seller.primaryClaim) ? seller.primaryClaim : null;
+    const held = (hash: string) => listingOwner ? hasPendingOwnerRevocationCandidate(hash, listingOwner) : hasPendingRevocationCandidates(hash);
+    return { ...seller, listings: seller.listings.filter((listing) =>
+      listing.status === "revoked" || listing.anchor?.kind === "fixture" || !held(listing.contentHash)) };
+  }) });
+  setJson("revocation-read-schema-version", REVOCATION_READ_SCHEMA_VERSION);
+}).immediate();
 const rejectCandidate = db.prepare("UPDATE revocation_candidates SET state='rejected' WHERE listing_hash = ? AND locator = ?");
 const requeueCandidate = db.prepare(`UPDATE revocation_candidates SET seq = ?
   WHERE listing_hash = ? AND locator = ? AND state = 'pending'`);
@@ -419,10 +617,9 @@ export const recordRevocationProgress = db.transaction(
       // scope bytes whose previously invalid signature may have been repaired.
       const rejectedBindings = new Set(examinedBindings.filter((binding) =>
         binding.listingContentHash === listingHash && progress.rejected.includes(binding.markerAnchor.locator)).map(revocationBindingKey));
-      const sources = withdrawalSources();
-      for (const source of sources) source.bindings = (source.bindings ?? []).filter((binding) =>
-        !rejectedBindings.has(revocationBindingKey(binding)));
-      saveWithdrawalSources(sources);
+      // The sources are not journaled, so a release a node read decided waits for the window's commit.
+      if (chainReadWindowOpen()) stageWithdrawalBindingRelease(rejectedBindings);
+      else releaseWithdrawalBindings(rejectedBindings);
     }
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
     for (const locator of progress.unread) {
@@ -495,7 +692,8 @@ export const loadScanState = () => normalizeScanState(getJson("scan-state", { la
 export const saveScanState = db.transaction((state: ScanState): void => {
   const normalized = normalizeScanState(state);
   ingestLegacyRevocations(normalized.revocations);
-  setJson("scan-state", { ...normalized, revocations: {} });
+  const { chainIdentity: retiredChain, withheldChainIdentity: retiredWithheld, ...canonical } = normalized;
+  setJson("scan-state", { ...canonical, revocations: {} });
 });
 /**
  * Remove active cache rows that belong to a replaced chain. Registrations and
@@ -509,25 +707,202 @@ export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM artifacts").run();
   db.prepare("DELETE FROM revocation_candidates").run();
 });
+
+// A catalog writer persists some node reads while it indexes (rejections, revocation progress,
+// retained markers). Until a later read confirms the node still serves the gated chain, each such
+// write is journaled with the statement that undoes it, in the same transaction, so a failed check
+// or a crash reverts it. Leases and run history are not journaled, nor are the keys in
+// UNJOURNALED_KEYS.
+db.exec("CREATE TABLE IF NOT EXISTS unconfirmed_chain_writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, undo_sql TEXT NOT NULL)");
+/**
+ * A binding release a marker read decided inside the open window. One row per binding and source
+ * revision keeps each write bounded: rewriting one growing list made the journal grow quadratically.
+ * The table is bookkeeping, not node-derived state, so it is not journaled; commit and revert clear it.
+ */
+db.exec(`CREATE TABLE IF NOT EXISTS staged_binding_releases (
+  binding_key TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  PRIMARY KEY(binding_key, revision)
+)`);
+interface UndoStatement { seq: number; undo_sql: string }
+// Listing preparations retain seller-signed writes, not node reads. A refused or
+// crashed refresh must never undo a transaction already released to its seller.
+const UNJOURNALED_TABLES = new Set(["leases", "scan_runs", "unconfirmed_chain_writes", "staged_binding_releases", "sqlite_sequence", "listing_preparations"]);
+/**
+ * kv_state keys the journal skips. Other routes write registrations and domains while a pass runs, so
+ * an undo would drop their saves. Withdrawal sources hold what a publisher signed and served from its
+ * own domain, not what the node returned, so a refused chain check says nothing about them; undoing
+ * them would let a failed pass publish a listing the publisher had already withdrawn. A marker read
+ * that releases one of their bindings is node-derived, so it is staged in its own bookkeeping rows instead.
+ */
+const UNJOURNALED_KEYS = ["catalog-chain", "registrations", "domains", "withdrawal-sources", "withdrawal-source-revision"];
+const unjournaledKeyList = UNJOURNALED_KEYS.map((key) => `'${key}'`).join(",");
+let journalTriggersCreated = false;
+/** Per-connection triggers, created once every migration has run; they journal only while a window is open. */
+function createJournalTriggers(): void {
+  if (journalTriggersCreated) return;
+  db.exec("CREATE TEMP TABLE IF NOT EXISTS unconfirmed_chain_window (opened INTEGER NOT NULL)");
+  // SQLite refuses triggers on its own tables (sqlite_stat1 after ANALYZE, sqlite_sequence),
+  // so an operator-analyzed database must not make every refresh fail at its first write.
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+    .map((row) => row.name).filter((name) => !name.startsWith("sqlite_") && !UNJOURNALED_TABLES.has(name));
+  for (const table of tables) {
+    const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => `"${column.name}"`);
+    // SQLite's quote() stops a text value at its first NUL byte. A node supplies some stored text
+    // (an artifact owner, for one), so carry such text as a hex literal to restore its exact bytes;
+    // plain text stays quoted to keep the journal small.
+    const oldValue = (column: string) => `CASE WHEN typeof(old.${column})='text' AND instr(old.${column}, char(0)) > 0
+      THEN 'CAST(X''' || hex(old.${column}) || ''' AS TEXT)' ELSE quote(old.${column}) END`;
+    const oldValues = columns.map(oldValue).join(" || ',' || ");
+    const oldAssignments = columns.map((column) => `'${column}=' || ${oldValue(column)}`).join(" || ',' || ");
+    const journal = (event: string, row: "old" | "new", undo: string) => db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS
+      journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
+      WHEN EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)${table === "kv_state" ? ` AND ${row}.key NOT IN (${unjournaledKeyList})` : ""}
+      BEGIN INSERT INTO unconfirmed_chain_writes(undo_sql) VALUES (${undo}); END`);
+    journal("INSERT", "new", `'DELETE FROM ${table} WHERE rowid=' || new.rowid`);
+    journal("UPDATE", "old", `'UPDATE ${table} SET ' || ${oldAssignments} || ' WHERE rowid=' || old.rowid`);
+    journal("DELETE", "old", `'INSERT INTO ${table}(rowid,${columns.join(",")}) VALUES(' || old.rowid || ',' || ${oldValues} || ')'`);
+  }
+  journalTriggersCreated = true;
+}
+/** Journal every chain-derived write from now until the window is confirmed or reverted. */
+export function openChainReadWindow(): void {
+  createJournalTriggers();
+  db.prepare("INSERT INTO temp.unconfirmed_chain_window(opened) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM temp.unconfirmed_chain_window)").run();
+}
+const closeChainReadWindow = (): void => {
+  if (journalTriggersCreated) db.exec("DELETE FROM temp.unconfirmed_chain_window");
+};
+const chainReadWindowOpen = (): boolean =>
+  journalTriggersCreated && db.prepare("SELECT 1 FROM temp.unconfirmed_chain_window").get() !== undefined;
+/**
+ * Withdrawal bindings a marker rejection released inside the open window, each with the source revision
+ * it was decided against. The rows are bookkeeping, so a refused or crashed pass drops the release and
+ * the binding keeps holding; readers already see it released, as they would outside a window.
+ */
+interface StagedBindingRelease { binding_key: string; revision: number }
+const stagedBindingReleases = (): StagedBindingRelease[] =>
+  db.prepare("SELECT binding_key, revision FROM staged_binding_releases").all() as StagedBindingRelease[];
+/**
+ * The staged releases a reader may act on: only those decided against the current source
+ * revision. A newer signed source declaration may carry the binding again, so a release
+ * decided before it is stale and must not hide the binding from the pass's own reads.
+ */
+const stagedBindingReleaseKeys = (): Set<string> =>
+  new Set((db.prepare("SELECT binding_key FROM staged_binding_releases WHERE revision = ?")
+    .all(wellKnownWithdrawalRevision()) as Array<{ binding_key: string }>)
+    .map((row) => row.binding_key));
+const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => {
+  if (keys.size === 0) return;
+  const revision = wellKnownWithdrawalRevision();
+  const stage = db.prepare("INSERT OR IGNORE INTO staged_binding_releases(binding_key, revision) VALUES (?, ?)");
+  for (const key of keys) stage.run(key, revision);
+};
+/**
+ * Run the writer's last saves (its scan state and catalog) and keep the window's writes, in one
+ * transaction: a chain read after those writes confirmed the gated chain, so either all of them are
+ * durable or, after a failed save or a crash, none is. A staged binding release is applied only if no
+ * signed source changed since it was decided. A failed save leaves the window open for
+ * `revertChainReadWindow`.
+ */
+export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
+  lastSaves();
+  const revision = wellKnownWithdrawalRevision();
+  const released = new Set(stagedBindingReleases().filter((release) => release.revision === revision).map((release) => release.binding_key));
+  if (released.size > 0) releaseWithdrawalBindings(released);
+  db.exec("DELETE FROM staged_binding_releases");
+  closeChainReadWindow();
+  db.exec("DELETE FROM unconfirmed_chain_writes");
+});
+/**
+ * Undo every journaled write, newest first, and close the window. Also undoes the writes of a
+ * window a crash left open, so every catalog writer calls it under its lease before it reads.
+ * It holds one undo statement at a time: a statement carries a whole prior row, so a journal of
+ * many large rows must not be loaded at once. It takes the write lock before it reads so a
+ * concurrent commit cannot invalidate its snapshot between the read and the first undo.
+ */
+const revertChainReadWindowTransaction = db.transaction((): void => {
+  closeChainReadWindow();
+  const newestUndo = db.prepare("SELECT seq, undo_sql FROM unconfirmed_chain_writes ORDER BY seq DESC LIMIT 1");
+  const forgetUndo = db.prepare("DELETE FROM unconfirmed_chain_writes WHERE seq = ?");
+  for (let undo = newestUndo.get() as UndoStatement | undefined; undo; undo = newestUndo.get() as UndoStatement | undefined) {
+    db.exec(undo.undo_sql);
+    forgetUndo.run(undo.seq);
+  }
+  db.exec("DELETE FROM staged_binding_releases");
+});
+export const revertChainReadWindow = (): void => { revertChainReadWindowTransaction.immediate(); };
+/** Read control, consuming retired scanner labels atomically during migration. */
+export const loadCatalogChain = db.transaction((): CatalogChain | null => {
+  const control = getJson<CatalogChain | null>("catalog-chain", null);
+  if (control) return control;
+  const state = loadScanState();
+  const evidenceChain = state.chainIdentity ?? state.withheldChainIdentity;
+  if (evidenceChain === undefined) return null;
+  const migrated = { evidenceChain, readySchema: state.chainIdentity ? state.schemaVersion ?? null : null };
+  setJson("catalog-chain", migrated);
+  saveScanState(state);
+  return migrated;
+});
+/** Bind/adopt evidence before provisional work; only publication can grant readiness. */
+export const invalidateCatalogChain = (evidenceChain: string): void =>
+  setJson("catalog-chain", { evidenceChain, readySchema: null });
+/** Reset progress, explicit derived evidence and replacement catalog in one durable transition. */
+export const resetCatalogChain = db.transaction((evidenceChain: string, replacement: boolean, tip: number | null) => {
+  clearChainDerivedArtifacts();
+  if (replacement) saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [] });
+  const state = normalizeScanState({ schemaVersion: 0, lastSeenTxId: 0,
+    ...(tip === null ? {} : { lastChainTip: tip }), listings: {}, deals: {}, programs: {},
+    revocations: {}, verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: false });
+  saveScanState(state);
+  invalidateCatalogChain(evidenceChain);
+  return state;
+});
+/** Publish a completed pass's catalog, scanner/schema and readiness atomically; throws on failed storage. */
+export const publishCatalogChain = db.transaction((catalog: Catalog, state: ScanState, evidenceChain: string): void => {
+  saveScanState({ ...state, schemaVersion: SCAN_STATE_SCHEMA_VERSION });
+  saveCatalog(catalog);
+  setJson("catalog-chain", { evidenceChain, readySchema: SCAN_STATE_SCHEMA_VERSION });
+});
 export const loadDomains = (): string[] => getJson("domains", []);
 export const saveDomains = (domains: string[]): void => setJson("domains", [...new Set(domains)].sort());
 
 interface WithdrawalSource { domain: string; seller: string; hashes: string[]; incomplete: string[];
   provenance?: WithdrawalProvenance | "legacy";
   bindings?: RevocationBinding[];
-  index?: { generatedAt: number; hash: string } }
-const withdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+  index?: { generatedAt: number; hash: string };
+  /** Content hashes by anchor from the last publisher-signed index accepted; absent on rows saved before them. */
+  declarations?: Record<string, string> }
+const storedWithdrawalSources = (): WithdrawalSource[] => getJson("withdrawal-sources", []);
+/** The saved sources, less the bindings a marker rejection in the open window released. */
+const withdrawalSources = (): WithdrawalSource[] => {
+  const released = stagedBindingReleaseKeys();
+  const sources = storedWithdrawalSources();
+  if (released.size > 0) for (const source of sources) source.bindings = source.bindings?.filter((binding) =>
+    !released.has(revocationBindingKey(binding)));
+  return sources;
+};
 export const wellKnownWithdrawalRevision = (): number => getJson("withdrawal-source-revision", 0);
 const saveWithdrawalSources = (sources: WithdrawalSource[]): void => {
   setJson("withdrawal-sources", sources);
   setJson("withdrawal-source-revision", wellKnownWithdrawalRevision() + 1);
 };
-/** Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. */
+const releaseWithdrawalBindings = (keys: ReadonlySet<string>): void => {
+  const sources = storedWithdrawalSources();
+  for (const source of sources) source.bindings = (source.bindings ?? []).filter((binding) => !keys.has(revocationBindingKey(binding)));
+  saveWithdrawalSources(sources);
+};
+/**
+ * Authenticated recrawls reconcile metadata; only marker adjudication resolves a carried binding. An accepted
+ * publisher-signed index saves its declared content hashes in the same transaction; an operator-pinned one keeps
+ * the row's earlier declarations.
+ */
 export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, seller?: string,
   hashes: string[] = [], incomplete: string[] = [], index?: WithdrawalSource["index"],
   bindings: NonNullable<WithdrawalSource["bindings"]> = [],
-  provenance: WithdrawalProvenance = "publisher-signature"): boolean => {
-  const sources = withdrawalSources();
+  provenance: WithdrawalProvenance = "publisher-signature", declarations?: Record<string, string>): boolean => {
+  // A release staged in the open window is not saved here; only the window's commit applies it.
+  const sources = storedWithdrawalSources();
   for (const source of sources) if (source.domain === domain) source.incomplete = [...new Set([...source.hashes, ...source.incomplete])];
   if (seller) {
     const prior = sources.find((source) => source.domain === domain && source.seller === seller);
@@ -543,7 +918,8 @@ export const recordWellKnownWithdrawalCheck = db.transaction((domain: string, se
     // the binding rather than turning arbitrary chain hints into authority.
     const retained = prior?.provenance !== "legacy" ? (prior?.bindings ?? []) : [];
     const carried = [...new Map([...retained, ...bindings].map((binding) => [revocationBindingKey(binding), binding])).values()];
-    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings: carried, provenance };
+    const next = { domain, seller, hashes: [...new Set([...hashes, ...missing])], incomplete: [...new Set([...incomplete, ...missing])], index, bindings: carried, provenance,
+      declarations: provenance === "publisher-signature" ? declarations : prior?.declarations };
     if (prior) Object.assign(prior, next); else sources.push(next);
   }
   saveWithdrawalSources(sources);
@@ -561,10 +937,13 @@ export const finishWithdrawalCarriageReplay = db.transaction((): void => {
   setJson("withdrawal-carriage-replay-hashes", []);
 });
 
-/** Called only after the indexer verifies the listing's signature and chain owner. */
+/**
+ * Called only after the indexer verifies the listing's signature and chain owner. A binding
+ * carries the exact `presentedBy`, CF-3 parameters included, so it matches the canonical seller.
+ */
 export const boundWellKnownRevocations = (seller: string, hash: string, id: string, version: number) =>
   withdrawalSources().filter((source) => source.seller === seller && source.provenance !== "legacy").flatMap((source) =>
-    (source.bindings ?? []).filter((binding) => binding.sellerPrimaryClaim === seller &&
+    (source.bindings ?? []).filter((binding) => sellerIdentity(binding.sellerPrimaryClaim) === seller &&
       binding.listingContentHash === hash && binding.listingId === id && binding.listingVersion === version));
 
 /** Continue bounded discovery work across passes, even across process restarts. */
@@ -799,28 +1178,125 @@ export function pruneFailureHistory(now = Date.now(), batch = 500): number {
 export const failureHistorySize = (): number =>
   (db.prepare("SELECT COUNT(*) count FROM artifact_failure_history").get() as { count: number }).count;
 
-export type ListingRejectionCode = "SELLER_CLAIM_BINDING" | "OWNER_CLAIM_BINDING";
-
 export function recordListingRejection(
   locator: string,
   registrationClaim: string,
   code: ListingRejectionCode,
+  coordinates?: ListingDiagnosticCoordinates,
+  publicNotice = false,
 ): void {
   const now = Date.now();
   db.prepare(`INSERT INTO listing_rejections(
-      locator,registration_claim,reason_code,occurrences,first_seen_at,last_seen_at
-    ) VALUES (?,?,?,1,?,?)
+      locator,registration_claim,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
+    ) VALUES (?,?,?,?,?,?,1,?,?)
     ON CONFLICT(locator,registration_claim) DO UPDATE SET
       reason_code=excluded.reason_code,
+      listing_id=excluded.listing_id,
+      listing_version=excluded.listing_version,
+      public_notice=excluded.public_notice,
       occurrences=listing_rejections.occurrences+1,
       last_seen_at=excluded.last_seen_at`)
-    .run(locator, registrationClaim.toLowerCase(), code, now, now);
+    .run(
+      locator,
+      registrationClaim.toLowerCase(),
+      code,
+      coordinates?.listingId ?? null,
+      coordinates?.listingVersion ?? null,
+      publicNotice && coordinates ? 1 : 0,
+      now,
+      now,
+    );
 }
+
+/** The authenticated notice code for an anchor under a registration, or undefined when none is. */
+export function listingRejectionNoticeCode(locator: string, registrationClaim: string): ListingRejectionCode | undefined {
+  const row = db.prepare("SELECT reason_code FROM listing_rejections WHERE locator = ? AND registration_claim = ? AND public_notice = 1")
+    .get(locator, registrationClaim.toLowerCase()) as { reason_code: ListingRejectionCode } | undefined;
+  return row?.reason_code;
+}
+
+/** Whether this normalized domain previously supplied publisher-authenticated discovery. */
+export const hasPublisherAuthenticatedWellKnownSource = (domain: string): boolean =>
+  withdrawalSources().some((source) => source.domain === domain && source.provenance === "publisher-signature");
 
 export function clearListingRejection(locator: string, registrationClaim: string): void {
   db.prepare("DELETE FROM listing_rejections WHERE locator = ? AND registration_claim = ?")
     .run(locator, registrationClaim.toLowerCase());
 }
+
+/** Clear all diagnostics when a seller leaves the registration set. */
+export function clearRegistrationListingRejections(registrationClaim: string): void {
+  db.prepare("DELETE FROM listing_rejections WHERE registration_claim = ?").run(registrationClaim.toLowerCase());
+}
+
+/** A seller's saved publisher-signed declarations from configured domains, and whether an older such source saved none. */
+export interface SavedListingDeclarations { sources: Array<Record<string, string>>; unknown: boolean }
+
+/** Read a seller's saved declarations, hashes as their index declared them. Storage failures throw. */
+export function savedListingDeclarations(seller: string): SavedListingDeclarations {
+  const configured = new Set(loadDomains().flatMap((domain) => {
+    try { return [normalizeSubmittedDomain(domain)]; }
+    catch { return []; /* An invalid legacy domain cannot identify a source. */ }
+  }));
+  const rows = withdrawalSources().filter((source) =>
+    source.seller.toLowerCase() === seller.toLowerCase() && configured.has(source.domain));
+  return {
+    sources: rows.flatMap((source) => source.declarations ? [source.declarations] : []),
+    unknown: rows.some((source) => !source.declarations && source.provenance === "publisher-signature"),
+  };
+}
+
+const declaredBySavedSource = (saved: SavedListingDeclarations, locator: string): boolean =>
+  saved.unknown || saved.sources.some((hashes) => Object.hasOwn(hashes, locator));
+
+const listingRejectionRows = (claim: string) =>
+  db.prepare("SELECT locator, reason_code, public_notice FROM listing_rejections WHERE registration_claim = ?")
+    .all(claim) as Array<{ locator: string; reason_code: ListingRejectionCode; public_notice: number }>;
+
+/**
+ * Prune public notices of anchors the registration no longer lists once their evidence is gone: a hash notice when
+ * no saved signed source declares the anchor, an owner notice when the verified owner-signed registration no longer
+ * names it. Other rows wait for complete discovery (`pruneListingRejections`). Storage failures throw.
+ */
+export const pruneRegistrationListingRejections = db.transaction((
+  registrationClaim: string,
+  listedAnchors: readonly string[],
+  ownerSignedAnchors?: readonly string[],
+): void => {
+  const claim = registrationClaim.toLowerCase();
+  const saved = savedListingDeclarations(claim);
+  for (const { locator, reason_code, public_notice } of listingRejectionRows(claim)) {
+    if (public_notice !== 1 || listedAnchors.includes(locator)) continue;
+    const evidenceGone = reason_code === "DECLARED_CONTENT_HASH_MISMATCH" ? !declaredBySavedSource(saved, locator)
+      : reason_code === "OWNER_CLAIM_BINDING" && ownerSignedAnchors !== undefined && !ownerSignedAnchors.includes(locator);
+    if (evidenceGone) clearListingRejection(locator, claim);
+  }
+});
+
+/**
+ * After complete discovery, prune diagnostics of pointers no indexed registration lists. A public hash notice stays
+ * while a saved signed source declares its anchor; a listed seller's public owner notice is left to its owner
+ * evidence (`pruneRegistrationListingRejections`). Storage failures throw.
+ */
+export const pruneListingRejections = db.transaction((
+  registrations: ReadonlyArray<Pick<Registration, "primaryClaim" | "listingAnchors">>,
+): void => {
+  const listed = new Map<string, Set<string>>();
+  for (const reg of registrations) {
+    const claim = reg.primaryClaim.toLowerCase();
+    listed.set(claim, new Set([...listed.get(claim) ?? [], ...reg.listingAnchors]));
+  }
+  for (const { registration_claim: claim } of db.prepare("SELECT DISTINCT registration_claim FROM listing_rejections").all() as Array<{ registration_claim: string }>) {
+    const anchors = listed.get(claim);
+    const saved = savedListingDeclarations(claim);
+    for (const { locator, reason_code, public_notice } of listingRejectionRows(claim)) {
+      if (anchors?.has(locator)) continue;
+      const kept = public_notice === 1 && (reason_code === "DECLARED_CONTENT_HASH_MISMATCH"
+        ? declaredBySavedSource(saved, locator) : reason_code === "OWNER_CLAIM_BINDING" && anchors !== undefined);
+      if (!kept) clearListingRejection(locator, claim);
+    }
+  }
+});
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
@@ -880,8 +1356,12 @@ export interface PublicDeadLetterDiagnostic {
 
 export interface PublicListingRejectionDiagnostic {
   locator: string;
+  listingId?: string;
+  listingVersion?: number;
+  publicNotice: boolean;
   code: ListingRejectionCode;
   message: string;
+  guidance: string;
   occurrences: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -920,8 +1400,9 @@ export interface IndexerDiagnostics {
     items: PublicDeadLetterDiagnostic[];
   };
   listingRejectionDiagnostics: {
-    scope: "listing-registration-binding";
+    scope: "listing-admission";
     total: number;
+    publicTotal: number;
     byCode: Record<string, number>;
     query: { locator: string | null; limit: number };
     returned: number;
@@ -938,16 +1419,14 @@ interface DeadLetterRow {
 
 interface ListingRejectionRow {
   locator: string;
+  listing_id: string | null;
+  listing_version: number | null;
+  public_notice: number;
   reason_code: ListingRejectionCode;
   occurrences: number;
   first_seen_at: number;
   last_seen_at: number;
 }
-
-const LISTING_REJECTION_MESSAGES: Record<ListingRejectionCode, string> = {
-  SELLER_CLAIM_BINDING: "The verified listing seller does not match the registration claim.",
-  OWNER_CLAIM_BINDING: "The listing anchor owner does not match the registration claim.",
-};
 
 const publicFailure = (code: string): { code: string; message: string } =>
   PUBLIC_FAILURES[code]
@@ -1007,17 +1486,22 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
     "SELECT reason_code, COUNT(*) count FROM listing_rejections GROUP BY reason_code",
   ).all() as Array<{ reason_code: ListingRejectionCode; count: number }>;
   const listingWhere = locator ? " WHERE locator = ?" : "";
-  const listingStatement = db.prepare(`SELECT locator,reason_code,occurrences,first_seen_at,last_seen_at
+  const publicTotal = (db.prepare("SELECT COUNT(*) count FROM listing_rejections WHERE public_notice = 1").get() as { count: number }).count;
+  const listingStatement = db.prepare(`SELECT locator,reason_code,listing_id,listing_version,public_notice,occurrences,first_seen_at,last_seen_at
     FROM listing_rejections${listingWhere}
-    ORDER BY last_seen_at DESC, locator ASC LIMIT ?`);
+    ORDER BY public_notice DESC, last_seen_at DESC, locator ASC LIMIT ?`);
   const listingRows = (locator
     ? listingStatement.all(locator, limit + 1)
     : listingStatement.all(limit + 1)) as ListingRejectionRow[];
   const listingHasMore = listingRows.length > limit;
   const listingItems = listingRows.slice(0, limit).map((row): PublicListingRejectionDiagnostic => ({
     locator: row.locator,
+    publicNotice: row.public_notice === 1,
+    ...(row.listing_id ? { listingId: row.listing_id } : {}),
+    ...(row.listing_version !== null ? { listingVersion: row.listing_version } : {}),
     code: row.reason_code,
     message: LISTING_REJECTION_MESSAGES[row.reason_code],
+    guidance: LISTING_REJECTION_GUIDANCE[row.reason_code],
     occurrences: row.occurrences,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
@@ -1031,8 +1515,9 @@ const readIndexerDiagnostics = db.transaction((options: IndexerDiagnosticsOption
       query: { locator: locator ?? null, limit }, returned: items.length, hasMore, items,
     },
     listingRejectionDiagnostics: {
-      scope: "listing-registration-binding",
+      scope: "listing-admission",
       total: listingRejectionTotal,
+      publicTotal,
       byCode: Object.fromEntries(listingRejectionCounts.map((row) => [row.reason_code, row.count])),
       query: { locator: locator ?? null, limit },
       returned: listingItems.length,

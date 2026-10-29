@@ -10,13 +10,10 @@ import * as counter from "./fixtures/catalog-projection-counter.js";
 
 const data = mkdtempSync(join(tmpdir(), "dacs-projection-cache-"));
 process.env.DACS_DIRECTORY_DATA = data;
-// These dependencies belong to address/withdrawal operations, which this
-// catalog-read test does not exercise. Keep the real database and projection.
+// Count projections while keeping the real store dependencies and database.
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.endsWith("/src/catalog/store.ts")) {
-      if (specifier === "./chain.js") return { url: "data:text/javascript,export function deriveAnchorAddress() { throw Error('unexpected address derivation'); }", shortCircuit: true };
-      if (specifier === "./wellknown.js") return { url: "data:text/javascript,export function revocationBindingKey() { throw Error('unexpected withdrawal operation'); }", shortCircuit: true };
       if (specifier === "./testnetMetrics.js") return { url: new URL("./fixtures/catalog-projection-counter.ts", import.meta.url).href, shortCircuit: true };
     }
     return nextResolve(specifier, context);

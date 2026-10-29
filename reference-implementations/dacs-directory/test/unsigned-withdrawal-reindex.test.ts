@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { onPinnedChain } from './fixtures/pinned-node.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,13 +23,14 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
   const claim = `did:demos:agent:${key}`;
   const sign = (raw: Record<string, unknown>, prefix: string) => ({ algorithm: 'ed25519', signer: claim,
     value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
-  const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
-  const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
-    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('hex') }] } };
+  const presentedBy = claim;
+  const identityScope = { bundleVersion: '1', presentedBy, presentedAt: 1, claims: [{ ref: presentedBy }] };
+  const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: presentedBy,
+    signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
   const scope = { dacsVersion: '1', listingVersion: 1, listingId: 'svc', requiredCapabilities: ['SR-2'],
     seller: { displayName: 'Service', identity, ...(domainBound ? { publicEndpoint: 'https://seller.example/a2a' } : {}) },
     offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
-      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json' } },
+      deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
     buyerRequirement: { requirementVersion: '1', required: [] },
     pipeline: [{ kind: 'negotiate-fixed-price' }, { kind: 'commit-agreement' }, { kind: 'deliver-attested-payload' }],
     pricing: { kind: 'fixed', price: { amount: '1', currency: 'DEM' } },
@@ -60,7 +62,7 @@ for (const domainBound of [false, true]) test(`unsigned tombstone full reindex (
   try {
     const reg = { primaryClaim: claim, displayName: 'Service', listingAnchors: [at(1)], deals: [] };
     store.saveRegistrations([reg]); store.saveDomains([]);
-    const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
+    const run = () => reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error('offline'); },
       crawlWellKnown: async () => ({ agents: [crawled], errors: [] }) });
     await run();
     assert.equal(store.loadCatalog().sellers[0].listings.some(activeOffer), true, 'positive control: executable listing is active before discovery');

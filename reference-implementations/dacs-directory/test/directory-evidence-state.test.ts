@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directoryEvidenceState, UNMEASURED_REACHABILITY_LABEL } from "../src/components/directory-evidence-state.js";
+import { catalogAuthenticationLabel, directoryEvidenceState, UNMEASURED_REACHABILITY_LABEL } from "../src/components/directory-evidence-state.js";
 import type { ListingSummary, SellerRecord } from "../src/catalog/types.js";
 
 const listing = (overrides: Partial<ListingSummary> = {}): ListingSummary => ({
@@ -108,4 +108,10 @@ test("deal presentation exposes the total observation count without a completed 
     label: "Observed outcomes: 3, not verified",
     explanation: "Completion verification unavailable",
   });
+});
+
+test("catalog authentication labels reflect current, legacy and fixture evidence", () => {
+  assert.equal(catalogAuthenticationLabel("dacs-v0.1"), "Structure, signature, and identity presentation authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)");
+  assert.equal(catalogAuthenticationLabel("legacy-sdk-v0.1"), "Legacy structure and signature authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)");
+  assert.equal(catalogAuthenticationLabel("fixture-listing"), "Fixture machine contract and content hash match; no chain anchor claimed");
 });

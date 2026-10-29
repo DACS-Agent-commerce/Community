@@ -6,7 +6,7 @@ verified on testnet. This file is the definition the code cites
 with this repository, so a commit of this repository pins it.
 
 It is measured against the DACS Standard at
-[`4bb9e48a1095ab32c06c25b7c0b52018d3ce4091`](https://github.com/DACS-Agent-commerce/DACS-Standard/tree/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091),
+[`d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20`](https://github.com/DACS-Agent-commerce/DACS-Standard/tree/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20),
 the source revision named by the retained SPEC_PIN.
 
 ## Rules

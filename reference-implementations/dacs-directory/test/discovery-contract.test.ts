@@ -29,7 +29,10 @@ test("public navigation never sends visitors to the private SDK repository", () 
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     assert.doesNotMatch(source, /github\.com\/DACS-Agent-commerce\/dacs-sdk/);
-    assert.match(source, /DACS-Standard\/blob\/main\/docs\/builders-guide\.md/);
+    // Normative links name the Standard revision the pinned SDK declares, never mutable main.
+    assert.match(source, /DACS-Standard\/blob\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20\/docs\/builders-guide\.md/);
+    assert.match(source, /DACS-Standard\/tree\/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"/);
+    assert.doesNotMatch(source, /DACS-Standard\/(?:blob|tree)\/main/);
   }
 });
 
@@ -71,7 +74,7 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   assert.deepEqual(listings.parameters.map((parameter) => parameter.name).sort(), [...manifest.filters].sort());
   assert.deepEqual(listings.responses, {
     "200": { description: "A cursor-paginated listing page" },
-    "400": { description: "Invalid query, an unlisted query name, or unavailable rate/score filtering or ranking" },
+    "400": { description: "Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over 1024 bytes" },
   });
   assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
   assert.match(listings.description, /every query name not listed here are refused with 400/);
@@ -90,7 +93,9 @@ test("the TP-1 contract change carries version signals and the exact advertised 
 
 test("TP-1 is defined in-tree and declares its deviations in the Standard's ImplementationDeviation shape", () => {
   const definition = readFileSync(new URL("../docs/TP-1.md", import.meta.url), "utf8");
-  assert.match(definition, /DACS-Standard\/tree\/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091/);
+  const sourcePin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8").match(/^[a-f0-9]{40}$/m)?.[0];
+  assert.ok(sourcePin, "SPEC_PIN must declare the Standard source revision");
+  assert.ok(definition.includes(`DACS-Standard/tree/${sourcePin}`), "TP-1 must describe the retained Standard source revision");
   const block = /```json\n([\s\S]+?)\n```/.exec(definition);
   assert.ok(block, "TP-1 must carry its deviation JSON block");
   const deviations: unknown = JSON.parse(block[1]);
@@ -173,6 +178,9 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.equal(inspectSeller?.schema.pattern, "\\S");
   assert.ok(listingSummarySchema.required.includes("contentHash"));
   assert.ok(listingSummarySchema.required.includes("offering"));
+  assert.ok(listingSummarySchema.required.includes("transactionReadiness"));
+  assert.equal(listingSummarySchema.properties.transactionReadiness.additionalProperties, false);
+  assert.equal(listingSummarySchema.properties.transactionReadiness.properties.disposition.const, "unassessed");
   assert.equal(listingSummarySchema.properties.inspection.properties.artifactType.const, "directory-service-profile");
   assert.ok(listingSummarySchema.properties.inspection.properties.maturity.enum.includes("listed"));
   assert.equal(listingSummarySchema.properties.inspection.properties.href.format, "uri-reference");
@@ -284,4 +292,10 @@ test("mixed current rails remain discoverable while alias-only offers are archiv
     assert.equal(activeCatalogSellers([seller]).length, Number(expected));
     assert.equal(activeOffer(listing(rails, "revoked")), false);
   }
+});
+
+test("llms.txt requires the verified Listing disposition before a new session, not just before payment", async () => {
+  const { GET } = await import("../app/llms.txt/route.js");
+  const text = await (await GET()).text();
+  assert.match(text, /verified disposition from the current SDK Listing reader before starting a new session \(DACS-1 LR-3\)/);
 });

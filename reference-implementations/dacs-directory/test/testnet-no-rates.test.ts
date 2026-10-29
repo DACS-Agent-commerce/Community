@@ -89,7 +89,7 @@ test("cached catalog, listings API and seller API hide old metrics and retain la
     assert.equal(page.listings[0].corporateName, "Listing Corporation");
     assertNoNumericMetrics(page);
     const response = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
-      params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
+      params: Promise.resolve({ primaryClaimRef: noRateClaim }),
     });
     assert.equal(response.status, 200);
     const seller = await response.json();
@@ -141,7 +141,7 @@ test("cached listings without a hint publish null metrics and scoped observation
   saveCatalog(fixture);
   const listings = await getListings(new NextRequest("https://directory.example/api/dacs/listings"));
   const seller = await getSeller(new NextRequest("https://directory.example/api/dacs/sellers/test"), {
-    params: Promise.resolve({ primaryClaimRef: encodeURIComponent(noRateClaim) }),
+    params: Promise.resolve({ primaryClaimRef: noRateClaim }),
   });
   assert.equal(listings.status, 200);
   assert.equal(seller.status, 200);

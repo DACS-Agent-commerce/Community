@@ -1,3 +1,5 @@
+import { currentLifecycle, exactListingTuple, makeCommitmentContext, type CommitmentContext } from "./commitmentContext.js";
+import { verifyListingCommitment, type CommitmentVerifier, type ListingEvidence } from "./commitmentFinality.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyStoredListing } from "./listingVerification.js";
@@ -13,12 +15,15 @@ export interface CurrentRef { anchor: { kind: string; locator: string }; content
 export interface ResolvedEvidence { kind: ArtifactKind; ref?: CurrentRef; locator: string; raw: Record<string, unknown>; contentHash: string }
 export interface EvidenceGraph {
   profile: "dacs-v0.1";
+  /** Structural authentication only; credit additionally requires refsVerified and matching copies. */
   ok: boolean;
   reason?: string;
   bundle: Record<string, unknown>;
   bundleContentHash: string;
   signaturesVerified: boolean;
   refsVerified: boolean;
+  credit?: { kind: "pre-commit" } | { kind: "committed"; context: CommitmentContext };
+  errorCause?: unknown;
   artifacts: ResolvedEvidence[];
   agreement?: Record<string, unknown>;
   listing?: Record<string, unknown>;
@@ -26,7 +31,8 @@ export interface EvidenceGraph {
 }
 export interface EvidenceGraphDeps {
   read: (locator: string) => Promise<Record<string, unknown> | null>;
-  resolveListing: (ref: Record<string, unknown>) => Promise<{ locator: string; raw: Record<string, unknown> } | null>;
+  resolveListing: (ref: Record<string, unknown>) => Promise<ListingEvidence | null>;
+  commitment?: CommitmentVerifier;
   resolvePrimaryClaimKey?: ResolvePrimaryClaimKey;
 }
 
@@ -430,8 +436,8 @@ async function verifyCurrentEvidenceGraph(
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
   const listingHash = normalizedHash(listingRef.contentHash);
-  if (!listed || artifactHash(listed.raw, "listing") !== listingHash ||
-      !(await verifyStoredListing(listed.raw, listed.locator, resolveKey))) return { ...fail("listing reference failed"), signaturesVerified };
+  const verifiedListing = listed && await verifyStoredListing(listed.raw, listed.locator, resolveKey);
+  if (!verifiedListing || verifiedListing.contentHash !== listingHash || !exactListingTuple(listingRef, listed.raw)) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
@@ -444,16 +450,33 @@ async function verifyCurrentEvidenceGraph(
       return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
+  artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
+  const authenticated: EvidenceGraph = { profile: "dacs-v0.1", ok: true, bundle: raw,
+    bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: false, artifacts,
+    agreement, listing: listed.raw, ratings: artifacts.filter(artifact => artifact.kind === "rating").map(artifact => artifact.raw) };
+  const lifecycle = currentLifecycle(raw, listed.raw);
+  if (lifecycle === "pre-commit") {
+    const validity = rec(listed.raw.validity);
+    const now = Date.now();
+    if ((typeof validity?.notBefore === "number" && validity.notBefore > now) ||
+        (typeof validity?.notAfter === "number" && validity.notAfter < now)) {
+      return { ...authenticated, reason: "pre-commit Listing is outside signed validity" };
+    }
+    return { ...authenticated, refsVerified: true, credit: { kind: "pre-commit" } };
+  }
+  if (lifecycle === "refused" || !agreement) return { ...authenticated, reason: "unsupported terminal lifecycle" };
+  const context = makeCommitmentContext(raw, agreement, listed, artifactHash(agreement, "agreement"));
+  if (!context) return { ...authenticated, reason: "invalid commitment context" };
   // Discovery compatibility does not establish settlement semantics. This
   // pairing needs agreement/deliverable, payment/finality and delivery adapters
   // before either signed copy can contribute a verified outcome or volume.
   // Include the RFQ fixed-price fallback and both agreement/bundle profiles.
   if (rec(listed.raw.pricing)?.kind === "negotiable" && agreement?.derivedFromPattern === "fixed-price") {
-    return { ...fail("semantic settlement verification is unsupported for fixed-price agreements on negotiable listings"),
-      signaturesVerified, artifacts, agreement, listing: listed.raw };
+    return { ...authenticated, reason: "semantic settlement verification is unsupported for fixed-price agreements on negotiable listings" };
   }
-  artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
-  return { profile: "dacs-v0.1", ok: true, bundle: raw, bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: true, artifacts, agreement, listing: listed.raw, ratings: artifacts.filter((artifact) => artifact.kind === "rating").map((artifact) => artifact.raw) };
+  const commitment = await verifyListingCommitment(context, deps.commitment, resolveKey);
+  return { ...authenticated, refsVerified: commitment.ok, credit: { kind: "committed", context },
+    ...(!commitment.ok ? { reason: commitment.reason, errorCause: commitment.cause } : {}) };
 }
 
 export function agreementPrice(agreement: Record<string, unknown> | undefined): { amount: string; currency: string } | null {

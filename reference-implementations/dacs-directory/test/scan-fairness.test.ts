@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import type { BundleBinding, Registration, ScanState } from "../src/catalog/types.js";
+import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
 
 // Each listing, deal and retry stays isolated from other parties' writes:
 // real SDK hashes and signatures over a stubbed node, through reindexAll.
@@ -108,8 +110,9 @@ function sql(query: string, ...params: unknown[]) {
     return (statement.reader ? statement.all(...params) : (statement.run(...params), [])) as Record<string, unknown>[];
   } finally { db.close(); }
 }
+/** A schema-9 state recorded on the pinned chain: a pass replays its history without resetting it. */
 const emptyState = (): ScanState => ({
-  schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
+  chainIdentity: PINNED_DEMOS_CHAIN_IDENTITY, schemaVersion: 9, lastSeenTxId: 0, listings: {}, deals: {}, programs: {}, revocations: {},
   verifiedRevocations: {}, bundleBindings: {}, bundleBindingOverflow: [], anchorBackfillComplete: true,
 });
 const candidateTable = () => sql("SELECT name FROM sqlite_master WHERE name='revocation_candidates'").length > 0;
@@ -145,7 +148,7 @@ const sqlWork = { enabled: false, calls: 0, rows: 0 };
 }
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
 const sellerRegistration: Registration = { primaryClaim: seller, displayName: "Seller", listingAnchors: [locator(1)] };
-const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+const reindex = () => reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 const listingStatus = () => store.loadCatalog().sellers.find((s) => s.primaryClaim === seller)?.listings[0]?.status;
 const lastRun = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")[0];
 
@@ -498,6 +501,28 @@ test("a discovered deal keeps its seller copy when a later window has none", asy
   await reindex();
   assert.equal(entry().owners.seller, seller);
   assert.equal(entry().sellerBundleRef, locator(922));
+});
+
+test("one replay pass joins the buyer bundle, agreement and seller copy in every chain order", async () => {
+  const parts = ["bundle", "agreement", "copy"] as const;
+  const orders = parts.flatMap((a) => parts.filter((b) => b !== a).map((b) => [a, b, parts.find((c) => c !== a && c !== b)!]));
+  assert.equal(orders.length, 6);
+  for (const [index, order] of orders.entries()) {
+    const jobId = `order-${order.join("-")}`;
+    const at = { bundle: locator(970 + 3 * index), agreement: locator(971 + 3 * index), copy: locator(972 + 3 * index) };
+    resetIndex([later], 26);
+    chain({
+      [at.bundle]: { name: `dacs5:bundle:${jobId}`, data: '{"any":1}', owner: ownerOf(buyer) },
+      [at.agreement]: { name: `dacs3:agreement:${jobId}`, data: JSON.stringify(await agreementFor(jobId, 0, 1)), owner: ownerOf(buyer) },
+      [at.copy]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"any":1}', owner: ownerOf(seller) },
+    }, order.map((part) => at[part]));
+    // A newer transaction puts all three writes below the finality depth.
+    transactions.unshift(memo(10));
+    await reindex();
+    const deal = store.loadScanState().deals[`${ownerOf(buyer)}\n${jobId}`];
+    assert.equal(deal?.owners.seller, seller, order.join(" → "));
+    assert.equal(deal?.sellerBundleRef, at.copy, order.join(" → "));
+  }
 });
 
 /** Records each locator as read with `who` as its storage owner. */

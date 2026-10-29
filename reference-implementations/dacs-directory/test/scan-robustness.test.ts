@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,7 +56,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(listingScope), PREFIXES.listing, 1) } };
+// The SDK legacy-MVP read profile carries a bare Ed25519 value; agentId is the signer.
+const listing = { ...listingScope, signature: await signature(contentHash(listingScope), PREFIXES.listing, 1) };
 const verifiedListing = await verifyListing(listing);
 assert.ok(verifiedListing);
 const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: verifiedListing.contentHash, revokedAt: 1 };
@@ -136,18 +138,50 @@ const artifactRow = (at: string) => {
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 const later: Registration = { primaryClaim: outsider, displayName: "Later", listingAnchors: [] };
-const reindex = () => reindexAll({ log: () => {}, resolveIdentities: offline });
+const reindex = () => reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 function sql(query: string) {
   const db = new Database(join(dataDirectory, "directory.sqlite"));
   try { return db.prepare(query).all() as Record<string, unknown>[]; } finally { db.close(); }
 }
 const scanCounts = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")[0];
-async function agreementFor(jobId: string) {
+async function agreementFor(jobId: string, sellerClaim = seller) {
   const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
-    parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+    parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: sellerClaim }],
     terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   return { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
 }
+
+test("qualified agreement sellers share one catalog record and canonical public owners", async () => {
+  const { NextRequest } = await import("next/server");
+  const { GET } = await import("../app/api/dacs/deal-owners/route.js");
+  for (const qualifier of ["channel=directory", "region=EU"]) {
+    const jobId = "qualified-seller";
+    const agreement = await agreementFor(jobId, `${seller}?${qualifier}`);
+    const original = JSON.stringify(agreement);
+    resetIndex([{ primaryClaim: seller, displayName: "Registered seller", listingAnchors: [] }], 5);
+    chain({
+      [locator(991)]: { name: `dacs5:bundle:${jobId}`, data: '{"anchoredByRole":"buyer"}', owner: ownerOf(buyer) },
+      [locator(992)]: { name: `dacs5:bundle:seller:${jobId}`, data: '{"anchoredByRole":"seller"}', owner: ownerOf(seller) },
+      [locator(993)]: { name: `dacs3:agreement:${jobId}`, data: original, owner: ownerOf(buyer) },
+    }, [locator(991), locator(992), locator(993)]);
+    const scanned = await scan();
+    const discovered = [...scanned.deals.values()][0];
+    assert.equal(discovered?.owners.seller, seller);
+    assert.equal(discovered?.sellerFromAgreement, seller);
+    assert.equal(discovered?.sellerBundleRef, locator(992), "seller-copy ownership uses canonical identity");
+    await reindex();
+    const sellers = store.loadCatalog().sellers;
+    assert.deepEqual(sellers.map((record) => record.primaryClaim), [seller]);
+    assert.equal(sellers[0].deals.length, 1);
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/deal-owners?jobId=${jobId}`));
+    assert.deepEqual((await response.json()).owners, { buyer, seller });
+    transactions = [];
+    await reindex();
+    assert.deepEqual(store.loadCatalog().sellers.map((record) => record.primaryClaim), [seller],
+      "accumulated discovery still uses the registered reputation record");
+    assert.equal(JSON.stringify(agreement), original, "signed references remain unchanged");
+  }
+});
 for (const jobId of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
   test(`unsigned reserved job ${jobId} survives two reindexes`, async () => {
     resetIndex([later], 5);

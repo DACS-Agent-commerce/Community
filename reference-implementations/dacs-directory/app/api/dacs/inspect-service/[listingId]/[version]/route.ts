@@ -1,6 +1,7 @@
 /** GET /api/dacs/inspect-service/{listingId}/{version} — verifier-ready Directory profile envelope. */
 import { NextRequest, NextResponse } from "next/server";
-import { catalogJson } from "@/src/catalog/http";
+import { sellerIdentity } from "@/src/catalog/discovery";
+import { catalogJson, claimQuery } from "@/src/catalog/http";
 import {
   buildDirectoryServiceInspectionEnvelope,
   listingJsonPath,
@@ -14,13 +15,15 @@ export async function GET(
   { params }: { params: Promise<{ listingId: string; version: string }> },
 ) {
   const { listingId, version } = await params;
-  const requestedSeller = req.nextUrl.searchParams.get("seller")?.trim();
+  const sellerQuery = claimQuery(req.nextUrl.searchParams.get("seller"), "seller");
+  if ("refused" in sellerQuery) return sellerQuery.refused;
+  const requestedSeller = sellerQuery.value?.trim();
   if (!requestedSeller) {
     return NextResponse.json({ error: "seller is required" }, { status: 400 });
   }
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && l.seller.primaryClaim === requestedSeller);
+    .find((l) => l.listingId === listingId && String(l.version) === version && sellerIdentity(l.seller.primaryClaim) === sellerIdentity(requestedSeller));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
 
   const origin = requestBaseUrl(req);

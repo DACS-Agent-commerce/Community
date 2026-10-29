@@ -17,7 +17,7 @@ test.after(() => rmSync(directory, { recursive: true, force: true }));
 const at = (n: number) => `stor-${String(n).padStart(40, '0')}`;
 
 for (const change of ['scope', 'signature'] as const) {
-  for (const response of ['repaired', 'missing', 'unavailable', 'malformed', 'rejected', 'unbound', 'cached-valid'] as const) {
+  for (const response of ['repaired', 'missing', 'unavailable', 'malformed', 'not-an-object', 'rejected', 'unbound', 'cached-valid'] as const) {
     test(`cached ${change} rejection requires a current marker read (${response})`, async () => {
       const listingId = `cached-${change}-${response}`;
       const domain = `${listingId}.example`;
@@ -28,11 +28,11 @@ for (const change of ['scope', 'signature'] as const) {
         value: Buffer.from(ed25519Sign(Buffer.from(prefix + contentHash(raw)), privateKeyFromSeed(seed))).toString('base64url') });
       const identityScope = { bundleVersion: '1', presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
       const identity = { ...identityScope, presentation: { kind: 'per-claim', signatures: [{ ref: claim,
-        signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('hex') }] } };
+        signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`), privateKeyFromSeed(seed))).toString('base64url') }] } };
       const scope = { dacsVersion: '1', listingVersion: 1, listingId, requiredCapabilities: ['SR-2'],
         seller: { displayName: 'Service', identity },
         offering: { title: 'Service', description: 'Service', category: 'services.other', tags: [],
-          deliverable: { kind: 'attested-payload', payloadFormat: 'application/json' } },
+          deliverable: { kind: 'attested-payload', payloadFormat: 'application/json', verificationMethod: { kind: 'self-signed' } } },
         buyerRequirement: { requirementVersion: '1', required: [] },
         pipeline: [{ kind: 'negotiate-fixed-price' }, { kind: 'commit-agreement' }, { kind: 'deliver-attested-payload' }],
         pricing: { kind: 'fixed', price: { amount: '1', currency: 'DEM' } },
@@ -75,6 +75,7 @@ for (const change of ['scope', 'signature'] as const) {
         if (response === 'missing') return Response.json({ success: false, errorCode: 'NOT_FOUND' }, { status: 404 });
         if (response === 'unavailable' || response === 'cached-valid') return Response.json({ success: false }, { status: 503 });
         if (response === 'malformed') return new Response('{');
+        if (response === 'not-an-object') return Response.json({ success: true, owner: `0x${key}`, data: 'not-an-object' });
         return Response.json({ success: true, owner: `0x${key}`, data: stale });
       };
       try {
