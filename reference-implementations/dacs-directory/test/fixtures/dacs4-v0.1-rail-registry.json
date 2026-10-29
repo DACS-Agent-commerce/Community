@@ -1,0 +1,60 @@
+{
+  "source": "DACS-Standard spec/DACS-4-SETTLE.md §9.4.2 v0.1 registry contents",
+  "standardRevision": "d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20",
+  "lines": "205-217",
+  "note": "Copied from the pinned Standard table (the dacs-sdk 3904d70 dacs.standardRevision); not derived from the Directory's own rail table.",
+  "rails": [
+    {
+      "railId": "evm-erc20:1:USDC",
+      "phaseHandler": "pay-evm-erc20"
+    },
+    {
+      "railId": "evm-erc20:8453:USDC",
+      "phaseHandler": "pay-evm-erc20"
+    },
+    {
+      "railId": "evm-erc20:42161:USDC",
+      "phaseHandler": "pay-evm-erc20"
+    },
+    {
+      "railId": "evm-erc20:137:USDC",
+      "phaseHandler": "pay-evm-erc20"
+    },
+    {
+      "railId": "solana-spl:mainnet:USDC",
+      "phaseHandler": "pay-solana-spl"
+    },
+    {
+      "railId": "solana-spl:mainnet:USDT",
+      "phaseHandler": "pay-solana-spl"
+    },
+    {
+      "railId": "cross-chain-htlc:USDC",
+      "phaseHandler": "pay-cross-chain-htlc"
+    },
+    {
+      "railId": "cross-chain-liquidity-tank:USDC",
+      "phaseHandler": "pay-cross-chain-liquidity-tank"
+    },
+    {
+      "railId": "demos-native:DEM",
+      "phaseHandler": "pay-dem"
+    },
+    {
+      "railId": "ap2:visa-direct",
+      "phaseHandler": "pay-ap2"
+    },
+    {
+      "railId": "ap2:mastercard-send",
+      "phaseHandler": "pay-ap2"
+    },
+    {
+      "railId": "ap2:stripe-paymentintents",
+      "phaseHandler": "pay-ap2"
+    },
+    {
+      "railId": "x402:default",
+      "phaseHandler": "pay-x402"
+    }
+  ]
+}

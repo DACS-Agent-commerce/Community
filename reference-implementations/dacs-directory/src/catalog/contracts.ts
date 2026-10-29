@@ -1,4 +1,9 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
+import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
+
+const claimBoundDescription = (purpose: string): string =>
+  `${purpose}. At most ${MAX_CLAIM_QUERY_BYTES} UTF-8 bytes as sent, before any trimming; a longer value gets 400.`;
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
@@ -6,8 +11,9 @@ export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
   title: "DACS Directory ListingSummary",
+  description: "Discovery projection with unassessed transaction readiness. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile.",
   type: "object",
-  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt"],
+  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt", "transactionReadiness"],
   properties: {
     listingId: { type: "string", minLength: 1 },
     version: { type: "integer", minimum: 1 },
@@ -70,6 +76,16 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
+    transactionReadiness: {
+      type: "object",
+      required: ["disposition", "reason"],
+      additionalProperties: false,
+      properties: {
+        disposition: { const: "unassessed" },
+        reason: { type: "string", minLength: 1 },
+      },
+      description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
+    },
     reputationHint: { type: "object" },
     inspection: {
       type: "object",
@@ -109,11 +125,15 @@ export const deadLetterDiagnosticSchema = {
 export const listingRejectionDiagnosticSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
+  required: ["locator", "code", "message", "publicNotice", "guidance", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
-    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    listingId: { type: "string", pattern: "^[A-Za-z0-9._~-]{1,128}$" },
+    listingVersion: { type: "integer", minimum: 1 },
+    code: { enum: LISTING_REJECTION_CODES },
+    message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
+    publicNotice: { type: "boolean" },
+    guidance: { type: "string", description: "Public-safe recovery guidance for the failed admission." },
     occurrences: { type: "integer", minimum: 1 },
     firstSeenAt: { type: "integer", minimum: 0 },
     lastSeenAt: { type: "integer", minimum: 0 },
@@ -141,12 +161,13 @@ export const indexerScanRunSchema = {
 export const catalogStatusSchema = {
   type: "object",
   required: [
-    "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "generatedAt", "legacyVetUnsupportedDeals", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
     generatedAt: { type: "integer" },
+    legacyVetUnsupportedDeals: { type: "integer", minimum: 0 },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },
@@ -188,9 +209,10 @@ export const catalogStatusSchema = {
         },
         listingRejectionDiagnostics: {
           type: "object",
-          required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
+          required: ["scope", "total", "publicTotal", "byCode", "query", "returned", "hasMore", "items"],
           properties: {
-            scope: { const: "listing-registration-binding" },
+            scope: { const: "listing-admission" },
+            publicTotal: { type: "integer", minimum: 0 },
             total: { type: "integer", minimum: 0 },
             byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
             query: {
@@ -251,7 +273,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
     missingProfileMeans: "legacy-sdk-v0.1",
   },
   maturity: {
-    listings: "current publisher and dual-profile reader",
+    listings: "dual-profile discovery reader; browser publication omitted; pay-bearing preparation requires verified rail authority",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
     reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
   },
@@ -267,7 +289,7 @@ export const openApiDocument = (origin: string) => ({
   info: {
     title: "DACS Directory API",
     version: "1.0.0",
-    description: "Discover DACS services and retrieve the signed chain artifacts behind them.",
+    description: "Discover DACS services and retrieve signed chain artifacts. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile. Catalog admission does not establish transaction readiness.",
   },
   servers: [{ url: origin }],
   paths: {
@@ -280,7 +302,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
           { name: "rail", in: "query", schema: { type: "string" } },
           { name: "credential", in: "query", schema: { type: "string" } },
-          { name: "primaryClaim", in: "query", schema: { type: "string" } },
+          { name: "primaryClaim", in: "query", description: claimBoundDescription("Seller claim or claim-scheme prefix"), schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
           { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
@@ -290,7 +312,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: `Invalid filter or pagination, or primaryClaim over ${MAX_CLAIM_QUERY_BYTES} bytes` } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -299,9 +321,14 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
+          { name: "seller", in: "query", description: claimBoundDescription("Disambiguates seller-scoped listing IDs"), schema: { type: "string" } },
         ],
-        responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+        responses: {
+          "200": { description: "Signed listing artifact" },
+          "400": { description: `seller over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+          "502": { description: "Anchor verification failed" },
+        },
       },
     },
     "/api/dacs/bundles/{jobId}": {
@@ -324,16 +351,24 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", required: true, description: "Identifies the seller-scoped listing ID", schema: { type: "string", minLength: 1, pattern: "\\S" } },
+          { name: "seller", in: "query", required: true, description: claimBoundDescription("Identifies the seller-scoped listing ID"), schema: { type: "string", minLength: 1, pattern: "\\S" } },
         ],
-        responses: { "200": { description: "Directory service profile inspection envelope" }, "400": { description: "Seller is required" }, "404": { description: "Listing not found" } },
+        responses: {
+          "200": { description: "Directory service profile inspection envelope" },
+          "400": { description: `Seller is required, or over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+        },
       },
     },
     "/api/dacs/sellers/{primaryClaimRef}": {
       get: {
         summary: "Retrieve seller identity, services, reputation hints, and deals",
-        parameters: [{ name: "primaryClaimRef", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Seller view" }, "404": { description: "Seller not found" } },
+        parameters: [{ name: "primaryClaimRef", in: "path", required: true, description: claimBoundDescription("Seller claim, percent-encoded once"), schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Seller view" },
+          "400": { description: `primaryClaimRef over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Seller not found" },
+        },
       },
     },
     "/api/dacs/status": {
