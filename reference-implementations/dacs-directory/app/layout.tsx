@@ -55,9 +55,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <div className="nav-links" style={{ marginLeft: "auto" }}>
               <Link href="/api/dacs">api</Link>
               <Link href="/.well-known/dacs-directory.json">machine manifest</Link>
-              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard" target="_blank" rel="noreferrer">standard</a>
+              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/tree/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20" target="_blank" rel="noreferrer">standard</a>
               <a href="https://github.com/DACS-Agent-commerce/Community" target="_blank" rel="noreferrer">community</a>
-              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/main/docs/builders-guide.md" target="_blank" rel="noreferrer">builder guide</a>
+              <a href="https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/docs/builders-guide.md" target="_blank" rel="noreferrer">builder guide</a>
               <a href="https://explorer.demos.sh" target="_blank" rel="noreferrer">explorer</a>
             </div>
           </div>

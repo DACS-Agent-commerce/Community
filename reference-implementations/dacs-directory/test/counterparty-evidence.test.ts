@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import test from "node:test";
@@ -131,12 +131,18 @@ test("counterparty fixture seed command persists the reindex marker", () => {
   }
 });
 
-test("counterparty fixture listing JSON path serves the machine contract", async () => {
+test("freshly seeded counterparty fixture listing serves the machine contract", async () => {
   const priorDataDir = process.env.DACS_DIRECTORY_DATA;
   const dataDir = mkdtempSync(`${tmpdir()}/dacs-counterparty-directory-`);
-  copyFileSync(fileURLToPath(new URL("./fixtures/counterparty-directory/catalog.json", import.meta.url)), `${dataDir}/catalog.json`);
   process.env.DACS_DIRECTORY_DATA = dataDir;
   try {
+    // Seeding publishes under the current admission profile; old JSON caches
+    // now wait for refresh rather than serving pre-upgrade active summaries.
+    execFileSync(process.execPath, ["--import", "tsx", "scripts/seed-counterparty-fixture.ts"], {
+      cwd: dirname(fileURLToPath(new URL("../package.json", import.meta.url))),
+      env: process.env,
+      stdio: "pipe",
+    });
     const { GET: getListingContract } = await import("../app/api/dacs/listings/[listingId]/[version]/route.js");
     const response = await getListingContract(
       new NextRequest(`http://localhost/api/dacs/listings/${COUNTERPARTY_EVIDENCE_SERVICE_ID}/1?seller=${encodeURIComponent(COUNTERPARTY_EVIDENCE_AGENT_ID)}`),

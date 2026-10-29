@@ -7,9 +7,10 @@
  * construction — host them byte-exact, then register the domain here.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { contentHash, sha256Hex, stripSignature } from "@kynesyslabs/dacs/canonical";
+import { sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
+import { storedListingHash } from "@/src/catalog/listingVerification";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
 import { loadCatalog } from "@/src/catalog/store";
 
@@ -34,10 +35,13 @@ export async function GET(req: NextRequest) {
   for (const l of seller.listings) {
     const raw = await readAnchor(l.anchor.locator);
     if (!raw) continue;
+    let listingContentHash: string;
+    // Stored programs are mutable; one with no canonical form must not fail the whole index.
+    try { listingContentHash = storedListingHash(raw, l.contentHash); } catch { continue; }
     entries.push({
       listingId: l.listingId,
       version: l.version,
-      contentHash: contentHash(stripSignature(raw)),
+      contentHash: listingContentHash,
       anchor: { kind: "storage-program", locator: l.anchor.locator },
       summary: {
         title: l.offering.title,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +27,7 @@ test("verified withdrawal bindings survive incomplete discovery metadata without
   const identityScope = { bundleVersion: "1", presentedBy: claim, presentedAt: 1, claims: [{ ref: claim }] };
   const identity = { ...identityScope, presentation: { kind: "per-claim", signatures: [{ ref: claim,
     signature: Buffer.from(ed25519Sign(Buffer.from(`dacs-bundle-presentation:v1:${contentHash(identityScope)}`),
-      privateKeyFromSeed(seed))).toString("hex") }] } };
+      privateKeyFromSeed(seed))).toString("base64url") }] } };
   const cases: Array<[string, Record<string, unknown>]> = [
     ["complete control", {}],
     ["tampered marker control", { summary: undefined }],
@@ -43,7 +44,7 @@ test("verified withdrawal bindings survive incomplete discovery metadata without
     const listingId = `metadata-${++generatedAt}`; // Distinct hashes prevent retained state masking another case.
     const scope = { dacsVersion: "1", listingVersion: 1, listingId, requiredCapabilities: ["SR-2"],
       seller: { displayName: "Service", identity },
-      offering: { ...summary, description: "Service", deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+      offering: { ...summary, description: "Service", deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
       buyerRequirement: { requirementVersion: "1", required: [] },
       pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "deliver-attested-payload" }],
       pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } }, terms: {}, validity: { notBefore: 1 } };
@@ -89,7 +90,7 @@ test("verified withdrawal bindings survive incomplete discovery metadata without
     try {
       store.saveRegistrations([]);
       store.saveDomains(["seller.example"]);
-      const run = () => reindexAll({ log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
+      const run = () => reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => { throw new Error("offline"); },
         crawlWellKnown: async () => ({ agents: [agent], errors: [] }) });
       await run();
       const listings = store.loadCatalog().sellers.flatMap(seller => seller.listings);

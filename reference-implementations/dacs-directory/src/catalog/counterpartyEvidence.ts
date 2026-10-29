@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify as verifySignature } from "node:cry
 
 import fixtureReceipt from "../../data/counterparty-evidence/microsoft-counterparty.receipt.json";
 import type { SellerRecord } from "./types.js";
+import { DIRECTORY_TRANSACTION_READINESS } from "./inspection.js";
 
 type JsonValue =
   | null
@@ -181,6 +182,7 @@ export function counterpartyEvidenceSellerRecord(now = Date.now()): SellerRecord
       pricing: {},
       status: "active",
       catalogObservedAt: now,
+      transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     }],
     deals: [],
     reputation: {

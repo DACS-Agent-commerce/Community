@@ -83,3 +83,12 @@ export function directoryEvidenceState(
     }),
   });
 }
+
+
+/** Describe only the authentication performed for this artifact profile. */
+export function catalogAuthenticationLabel(profile: string): string {
+  if (profile === "fixture-listing") return "Fixture machine contract and content hash match; no chain anchor claimed";
+  return profile === "dacs-v0.1"
+    ? "Structure, signature, and identity presentation authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)"
+    : "Legacy structure and signature authenticated; anchor bytes and owner read from the configured Demos node (finality not verified)";
+}

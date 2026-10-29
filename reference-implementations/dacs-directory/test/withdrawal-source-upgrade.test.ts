@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { onPinnedChain } from './fixtures/pinned-node.js';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ content_hash TEXT, seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', 
 const put = db.prepare('INSERT INTO kv_state VALUES (?, ?, 0)');
 for (const [key, value] of Object.entries({
  'schema-version': 1, 'sr2-anchor-schema-version': 2, 'revocation-read-schema-version': 1,
- 'withdrawal-carriage-schema-version': 2,
+ 'withdrawal-carriage-schema-version': 2, 'listing-admission-schema-version': 1,
  'withdrawal-sources': [{domain:'https://seller.example',seller:claim,hashes:[hash],incomplete:[hash],index:{generatedAt:123,hash:'a'.repeat(64)}}],
  'scan-state': {schemaVersion:10,lastSeenTxId:0,listings:{},deals:{}},
  'catalog': {catalogVersion:'1',generatedAt:1,sellers:[{primaryClaim:claim,listings:[{contentHash:hash,status:'active'},{contentHash:'b'.repeat(64),status:'active'}]}]},
@@ -40,7 +41,7 @@ test('v2 authenticated incomplete source survives upgrade when discovery is unav
   const reg = store.loadRegistrations()[0];
   const immediate = await indexRegistration(reg, undefined, async()=>{throw new Error('offline')});
   assert.equal(immediate.listings.some(activeOffer),false,'index-now cannot bypass the source-only upgrade hold');
-  await reindexAll({log:()=>{},resolveIdentities:async()=>{throw new Error('offline')},
+  await reindexAll({nodeDeployment:onPinnedChain,log:()=>{},resolveIdentities:async()=>{throw new Error('offline')},
    crawlWellKnown:async()=>({agents:[],errors:[{domain:'seller.example',error:'transport offline'}]})});
   const listings = store.loadCatalog().sellers.flatMap(s=>s.listings);
   assert.equal(listings.some(activeOffer),false,'upgrade plus failed discovery must not turn a prior authenticated incomplete check into an active offer');

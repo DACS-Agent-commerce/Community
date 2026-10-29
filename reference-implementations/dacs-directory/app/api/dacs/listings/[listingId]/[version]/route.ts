@@ -7,8 +7,9 @@ import {
   verifyCounterpartyEvidenceFixtureListing,
 } from "@/src/catalog/counterpartyEvidence";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
-import { catalogJson } from "@/src/catalog/http";
-import { inspectServicePath } from "@/src/catalog/inspection";
+import { sellerIdentity } from "@/src/catalog/discovery";
+import { catalogJson, claimQuery } from "@/src/catalog/http";
+import { inspectServicePath, servicePath } from "@/src/catalog/inspection";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
 export async function GET(
@@ -16,11 +17,13 @@ export async function GET(
   { params }: { params: Promise<{ listingId: string; version: string }> },
 ) {
   const { listingId, version } = await params;
-  const requestedSeller = req.nextUrl.searchParams.get("seller");
+  const sellerQuery = claimQuery(req.nextUrl.searchParams.get("seller"), "seller");
+  if ("refused" in sellerQuery) return sellerQuery.refused;
+  const requestedSeller = sellerQuery.value;
   const origin = requestBaseUrl(req);
   const hit = loadCatalog()
     .sellers.flatMap((s) => s.listings)
-    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || l.seller.primaryClaim === requestedSeller));
+    .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || sellerIdentity(l.seller.primaryClaim) === sellerIdentity(requestedSeller)));
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
   if (hit.anchor.kind === "fixture") {
     const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
@@ -30,8 +33,8 @@ export async function GET(
     return catalogJson(req, fixture, {
       lastModified: hit.catalogObservedAt,
       links: [
-        { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
-        { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+        { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
+        { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
         { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
       ],
     });
@@ -51,8 +54,8 @@ export async function GET(
   return catalogJson(req, raw, {
     lastModified: hit.catalogObservedAt,
     links: [
-      { href: `${origin}/service/${encodeURIComponent(hit.seller.primaryClaim)}/${encodeURIComponent(hit.listingId)}/${hit.version}`, rel: "alternate", type: "text/html" },
-      { href: `${origin}/api/dacs/sellers/${encodeURIComponent(hit.seller.primaryClaim)}`, rel: "seller", type: "application/json" },
+      { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
+      { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
       { href: `${origin}${inspectServicePath(hit)}`, rel: "service-inspection", type: "application/json" },
       { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],

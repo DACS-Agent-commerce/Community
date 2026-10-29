@@ -6,7 +6,11 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
-the pinned SDK's legacy artifacts through program-name and content-shape detection. Registration adds a display
+the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
+listings must pass the pinned SDK's `isListing()` gate with the Directory compatibility patch on their exact signed bytes, with CORE §B.7
+SIG-6 base64url signature values, before catalog admission. They are exposed as
+authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
+rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display
 name and (when owner-signed) the "owner-registered" badge — it is never a gate.
 
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
@@ -20,10 +24,10 @@ checks in-browser, while chain inclusion still depends on the disclosed proxy/RP
 | Surface | Spec | How |
 |---|---|---|
 | Catalog API | DACS-1 §6.3.6 | The §6.3.6 listing filters except `minCompletionRate` and `minRating`, which testnet profile TP-1 refuses with 400 (a Directory-local departure from those advisory filters), plus `q`, profile and identity-tier extensions; canonical current listings, explicitly labelled legacy SDK artifacts, and unauthenticated BB-4-verified `GET /api/dacs/bundles/{jobId}` candidates |
-| Seller publication | DACS-1 §6.3.4 | `/register` builds and wallet-signs a current Listing, creates its StorageProgram with the live next-nonce/empty-salt mapping from SDK #70, persists non-secret recovery coordinates before broadcast, and independently verifies native address, owner, program name, tuple, identity, signature and content hash before catalog registration |
+| Seller publication | DACS-1 §6.3.4 | The browser publisher is omitted from this release. `/register` explains discovery-pointer submission and offers read-only recovery of saved anchors. Publication through another client requires a verified finalized AnchorReceipt (LP-1), and for pay-bearing listings verified rail authority (LP-6). The internal builder checks rail authority (LP-6) and prepares a transaction; its `publicationReady` flag means a transaction was prepared, not that it is final, so it does not satisfy LP-1. `confirm-listing` requires a transaction hash and reports only an unauthenticated node observation, never a receipt. `POST /api/dacs/register` accepts bounded pointer sets; the indexer independently authenticates each anchor. |
 | Registration | — (catalog-side) | `POST /api/dacs/register` with bounded discovery hints. Nothing in the payload is trusted: listings are read from chain, BundleBindings are independently BB-4 verified, CCI badges are resolved from the on-chain GCR, and every offered bundle is cryptographically verified before it counts |
 | Identity links | DACS-1 / DACS-2 / CCI | GCR links remain informational; identity tiers elevate only from hash/signature/identifier/method/version/freshness-verified `verifiedBy` evidence under an explicit recipe policy |
-| Reputation derivation | DACS-5 §10.4–§10.5 | logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts; under TP-1 completion rate, fault rate and rating values are null and counts are observations, not verified completion |
+| Reputation derivation | DACS-5 §10.4–§10.5 | authenticated commitment-finality gate (requires a trusted adapter; otherwise only authenticated pre-commit terminal evidence), logical bundle-address derivation and bounded BB-4/BB-5/BB-6 resolution, strict two-sided evidence graphs, legacy and v0.3 absolute-fault bundles, seller perspective, exact-decimal volume, settlement uniqueness, SR-2 windows and deterministic receipts; under TP-1 completion rate, fault rate and rating values are null and counts are observations, not verified completion |
 | Index persistence | Operational | SQLite WAL repository, one-time JSON migration, cross-process leases, artifact retry/dead-letter queue and scan-run diagnostics |
 | In-browser verify | DACS-5 §10.4 | strict buyer/seller bundle-signature coverage plus referenced-artifact signature/hash checks run in the visitor's browser. Because the server ferries RPC bytes, this proves internal cryptographic consistency but is not an independent chain-inclusion proof; the UI states that boundary explicitly |
 
@@ -105,21 +109,40 @@ its 1.6 GB development dependency tree:
 railway up . --no-gitignore
 ```
 
-`.railwayignore` includes only the SDK's compiled `dist` output from the otherwise ignored
-vendor directory.
+`.railwayignore` includes only the SDK's compiled `dist` output, its `package.json` and the
+`.dacs-sdk-revision` marker from the otherwise ignored vendor directory. `scripts/setup-sdk.sh` accepts that packaged build only when
+`dist/.dacs-sdk-revision` names the pinned `SDK_REV` (written by the source build after it
+checks a clean checkout of that commit), the SDK's `package.json` declares the pinned
+`dacs.standardRevision`, and the `dist` bytes hash to the pinned `SDK_DIST_SHA256`
+(`scripts/sdk-dist-digest.mjs`; the SDK build is reproducible, and a source build is held to
+the same digest and records its per-file `dist/.dacs-sdk-manifest`); otherwise it refuses to
+continue. The reproducible source build applies `scripts/dacs-sdk-compat.patch`, checked against
+`SDK_PATCH_SHA256`, and restores the clean SDK source after building. The compatibility modules use the
+pinned Node release's TypeScript transformer (`scripts/sdk-compat-output.mjs`) after
+TypeScript checks and builds the SDK; their source/declaration maps are omitted.
+The patch applies the DACS-1 §6.3.4 / CORE §B.2 LR-2 cap of 16,384 canonical bytes
+with `signature` omitted. It also authenticates historical SDK Listing, agreement
+and evidence signatures and preserves the historical member-name hash profile
+only for explicit legacy references.
+The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
+profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
+integer. Catalog admission alone does not promise SDK transaction readiness.
+Changing either the revision or patch requires rebuilding and updating `SDK_DIST_SHA256`.
 
 ### Configuration
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `DEMOS_RPC` | No | Demos RPC base URL; defaults to the public testnet endpoint |
+| `DEMOS_CHAIN_IDENTITY` | No | Chain the Directory's node must serve (block one's `previousHash`); defaults to `d59b54c2f70305e03d3a7e4d469f38295ffe4e4a62cb59b9f887057d0e5ca4bc`. `node2.demos.sh` was rebuilt onto this chain on 2026-10-20, and the default `DEMOS_RPC` host (`demosnode.discus.sh`) served the identical block one (hash `4a9b8c965fad45d7495b2a9dfd61d19f3d87ea67846696cabe7a2ea0930141e9`) when read on 2026-10-21; that observation is the whole basis for the pin. On another chain, reindexing fails without changing the catalog, `build-listing` returns no transaction and `confirm-listing` reports nothing |
+| `DEMOS_NODE_BUILDS` | No | Comma-separated node builds the Directory accepts, from `getNetworkInfo`'s `nodeVersion`: `<commit>` for a clean build, or `<commit>+dirty@<builtAt>` to accept exactly one observed build with uncommitted changes. Defaults to the clean `61b8e75…` build. The node reports its own build, so this detects drift and does not authenticate the node. `node2.demos.sh` reported a dirty build (`11e7c82…+dirty@2026-10-20T11:09:32Z` on 2026-10-22) on the pinned chain; the build the default `DEMOS_RPC` host reports has not been checked against this pin. Catalog refreshes (`npm run index`, `/api/dacs/reindex` and `/api/dacs/index-now`) gate on chain identity only; a changed, dirty or missing build is logged. Publication and inclusion observations still require the exact configured build. A reported dirty build does not provide reviewable deployed source bytes. A refused reindex is recorded as a `failed` run, so `GET /api/dacs/status` shows that the catalog is not advancing |
 | `NEXT_PUBLIC_DEMOS_RPC` | No | Credential-free public HTTPS Demos RPC advertised to machine clients; defaults to the public testnet endpoint and deliberately does not inherit `DEMOS_RPC` |
 | `DACS_ADMIN_TOKEN` | Production | Bearer token for the operational reindex endpoints |
 | `DACS_SDK_GITHUB_TOKEN` | No | Optional fine-grained, read-only token that only authenticates the build's clone of the pinned SDK; the SDK repository is public |
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
-| `DACS_SCAN_REPLAY_DEPTH` | No | Finalized transaction overlap replayed on every pass; defaults to `2` |
+| `DACS_SCAN_REPLAY_DEPTH` | No | Overlap of already-scanned transactions (behind the held-back depth) replayed on every pass; defaults to `2` |
 | `DACS_INDEX_INTERVAL_SECONDS` | No | Seconds between production reindex passes; defaults to `900` |
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
@@ -227,9 +250,41 @@ longest-waiting one takes the next free slot. `STORAGE_NOT_FOUND` is operational
 diagnostic evidence only: under the current Demos mapping it is never authoritative
 DACS-5 absence evidence and cannot satisfy BB-8.
 
+The same status response and the catalog UI expose `listingRejectionDiagnostics` with scope
+`listing-admission`. It reports stable public-safe classes for normative shape,
+verification-method, signature, identity-presentation, owner/seller binding and
+declared-hash failures, including bounded listing ID/version coordinates when they can
+be safely recovered and explicit republishing guidance. For example, string-valued deliverable verification methods
+are excluded as `VERIFICATION_METHOD_INVALID`; the Directory never aliases them to a
+registered structured verification-method variant.
+
+Listings that `/register` published before this release carry the wallet's raw hex
+(128 digits) as the identity presentation signature. DACS-1 §6.3.2 leaves that bare
+signature's encoding open. The Directory and its SDK-reader adapter verify historical
+hex, canonical Base64URL and the pinned Standard vector's padded standard Base64.
+All forms verify the exact bundle-presentation bytes under the presenting claim's key.
+ListingSignature envelope values continue to require canonical unpadded Base64URL.
+
+That keeps a main-era Listing only when its other content is admissible. Main's `/register`
+form defaulted to an `attested-payload` deliverable with no `verificationMethod`. DACS-4 §9.6.3
+DPA-1 requires a Listing whose pipeline contains `deliver-attested-payload` to carry a present,
+well-formed `verificationMethod` and says the reader MUST reject it otherwise, so such a Listing
+is excluded as `VERIFICATION_METHOD_INVALID` and no operator action restores it. The
+storage-program delivery shape that main's form also offered stays. Versions are immutable, so
+its seller publishes a new Listing ID from a current SDK seller runtime.
+
+Earlier `/register` versions also wrote raw hex into the Listing signature. CORE §B.7
+SIG-6 requires canonical base64url for that envelope, so unless an operator pins them
+(see `DACS_HISTORICAL_LISTING_IMPORTS` below) such Listings are excluded as
+`LISTING_SIGNATURE_INVALID`. Their versions stay occupied on chain, so republishing under
+the same listing ID is blocked (see the version limitation below). Before deploying, inventory
+the live anchors whose locator diagnostics carry `LISTING_SIGNATURE_INVALID`, and either pin
+each authenticated one or ask its seller to republish under a new listing ID from a
+current SDK seller runtime.
+
 ## Discovery — three channels
 
-1. **Registration** (`/register` UI or `POST /api/dacs/register`): bounded pointer sets,
+1. **Registration** (`POST /api/dacs/register`, documented at `/register#registration-api`): bounded pointer sets,
    plus self-authenticating BundleBinding carriage, all independently verified. Third
    parties may submit a new candidate, but only the owner key can replace an existing
    registration.
@@ -239,6 +294,25 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    to sellers via the buyer-anchored agreement. Agents nobody registered appear as
    "discovered on-chain". Depth: `DACS_SCAN_MAX_TXS` (default 100000); a pass that
    hits the cap fails rather than advancing the cursor and silently skipping history.
+   Chain gate: reindex and `POST /api/dacs/index-now` first check the served chain.
+   An unreadable node (503) or wrong chain (409) changes no evidence or control;
+   batch failures record their timeout, transport, unreadable-genesis or wrong-chain cause.
+   Build drift is a diagnostic warning. A fixed `catalog-chain` record binds evidence
+   provenance independently of completion. Legacy caches adopt their first admitted chain;
+   older scanner labels migrate without losing known provenance. Both retain withdrawals
+   and the earlier catalog while requiring a full replay.
+   Before provisional work, both writers durably clear readiness. A throw, process death,
+   failed save, final refusal or scan cap leaves provenance intact and requires full replay.
+   Only a complete pass and successful final chain check atomically publish the catalog,
+   scanner/schema and readiness. Index-now requires that completed replay; it cannot finish one.
+   A known replacement is rechecked, then atomically clears foreign catalog, discoveries,
+   artifacts, rejections and retained revocations, resets progress and binds the target chain.
+   Same-chain tip regression resets progress and derived rows while retaining the earlier catalog.
+   A replay exceeding `DACS_SCAN_MAX_TXS` publishes nothing; raise the cap to cover history.
+   Provisional node-derived writes are journaled until the final chain check and publication.
+   Refusal, failed storage or process death reverts those writes; a restarted writer recovers
+   the journal before its gate. Durable chain provenance and readiness invalidation stay outside
+   that window, as do publisher-signed source declarations and concurrent registration saves.
    Revocation markers are recognised by their signed content, never by program name.
    Every candidate locator is queued once per listing hash; each pass examines
    at most 16 locators per listing — markers that already passed RB-4 first, then those
@@ -255,6 +329,9 @@ DACS-5 absence evidence and cannot satisfy BB-8.
    requires a current marker read before rejecting the candidate or releasing a
    hold: at most 16 current reads and 32 cached/current checks per pass. Missing or
    unavailable reads keep authenticated holds across recrawls and restarts.
+   A marker that verified before, or a candidate the listing's owner anchored, that the
+   node cannot serve (a storage `not found` included) also withholds the listing until it
+   can be read.
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
    `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
@@ -277,8 +354,12 @@ The Next app and the indexer speak to the node over **plain HTTP** (storage read
 unauthenticated GETs; `gcr_routine` uses hand-rolled timestamp-bound auth headers signed
 with the SDK's pure ed25519). demosdk is NOT a runtime dependency — its dependency tree
 (rubic bridge → pancakeswap/cetus/…) has unresolvable optionals in consumer installs and
-is bundler-hostile. The SDK's pure barrel does all cryptography, on both server and
-client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
+is bundler-hostile. SDK verification names resolve through one compatibility seam because
+the current top-level SDK barrel statically re-exports those optional rail modules; replace
+that seam when the SDK publishes a browser-safe verification subpath. The same verification
+code runs on server and client (browser: @noble-shimmed `node:crypto`, a narrow `node:util`
+shim over JSON-owned values, WHATWG-subset `node:net` and `node:url` shims, and
+base64url-patched Buffer).
 
 ## Honest limitations (MVP)
 
@@ -288,12 +369,16 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   browser-verifiable proof or a CORS-safe independent read endpoint.
 - **Operational writes are protected**: production reindex/index-now calls require
   `DACS_ADMIN_TOKEN` as a Bearer token. Run indexing from cron/CI, not public UI.
-- **Wallet publication uses three signatures**: the embedded IdentityBundle presentation,
-  the Listing, and the catalog pointer/deal set. Registration remains catalog-side and non-normative.
-  Before any StorageProgram broadcast, the browser persists the public signed artifact,
-  exact native/write coordinates and unsigned registration. A reload re-verifies that
-  same anchor and refreshes only the catalog-pointer signature; it never creates another
-  listing version or re-sends a chain transaction automatically.
+- **Browser publication is omitted.** `/register` documents submission of existing
+  chain pointers through the API. Saved publication recovery can read the exact saved
+  anchor and deliberately discard local recovery data after acknowledgement. It never
+  signs, sends, retries or registers that publication. Discard does not cancel a chain
+  transaction or revoke a Listing. Publication can return in a later release with signed
+  rail authority and authenticated finality. `confirm-listing` requires `transactionRef`,
+  looks up that exact transaction and does not scan history on a miss. Its observation
+  remains unauthenticated and cannot satisfy LP-1.
+- **Scan cursors are chain-bound.** A changed or missing persisted chain identity clears
+  chain-derived discoveries and restarts from genesis after a successful deployment check.
 - **Scanner depth is bounded** per pass. Increase `DACS_SCAN_MAX_TXS` if a backfill or
   unusually large interval exceeds the configured cap.
 - **DACS-2 recipe governance is deployment policy.** Identity-tier derivation checks
@@ -301,6 +386,35 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   The new recipe snapshot resolver and required-claim matcher are standalone helpers;
   production session admission does not yet apply them. Their live-only policy does
   not change the existing tier path's availability handling.
+- **Legacy composite vet verification is unsupported.** SDK-MVP deals with nonempty
+  `vetRecords` retain their bundle-signature verdict but have `refsVerified:false` and
+  cannot contribute to reputation. `verificationLimitation: "legacy-vet-unsupported"`
+  identifies each excluded deal; `/api/dacs/status` reports the cached count as
+  `legacyVetUnsupportedDeals`. An authenticated session-bound composite verifier is
+  required before these deals can count.
+- **Committed deal credit requires authenticated commitment finality.** Authenticated current
+  pre-commit abort copies, including single-signed anchoring copies, retain fault/cancellation
+  evidence without a finality adapter while the signed Listing is inside its validity window
+  at verification time. Their phase facts must match the signed Listing
+  strictly before commitment, with no agreement reference, settlement, amendments or ratings. Current
+  and legacy indexer paths verify the commitment's session-orchestrator signature,
+  exact agreement hash, Listing tuple, pattern and signing-party roster. New records
+  use finalized receipt consensus time; legacy signed `committedAt` must equal it.
+  That time must fall inside the signed Listing validity window and satisfy its
+  deadline bound. Withdrawal never removes committed credit (DACS-1): a marker's
+  signed `revokedAt` is chosen by the seller rather than authenticated consensus time,
+  and an unsettled withdrawal holds only discovery. Expired tuples remain available
+  as historical evidence without returning to discovery; category attribution uses
+  the exact tuple. Startup clears older cached deal credit and Listing reputation hints.
+  `EvidenceGraphDeps.commitment`, `ReindexOptions.commitment` and `indexRegistration`'s final dependency accept a
+  server-owned `CommitmentVerifier`: it must resolve authenticated session authority
+  and immutable native commitment content for the exact authenticated context, and independently verify the original
+  finalized receipt evidence, including network/profile, transaction, writer and nonce.
+  Its network reads must bound bytes before decoding and honor the supplied deadline.
+  This app ships without a Demos consensus authenticator, so its default indexer
+  withholds committed credit. Node observations, saved verdicts, signatures alone
+  and injected candidate timestamps cannot enable credit. Tests use a separate signed
+  fixture finality profile; that profile does not authenticate Demos consensus.
 - **Authority proof integration is pending.** Current graph and identity-tier paths
   check authority content hashes. The standalone `authenticateAuthorityAttestation`
   helper can delegate original proof/hash/signer/validator-epoch authentication to
@@ -308,24 +422,72 @@ client (browser: @noble-shimmed `node:crypto`, base64url-patched Buffer).
   signature and a matching authority hash do not establish that authority proof.
 - **Listing publication and listing/revocation verification use Unicode scalar values.**
   These paths reject lone UTF-16 surrogates in string values and property names before
-  canonical hashing. The pinned serializer supports integer JSON numbers only:
-  publication rejects fractional negotiation percentages with HTTP 400, and readers
-  reject fractional signed inputs too. This is a narrower profile than the Standard.
+  canonical hashing. Current Listing readers accept bounded fractional JSON numbers,
+  including fractional negotiation percentages. Publication rejects fractional negotiation
+  percentages with HTTP 400; the frozen historical hash requires safe integers.
+  Stored Listings and withdrawals also authenticate the previous SDK hash profile;
+  new Listing admission uses the current profile.
 - **BundleBinding key resolution currently implements the directory's canonical Demos
   agent profile.** BB-4 accepts self-describing `did:demos:agent:<64hex>` claims. A
   binding signed through another ClaimReference/key-resolution method is not carried or
   used until that resolver is configured; it fails closed to `indeterminate` rather
   than being relabelled as verified.
-- **Listing versions are allocated from observed catalog state**, without a mutable
-  in-process lock. Publishers must serialize writes for one `seller + listingId` until
-  the substrate or SDK provides an atomic version allocator; concurrent publishers can
-  otherwise propose the same next version.
+- **Listing versions are allocated from observed catalog state.** Authenticated
+  preparations reserve one create per configured chain and logical version; concurrent
+  publishers cannot replace the first saved transaction. An occupied version whose
+  owner-held program no longer authenticates blocks publication for that listing ID.
+  Recover by publishing under a new listing ID; the publisher never skips a version.
+- **New Listing versions use producer-name checks and an optional logical resolver.**
+  Without a resolver, the builder permits creation only when this producer's current
+  and legacy program names are absent and the requested version equals the next
+  known version. Another producer's differently named publication of the same logical
+  version, or a program an empty node search fails to return, is not detected before
+  creation. This is an accepted limitation until the node offers a complete
+  logical-version lookup; today's pinned node has none, so no production resolver is
+  configured. Existing producer-name matches resume through fresh authenticated
+  readback. When configured, the server-owned `ResolveListingVersion` callback receives
+  the logical Listing address, configured chain identity and abort signal and must
+  establish occupancy across all producer names. It decides whenever the name lookups
+  recover no owned program, including when they are uncertain, as the pinned node's
+  ACL-filtered fallback search always is. A complete, correctly scoped empty
+  result permits the next version; one native binding requires fresh owner, metadata,
+  tuple and signature verification and resumes the stored Listing without writing.
+  Ambiguous, malformed, incomplete, failed or timed-out resolution returns HTTP 503,
+  except for a signed retry of a version with a saved preparation (below).
+  Request fields cannot supply this authority. Adapters must bound network bytes
+  before decoding and honor cancellation; the builder also bounds results and enforces
+  a deadline. These checks do not provide an atomic version allocator.
+- **Authenticated Listing preparations survive retries, restarts and catalog reverts.**
+  Before returning a transaction, the builder commits its exact bytes and signed Listing
+  to an append-only SQLite table, separate from the undo journal for node reads.
+  Unprepared previews remain stateless. A preview of a prepared version returns HTTP
+  409 with its saved anchor and no signing message. Empty name lookups, advancing
+  nonces, re-signing and elapsed time never release another create for that version.
+  An exact repeat (same presentation time, identity signature and Listing signature)
+  receives the saved bytes, including with an expired presentation or changed catalog
+  display name, only while the configured node reports the pinned build and chain
+  and the saved rail and payment handler match the currently authorized selection.
+  A different rail selection returns only the saved anchor with HTTP 409.
+  Other valid signed retries, and prepared versions the catalog already lists, get 409
+  with the saved anchor and no transaction.
+  So does any signed retry while the version lookup is indeterminate (a failed,
+  timed-out, oversized or ambiguous name search or resolver), even an exact repeat,
+  because the version may be taken; the reply names the lookup cause. The retry must
+  carry valid identity and Listing signatures (invalid ones get HTTP 400). A preview, or
+  a version with no saved preparation, still gets HTTP 503.
+  Authenticated owner-bound readback resumes registration without a write; only exact repeats may
+  use expired identity presentations. Preparations prove neither finality nor success.
+  There is no automatic expiry or abandon: an unobserved transaction may still execute.
+  Keep the persistent data volume through deployments and catalog rebuilds.
 
 ## DACS surface / conformance declaration
 
 This is a partial implementation of DACS-1 listing publication, well-known
 files and catalog discovery, with current-artifact graph readers and a labelled
-legacy SDK path. It does not claim complete DACS conformance. Session historical
+legacy SDK path. It does not claim complete DACS conformance. Current Listings pass
+the pinned SDK's normative shape and component-signature APIs, then this catalog's
+stricter profile, and are labelled transaction-readiness-unassessed until a buyer
+runs the complete SDK reader. Session historical
 identity/challenge/recipe admission, authority-proof authentication, native-payment
 finality, rail snapshots, delivery cleartext/ACL verification and full agreement
 conformance remain pending integration. Catalog computations are advisory and
@@ -333,11 +495,13 @@ independently reproducible from their refs; reference verification alone does no
 establish payment or delivery.
 Procurement listings remain outside this reader profile until reconciliation supports
 the publisher as buyer and attributes supplier history to the agreement seller.
+The catalog profile also refuses APR-1 `pay-alternative` pipelines, which the pinned
+SDK reader accepts.
 
 **Upstream source contracts.** The Directory records these source revisions:
 
-- **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation (v0.4,
-  `4bb9e48`), the conformance vector files vendored under `test/fixtures/dacs-standard/`
+- **DACS Standard**: `SPEC_PIN` records the source revision used by this partial implementation at
+  `d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20`, the conformance vector files vendored under `test/fixtures/dacs-standard/`
   with their hashes and implementation limits. `test/standard-vectors.test.ts` checks
   SIG-6 encoding and Demos agent claim resolution. `test/listing-vectors.test.ts` and
   `test/revocation-vectors.test.ts` check the two listing/withdrawal fixture hashes and
@@ -346,8 +510,11 @@ the publisher as buyer and attributes supplier history to the agreement seller.
   vector adapters remain pending. The `did:demos:agent` primary-claim profile is the
   deliberate addition; it comes from
   DACS-Standard #296 on `next` at `725fa78`, whose fixture is vendored too.
-- **dacs-sdk**: `SDK_REV` in `scripts/setup-sdk.sh`. It supplies canonical hashing,
-  Ed25519, CCI parsing and the verifier for the labelled legacy SDK path.
+- **dacs-sdk**: `SDK_REV`, `STANDARD_REV`, patch digest and output digest in
+  `scripts/setup-sdk.sh` pin the compiled compatibility build. It supplies current
+  canonical hashing, Ed25519, CCI parsing, the normative Listing validator and
+  component-signature verification, and the labelled legacy verifier. Frozen
+  historical hashes stay in the Directory.
 - **Demos node**: the read contract is pinned to `kynesyslabs/node` `ac8f45f`.
   `GET /storage-program/<address>` answers `{success: false, errorCode}` with 404
   `NOT_FOUND`, 403 `PERMISSION_DENIED` or 400 `INVALID_REQUEST` (an address without the
@@ -371,8 +538,15 @@ filter ACLs after pagination. A deployed node may also answer it as a `nodeCall`
 only on a recognized "Unknown message" answer. Both public search reads send JSON
 headers without wallet authentication, as required by the pinned middleware contract. The fallback can recover a listing
 after a fresh read confirms its owner. Its pages are ACL-filtered after pagination
-and cannot establish absence, so an unresolved fallback lookup returns HTTP 503
-and withholds new publication until a complete search contract is available.
+and cannot establish absence, so without a configured resolver an unresolved fallback
+lookup returns HTTP 503.
+Even an empty nodeCall search cannot establish occupancy across other producers'
+names or detect a program the search fails to return. Without a configured resolver,
+the builder accepts this limitation and allows the next version after both producer
+names are absent; it cannot detect those publications before creation. This remains
+an accepted limitation until the node offers a complete logical-version lookup.
+When configured, the logical-resolution adapter described above must establish
+complete occupancy before creation.
 `npm run check:node -- <exact program name>` is a read-only probe (no
 transactions) that reports the storage not-found answer and both search paths, and fails
 when they disagree, return no known program, or a fresh read cannot confirm one
@@ -421,6 +595,10 @@ timestamp and hash ordering, including after migration. A stored timestamp that 
 incorrectly ahead of the publisher's current index requires explicit operator
 revalidation of that source; an older index cannot silently replace it.
 
+A hosted listings index is rejected if duplicate anchors declare different content
+hashes, including in incomplete rows. Equal hashes remain deduplicated. A rejected
+index cannot replace saved declarations or clear an earlier listing rejection notice.
+
 Fixed-price agreements on negotiable listings (including signed RFQ fixed-price
 fallback) are readable for listing discovery. Their deal evidence remains unverified
 and excluded from completion, ratings and volume until semantic agreement, settlement
@@ -431,6 +609,10 @@ process restarts. An unread marker continues to withhold the offer until a succe
 read rejects it or verifies revocation; verified revocation takes precedence.
 Rejection is applied only while the captured source revision is current, so a slow
 read cannot clear a newer advertisement even when it references the same marker scope.
+A marker verified on an earlier pass that can no longer be read, or a marker the
+Listing's owner anchored that no read has settled, also withholds the offer, including
+while that marker waits out its retry backoff. Candidates anchored by anyone else
+cannot withhold it.
 
 The x402, AP2, EVM/EIP, SPL and HTLC names mirror the pinned DACS-4 rail registry.
 Independent protocol revisions and live handler compatibility are not asserted by
@@ -463,6 +645,12 @@ upgrading; each entry declares `encoding: "lowercase-hex"`, `sellerPrimaryClaim`
 characters). This is an explicit local trust input, never a field accepted from
 registration requests, index rows or the listing itself. At most 256 entries and
 65,536 UTF-8 bytes are accepted; malformed or incomplete pins cannot import hex.
+The declared encoding applies to the Listing signature only. The identity presentation,
+which the earlier `/register` publisher also wrote as wallet hex, needs no pin: every
+current Listing's presentation is read as canonical base64url, padded Base64, or 128 hex digits without a `0x` prefix (see
+the upgrade note above), must be the `presentedBy` entry and must verify under the
+seller's key. A pin never applies to a Listing whose own signature is already
+canonical; such a Listing is admitted or refused on its own signatures.
 
 Every historical read rechecks the original signatures, current schema and pinned
 tuple/hash. The importer normalizes only the envelope in memory, retaining the
@@ -472,3 +660,24 @@ same stored artifact without a new transaction. Unpinned current hex artifacts
 remain rejected; the labelled draft SDK profile keeps its separate reader.
 `test/historical-listing-import.test.ts`, `test/current-indexer.test.ts` and
 `test/build-listing.test.ts` cover import boundaries and immutable history/recovery.
+
+Legacy draft Listings retain the SDK `44d8ff2` hashing profile, including NFC member-name
+normalization and the SDK legacy reader's size policy; the current Listing's 16,384-byte
+canonical cap does not apply to that draft compatibility reader. Historical raw-hex
+delivery attestations use the same frozen hash profile. Current Listings use the pinned
+SDK canonicalizer. On upgrade, cached active summaries from the earlier admission
+profile are withheld until a successful reindex validates their signed artifacts with
+the current reader. Registrations, scan pointers and revoked tombstones are retained;
+a failed refresh does not republish unvalidated offers. Rejection diagnostics
+retain occurrence counts and first-seen timestamps for continuing failures; each seller
+indexing pass prunes failures it no longer observes, except after a crawl that did not
+complete. Only a publisher-authenticated hash declaration for a seller-matching artifact can
+appear in the public pointer notice. Registration binding and content-hash diagnostics call
+for a corrected pointer or declaration, then a reindex, not a new Listing ID.
+
+**Listings that /register published.** The reader is the pinned SDK Listing shape plus
+this catalog's profile. The identity presentation also accepts the earlier publisher's
+wallet hex and the Standard vector's padded Base64 beside Base64URL; the Listing
+signature stays SIG-6 Base64URL. A string `verificationMethod` is refused, a revocation
+marker accepts a numeric `revokedAt` within ±(2^53−1), and its binding carries the exact `presentedBy`
+(RB-2). `test/listing-verification.test.ts` and `test/revocation-vectors.test.ts` pin them.

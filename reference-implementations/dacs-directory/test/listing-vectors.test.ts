@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { contentHash, stripSignature } from "../src/catalog/canonical.js";
-import { verifyListing } from "../src/catalog/listingVerification.js";
+import { verifyListingResult } from "../src/catalog/listingVerification.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
+import { sdkListingSignatureVerifier } from "../src/catalog/sdkReaderVerifiers.js";
+import { isPhaseStep } from "@kynesyslabs/dacs/artifacts";
 
 type Obj = Record<string, any>;
 const name = "listing-preserve-unknown-v0.1.json";
@@ -13,6 +15,10 @@ const vectors = JSON.parse(raw.toString()) as Obj;
 const pin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
 const resolveKey: ResolvePrimaryClaimKey = async (claim, algorithm) => vectors.publicKeys[claim] && algorithm === "ed25519"
   ? { canonicalClaim: claim, algorithm, publicKey: Uint8Array.from(Buffer.from(vectors.publicKeys[claim], "base64url")) } : null;
+/** The Listing signature over the scope's computed hash (CORE §B.7 SIG-3/SIG-5), as an SDK reader checks it. */
+const signatureBinds = (listing: Obj, resolver?: ResolvePrimaryClaimKey) => sdkListingSignatureVerifier(resolver)({
+  signedBytes: Buffer.from(`dacs-listing:v1:${contentHash(stripSignature(listing))}`, "utf8"), signature: listing.signature,
+});
 
 test("the preserve-unknown fixture bytes match SPEC_PIN", () => {
   const line = pin.split("\n").find(line => line.includes(name));
@@ -29,19 +35,31 @@ for (const vector of vectors.vectors) test(`upstream SIG-5: ${vector.name}`, asy
   if (vector.transform.kind === "set") target[key] = vector.transform.value;
   if (vector.transform.kind === "remove") delete target[key];
   assert.equal(contentHash(stripSignature(listing)), vector.want.computedArtifactHash);
-  assert.equal(Boolean(await verifyListing(listing, resolveKey)), vector.expected === "pass");
+  assert.equal(await signatureBinds(listing, resolveKey), vector.want.signature === "valid");
+  const result = await verifyListingResult(listing, resolveKey);
+  if (vector.expected === "pass") {
+    assert.equal(result.ok, true, vector.name);
+  } else {
+    assert.equal(result.ok, false);
+  }
 });
 
-test("independently signed nested phase extensions remain readable and signature-bound", async () => {
+test("independently signed nested phase extensions stay signature-bound; the SDK reader refuses parameters on parameter-free phases", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/listing-nested-phase-metadata.json", import.meta.url), "utf8")) as Obj;
   const listing = fixture.listing;
   assert.equal(contentHash(stripSignature(listing)), fixture.contentHash);
-  assert.equal((await verifyListing(listing))?.contentHash, fixture.contentHash);
+  assert.equal(await signatureBinds(listing), true, "the nested extension bytes are signed");
+  assert.equal((await verifyListingResult(listing)).ok, false);
+  // The SDK reader's PhaseStep rule: only `rate` may carry parameters among these kinds.
+  assert.deepEqual(listing.pipeline.map((step: Obj) => [step.kind, isPhaseStep(step)]), [
+    ["vet-credentials", false], ["negotiate-fixed-price", false], ["commit-agreement", false],
+    ["deliver-attested-payload", false], ["rate", true],
+  ]);
   const tampered = structuredClone(listing);
   tampered.pipeline[2].parameters.future.label = "modified";
   assert.notEqual(contentHash(stripSignature(tampered)), fixture.contentHash);
-  assert.equal(await verifyListing(tampered), null, "nested extension changes invalidate the stored signature");
+  assert.equal(await signatureBinds(tampered), false, "nested extension changes invalidate the stored signature");
   const wrongSignature = structuredClone(listing);
   wrongSignature.signature.value = Buffer.alloc(64).toString("base64url");
-  assert.equal(await verifyListing(wrongSignature), null, "signature verification is still required");
+  assert.equal(await signatureBinds(wrongSignature), false, "signature verification is still required");
 });

@@ -6,11 +6,13 @@
  */
 import { discoveredDealKey, normalizeScanState, ownArray, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { MAX_REGISTRATION_BUNDLE_BINDINGS, parseRegistration } from "./registration.js";
+import { ownerSignedRegistration } from "./registrationSig.js";
 import { boundedJson } from "./artifactLimits.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, verifyStoredListing } from "./listingVerification";
+import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -18,10 +20,15 @@ import {
   scanConsensusAnchorBackfill,
 } from "./scan";
 import { chainResetRequired, chainResetThreshold } from "./chainContinuity";
+import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "./chainGate";
+import type { catalogNodeDeployment } from "./listingFinality";
 import { crawlDomains, normalizeSubmittedDomain, revocationBindingKey, wellKnownWithdrawalProvenance, type WellKnownAgent } from "./wellknown";
 import { upsertCounterpartyEvidenceSeller } from "./counterpartyEvidence";
 import { refreshReachabilityHints } from "./reachability";
 import {
+  openChainReadWindow,
+  commitChainReadWindow,
+  revertChainReadWindow,
   loadStoredCatalog,
   loadDomains,
   loadFixtureSeeds,
@@ -34,14 +41,17 @@ import {
   loadWithdrawalCursor,
   saveWithdrawalCursor,
   finishWithdrawalCarriageReplay,
-  saveCatalog,
+  loadCatalogChain,
+  invalidateCatalogChain,
+  resetCatalogChain,
+  publishCatalogChain,
   saveScanState,
   beginScanRun,
   finishScanRun,
   loadRetryableArtifacts,
-  clearChainDerivedArtifacts,
   recordArtifact,
   pruneFailureHistory,
+  pruneListingRejections,
   recordArtifactFailure,
   loadUnanchoredBundleTargets,
   recordConsensusAnchors,
@@ -49,6 +59,7 @@ import {
 } from "./store";
 import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
+import type { CommitmentVerifier } from "./commitmentFinality";
 
 export interface ReindexSummary {
   sellers: number;
@@ -64,46 +75,38 @@ export interface ReindexOptions {
    */
   resolveIdentities?: ResolveIdentities;
   resolveRecipe?: ResolveRecipe;
+  /** Server-owned consensus authenticator; omitted deployments withhold committed credit. */
+  commitment?: CommitmentVerifier;
+  /** Node deployment read injected by tests; production reads the configured node. */
+  nodeDeployment?: typeof catalogNodeDeployment;
   /** Alternate discovery transport for deterministic/offline deployments. */
   crawlWellKnown?: typeof crawlDomains;
 }
 
 export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSummary> {
+  revertChainReadWindow();
   const log = opts.log ?? console.log;
   const omitted = { omittedSellers: 0, omittedBindings: 0, omittedDeals: 0 };
-  const regs: (Registration & { discovered?: boolean })[] = [];
-  for (const raw of loadRegistrations()) {
-    // The registration and its binding count are checked before any binding is verified;
-    // admitted bindings are then verified one at a time.
-    const rawBindings: unknown = raw?.bundleBindings;
-    const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
-    let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
-    if (parsed.ok && admitted) {
-      const bindings: BundleBinding[] = [];
-      for (const binding of admitted) {
-        const verified = await verifyBundleBinding(binding);
-        if (verified) bindings.push(verified);
-      }
-      omitted.omittedBindings += admitted.length - bindings.length;
-      parsed = parseRegistration({ ...raw, bundleBindings: bindings });
-    }
-    if (!parsed.ok) {
-      omitted.omittedSellers++;
-      const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
-      log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
-      continue;
-    }
-    regs.push({ ...parsed.value,
-      ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
-        ? { listingContentHashes: raw.listingContentHashes } : {}),
-    });
+  // A refusal is recorded as a failed run, so the public status shows the catalog is not advancing.
+  function refuse(error: string): never {
+    const { lastSeenTxId } = loadScanState();
+    finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
+    throw new Error(error);
   }
-  const prior = loadStoredCatalog();
+  const served = await servedCatalogChain(opts.nodeDeployment);
+  if (!served.ok) return refuse(`catalog not updated: ${served.cause}`);
+  if (served.warning) log(`node build warning: ${served.warning}`);
+  // Reads made after the gate are saved only after the node is seen to serve the gated chain again.
+  const chainChange = async (): Promise<string | null> => {
+    const again = await servedChainUnchanged(served.chainIdentity, opts.nodeDeployment);
+    return again.ok ? null : `the served chain changed during the pass: ${again.cause}`;
+  };
+  let prior = loadStoredCatalog();
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
-  //    confirmed large tip regression clears derived state before a genesis
-  //    rescan. First run backfills the full history.
+  //    changed chain identity or a confirmed large tip regression clears
+  //    derived state before a genesis rescan. First run backfills the full history.
   let state = loadScanState();
   const resetThreshold = chainResetThreshold();
   let observedChainTip: number | null = null;
@@ -113,70 +116,97 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // The normal scan below retains the established fail-closed behaviour and
     // surfaces the node error. This preflight exists only for reset detection.
   }
-  if (observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold)) {
+  // Confirm admission before control migration, legacy sanitation or a reset can persist.
+  const admissionChange = await chainChange();
+  if (admissionChange) return refuse(`catalog not updated: ${admissionChange}`);
+  const control = loadCatalogChain();
+  const chainReplaced = control !== null && control.evidenceChain !== served.chainIdentity;
+  const tipRegressed = observedChainTip !== null && chainResetRequired(state, observedChainTip, resetThreshold);
+  // Decide from the admitted snapshot before clearing readiness for this run.
+  const needsHistoryReplay = chainReplaced || tipRegressed || !scanStateCurrent(state, served.chainIdentity, control);
+  if (chainReplaced || tipRegressed) {
     const previousCursor = state.lastSeenTxId;
-    clearChainDerivedArtifacts();
-    state = normalizeScanState({
-      schemaVersion: SCAN_STATE_SCHEMA_VERSION,
-      lastSeenTxId: 0,
-      lastChainTip: observedChainTip,
-      listings: {},
-      deals: {},
-      programs: {},
-      revocations: {},
-      verifiedRevocations: {},
-      bundleBindings: {},
-      bundleBindingOverflow: [],
-      anchorBackfillComplete: false,
-    });
+    try { state = resetCatalogChain(served.chainIdentity, chainReplaced, observedChainTip); }
+    catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
+    prior = loadStoredCatalog();
+    log(`chain replacement detected: ${chainReplaced ? "the node serves another chain than the recorded one" :
+      `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
+      "cleared chain-derived cache and restarting from genesis");
+  } else if (!control) {
+    // Legacy withdrawals stay retained, but unproven name bindings cannot seed this chain.
+    // Persist sanitation before adoption so an interrupted replay cannot label the old map.
+    state.programs = Object.create(null);
     saveScanState(state);
-    log(
-      `chain replacement detected: tip ${observedChainTip} is more than ${resetThreshold} txs ` +
-        `behind cursor ${previousCursor}; cleared chain-derived cache and restarting from genesis`,
-    );
+    log("no chain is recorded for the cached state; replaying history from genesis");
   }
-  // v9 replays history to recover duplicate programs discarded by older caches.
-  // It retains earlier storage classification, binding and consensus-time replays.
-  // v10 replays it again so every owner's deal and binding is rebuilt under its own key.
-  const needsHistoryReplay = state.schemaVersion !== SCAN_STATE_SCHEMA_VERSION;
-  // Overflow is recomputed per signer from the replayed bindings.
   if (needsHistoryReplay) state.bundleBindingOverflow = [];
   const configuredMax = Number(process.env.DACS_SCAN_MAX_TXS ?? 100000);
   const maxTxs = Number.isSafeInteger(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
   const configuredOverlap = Number(process.env.DACS_SCAN_REPLAY_DEPTH ?? 2);
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
   const sinceTxId = needsHistoryReplay ? 0 : Math.max(0, state.lastSeenTxId - overlap);
-  state.verifiedRevocations ??= Object.create(null);
-  state.bundleBindings ??= Object.create(null);
-  state.bundleBindingOverflow ??= [];
-  for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
-    const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
-    omitted.omittedBindings += raw.length - verified.length;
-    state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
-  }
-  // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
-  // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
-  for (const reg of regs) {
-    const verified = reg.bundleBindings ?? [];
-    for (const binding of verified) {
-      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
-      state.bundleBindings[binding.jobId] = bounded.bindings;
-      state.bundleBindingOverflow = [...new Set([
-        ...state.bundleBindingOverflow,
-        ...bounded.overflowKeys,
-      ])].sort();
-    }
-  }
-  for (const seller of prior.sellers) for (const listing of seller.listings) {
-    const locator = listing.revocation?.markerAnchor.locator;
-    if (!locator) continue;
-    const verified = state.verifiedRevocations[listing.contentHash] ?? [];
-    if (!verified.includes(locator)) verified.push(locator);
-    state.verifiedRevocations[listing.contentHash] = verified;
-  }
   const runId = beginScanRun(sinceTxId);
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
+    // Provenance survives every failure; absence of readiness requires full replay next time.
+    invalidateCatalogChain(served.chainIdentity);
+    openChainReadWindow();
+    const regs: (Registration & { discovered?: boolean })[] = [];
+    for (const raw of loadRegistrations()) {
+      // The registration and its binding count are checked before any binding is verified;
+      // admitted bindings are then verified one at a time.
+      const rawBindings: unknown = raw?.bundleBindings;
+      const admitted = Array.isArray(rawBindings) && rawBindings.length <= MAX_REGISTRATION_BUNDLE_BINDINGS ? rawBindings : undefined;
+      let parsed = parseRegistration(admitted ? { ...raw, bundleBindings: [] } : raw);
+      if (parsed.ok && admitted) {
+        const bindings: BundleBinding[] = [];
+        for (const binding of admitted) {
+          const verified = await verifyBundleBinding(binding);
+          if (verified) bindings.push(verified);
+        }
+        omitted.omittedBindings += admitted.length - bindings.length;
+        parsed = parseRegistration({ ...raw, bundleBindings: bindings });
+      }
+      if (!parsed.ok) {
+        omitted.omittedSellers++;
+        const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
+        log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
+        continue;
+      }
+      // Verified before crawl data is merged in, which changes what the owner signed.
+      regs.push({ ...parsed.value, ownerSigned: await ownerSignedRegistration(parsed.value),
+        ...(raw.listingContentHashes && typeof raw.listingContentHashes === "object" && !Array.isArray(raw.listingContentHashes)
+          ? { listingContentHashes: raw.listingContentHashes } : {}),
+      });
+    }
+    state.verifiedRevocations ??= Object.create(null);
+    state.bundleBindings ??= Object.create(null);
+    state.bundleBindingOverflow ??= [];
+    for (const [jobId, raw] of Object.entries(state.bundleBindings)) {
+      const verified = (await Promise.all(raw.map((binding) => verifyBundleBinding(binding)))).filter((binding) => binding !== null);
+      omitted.omittedBindings += raw.length - verified.length;
+      state.bundleBindings[jobId] = catalogBundleBindings(verified).bindings;
+    }
+    // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
+    // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
+    for (const reg of regs) {
+      const verified = reg.bundleBindings ?? [];
+      for (const binding of verified) {
+        const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
+        state.bundleBindings[binding.jobId] = bounded.bindings;
+        state.bundleBindingOverflow = [...new Set([
+          ...state.bundleBindingOverflow,
+          ...bounded.overflowKeys,
+        ])].sort();
+      }
+    }
+    for (const seller of prior.sellers) for (const listing of seller.listings) {
+      const locator = listing.revocation?.markerAnchor.locator;
+      if (!locator) continue;
+      const verified = state.verifiedRevocations[listing.contentHash] ?? [];
+      if (!verified.includes(locator)) verified.push(locator);
+      state.verifiedRevocations[listing.contentHash] = verified;
+    }
     scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
       knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
@@ -185,6 +215,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         `chain scan hit DACS_SCAN_MAX_TXS=${maxTxs} before reaching its cursor; increase the limit so the catalog cannot skip history`,
       );
     }
+    const scanChainChange = await chainChange();
+    if (scanChainChange) throw new Error(`catalog not updated: ${scanChainChange}`);
     // Before v9, cached deals could carry stale attribution, so they are rebuilt; later
     // entries are kept and the replay adds or refreshes each owner's entry.
     if (needsHistoryReplay && (state.schemaVersion ?? 0) < 9) state.deals = Object.create(null);
@@ -267,6 +299,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           maxTxs: configuredBackfillMax,
           budgetMs: configuredBackfillBudget,
         });
+        const backfillChainChange = await chainChange();
+        if (backfillChainChange) throw new Error(backfillChainChange);
         const updated = recordConsensusAnchors(backfill.observations);
         state.anchorBackfillCursor = backfill.nextCursor;
         state.anchorBackfillComplete = backfill.complete;
@@ -291,7 +325,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
-    state.schemaVersion = SCAN_STATE_SCHEMA_VERSION;
     saveScanState(state);
     finishWithdrawalCarriageReplay();
     log(
@@ -343,8 +376,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // ── Channel 3: §6.3.5 well-known crawl (hash-bound per-agent indexes) ──
     const domains = loadDomains();
+    let crawlIncomplete = false;
     if (domains.length > 0) {
       const crawl = await (opts.crawlWellKnown ?? crawlDomains)(domains);
+      crawlIncomplete = crawl.errors.length > 0;
       for (const e of crawl.errors) {
         let domain: string;
         try { domain = normalizeSubmittedDomain(e.domain); }
@@ -355,7 +390,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       for (const agent of crawl.agents) {
         await ingestWellKnownRevocations(agent);
         const reg = sellerReg(agent.seller) as Registration & { wellKnownDomains?: string[]; discovered?: boolean };
-        if (agent.displayName && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
+        // agent.json is unsigned: its name never replaces one the owner signed.
+        if (agent.displayName && !reg.ownerSigned && reg.displayName.startsWith("agent ")) reg.displayName = agent.displayName;
         for (const anchor of agent.listingAnchors) {
           // A revoked or incomplete row can carry a marker, but cannot introduce an
           // active offer. Authenticated unresolved sources create holds; unsigned
@@ -364,7 +400,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           if (!reg.listingAnchors.includes(anchor)) {
             const retained = retainedListingRevocation(agent.contentHashes[anchor]);
             if (!agent.activeListingAnchors.includes(anchor) && !wellKnownWithdrawalProvenance(agent) &&
-                retained?.sellerPrimaryClaim !== agent.seller) continue;
+                canonicalDemosAgentClaim(retained?.sellerPrimaryClaim ?? "") !== agent.seller) continue;
             reg.listingAnchors.push(anchor);
             const declaredHash = agent.contentHashes[anchor];
             if (declaredHash) {
@@ -402,7 +438,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }).catch((error: unknown) => {
+      }, undefined, opts.commitment).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
@@ -438,15 +474,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     state.reachabilityCursor = await refreshReachabilityHints(catalogSellers, prior.sellers, {
       cursor: state.reachabilityCursor,
     });
-    saveScanState(state);
-
-    saveCatalog({ catalogVersion: "1", generatedAt, sellers: catalogSellers });
+    const indexChainChange = await chainChange();
+    if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
+    // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
+    commitChainReadWindow(() => {
+      if (!crawlIncomplete) pruneListingRejections(allRegs);
+      publishCatalogChain({ catalogVersion: "1", generatedAt, sellers: catalogSellers }, state, served.chainIdentity);
+    });
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
       artifacts: scan.observations.length, rejected: scan.failures.length });
 
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
   } catch (error) {
+    revertChainReadWindow();
     finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan?.chainTip,
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });
@@ -466,7 +507,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
     // verified listing read (here or in indexRegistration) establishes ownership.
     if (!recordWellKnownWithdrawalCheck(domain, agent.seller, agent.withdrawalHashes,
       agent.incompleteWithdrawalHashes ?? [],
-      agent.withdrawalIndex, agent.revocations, provenance)) return;
+      agent.withdrawalIndex, agent.revocations, provenance, agent.contentHashes)) return;
   } else recordWellKnownWithdrawalCheck(domain);
 
   const byHash = new Map<string, typeof agent.revocations>();
@@ -514,7 +555,7 @@ export async function ingestWellKnownRevocations(agent: WellKnownAgent): Promise
           listing.contentHash !== agent.contentHashes[anchor]) continue;
       const id = listing.scope.listingId ?? listing.scope.serviceId;
       const version = listing.scope.listingVersion ?? listing.scope.version ?? 1;
-      if (binding.sellerPrimaryClaim !== listing.sellerClaim || binding.listingContentHash !== listing.contentHash ||
+      if (binding.sellerPrimaryClaim !== revocationSellerClaim(listing) || binding.listingContentHash !== listing.contentHash ||
           binding.listingId !== id || binding.listingVersion !== version) continue;
       if (provenance) {
         admitRevocationCandidates(listing.contentHash, [{ locator: binding.markerAnchor.locator }]);
