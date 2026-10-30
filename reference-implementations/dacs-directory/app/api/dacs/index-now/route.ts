@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
 import { requireAdmin } from "@/src/catalog/security";
-import { openChainReadWindow, commitChainReadWindow, revertChainReadWindow, loadCatalog, loadRegistrations, loadScanState, loadCatalogChain, invalidateCatalogChain, publishCatalogChain, withDataLock } from "@/src/catalog/store";
+import { openChainReadWindow, commitChainReadWindow, revertChainReadWindow, loadStoredCatalog, loadRegistrations, loadScanState, loadCatalogChain, invalidateCatalogChain, publishCatalogChain, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "catalog not updated: no complete reindex on this chain yet; run a full reindex first" },
         { status: 409 });
     }
-    const catalog = loadCatalog();
+    const catalog = loadStoredCatalog();
     const prior = catalog.sellers.find((s) => s.primaryClaim === claim);
     invalidateCatalogChain(served.chainIdentity);
     openChainReadWindow();

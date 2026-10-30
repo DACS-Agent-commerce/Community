@@ -1,4 +1,5 @@
 import type { DealRecord, SellerRecord } from "./types.js";
+import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetricPolicy.js";
 import { canonicalSigningIdentity } from "./claimRef.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
@@ -77,11 +78,6 @@ export function deriveSellerReputation(
   }
   scoped = scoped.filter((deal) => !(deal.settlementTxIds ?? []).some((tx) => settlementOwner.get(tx.id) !== deal));
   const completed = scoped.filter((deal) => deal.sellerOutcome === "completed").length;
-  const neutral = scoped.filter((deal) => deal.sellerOutcome === "failed-substrate" || deal.cancellationNeutral).length;
-  const counterpartyFault = scoped.filter((deal) => !deal.cancellationNeutral &&
-    (deal.sellerOutcome === "failed-counterparty" || deal.sellerOutcome === "aborted-by-other")).length;
-  const partyFaultDenominator = scoped.length - neutral;
-  const blameDenominator = partyFaultDenominator - counterpartyFault;
   const bundleRefs = scoped.filter((deal) => deal.bundleContentHash).map((deal) => ({
     kind: "dacs-5-bundle" as const,
     id: deal.jobId,
@@ -120,13 +116,9 @@ export function deriveSellerReputation(
     completed,
     bundleCount: scoped.length,
     totalAgreements: scoped.length,
-    completionRate: partyFaultDenominator > 0 ? completed / partyFaultDenominator : null,
-    counterpartyAdjustedCompletionRate: blameDenominator > 0 ? completed / blameDenominator : null,
-    counterpartyFaultRate: partyFaultDenominator > 0 ? counterpartyFault / partyFaultDenominator : null,
-    // This catalog record is seller-scoped. Buyer-side sessions are not part
-    // of its input set, so surfacing a buyer rating here would invent signal.
-    averageBuyerRating: null,
-    averageSellerRating: sellerRatings.length ? sellerRatings.reduce((a, b) => a + b, 0) / sellerRatings.length : null,
+    ...UNAVAILABLE_TESTNET_METRICS,
+    ...OBSERVED_REPUTATION_COUNTS,
+    observedOutcomesLabel: observedOutcomesLabel(scoped.length),
     observedTransactionalVolume,
     transactionCountByCurrency,
     bundleRefs,

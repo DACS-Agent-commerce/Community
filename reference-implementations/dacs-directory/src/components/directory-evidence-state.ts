@@ -1,6 +1,7 @@
 import { safePublicEndpoint } from "../catalog/publicEndpoint.js";
 import { effectiveReachabilityStatus } from "../catalog/reachabilityStatus.js";
 import type { IdentityTier, ListingSummary, SellerRecord } from "../catalog/types.js";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, observedOutcomesLabel } from "../catalog/testnetMetricPolicy.js";
 
 export const UNMEASURED_REACHABILITY_LABEL = "Not measured by Directory" as const;
 
@@ -23,7 +24,6 @@ export type DirectoryEvidenceState = Readonly<{
   >;
   identityTier: IdentityTier;
   deals: Readonly<{
-    completed: number;
     total: number;
     label: string;
     explanation: string;
@@ -42,7 +42,6 @@ export function directoryEvidenceState(
     : listing.artifactProfile === "dacs-v0.1"
       ? { kind: "current" as const, label: "current DACS listing" as const }
       : { kind: "legacy" as const, label: "legacy SDK listing" as const };
-  const completed = seller.reputation.completed;
   const total = seller.reputation.totalAgreements;
   const reachabilityStatus = listing.reachabilityHint
     ? effectiveReachabilityStatus(listing.reachabilityHint, now)
@@ -78,12 +77,9 @@ export function directoryEvidenceState(
     reachability: Object.freeze(reachability),
     identityTier: seller.identityTier ?? "self-declared",
     deals: Object.freeze({
-      completed,
       total,
-      label: `${completed} strict-verified / ${total} agreement${total === 1 ? "" : "s"}`,
-      explanation: total === 0
-        ? "No verified two-sided bundle history yet"
-        : "Both parties' signed copies must verify and agree before a bundle counts",
+      label: observedOutcomesLabel(total),
+      explanation: COMPLETION_VERIFICATION_UNAVAILABLE,
     }),
   });
 }

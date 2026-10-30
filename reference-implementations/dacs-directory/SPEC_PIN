@@ -4,6 +4,9 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # Additional primary-claim profile: did:demos:agent:<64 lowercase hex>, Ed25519,
 # from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7.
 # This is a source pin, not a declaration of complete DACS conformance.
+# Additional deviation-schema fixture from Standard 4bb9e48a1095ab32c06c25b7c0b52018d3ce4091:
+# conformance/implementation-manifest.schema.json
+# SHA-256: e6dfc82a621737c2a422aa0708e10776f832608255f5bdc77acacbd77aabf805
 #
 # Implemented and tested in this split:
 # - BundleBinding BB-4 signature/member checks and strict SIG-6 envelope decoding:

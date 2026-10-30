@@ -29,7 +29,7 @@ import {
   openChainReadWindow,
   commitChainReadWindow,
   revertChainReadWindow,
-  loadCatalog,
+  loadStoredCatalog,
   loadDomains,
   loadFixtureSeeds,
   loadRegistrations,
@@ -101,7 +101,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const again = await servedChainUnchanged(served.chainIdentity, opts.nodeDeployment);
     return again.ok ? null : `the served chain changed during the pass: ${again.cause}`;
   };
-  let prior = loadCatalog();
+  let prior = loadStoredCatalog();
 
   // ── Passive discovery, incremental: walk latest → cursor, union into the
   //    accumulated scan state. Discoveries persist while the chain does; a
@@ -128,7 +128,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const previousCursor = state.lastSeenTxId;
     try { state = resetCatalogChain(served.chainIdentity, chainReplaced, observedChainTip); }
     catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
-    prior = loadCatalog();
+    prior = loadStoredCatalog();
     log(`chain replacement detected: ${chainReplaced ? "the node serves another chain than the recorded one" :
       `tip ${observedChainTip} is more than ${resetThreshold} txs behind`} cursor ${previousCursor}; ` +
       "cleared chain-derived cache and restarting from genesis");

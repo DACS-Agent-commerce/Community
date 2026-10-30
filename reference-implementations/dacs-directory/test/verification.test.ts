@@ -352,9 +352,9 @@ test("DACS-5 scalar derivation uses seller perspective and neutral exclusions", 
     deal("other", "aborted-by-other"),
   ], 0, 20);
   assert.equal(reputation.totalAgreements, 3);
-  assert.equal(reputation.completionRate, 0.5);
-  assert.equal(reputation.counterpartyAdjustedCompletionRate, 1);
-  assert.equal(reputation.counterpartyFaultRate, 0.5);
+  assert.equal(reputation.completionRate, null);
+  assert.equal(reputation.counterpartyAdjustedCompletionRate, null);
+  assert.equal(reputation.counterpartyFaultRate, null);
   assert.equal(flipOutcome("failed-perm"), "failed-counterparty");
 });
 

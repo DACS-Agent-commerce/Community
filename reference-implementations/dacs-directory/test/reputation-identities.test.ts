@@ -16,42 +16,48 @@ const deal = (ratings: Rating[], jobId = "rating-job"): DealRecord => ({
   reputationEligible: true, sellerOutcome: "completed", finalisedAt: 100,
   verifiedAt: 100, ratings,
 });
-const average = (deals: DealRecord[]) => deriveSellerReputation(deals, 0, 200).averageSellerRating;
+const average = (deals: DealRecord[]) => {
+  const retained = structuredClone(deals);
+  const reputation = deriveSellerReputation(deals, 0, 200);
+  assert.deepEqual(deals, retained, "TP-1 retains the original rating evidence");
+  assert.equal(reputation.metricsProfile, "TP-1");
+  return reputation.averageSellerRating;
+};
 
-test("seller ratings match a qualified target by CF-3 identity", () => {
-  assert.equal(average([deal([rating({ target: `${seller}?channel=directory` })])]), 5);
+test("TP-1 hides aggregate ratings for qualified CF-3 targets", () => {
+  assert.equal(average([deal([rating({ target: `${seller}?channel=directory` })])]), null);
 });
 
-test("rater aliases share timestamp and content-hash selection regardless of order", () => {
+test("TP-1 hides aggregate ratings for rater aliases regardless of order", () => {
   const ratings = [
     rating({ value: 1, ratedAt: 20 }),
     rating({ rater: `${buyer}?channel=one`, value: 2, ratedAt: 10, contentHash: "z".repeat(64) }),
     rating({ rater: `${buyer}?channel=two`, target: `${seller}?channel=two`, value: 4, ratedAt: 20, contentHash: "b".repeat(64) }),
   ];
-  assert.equal(average([deal(ratings)]), 4);
-  assert.equal(average([deal([...ratings].reverse())]), 4);
+  assert.equal(average([deal(ratings)]), null);
+  assert.equal(average([deal([...ratings].reverse())]), null);
 });
 
-test("qualified self-ratings do not contribute to seller reputation", () => {
+test("qualified self-ratings cannot produce a TP-1 aggregate", () => {
   for (const [rater, target] of [
     [`${seller}?channel=self`, seller],
     [seller, `${seller}?channel=self`],
     [`${seller}?channel=one`, `${seller}?channel=two`],
   ]) {
     assert.equal(average([deal([rating({ rater, target })])]), null);
-    assert.equal(average([deal([rating({ value: 1 }), rating({ rater, target })])]), 1);
+    assert.equal(average([deal([rating({ value: 1 }), rating({ rater, target })])]), null);
   }
 });
 
-test("canonical rater keys keep different raters and jobs independent", () => {
+test("TP-1 retains different raters and jobs without publishing their average", () => {
   const other = `did:demos:agent:${"ef".repeat(32)}`;
   assert.equal(average([
     deal([rating({ rater: `${buyer}?channel=one`, value: 1 }), rating({ rater: other, value: 3 })]),
     deal([rating({ rater: `${buyer}?channel=two`, value: 5 })], "other-job"),
-  ]), 3);
+  ]), null);
 });
 
-test("seller rating matching does not repair non-canonical key casing", () => {
+test("TP-1 hides aggregate ratings for non-canonical target keys", () => {
   const target = `did:demos:agent:${"CD".repeat(32)}`;
   assert.equal(average([deal([rating({ target })])]), null);
 });

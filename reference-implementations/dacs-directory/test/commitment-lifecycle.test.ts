@@ -89,7 +89,8 @@ for (const adapter of [false, true]) for (const [window, validity, eligible] of 
       assert.equal(result.deals[0].refsVerified, eligible);
       assert.equal(result.deals[0].reputationEligible, eligible);
       assert.equal(result.reputation.totalAgreements, eligible ? 1 : 0);
-      assert.equal(result.reputation.completionRate, eligible ? 0 : null);
+      assert.equal(result.reputation.completionRate, null);
+      assert.equal(result.reputation.metricsProfile, "TP-1");
     }
   });
 }
@@ -215,7 +216,7 @@ test("each copy needs its own proof and the exact same authenticated commitment 
   assert.equal(reconcileCurrentCopies(deal, dids[1], buyer, sellerDifferent).refsVerified, false);
 });
 
-test("one completed deal plus one seller-fault pre-commit abort stays at 0.5 over two agreements", async t => {
+test("one completed deal plus one seller-fault pre-commit abort counts two agreements without a rate under TP-1", async t => {
   t.mock.method(Date, "now", () => 150);
   const aborted = await abortFixture(false, true, false, "negotiate", true);
   const saved = new Map(maps);
@@ -234,7 +235,7 @@ test("one completed deal plus one seller-fault pre-commit abort stays at 0.5 ove
     deals: fixtures.map(f => registeredDeal(String(f.buyerBundle.jobId), f.locators.buyer, f.locators.seller)), bundleBindings: bindings },
     undefined, async () => { throw new Error("offline"); }, undefined, undefined, undefined,
     { ...fixtureCommitments, resolve: async () => commitmentProof(completed.agreement, completed.agreement.listingRef as Obj) });
-  assert.equal(record.reputation.completionRate, 0.5);
+  assert.equal(record.reputation.completionRate, null);
   assert.equal(record.reputation.totalAgreements, 2);
 });
 

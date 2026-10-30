@@ -174,7 +174,8 @@ test("expired exact Listing tuples still credit authentically committed history 
   assert.deepEqual(record.listings, []);
   assert.equal(record.deals[0].refsVerified, true);
   assert.equal(record.reputation.completed, 1);
-  assert.equal(record.reputation.averageSellerRating, 5);
+  assert.equal(record.reputation.averageSellerRating, null);
+  assert.equal(record.deals[0].ratings?.[0].value, 5, "signed rating evidence is retained under TP-1");
   assert.deepEqual((record.reputation.observedTransactionalVolume ?? []).map((v) => v.amount), ["1.25"]);
   const repeated = await indexed(fixture, undefined, record);
   assert.equal(repeated.deals[0].refsVerified, false, "saved credit is never a proof");
@@ -286,7 +287,7 @@ test("startup clears pre-finality cached credit atomically and repeats preserve 
   db.close();
   const restart = () => {
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-      "const s=await import('./src/catalog/store.ts'); console.log(JSON.stringify(s.loadCatalog()))"],
+      "const s=await import('./src/catalog/store.ts'); console.log(JSON.stringify(s.loadStoredCatalog()))"],
     { encoding: "utf8", env: process.env, timeout: 30_000 });
     assert.equal(child.status, 0, child.stderr);
     return JSON.parse(child.stdout) as ReturnType<typeof store.loadCatalog>;

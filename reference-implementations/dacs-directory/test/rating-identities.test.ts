@@ -44,31 +44,34 @@ for (const [label, rater, target] of [
   ["target", dids[0], `${dids[1]}?channel=seller`],
   ["rater and target", `${dids[0]}?channel=buyer`, `${dids[1]}?channel=seller`],
 ]) {
-  test(`signed ratings with a qualified ${label} reach seller reputation`, async () => {
+  test(`signed ratings with a qualified ${label} retain signed evidence with an unavailable TP-1 aggregate`, async () => {
     const record = await indexRatings([{ rater, target, value: 5, signer: 0 }]);
     assert.equal(record.deals[0].refsVerified, true);
-    assert.equal(record.reputation.averageSellerRating, 5);
+    assert.equal(record.reputation.averageSellerRating, null);
+    assert.equal(record.deals[0].ratings?.[0].value, 5);
     assert.equal(record.deals[0].ratings?.[0].rater, rater);
     assert.equal(record.deals[0].ratings?.[0].target, target);
   });
 }
 
-test("signed aliases contribute only the latest rating for a rater and job", async () => {
+test("signed aliases retain both ratings while the TP-1 aggregate is unavailable", async () => {
   const record = await indexRatings([
     { rater: dids[0], target: dids[1], value: 1, signer: 0 },
     { rater: `${dids[0]}?channel=buyer`, target: `${dids[1]}?channel=seller`, value: 5, signer: 0 },
   ]);
   assert.equal(record.deals[0].refsVerified, true);
   assert.equal(record.deals[0].ratings?.length, 2);
-  assert.equal(record.reputation.averageSellerRating, 5);
+  assert.deepEqual(record.deals[0].ratings?.map(rating => rating.value), [1, 5]);
+  assert.equal(record.reputation.averageSellerRating, null);
 });
 
-test("a signed qualified self-rating is excluded from seller reputation", async () => {
+test("a signed qualified self-rating cannot produce a TP-1 aggregate", async () => {
   const record = await indexRatings([
     { rater: dids[0], target: dids[1], value: 1, signer: 0 },
     { rater: `${dids[1]}?channel=self`, target: dids[1], value: 5, signer: 1 },
   ]);
   assert.equal(record.deals[0].refsVerified, true);
   assert.equal(record.deals[0].ratings?.length, 2);
-  assert.equal(record.reputation.averageSellerRating, 1);
+  assert.deepEqual(record.deals[0].ratings?.map(rating => rating.value), [1, 5]);
+  assert.equal(record.reputation.averageSellerRating, null);
 });

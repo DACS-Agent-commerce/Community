@@ -96,13 +96,17 @@ test("SR-2 migration removes every legacy producer-controlled anchor time once",
   assert.equal(catalog.sellers[0]?.deals[0]?.anchorTimestamp, undefined);
   assert.equal(catalog.sellers[0]?.reputation.windowingBasis, "finalisedAt");
   assert.equal(catalog.sellers[0]?.reputation.bundleCount, 1);
-  assert.equal(catalog.sellers[0]?.listings[0]?.reputationHint, undefined);
+  const hint = catalog.sellers[0]?.listings[0]?.reputationHint;
+  assert.equal(hint?.completionRate, null);
+  assert.equal(hint?.metricsUnavailableReason, "Completion verification unavailable");
+  assert.equal(hint?.bundleCount, 0, "uncategorized records cannot count as scoped observations");
+  assert.equal(hint?.observedOutcomesLabel, "Observed outcomes: 0, not verified");
 });
 
 
 test("two restarts preserve migrated evidence without restoring producer timestamps or listing hints", () => {
   const moduleUrl = new URL("../src/catalog/store.js", import.meta.url).href;
-  const code = `const s=await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify({anchor:s.artifactAnchorTime(${JSON.stringify(locator)}),catalog:s.loadCatalog()}));`;
+  const code = `const s=await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify({anchor:s.artifactAnchorTime(${JSON.stringify(locator)}),catalog:s.loadStoredCatalog()}));`;
   for (let restart = 0; restart < 2; restart++) {
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { encoding: "utf8", env: process.env });
     assert.equal(child.status, 0, child.stderr);
