@@ -976,8 +976,7 @@ export const findProgramAddress = (owner: string, name: string): string | null =
  * derived address when none was observed, or null when duplicate programs
  * make the entry indeterminate. Null must never fall back to derivation.
  */
-export function resolveProgramAddress(owner: string, name: string): string | null {
-  const programs = loadScanState().programs;
+export function resolveProgramAddress(owner: string, name: string, programs = loadScanState().programs): string | null {
   const key = programBindingKey(owner, name);
   return Object.hasOwn(programs, key) ? programs[key] : deriveAnchorAddress(owner, name);
 }
@@ -1297,6 +1296,12 @@ export const pruneListingRejections = db.transaction((
     }
   }
 });
+/** Unresolved storage bytes may conceal a marker; rejected content was successfully read. */
+export function hasUnresolvedStorageReads(): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM artifacts
+    WHERE status IN ('retry','dead-letter') AND error_code IS NOT 'ARTIFACT_REJECTED' LIMIT 1`).get());
+}
+
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected

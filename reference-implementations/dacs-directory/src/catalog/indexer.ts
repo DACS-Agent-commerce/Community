@@ -64,6 +64,8 @@ import {
   loadScanState,
   recordListingRejection,
   recordRevocationProgress,
+  hasPendingRevocationCandidates,
+  hasUnresolvedStorageReads,
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
@@ -155,6 +157,7 @@ export async function indexRegistration(
   onOmitted?: (kind: "bindings" | "deals", count: number) => void,
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
   commitment?: CommitmentVerifier,
+  scanState: ReturnType<typeof loadScanState> = loadScanState(),
 ): Promise<SellerRecord> {
   const now = Date.now();
   // Owner evidence comes from what the owner signed, never from crawl data merged into `reg`.
@@ -192,7 +195,7 @@ export async function indexRegistration(
   const listingArtifacts = new Map<string, ListingEvidence>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
-  const { verifiedRevocations } = loadScanState();
+  const { verifiedRevocations } = scanState;
   const savedDeclarations = savedListingDeclarations(reg.primaryClaim);
   const normalizedHash = (hash: string) => hash.replace(/^sha256-/, "").toLowerCase();
   for (const anchor of reg.listingAnchors) {
@@ -291,6 +294,10 @@ export async function indexRegistration(
         knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
         hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
         ? "indeterminate" : "absent";
+    const complete = !hasUnresolvedStorageReads() && (Boolean(revocationBinding) || (progress.unread.length === 0 &&
+      !hasPendingRevocationCandidates(verified.contentHash)));
+    const previous = prior?.listings.find((item) => item.contentHash === verified.contentHash &&
+      item.listingId === listingId && item.version === version);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -332,6 +339,8 @@ export async function indexRegistration(
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
       status: revocation === "revoked" ? "revoked" : "active",
+      revocationCoverage: complete ? "complete" : "incomplete",
+      lastVerifiedAt: complete ? now : previous?.lastVerifiedAt ?? null,
       ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
@@ -341,7 +350,6 @@ export async function indexRegistration(
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
-  const scanState = loadScanState();
   const overflowBindings = new Set(scanState.bundleBindingOverflow ?? []);
   const relevantJobs = new Set((reg.deals ?? []).map((deal) => deal.jobId));
   // Only bindings signed by a deal's own buyer or seller are verified, so other signers'
@@ -519,7 +527,7 @@ export async function indexRegistration(
             : kind === "dacs-4-evidence" ? legacySessionAnchorName.evidence(jobId)
               : kind === "dacs-2-verifyresult" ? legacySessionAnchorName.vet(jobId) : null;
           if (!name) return null;
-          const address = resolveProgramAddress(deal.owners.buyer, name);
+          const address = resolveProgramAddress(deal.owners.buyer, name, scanState.programs);
           if (!address) return null;
           const raw = await readAnchor(address);
           if (raw) resolvedArtifacts.push({ kind, raw });
