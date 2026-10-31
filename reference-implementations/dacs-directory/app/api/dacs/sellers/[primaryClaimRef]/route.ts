@@ -1,12 +1,12 @@
 /**
  * GET /api/dacs/sellers/{primaryClaimRef} — §6.3.6 seller view:
- * listings + catalog-cached identity (CCI badges) + reputation (per DACS-5,
- * derived only from chain-verified bundles; re-derivable client-side).
+ * Listings, identity, observed history and unavailable testnet metrics.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { discoveryListing } from "@/src/catalog/discovery";
+import { withDirectoryTransactionReadiness } from "@/src/catalog/inspection";
 import { loadCatalog } from "@/src/catalog/store";
-import { catalogJson } from "@/src/catalog/http";
+import { catalogJson, claimQuery } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { canonicalDemosAgentClaim } from "@/src/catalog/claimRef";
 
@@ -14,8 +14,11 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ primaryClaimRef: string }> },
 ) {
-  const { primaryClaimRef } = await params;
-  const raw = decodeURIComponent(primaryClaimRef);
+  // Next has already decoded the path segment once; a CF-2 escape such as
+  // `%3A` inside a parameter is data and must not be decoded again.
+  const claimRef = claimQuery((await params).primaryClaimRef, "primaryClaim");
+  if ("refused" in claimRef) return claimRef.refused;
+  const raw = claimRef.value;
   // CF-2: the `did` scheme token is case-insensitive on read; canonicalise it
   // before matching. Non-canonical key material stays raw and simply misses.
   const claim = canonicalDemosAgentClaim(raw) ?? raw;
@@ -23,7 +26,7 @@ export async function GET(
   if (!seller) return NextResponse.json({ error: "seller not found" }, { status: 404 });
   const origin = requestBaseUrl(req);
   return catalogJson(req, {
-    listings: seller.listings.filter(discoveryListing),
+    listings: seller.listings.filter(discoveryListing).map(withDirectoryTransactionReadiness),
     identity: seller.identityBundle ?? {
       profile: "legacy-sdk-v0.1",
       primaryClaim: seller.primaryClaim,
@@ -32,9 +35,9 @@ export async function GET(
       limitation: "GCR identity links are not fresh DACS-2 verifiedBy results.",
     },
     reputation: {
-      profile: "dacs-5-scalar-derivation-v1",
+      profile: "TP-1",
       ...seller.reputation,
-      limitation: "Two-sided reconciliation, perspective/fault metrics, neutral exclusions, resolved ratings, and exact-decimal volume are applied over chain-verified bundles. averageBuyerRating is intentionally null (these records are seller-scoped). Completeness is best-effort: no oracle guarantees every relevant bundle is present.",
+      limitation: "Completion verification unavailable under TP-1. Completion and fault rates and numeric reputation scores are unavailable on testnet. Counts describe observed history, not verified completion; the catalog may be incomplete. Individual evidence remains available for inspection.",
     },
     deals: seller.deals,
   }, {

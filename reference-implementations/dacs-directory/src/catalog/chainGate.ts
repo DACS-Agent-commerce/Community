@@ -1,0 +1,65 @@
+/**
+ * The chain gate both catalog writers pass first: `reindexAll` and
+ * POST /api/dacs/index-now. Both invalidate readiness before provisional work
+ * and require a final chain check before atomic publication.
+ */
+import { catalogNodeDeployment } from "./listingFinality.js";
+import { SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
+import type { CatalogChain, ScanState } from "./types.js";
+
+/** Node-supplied text is cut to this many characters before it is logged or returned. */
+const MAX_CAUSE_TEXT = 200;
+
+/**
+ * The gate's verdict. A refusal's `cause` is a stable code (NODE_TIMEOUT,
+ * NODE_TRANSPORT, GENESIS_UNREADABLE or WRONG_CHAIN), then bounded text.
+ */
+export type ServedCatalogChain =
+  | { ok: true; chainIdentity: string; warning: string | null }
+  | { ok: false; status: 503 | 409; cause: string };
+
+const causeText = (text: string) => text.replace(/[^\x20-\x7e]/g, "?").slice(0, MAX_CAUSE_TEXT);
+
+function unreadableCode(error: unknown): string {
+  if (!(error instanceof Error)) return "GENESIS_UNREADABLE";
+  if (error.name === "TimeoutError" || error.name === "AbortError") return "NODE_TIMEOUT";
+  // fetch rejects with "fetch failed"; nodeCall names a non-2xx answer "<call> transport failed".
+  if (error.message === "fetch failed" || error.message.endsWith(" transport failed")) return "NODE_TRANSPORT";
+  // The node answered, but with an error, a malformed or oversized reply, or a block naming no chain.
+  return "GENESIS_UNREADABLE";
+}
+
+/**
+ * Read the chain the configured node serves and check it against the pin.
+ * Returns the served identity and any build-drift warning; 503 when the node
+ * cannot be read, 409 when it serves another chain. Never throws.
+ */
+export async function servedCatalogChain(read: typeof catalogNodeDeployment = catalogNodeDeployment): Promise<ServedCatalogChain> {
+  try {
+    const deployment = await read();
+    if (!deployment.ok) return { ok: false, status: 409, cause: `WRONG_CHAIN: ${causeText(deployment.reason)}` };
+    return { ok: true, chainIdentity: deployment.chainIdentity, warning: deployment.warning };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, status: 503, cause: `${unreadableCode(error)}: ${causeText(message)}` };
+  }
+}
+
+/**
+ * The gate again, just before a writer persists what it read from the node after
+ * passing the gate: the same verdict, except that a node now serving a chain other
+ * than `chainIdentity` is refused with WRONG_CHAIN. Never throws.
+ */
+export async function servedChainUnchanged(
+  chainIdentity: string,
+  read: typeof catalogNodeDeployment = catalogNodeDeployment,
+): Promise<ServedCatalogChain> {
+  const served = await servedCatalogChain(read);
+  return !served.ok || served.chainIdentity === chainIdentity ? served
+    : { ok: false, status: 409, cause: `WRONG_CHAIN: the node now serves chain ${causeText(served.chainIdentity)}` };
+}
+
+/** True only when a complete pass on this chain, at the current schema, produced the scan state and catalog. */
+export const scanStateCurrent = (state: ScanState, chainIdentity: string, control: CatalogChain | null): boolean =>
+  control?.evidenceChain === chainIdentity && control.readySchema === SCAN_STATE_SCHEMA_VERSION &&
+  state.schemaVersion === SCAN_STATE_SCHEMA_VERSION;

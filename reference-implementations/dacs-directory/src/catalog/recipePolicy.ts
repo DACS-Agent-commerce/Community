@@ -1,8 +1,12 @@
 import { resolveDemosPrimaryClaimKey, resolvePrimaryClaimKey, sameResolvedPrimaryClaim, type ResolvePrimaryClaimKey } from "./primaryClaimKey.js";
 
-/** Closed VerificationMethod registry at the DACS-2 source revision in SPEC_PIN. */
+/**
+ * Closed VerificationMethod registry: the eight kinds of the DACS-2 source revision in SPEC_PIN, plus
+ * `demos-gcr-domain`, which that revision lacks and the Standard revision the pinned SDK declares
+ * (STANDARD_REV in scripts/setup-sdk.sh) defines.
+ */
 export const VERIFICATION_METHODS = ["verifiable-credential", "tlsnotary", "zktls", "consensus-backed-proxy",
-  "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed"] as const;
+  "oauth-attested", "evm-rpc", "domain-tls-control", "self-signed", "demos-gcr-domain"] as const;
 export const isVerificationMethod = (value: unknown): value is typeof VERIFICATION_METHODS[number] =>
   typeof value === "string" && VERIFICATION_METHODS.some((method) => method === value);
 

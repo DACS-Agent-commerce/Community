@@ -19,13 +19,15 @@ DACS Directory discovers signed, chain-anchored agent services for humans and so
 
 ## Discovery
 
-GET ${base}/api/dacs/listings supports category, repeated tag, credential, primaryClaim, identityTier, rail, priceMax, minCompletionRate, minRating, cursor and limit. Directory extensions are q and profile. Every result includes an anchor and contentHash; dereference the listing-detail URL before engaging. identityTier is derived only from fresh, passing, version-pinned DACS-2 verifiedBy evidence; missing recipe policy fails closed to self-declared.
+GET ${base}/api/dacs/listings supports category, repeated tag, credential, primaryClaim, identityTier, rail, priceMax, cursor and limit. Directory extensions are q and profile. Completion verification unavailable: completion and fault rates and average ratings are null on testnet under TP-1, and other score fields are omitted. Rate/score filters (including minCompletionRate, minRating and trackRecord), sorting and ranking parameters, and any other query name return 400. Observed counts are not verified completion; individual evidence remains inspectable. Every result includes an anchor and contentHash; dereference the listing-detail URL before engaging. identityTier is derived only from fresh, passing, version-pinned DACS-2 verifiedBy evidence; missing recipe policy fails closed to self-declared.
 
 artifactProfile=dacs-v0.1 identifies a current structured Listing. artifactProfile=legacy-sdk-v0.1 identifies the pinned SDK compatibility shape. artifactProfile=fixture-listing identifies a local fixture that is not signed or chain-anchored. Treat a missing profile as legacy for backward compatibility. A publicEndpoint, when present, is an advertised engagement route rather than a trust anchor. reachabilityHint is a time-stamped, non-authoritative catalog probe; treat stale hints as unknown and never use them for validity, identity, revocation, or reputation decisions.
 
+transactionReadiness.disposition=unassessed is deliberate: Directory admission authenticates a catalog candidate but does not execute buyer-local revocation, rail-authority, payload-capability, or delegated signer-control policy. A transacting client must dereference the signed artifact and obtain a verified disposition from the current SDK Listing reader before starting a new session (DACS-1 LR-3), and so before any payment.
+
 ## Publication diagnostics
 
-GET ${base}/api/dacs/status returns bounded, public-safe dead-letter diagnostics. Use locator=stor-... for one exact storage reference and deadLetterLimit=1..100 to bound the recent list. An unclassified-storage result means the scanner could not read enough data to establish that the reference contains a DACS artifact; it is not an attribution of fault to a publisher.
+GET ${base}/api/dacs/status returns bounded, public-safe dead-letter and listing-admission diagnostics. Use locator=stor-... for one exact storage reference and deadLetterLimit=1..100 to bound the recent list. Listing rejections include public-safe listing coordinates when recoverable plus republishing guidance in the human UI. An unclassified-storage result means the scanner could not read enough data to establish that the reference contains a DACS artifact; it is not an attribution of fault to a publisher.
 
 ## Trust boundaries
 

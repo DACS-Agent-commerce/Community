@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,7 +53,8 @@ const listingScope = {
   claimRequirements: [], supportedNegotiation: ["negotiate-fixed-price"], supportedPaymentRails: ["pay-dem"],
   supportedDelivery: ["deliver-attested-payload"],
 };
-const listing = { ...listingScope, signature: { algorithm: "ed25519", signer: seller, value: await signature(contentHash(listingScope), PREFIXES.listing, 1) } };
+// The SDK legacy-MVP read profile carries a bare Ed25519 value; agentId is the signer.
+const listing = { ...listingScope, signature: await signature(contentHash(listingScope), PREFIXES.listing, 1) };
 const verifiedListing = await verifyListing(listing);
 assert.ok(verifiedListing);
 const markerScope = { listingId: "svc", listingVersion: 1, listingContentHash: verifiedListing.contentHash, revokedAt: 1 };
@@ -144,7 +146,7 @@ test("reindex records a deeply nested rejected artifact as bounded metadata and 
   }, [deepMarker, validMarker, listingAnchor]);
   resetIndex([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 42);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 42);
@@ -333,7 +335,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRaw: Obj = {
     dacsVersion: "1", listingVersion: 1, listingId: "svc-current", requiredCapabilities: ["SR-2"],
     seller: { identity: { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }], presentation: { kind: "per-claim", signatures: [] } }, displayName: "seller" },
-    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json" } },
+    offering: { title: "test", description: "test service", category: "services.test", tags: [], deliverable: { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } } },
     buyerRequirement: { requirementVersion: "1", required: [], preferredPresentation: "any" },
     pipeline: [{ kind: "negotiate-fixed-price" }, { kind: "commit-agreement" }, { kind: "pay-dem", parameters: { rail: "pay-dem" } }, { kind: "deliver-attested-payload" }],
     pricing: { kind: "fixed", price: { amount: "1.25", currency: "DEM", unit: "job" } }, acceptedRails: [{ railId: "pay-dem" }], terms: {}, validity: { notBefore: 1 },
@@ -346,7 +348,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
     agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };
@@ -354,7 +356,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const bundleScope: Obj = {
     bundleVersion: "1", jobId, outcome: "completed", listingRef, agreementRef: ref(at(2), agreement, "agreement"),
     parties: [{ role: "buyer", bundleHash: "a".repeat(64), primaryClaim: buyer }, { role: "seller", bundleHash: "b".repeat(64), primaryClaim: seller }],
-    phaseSummary: [{ index: 2, kind: "settle", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
+    phaseSummary: [{ index: 1, kind: "commit-agreement", outcome: "ok" }, { index: 2, kind: "pay-dem", outcome: "ok" }], vetRecords: [], settlementEvidence: [ref(at(3), evidence, "evidence")],
     recipeRegistryVersion: 1, railRegistryVersion: 1, finalisedAt: 120,
   };
   const signatures = [await signArtifact(bundleScope, "bundle", 0, true), await signArtifact(bundleScope, "bundle", 1, true)];
@@ -397,7 +399,15 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
     deals: [legacyDeal, currentMalformedDeal, poisoned.deal, valid.deal],
     bundleBindings: [currentBinding, ...poisoned.bindings, ...valid.bindings],
   };
-  const record = await indexRegistration(registration, undefined, offline);
+  const { commitmentProof, fixtureCommitments } = await import("./fixtures/commitment-proof.js");
+  const agreements = new Map(Object.values({ ...poisoned.programs, ...valid.programs })
+    .map(program => JSON.parse(program.data) as Obj).filter(raw => raw.agreementVersion === "1")
+    .map(raw => [artifactHash(raw, "agreement"), raw]));
+  const commitment = { ...fixtureCommitments, resolve: async (context: import("../src/catalog/commitmentFinality.js").CommitmentContext) => {
+    const agreement = agreements.get(context.agreementHash);
+    return agreement ? commitmentProof(agreement, context.listingRef, 90, false, { claim: buyer, seed: seeds[0] }, [buyer, seller]) : null;
+  } };
+  const record = await indexRegistration(registration, undefined, offline, undefined, undefined, undefined, commitment);
 
   const byJob = new Map(record.deals.map((deal) => [deal.jobId, deal]));
   for (const jobId of ["job-legacy-malformed", "job-current-malformed", "job-poisoned"]) {
@@ -411,11 +421,12 @@ test("malformed bundles and a deal that cannot be summarized stay unverified whi
   assert.equal(byJob.get("job-valid")?.refsVerified, true);
   assert.equal(record.reputation.bundleCount, 1);
   resetIndex([registration], 45);
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ nodeDeployment: onPinnedChain, commitment, log: () => {}, resolveIdentities: offline });
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
     const run = db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() as { omitted_deals: number };
     assert.equal(run.omitted_deals, 1, "the failed summary is counted in operator diagnostics");
+    assert.equal(store.loadCatalog().sellers[0].deals.some((deal) => deal.refsVerified), true);
   } finally { db.close(); }
 });
 
@@ -454,13 +465,14 @@ test("reindex drops malformed carried bindings and still indexes every later sel
   chain({ [listingAnchor]: { data: JSON.stringify(fresh) } }, [listingAnchor]);
   const carried = JSON.parse(withMember(binding, canonDeepText)) as BundleBinding;
   assert.doesNotThrow(() => JSON.stringify(carried));
-  assert.throws(() => contentHash(carried), RangeError);
+  // No canonical form: the pinned SDK refuses its nesting before recursing (DacsError, not RangeError).
+  assert.throws(() => contentHash(carried));
   resetIndex([
     { primaryClaim: buyer, displayName: "Carrier", listingAnchors: [], bundleBindings: [carried, binding] },
     { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] },
   ], 43);
 
-  await reindexAll({ log: () => {}, resolveIdentities: offline });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 43);
@@ -479,7 +491,7 @@ test("a seller whose record cannot be indexed is logged and omitted while later 
   resetIndex([broken, { primaryClaim: seller, displayName: "Seller", listingAnchors: [listingAnchor] }], 44);
   const lines: string[] = [];
 
-  await reindexAll({ log: (line) => lines.push(line), resolveIdentities: offline });
+  await reindexAll({ nodeDeployment: onPinnedChain, log: (line) => lines.push(line), resolveIdentities: offline });
 
   const catalog = store.loadCatalog();
   assert.ok(catalog.generatedAt > 44);

@@ -6,6 +6,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { activeCatalogSellers } from "@/src/catalog/discovery";
 import type { ListingSummary, SellerRecord } from "@/src/catalog/types";
 import { directoryEvidenceState } from "./directory-evidence-state";
+import { COMPLETION_VERIFICATION_UNAVAILABLE, unavailableMetricQuery } from "@/src/catalog/testnetMetricPolicy";
 import { deliveryLabel, pricingModelLabel, publishedPriceLabel, railLabel, tierMeta } from "./labels";
 
 const sellerTier = (seller: SellerRecord) => seller.identityTier ?? "self-declared";
@@ -33,7 +34,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
   const ownNavigation = useRef(false);
   const rail = params.get("rail");
   const category = params.get("category");
-  const goodRecord = params.get("trackRecord") === "90";
+  const unavailableQuery = unavailableMetricQuery(new URLSearchParams(paramsString), "discovery");
   const identityTier = params.get("identityTier");
 
   useEffect(() => {
@@ -70,11 +71,11 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     [services],
   );
   const filtered = useMemo(() => {
+    if (unavailableQuery) return [];
     const needle = q.trim().toLowerCase();
     return services.filter(({ listing, seller }) => {
       if (rail && !(listing.offering.rails ?? []).includes(rail)) return false;
       if (category && !categoryMatches(listing.offering.category, category)) return false;
-      if (goodRecord && !(seller.reputation.completionRate !== null && seller.reputation.completionRate >= 0.9)) return false;
       if (identityTier && sellerTier(seller) !== identityTier) return false;
       if (!needle) return true;
       return [
@@ -90,7 +91,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         ...seller.cci.map((claim) => `${claim.platform} ${claim.handle}`),
       ].join(" ").toLowerCase().replaceAll("-", " ").includes(needle.replaceAll("-", " "));
     });
-  }, [services, q, rail, category, goodRecord, identityTier]);
+  }, [services, q, rail, category, identityTier, unavailableQuery]);
 
   const setParam = (name: string, value: string | null) => {
     const next = new URLSearchParams(params.toString());
@@ -103,7 +104,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
     setQ("");
     router.replace(pathname, { scroll: false });
   };
-  const hasFilters = Boolean(q || rail || category || goodRecord || identityTier);
+  const hasFilters = Boolean(q || rail || category || unavailableQuery || identityTier);
 
   return (
     <section aria-labelledby="services-heading">
@@ -116,6 +117,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
       </div>
 
       <div className="discovery-panel">
+        {unavailableQuery && <p role="alert">{unavailableQuery} Clear all filters to continue.</p>}
         <label htmlFor="directory-search" className="sr-only">Search agent services</label>
         <div className="search-wrap">
           <span aria-hidden className="search-icon">⌕</span>
@@ -168,14 +170,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
               ))}
             </div>
           )}
-          {services.some(({ seller }) => seller.reputation.totalAgreements > 0) ? <div className="facet-row">
-            <span className="facet-label">record</span>
-            <button type="button" aria-pressed={goodRecord}
-              className={`badge filter ${goodRecord ? "ok active" : ""}`}
-              onClick={() => setParam("trackRecord", goodRecord ? null : "90")}>
-              90%+ completion
-            </button>
-          </div> : <div className="facet-row"><span className="facet-label">record</span><span className="badge">No current two-sided deal evidence yet</span></div>}
+          <div className="facet-row"><span className="facet-label">record</span><span>{COMPLETION_VERIFICATION_UNAVAILABLE}</span></div>
         </div>
       </div>
 
@@ -186,7 +181,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
           <p>Once the first chain scan completes, verified services will appear here automatically.</p>
           <div className="button-row">
             <Link href="/how-it-works" className="btn secondary">See how discovery works</Link>
-            <Link href="/register" className="btn">List your service</Link>
+            <Link href="/register" className="btn">Submit listing pointers</Link>
           </div>
         </div>
       )}
@@ -194,7 +189,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
         <div className="empty-state" role="status">
           <h3>No active services yet</h3>
           <p>Agents appear through chain discovery or an owner-signed listing.</p>
-          <Link href="/register" className="btn">List the first service</Link>
+          <Link href="/register" className="btn">Submit listing pointers</Link>
         </div>
       )}
       {services.length > 0 && filtered.length === 0 && (
@@ -238,7 +233,7 @@ export default function DirectoryExplorer({ sellers, indexed }: { sellers: Selle
                   {(listing.offering.rails ?? []).length === 0 && <span className="meta-empty">not stated</span>}
                 </span>
                 <span className="meta-label">record</span>
-                <span className="meta-chips"><span className={seller.reputation.completed ? "badge ok" : "badge"}>
+                <span className="meta-chips"><span>
                   {evidence.deals.label}
                 </span></span>
               </div>

@@ -35,6 +35,17 @@ export interface Registration {
    * chain-verified).
    */
   ownerSignature?: { message: string; signature: string; signedAt: number };
+  /**
+   * What the owner signed, verified on the stored registration before crawl data is merged in; null when its
+   * signature does not verify. In memory only, never stored; when absent, indexing verifies the registration given.
+   */
+  ownerSigned?: OwnerSignedRegistration | null;
+}
+
+/** The listing anchors and display name of a registration as its owner signed them. */
+export interface OwnerSignedRegistration {
+  anchors: string[];
+  displayName: string;
 }
 
 /** DACS-5 §10.4.2 signed logical-to-native mapping for one anchored copy. */
@@ -117,17 +128,25 @@ export interface ListingSummary {
   buyerRequirement?: Record<string, unknown>;
   terms?: Record<string, unknown>;
   status: "active" | "revoked";
-  /** Coverage of discovered candidates; not withdrawal authority or global absence. */
-  revocationCheck?: "complete" | "incomplete";
-  lastVerifiedAt?: number | null;
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
   revocation?: RevocationBinding;
   catalogObservedAt: number;
   /** Optional catalog observation; never a listing validity or trust signal. */
   reachabilityHint?: ReachabilityHint;
+  /**
+   * Catalog admission is not buyer/session admission. A buyer must dereference
+   * the signed artifact and run the current SDK reader with its own policy and
+   * runtime dependencies before transacting.
+   */
+  transactionReadiness?: DirectoryTransactionReadiness;
   reputationHint?: ReputationHint;
   /** Directory extension: machine-readable pointer to a verifier profile envelope. */
   inspection?: DirectoryInspectionAffordance;
+}
+
+export interface DirectoryTransactionReadiness {
+  disposition: "unassessed";
+  reason: string;
 }
 
 export interface ReachabilityHint {
@@ -152,6 +171,9 @@ export interface DirectoryInspectionAffordance {
 /** §6.3.6 ReputationHint — advisory; derived, never authoritative. */
 export interface ReputationHint {
   categoryScope: string;
+  metricsUnavailableReason?: string;
+  observedOutcomesLabel?: string;
+  metricsProfile?: "TP-1";
   completionRate: number | null;
   averageSellerRating?: number | null;
   bundleCount: number;
@@ -164,7 +186,9 @@ export interface VerifiedRating {
   rater: string;
   target: string;
   targetRole: "buyer" | "seller";
-  value: number;
+  /** Null in public testnet projections; inspect the individual source evidence. */
+  value: number | null;
+  metricsUnavailableReason?: string;
   ratedAt: number;
   contentHash: string;
 }
@@ -194,6 +218,13 @@ export interface DealRecord extends RegisteredDeal {
   signatureVerified: boolean;
   /** Referenced-artifact integrity (agreement/evidence/vet hash-checks). */
   refsVerified: boolean;
+  /**
+   * A disclosed reader limitation; never a substitute for a verification verdict.
+   * "legacy-vet-unsupported": the deal is not verified and an authenticated, deal-bound copy of its
+   * bundle carries vet records, which this reader cannot verify; the deal's other references may also
+   * have failed, and the other copy may be missing or invalid.
+   */
+  verificationLimitation?: "legacy-vet-unsupported";
   outcome?: string;
   finalisedAt?: number;
   verifiedAt: number;
@@ -235,6 +266,13 @@ export interface SellerRecord {
   listings: ListingSummary[];
   deals: DealRecord[];
   reputation: {
+    metricsUnavailableReason?: string;
+    observedOutcomesLabel?: string;
+    metricsProfile?: "TP-1";
+    completedLabel?: string;
+    totalAgreementsLabel?: string;
+    observedTransactionalVolumeLabel?: string;
+    transactionCountByCurrencyLabel?: string;
     completed: number;
     bundleCount?: number;
     totalAgreements: number;
@@ -254,25 +292,21 @@ export interface SellerRecord {
   lastIndexedAt: number;
 }
 
-export interface ScanProgress {
-  cursor: number | null;
-  tip: number | null;
-  lag: number | null;
-  cursorAdvancedAt: number | null;
-  lastSuccessfulFullScanAt: number | null;
-  /** Start of this successful incremental/full history walk; zero means genesis. */
-  fromTx: number | null;
-}
-
 export interface Catalog {
-  scanProgress?: ScanProgress;
   catalogVersion: "1";
   generatedAt: number;
   sellers: SellerRecord[];
 }
 
+/** Durable evidence provenance; readiness is granted only by a complete publication. */
+export interface CatalogChain { evidenceChain: string; readySchema: number | null }
+
 /** Persisted scanner memory: cursor + accumulated discoveries. */
 export interface ScanState {
+  /** Retired persisted label, consumed by catalog-chain migration and omitted from canonical saves. */
+  chainIdentity?: string;
+  /** Retired provenance label for migration only. */
+  withheldChainIdentity?: string;
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;

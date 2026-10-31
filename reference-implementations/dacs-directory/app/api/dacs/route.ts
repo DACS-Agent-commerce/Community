@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { DACS_DIRECTORY_VERSION } from "@/src/catalog/contracts";
 import { catalogJson } from "@/src/catalog/http";
 import { requestBaseUrl } from "@/src/catalog/publicUrl";
 
@@ -6,7 +7,7 @@ export async function GET(req: NextRequest) {
   const origin = requestBaseUrl(req);
   const body = {
     name: "DACS Directory API",
-    version: "1",
+    version: DACS_DIRECTORY_VERSION,
     description: "Discover services first; verify the signed artifacts before relying on catalog hints.",
     links: {
       manifest: `${origin}/.well-known/dacs-directory.json`,

@@ -1,4 +1,3 @@
-import { catalogScanProgress } from "@/src/catalog/freshness";
 /**
  * GET /api/dacs/status — catalog freshness vs the chain.
  * The catalog is a cache (§6.3.6); this reports how stale it is: the scan
@@ -53,7 +52,9 @@ export async function GET(req: NextRequest) {
   const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
-    scanProgress: catalogScanProgress(catalog),
+    legacyVetUnsupportedDeals: catalog.sellers.reduce((count, seller) => count + (seller.deals ?? []).filter(
+      (deal) => deal.verificationLimitation === "legacy-vet-unsupported",
+    ).length, 0),
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,

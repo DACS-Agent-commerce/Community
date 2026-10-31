@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { canonicalDemosAgentClaim } from "../src/catalog/claimRef.js";
 import { canonicalSignatureBytes, importLegacySignatureValue, type LegacySignatureEncoding } from "../src/catalog/signatureValue.js";
@@ -12,7 +12,7 @@ function fixture(name: string, hash: string) {
 }
 
 test("pinned SIG-6 vectors exercise canonical decoding and declared legacy import", () => {
-  const set = fixture("signature-value-encoding-v0.1.json", "bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312");
+  const set = fixture("signature-value-encoding-v0.1.json", "b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf");
   assert.equal(set.vectors.length, set.count);
   for (const vector of set.vectors) {
     if (vector.mode === "legacy-import") {
@@ -37,5 +37,22 @@ test("pinned Demos agent claim fixture exercises canonical claim resolution", ()
     const claim = canonicalDemosAgentClaim(vector.input);
     assert.equal(claim !== null, vector.expected.accepted, vector.id);
     assert.equal(claim, vector.expected.canonical, vector.id);
+  }
+});
+
+/** The sha256 SPEC_PIN lists for a vendored vector: on its own line or the line after. */
+function declaredHash(specPin: string, name: string): string | undefined {
+  const lines = specPin.split("\n");
+  const at = lines.findIndex((line) => line.includes(`/${name}`));
+  return at < 0 ? undefined : /\b[0-9a-f]{64}\b/.exec(`${lines[at]}\n${lines[at + 1]}`)?.[0];
+}
+
+test("every vendored Standard vector has the hash SPEC_PIN declares", () => {
+  const specPin = readFileSync(new URL("../SPEC_PIN", import.meta.url), "utf8");
+  const vendored = readdirSync(new URL("./fixtures/dacs-standard/", import.meta.url));
+  assert.ok(vendored.length > 0);
+  for (const name of vendored) {
+    const bytes = readFileSync(new URL(`./fixtures/dacs-standard/${name}`, import.meta.url));
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), declaredHash(specPin, name), `${name} differs from its SPEC_PIN hash`);
   }
 });

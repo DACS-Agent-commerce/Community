@@ -1,20 +1,37 @@
 import { publicDemosRpcUrl } from "./substrateDiscovery.js";
+import { LISTING_QUERY_PARAMETERS } from "./testnetMetricPolicy.js";
+import { LISTING_REJECTION_CODES } from "./listingAdmission.js";
+import { MAX_CLAIM_QUERY_BYTES } from "./discovery.js";
+
+const claimBoundDescription = (purpose: string): string =>
+  `${purpose}. At most ${MAX_CLAIM_QUERY_BYTES} UTF-8 bytes as sent, before any trimming; a longer value gets 400.`;
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
-export const scanProgressSchema = {
-  type: "object", additionalProperties: false,
-  required: ["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"],
-  properties: Object.fromEntries(["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"]
-    .map((key) => [key, { type: ["integer", "null"], minimum: 0 }])),
-} as const;
+// Local Directory constraint: non-negative safe integer counts and Unix milliseconds.
+const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
+
+// ECMAScript `\s` outside the control range, spelled out so that validators
+// whose `\s` differs (Python's omits U+FEFF) read the pattern the same way.
+const PATTERN_SPACE = "\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+const CANONICAL_STRING_PATTERN =
+  `^[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^${PATTERN_SPACE}\\u0000-\\u001f\\u007f])?$`;
+
+/**
+ * The no-rate testnet restriction this Directory applies. TP-1 is a Directory-local
+ * profile: completion cannot be verified on testnet, so rates and rating values are
+ * null and the advisory DACS-1 §6.3.6 `minCompletionRate` and `minRating` filters
+ * are refused. The manifest, OpenAPI document and listing schema describe it.
+ */
+export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
 
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "/schemas/listing-summary.schema.json",
   title: "DACS Directory ListingSummary",
+  description: "Discovery projection with unassessed transaction readiness. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile.",
   type: "object",
-  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt"],
+  required: ["listingId", "version", "contentHash", "anchor", "seller", "offering", "pricing", "status", "catalogObservedAt", "transactionReadiness"],
   properties: {
     listingId: { type: "string", minLength: 1 },
     version: { type: "integer", minimum: 1 },
@@ -56,8 +73,6 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationCheck: { enum: ["complete", "incomplete"] },
-    lastVerifiedAt: { type: ["integer", "null"], minimum: 0 },
     revocation: {
       type: "object",
       required: [
@@ -79,7 +94,47 @@ export const listingSummarySchema = {
       },
     },
     catalogObservedAt: { type: "integer" },
-    reputationHint: { type: "object" },
+    transactionReadiness: {
+      type: "object",
+      required: ["disposition", "reason"],
+      additionalProperties: false,
+      properties: {
+        disposition: { const: "unassessed" },
+        reason: { type: "string", minLength: 1 },
+      },
+      description: "Catalog admission is not buyer/session admission. Run the current SDK Listing reader with buyer-local dependencies before transacting.",
+    },
+    reputationHint: {
+      type: "object",
+      description: "TP-1 observed history; completion and fault rates and numeric reputation scores are unavailable. bundleCount is recomputed on read from the retained records the seller reputation counts; a missing or malformed cached hint uses the listing category and the catalog snapshot window. categoryScope equals offering.category or is a dot-separated prefix of it, and windowStart <= windowEnd (Unix milliseconds).",
+      additionalProperties: false,
+      required: [
+        "categoryScope", "completionRate", "counterpartyAdjustedCompletionRate", "counterpartyFaultRate",
+        "averageBuyerRating", "averageSellerRating", "bundleCount", "windowStart", "windowEnd",
+        "computedAt", "metricsUnavailableReason", "metricsProfile", "observedOutcomesLabel",
+      ],
+      properties: {
+        categoryScope: {
+          type: "string",
+          minLength: 1,
+          // No leading or trailing white space, C0 control or DEL; NFC cannot be expressed here.
+          pattern: CANONICAL_STRING_PATTERN,
+          description: "A canonical string: equal to its trim(), NFC-normalized, and free of C0 control characters and DEL.",
+        },
+        completionRate: { type: "null" },
+        counterpartyAdjustedCompletionRate: { type: "null" },
+        counterpartyFaultRate: { type: "null" },
+        averageBuyerRating: { type: "null" },
+        averageSellerRating: { type: "null" },
+        metricsUnavailableReason: { const: "Completion verification unavailable" },
+        metricsProfile: { const: "TP-1" },
+        observedOutcomesLabel: { type: "string" },
+        bundleCount: safeUint,
+        windowStart: safeUint,
+        windowEnd: safeUint,
+        computedAt: safeUint,
+      },
+    },
     inspection: {
       type: "object",
       required: ["artifactType", "maturity", "href"],
@@ -118,11 +173,15 @@ export const deadLetterDiagnosticSchema = {
 export const listingRejectionDiagnosticSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["locator", "code", "message", "occurrences", "firstSeenAt", "lastSeenAt"],
+  required: ["locator", "code", "message", "publicNotice", "guidance", "occurrences", "firstSeenAt", "lastSeenAt"],
   properties: {
     locator: { type: "string", pattern: "^stor-[0-9a-f]{40}$" },
-    code: { enum: ["SELLER_CLAIM_BINDING", "OWNER_CLAIM_BINDING"] },
-    message: { type: "string", description: "Public-safe explanation of the failed listing binding." },
+    listingId: { type: "string", pattern: "^[A-Za-z0-9._~-]{1,128}$" },
+    listingVersion: { type: "integer", minimum: 1 },
+    code: { enum: LISTING_REJECTION_CODES },
+    message: { type: "string", description: "Public-safe explanation of the failed listing admission." },
+    publicNotice: { type: "boolean" },
+    guidance: { type: "string", description: "Public-safe recovery guidance for the failed admission." },
     occurrences: { type: "integer", minimum: 1 },
     firstSeenAt: { type: "integer", minimum: 0 },
     lastSeenAt: { type: "integer", minimum: 0 },
@@ -150,13 +209,13 @@ export const indexerScanRunSchema = {
 export const catalogStatusSchema = {
   type: "object",
   required: [
-    "generatedAt", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "generatedAt", "legacyVetUnsupportedDeals", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
     "cursorStallThresholdSeconds", "cursorStalled", "indexer",
   ],
   properties: {
-    scanProgress: scanProgressSchema,
     generatedAt: { type: "integer" },
+    legacyVetUnsupportedDeals: { type: "integer", minimum: 0 },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
     txsBehind: { type: ["integer", "null"] },
@@ -198,9 +257,10 @@ export const catalogStatusSchema = {
         },
         listingRejectionDiagnostics: {
           type: "object",
-          required: ["scope", "total", "byCode", "query", "returned", "hasMore", "items"],
+          required: ["scope", "total", "publicTotal", "byCode", "query", "returned", "hasMore", "items"],
           properties: {
-            scope: { const: "listing-registration-binding" },
+            scope: { const: "listing-admission" },
+            publicTotal: { type: "integer", minimum: 0 },
             total: { type: "integer", minimum: 0 },
             byCode: { type: "object", additionalProperties: { type: "integer", minimum: 0 } },
             query: {
@@ -221,10 +281,14 @@ export const catalogStatusSchema = {
   },
 } as const;
 
+/** 2: TP-1 refuses the DACS-1 §6.3.6 rate filters and publishes null rates. */
+export const DACS_DIRECTORY_VERSION = "2";
+
 export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()) => ({
   name: "DACS Directory",
   description: "A discovery catalog for signed, chain-anchored DACS agent services.",
-  dacsDirectoryVersion: "1",
+  dacsDirectoryVersion: DACS_DIRECTORY_VERSION,
+  restrictions: TESTNET_RESTRICTIONS,
   humanUrl: origin,
   agentCard: `${origin}/.well-known/agent.json`,
   api: `${origin}/api/dacs`,
@@ -261,23 +325,24 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
     missingProfileMeans: "legacy-sdk-v0.1",
   },
   maturity: {
-    listings: "current publisher and dual-profile reader",
+    listings: "dual-profile discovery reader; browser publication omitted; pay-bearing preparation requires verified rail authority",
     identityTier: "self-declared unless a fresh DACS-2 verifiedBy result is resolved",
-    reputation: "DACS-5 two-copy reconciliation with ratings, volume, SR-2 windows, and deterministic receipts",
+    reputation: "Completion verification unavailable. Testnet publishes observed counts and individual evidence; completion and fault rates and numeric reputation scores are null.",
   },
   verification: {
     policy: "strict party signatures plus referenced-artifact signature/hash checks",
     limitation: "RPC bytes pass through the directory server; client verification proves internal consistency, not independent chain inclusion.",
   },
-  filters: ["category", "tag", "credential", "primaryClaim", "identityTier", "rail", "priceMax", "minCompletionRate", "minRating", "q", "profile", "limit", "cursor"],
+  filters: LISTING_QUERY_PARAMETERS,
 });
 
 export const openApiDocument = (origin: string) => ({
   openapi: "3.1.0",
   info: {
     title: "DACS Directory API",
-    version: "1.0.0",
-    description: "Discover DACS services and retrieve the signed chain artifacts behind them.",
+    // 2.0.0: minCompletionRate and minRating were removed (now refused with 400 under TP-1).
+    version: "2.0.0",
+    description: "Discover DACS services and retrieve signed chain artifacts. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile. Catalog admission does not establish transaction readiness.",
   },
   servers: [{ url: origin }],
   paths: {
@@ -285,22 +350,21 @@ export const openApiDocument = (origin: string) => ({
     "/api/dacs/listings": {
       get: {
         summary: "Search active services and verified withdrawal records",
+        description: "Completion verification unavailable. Rate and score filters (including minCompletionRate and minRating), sorting and ranking parameters, and every query name not listed here are refused with 400 on testnet.",
         parameters: [
           { name: "category", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", explode: true },
           { name: "rail", in: "query", schema: { type: "string" } },
           { name: "credential", in: "query", schema: { type: "string" } },
-          { name: "primaryClaim", in: "query", schema: { type: "string" } },
+          { name: "primaryClaim", in: "query", description: claimBoundDescription("Seller claim or claim-scheme prefix"), schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
           { name: "priceMax", in: "query", schema: { type: "number", minimum: 0 } },
-          { name: "minCompletionRate", in: "query", schema: { type: "number", minimum: 0, maximum: 1 } },
-          { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
           { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: artifactProfiles } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page with persisted scan progress", content: { "application/json": { schema: { type: "object", properties: { listings: { type: "array", items: listingSummarySchema }, total: { type: "integer" }, cursor: { type: "string" }, scanProgress: scanProgressSchema } } } } }, "400": { description: "Invalid pagination" } },
+        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: `Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over ${MAX_CLAIM_QUERY_BYTES} bytes` } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
@@ -309,9 +373,14 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", description: "Disambiguates seller-scoped listing IDs", schema: { type: "string" } },
+          { name: "seller", in: "query", description: claimBoundDescription("Disambiguates seller-scoped listing IDs"), schema: { type: "string" } },
         ],
-        responses: { "200": { description: "Signed listing artifact" }, "404": { description: "Listing not found" }, "502": { description: "Anchor verification failed" } },
+        responses: {
+          "200": { description: "Signed listing artifact" },
+          "400": { description: `seller over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+          "502": { description: "Anchor verification failed" },
+        },
       },
     },
     "/api/dacs/bundles/{jobId}": {
@@ -334,16 +403,24 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "listingId", in: "path", required: true, schema: { type: "string" } },
           { name: "version", in: "path", required: true, schema: { type: "integer" } },
-          { name: "seller", in: "query", required: true, description: "Identifies the seller-scoped listing ID", schema: { type: "string", minLength: 1, pattern: "\\S" } },
+          { name: "seller", in: "query", required: true, description: claimBoundDescription("Identifies the seller-scoped listing ID"), schema: { type: "string", minLength: 1, pattern: "\\S" } },
         ],
-        responses: { "200": { description: "Directory service profile inspection envelope" }, "400": { description: "Seller is required" }, "404": { description: "Listing not found" } },
+        responses: {
+          "200": { description: "Directory service profile inspection envelope" },
+          "400": { description: `Seller is required, or over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Listing not found" },
+        },
       },
     },
     "/api/dacs/sellers/{primaryClaimRef}": {
       get: {
         summary: "Retrieve seller identity, services, reputation hints, and deals",
-        parameters: [{ name: "primaryClaimRef", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Seller view" }, "404": { description: "Seller not found" } },
+        parameters: [{ name: "primaryClaimRef", in: "path", required: true, description: claimBoundDescription("Seller claim, percent-encoded once"), schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Seller view" },
+          "400": { description: `primaryClaimRef over ${MAX_CLAIM_QUERY_BYTES} bytes` },
+          "404": { description: "Seller not found" },
+        },
       },
     },
     "/api/dacs/status": {

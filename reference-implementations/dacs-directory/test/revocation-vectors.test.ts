@@ -6,11 +6,13 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import {
   findValidListingRevocation,
+  revocationLogicalAddress,
   verifyListingRevocation,
   type RevocationCandidateProgress,
   type VerifiedListing,
 } from "../src/catalog/listingVerification.js";
 import type { ResolvePrimaryClaimKey } from "../src/catalog/primaryClaimKey.js";
+import type { LegacyMvpListing, Listing } from "@kynesyslabs/dacs/artifacts";
 
 // DACS-1 RB-1..RB-6 against the pinned revocation-binding vectors (SPEC_PIN), then RB-4's tuple
 // checks against markers that are validly signed, so only the tuple rule can reject them.
@@ -27,8 +29,11 @@ const vectors = JSON.parse(readFileSync(new URL("./fixtures/dacs-standard/revoca
 const { fixtures } = vectors;
 const vectorKeys: ResolvePrimaryClaimKey = async (claim, algorithm) => vectors.publicKeys[claim] && algorithm === "ed25519"
   ? { canonicalClaim: claim, algorithm, publicKey: Uint8Array.from(Buffer.from(vectors.publicKeys[claim], "base64url")) } : null;
+/** A verified current Listing as RB-2 reads it: its id and exact `presentedBy` bytes. */
+const currentListing = (listingId: string, presentedBy: string) =>
+  ({ listingId, seller: { identity: { presentedBy } }, signature: { signer: presentedBy } }) as unknown as Listing;
 const vectorListing: VerifiedListing = {
-  listing: { listingId: fixtures.listing.listingId }, scope: { listingId: fixtures.listing.listingId },
+  listing: currentListing(fixtures.listing.listingId, fixtures.listing.sellerPrimaryClaim), scope: { listingId: fixtures.listing.listingId },
   contentHash: fixtures.listing.listingContentHash, signer: fixtures.listing.signer, sellerClaim: fixtures.listing.sellerPrimaryClaim, profile: "dacs-v0.1",
 };
 /** Reader-surface checks (well-known index integrity, catalog freshness, a received tombstone) that a producer never consumes. */
@@ -74,7 +79,7 @@ const otherSeed = Uint8Array.from(Buffer.alloc(32, 84));
 const didOf = (from: Uint8Array) => `did:demos:agent:${Buffer.from(rawPublicKey(publicKeyFromSeed(from))).toString("hex")}`;
 const listingHash = "c".repeat(64);
 const listing: VerifiedListing = {
-  listing: { listingId: "svc" }, scope: { listingId: "svc" }, contentHash: listingHash, signer: didOf(seed), sellerClaim: didOf(seed), profile: "dacs-v0.1",
+  listing: currentListing("svc", didOf(seed)), scope: { listingId: "svc" }, contentHash: listingHash, signer: didOf(seed), sellerClaim: didOf(seed), profile: "dacs-v0.1",
 };
 const signed = async (scope: Obj, key = seed, envelope: Obj = {}) => ({
   ...scope,
@@ -82,12 +87,23 @@ const signed = async (scope: Obj, key = seed, envelope: Obj = {}) => ({
     value: Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`, "utf8"), privateKeyFromSeed(key))).toString("base64url") },
 });
 
+/** A marker signed over the JCS text a producer would emit, without the SDK canonicalizer. */
+async function signedOverJcsText(scope: Obj): Promise<Obj> {
+  const jcs = JSON.stringify(Object.fromEntries(Object.entries(scope).sort(([a], [b]) => a < b ? -1 : 1)));
+  const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
+    privateKeyFromSeed(seed))).toString("base64url");
+  return { ...scope, signature: { algorithm: "ed25519", signer: didOf(seed), value } };
+}
+
 test("RB-4: a validly signed marker revokes only the exact listing tuple, signed by the listing's own signer", async () => {
   const tuple = { listingId: "svc", listingVersion: 2, listingContentHash: listingHash, revokedAt: 1 };
-  const verdict = async (marker: Obj, expectedVersion = 2, against = listing) => verifyListingRevocation(marker, against, expectedVersion);
+  const verdict = async (marker: Obj, expectedVersion = 2, against: VerifiedListing = listing) => verifyListingRevocation(marker, against, expectedVersion);
   assert.equal(await verdict(await signed(tuple)), true);
   assert.equal(await verdict(await signed({ ...tuple, reason: "withdrawn" })), true, "an optional reason is part of the signed scope");
   assert.equal(await verdict(await signed({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER })), true, "the largest safe integer is in range");
+  for (const revokedAt of [-Number.MAX_SAFE_INTEGER, -1, -1.5, 1784073600000.5]) {
+    assert.equal(await verdict(await signed({ ...tuple, revokedAt })), true, `revokedAt ${revokedAt}`);
+  }
   const rejected: Record<string, boolean> = {
     "another listingId": await verdict(await signed({ ...tuple, listingId: "svc-2" })),
     "another listingVersion": await verdict(await signed({ ...tuple, listingVersion: 3 })),
@@ -102,13 +118,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
     "a listing signed by someone else": await verdict(await signed(tuple), 2, { ...listing, signer: didOf(otherSeed) }),
     // The SDK canonicaliser refuses such a number, so the marker is signed over the JCS text a
     // producer would emit. The canonicalizer may reject it before the explicit magnitude check.
-    "a revokedAt beyond the safe-integer range": await (async () => {
-      const unsafe: Obj = { ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 };
-      const jcs = JSON.stringify(Object.fromEntries(Object.entries(unsafe).sort(([a], [b]) => a < b ? -1 : 1)));
-      const value = Buffer.from(await ed25519Sign(Buffer.from(`dacs-revocation:v1:${createHash("sha256").update(jcs).digest("hex")}`, "utf8"),
-        privateKeyFromSeed(seed))).toString("base64url");
-      return verdict({ ...unsafe, signature: { algorithm: "ed25519", signer: didOf(seed), value } });
-    })(),
+    "a revokedAt beyond the safe-integer range": await verdict(await signedOverJcsText({ ...tuple, revokedAt: Number.MAX_SAFE_INTEGER + 2 })),
     "no signature": await verdict({ ...tuple }),
     "a signature list": await verdict({ ...tuple, signature: [(await signed(tuple)).signature] }),
     "a bare signature string": await verdict({ ...tuple, signature: (await signed(tuple)).signature.value }),
@@ -120,7 +130,7 @@ test("RB-4: a validly signed marker revokes only the exact listing tuple, signed
   };
   assert.deepEqual(rejected, Object.fromEntries(Object.keys(rejected).map((name) => [name, false])));
   // A legacy listing names its id as serviceId.
-  const legacy: VerifiedListing = { ...listing, scope: {}, listing: { serviceId: "svc" }, profile: "legacy-sdk-v0.1" };
+  const legacy: VerifiedListing = { ...listing, scope: { serviceId: "svc" }, listing: { serviceId: "svc" } as unknown as LegacyMvpListing, profile: "legacy-sdk-v0.1" };
   assert.equal(await verdict(await signed(tuple), 2, legacy), true);
   assert.equal(await verdict(await signed({ ...tuple, listingId: "other" }), 2, legacy), false);
 });
@@ -207,5 +217,33 @@ test("both listing-index statuses require a complete summary before completing a
     }
     assert.equal(complete({ ...entry, summary: { ...summary, future: { inert: true } } }), true);
     assert.equal(complete({ ...entry, anchor: [] }), false);
+  }
+});
+
+test("revoked index rows compare CF-3 identities across claim schemes and retain the exact logical address", async () => {
+  const { listingIndexEntryIsComplete } = await import("../src/catalog/wellknown.js");
+  const binding = fixtures.bindings["opaque-name"];
+  const complete = (publisher: string, seller: string, logicalPublisher = publisher) => listingIndexEntryIsComplete({
+    listingId: binding.listingId, version: binding.listingVersion, contentHash: binding.listingContentHash,
+    anchor: { kind: "storage-program", locator: binding.markerAnchor.locator },
+    summary: { title: "Service", category: "services.other", tags: [] }, status: "revoked",
+    revocation: { ...binding, sellerPrimaryClaim: publisher,
+      logicalAddress: revocationLogicalAddress(logicalPublisher, fixtures.listing.listingId, fixtures.listing.listingVersion) },
+  }, seller);
+  for (const seller of [fixtures.listing.sellerPrimaryClaim, "key:ab", `did:demos:agent:${"a".repeat(64)}`, "future-claim:publisher"]) {
+    const publisher = `${seller}?channel=directory`;
+    assert.equal(complete(seller, seller), true, `${seller}: unqualified`);
+    assert.equal(complete(publisher, seller), true, `${seller}: qualified publisher`);
+    assert.equal(complete(publisher, `${seller}?region=eu`), true, `${seller}: different qualifiers`);
+    assert.equal(complete(publisher, seller, seller), false, `${seller}: logical address needs the exact publisher`);
+    assert.equal(complete(publisher, `${seller}0`), false, `${seller}: different identifier`);
+    assert.equal(complete(publisher, `other:${seller.slice(seller.indexOf(":") + 1)}`), false, `${seller}: different scheme`);
+    for (const suffix of ["?", "?channel=%ZZ", "?channel=one&channel=two", "?z=one&a=two"]) {
+      assert.equal(complete(`${seller}${suffix}`, seller), false, `${seller}: malformed publisher ${suffix}`);
+      assert.equal(complete(publisher, `${seller}${suffix}`), false, `${seller}: malformed seller ${suffix}`);
+    }
+  }
+  for (const malformed of ["not-a-claim", `did:demos:agent:${"A".repeat(64)}`, "key:ab?channel=%ZZ"]) {
+    assert.equal(complete(malformed, malformed), false, "equal malformed references cannot complete a row");
   }
 });

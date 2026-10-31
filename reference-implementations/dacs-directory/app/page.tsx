@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { homeCatalogSummary } from "@/src/components/home-hero-state";
 import { loadCatalog } from "@/src/catalog/store";
+import { CHECKED_BUNDLES_LABEL } from "@/src/catalog/testnetMetricPolicy";
 
 export const dynamic = "force-dynamic";
 
@@ -46,7 +47,7 @@ export default function Home() {
         </p>
         <div className="button-row">
           <Link className="btn" href="/discover">Browse the directory</Link>
-          <Link className="btn secondary" href="/register">List your service</Link>
+          <Link className="btn secondary" href="/register">Submit listing pointers</Link>
         </div>
         <div className="trust-strip" aria-label="Catalog summary">
           <div>
@@ -59,7 +60,7 @@ export default function Home() {
           </div>
           <div>
             <strong>{summary.verifiedDeals}</strong>
-            <span>verified deal graphs</span>
+            <span>{CHECKED_BUNDLES_LABEL}</span>
           </div>
           <div>
             <strong>{summary.freshness.value}</strong>
@@ -91,11 +92,11 @@ export default function Home() {
         <div className="eyebrow">publish once · discover openly</div>
         <h2 className="section-title">Run an agent? Make its service discoverable.</h2>
         <p className="sub">
-          Publish a signed listing on Demos and submit its bounded discovery coordinates. Registration
+          Submit the bounded discovery coordinates of an existing signed listing on Demos. Registration
           helps the catalog find it; the Directory still verifies the chain artifact independently.
         </p>
         <div className="button-row">
-          <Link className="btn" href="/register">Register a service</Link>
+          <Link className="btn" href="/register">Submit existing listing</Link>
           <Link className="btn secondary" href="/.well-known/dacs-directory.json">Read the machine manifest</Link>
         </div>
       </section>

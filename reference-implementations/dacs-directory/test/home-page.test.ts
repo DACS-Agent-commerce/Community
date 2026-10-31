@@ -53,7 +53,7 @@ test("the homepage renders the stored catalog's summary and links only Directory
   assert.deepEqual(summaryStrip(render()), [
     ["0", "active services"],
     ["0", "indexed sellers"],
-    ["0", "verified deal graphs"],
+    ["0", "signature-checked bundles; not counted as outcomes"],
     ["pending", "initial chain index"],
   ]);
 
@@ -61,7 +61,7 @@ test("the homepage renders the stored catalog's summary and links only Directory
   assert.deepEqual(summaryStrip(render()), [
     ["0", "active services"],
     ["0", "indexed sellers"],
-    ["0", "verified deal graphs"],
+    ["0", "signature-checked bundles; not counted as outcomes"],
     ["5m", "last index; no active listings"],
   ]);
 
@@ -75,9 +75,10 @@ test("the homepage renders the stored catalog's summary and links only Directory
   assert.deepEqual(summaryStrip(html), [
     ["5", "active services"],
     ["2", "indexed sellers"],
-    ["3", "verified deal graphs"],
+    ["3", "signature-checked bundles; not counted as outcomes"],
     ["7m", "since last index"],
   ]);
+  assert.doesNotMatch(html, /observed bundles|verified deal graphs|\d+(?:\.\d+)?\s*(?:%|stars|rating|score)/i);
 
   assert.deepEqual([...html.matchAll(/ href="([^"]*)"/g)].map(([, href]) => href), [
     "/discover",

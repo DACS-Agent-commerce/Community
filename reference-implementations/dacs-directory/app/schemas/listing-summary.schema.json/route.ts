@@ -3,5 +3,7 @@ import { listingSummarySchema } from "@/src/catalog/contracts";
 import { catalogJson } from "@/src/catalog/http";
 
 export async function GET(req: NextRequest) {
-  return catalogJson(req, listingSummarySchema, { cacheControl: "public, max-age=86400, immutable" });
+  // The schema URL is unversioned, so it must not be cached as immutable: a
+  // contract change has to reach clients within minutes (ETag revalidates).
+  return catalogJson(req, listingSummarySchema, { cacheControl: "public, max-age=300, must-revalidate" });
 }

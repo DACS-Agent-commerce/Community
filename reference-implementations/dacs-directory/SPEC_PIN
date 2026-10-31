@@ -1,9 +1,12 @@
 # DACS Standard source revision used by this Directory's partial implementation
-# github.com/DACS-Agent-commerce/DACS-Standard, v0.4 (annotated tag 0be9e80b342d0f3e269ae9ab45c2bbc372f161d4)
-4bb9e48a1095ab32c06c25b7c0b52018d3ce4091
+# github.com/DACS-Agent-commerce/DACS-Standard, same revision as the pinned SDK
+d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # Additional primary-claim profile: did:demos:agent:<64 lowercase hex>, Ed25519,
 # from DACS-Standard #296 at 725fa78bd124a7adb65df27adee376d5d44a4bd7.
 # This is a source pin, not a declaration of complete DACS conformance.
+# Additional deviation-schema fixture from Standard 4bb9e48a1095ab32c06c25b7c0b52018d3ce4091:
+# conformance/implementation-manifest.schema.json
+# SHA-256: e6dfc82a621737c2a422aa0708e10776f832608255f5bdc77acacbd77aabf805
 #
 # Implemented and tested in this split:
 # - BundleBinding BB-4 signature/member checks and strict SIG-6 envelope decoding:
@@ -26,7 +29,9 @@
 #   Every required/oneOf member must declare a boolean verificationRequired;
 #   VerifyResult shape is checked even when verificationRequired is false.
 #   BundleRequirement requires requirementVersion "1". Result and policy methods
-#   must belong to the pinned eight-kind DACS-2 VerificationMethod registry.
+#   must belong to the nine-kind DACS-2 VerificationMethod registry: the eight
+#   kinds of the pinned revision plus demos-gcr-domain, which is defined by the
+#   Standard revision the pinned SDK declares (STANDARD_REV, scripts/setup-sdk.sh).
 #   Unversioned requirements select the latest version in the supplied roster.
 #   Primary selection authenticates the exact result without overriding explicit
 #   listing recipe pins. Every presentedBy requires a trusted method-specific
@@ -42,6 +47,11 @@
 #   scope, signer and validator epoch. test/authority-attestation.test.ts uses a
 #   signed fixture adapter; it is not a production method-specific verifier.
 #
+# Legacy SDK-MVP bundles with nonempty vetRecords remain indeterminate: there
+# is no session-bound composite-verification adapter. They never count toward
+# reputation; DealRecord.verificationLimitation and status.legacyVetUnsupportedDeals
+# disclose the exclusion (test/legacy-deal-evidence.test.ts).
+#
 # Pending production integration (these helpers do not constrain current session
 # admission or identity tiers): historical IdentityBundle/challenge authentication,
 # session recipeRegistryVersion snapshot selection, required-claim matching and
@@ -54,14 +64,27 @@
 # agreement/listing conformance are pending; graph reference verification alone
 # does not establish these properties. No DACS_RAIL_SNAPSHOTS adapter exists here.
 #
+# Commitment finality: current pre-commit abort evidence retains authenticated fault/cancellation
+# standing without a finality adapter; committed current and legacy credit require a server-owned
+# CommitmentVerifier; default indexing withholds committed credit without one. Signed records,
+# finalized receipt binding, CA-8 consensus time, validity/deadline windows, credit
+# kept across withdrawal, and exact historical tuples are tested in
+# test/commitment-finality.test.ts and test/listing-expiry-history.test.ts.
+# The test receipt authority is not Demos consensus.
+#
 # Other current limitations:
 # - Only did:demos:agent key resolution is enabled for BundleBinding carriage.
 # - New current listings and revocation markers enforce strict SIG-6 encoding.
 #   Historical current hex listings require exact operator-controlled native/hash/
 #   tuple/seller import pins (DACS_HISTORICAL_LISTING_IMPORTS; README). Other graph
 #   envelopes retain legacy decoding. BundleBinding verification is strict.
-# - SDK canonicalization accepts only integer numbers. Fractional publication is
-#   unsupported; listing publication rejects fractional negotiation percentages.
+#   Per-claim presentation signatures use the Directory compatibility profile:
+#   canonical Base64URL, historical 64-byte hex (no 0x prefix), or padded Base64.
+#   CORE SIG-6 does not prescribe these per-claim strings; the pinned vector uses
+#   padded Base64. Catalog admission does not establish SDK transaction readiness.
+# - Current canonicalization accepts bounded fractional numbers; Listing readers allow
+#   fractional negotiation percentages. Frozen historical hashing requires safe integers.
+#   Publication rejects fractional negotiation percentages.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
@@ -75,11 +98,22 @@
 # Vendored conformance inputs (byte hashes and local decisions are checked by
 # test/standard-vectors.test.ts, test/listing-vectors.test.ts and
 # test/revocation-vectors.test.ts):
-# conformance/vectors/security/signature-value-encoding-v0.1.json
-# sha256 bf47cd0a42b0e0e30f2ff032327395d5a1b820758e6188c51212eb9129ba8312
+# SDK compatibility patch: scripts/dacs-sdk-compat.patch; its SHA-256 and the
+# rebuilt distribution SHA-256 are pinned in scripts/setup-sdk.sh.
+# The compatibility patch applies DACS-1 §6.3.4 + CORE §B.2 LR-2:
+# at most 16,384 canonical Listing bytes with signature omitted. Explicit legacy
+# graph references retain their historical signature decoders and NFC member-name
+# hashing. scripts/sdk-compat-output.mjs emits the two patched modules with the
+# pinned Node transformer after the SDK TypeScript build.
+# Directory compatibility retains zero retentionYears; §6.3.4 declares a number
+# without a positive-only rule, while the unpatched SDK requires a positive integer.
+# conformance/vectors/security/signature-value-encoding-v0.1.json (at d45c0a2)
+# sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)
 # sha256 0e70d2c12d9d4dd14d676519e1841b12767051153044659adcadbf8a3c994933
-# conformance/vectors/security/listing-preserve-unknown-v0.1.json 7dbe60aa89d44321a3bb04661b1d71fc15bc84501b76f23b486a05cb905f91bd
+# The SDK Listing schema, including DACS-4 section 9.6.3 DPA-1, and the next
+# vector are at d45c0a2, the Standard revision the pinned SDK declares.
+# conformance/vectors/security/listing-preserve-unknown-v0.1.json 987d3661c2c4ce9da3f4e7c57c55c7cda154743c99d1d3ef4ae164e8a5ae77e9
 # conformance/vectors/security/revocation-binding-v0.3.json 3e83dfe5cb603e3dce98a4280e2456bb30bcae9979f4a0db1ae322982bdaf1ce
 # The revocation adapter excludes remote-catalog freshness (not consumed here).
 # Its marker-level rejected verdicts and entry-completeness checks do not assert

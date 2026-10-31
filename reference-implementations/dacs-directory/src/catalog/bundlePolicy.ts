@@ -1,9 +1,12 @@
-import { contentHash, stripSignature } from "@kynesyslabs/dacs/canonical";
-import type { AttestationBundle } from "@kynesyslabs/dacs/artifacts";
-import type { BundleVerification } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
+import { legacyListingHash } from "./legacyListingHash.js";
+import { stripSignature } from "@kynesyslabs/dacs/canonical";
+import {
+  isLegacyMvpAttestationBundle,
+} from "@kynesyslabs/dacs/artifacts";
+import type { BundleVerification } from "@kynesyslabs/dacs";
 
 import { bundleSignerPolicy, demosSigningIdentity } from "./bundleSignerPolicy.js";
-import { verifyListing, verifyStoredListing } from "./listingVerification.js";
+import { storedListingHash, verifyListing, verifyStoredListing } from "./listingVerification.js";
 import {
   resolvePrimaryClaimKey,
   resolveDemosPrimaryClaimKey,
@@ -84,11 +87,11 @@ export function bundleMatchesRegisteredAnchor(
  * they must never be allowed to reassign somebody else's bundle/reputation.
  */
 export function bundleMatchesRegisteredDeal(
-  bundle: AttestationBundle | undefined,
+  bundle: BundleVerification["bundle"],
   deal: RegisteredDeal,
   catalogSeller: string,
 ): boolean {
-  if (!bundle || bundle.jobId !== deal.jobId) return false;
+  if (!isLegacyMvpAttestationBundle(bundle) || bundle.jobId !== deal.jobId) return false;
   const buyers = bundle.parties.filter((p) => p.role === "buyer");
   const sellers = bundle.parties.filter((p) => p.role === "seller");
   return buyers.length === 1 && sellers.length === 1 &&
@@ -124,6 +127,14 @@ export interface ResolvedArtifact {
   locator?: string;
 }
 
+// A current Listing keeps its own hash profile even when a historical bundle
+// references it. Other artifacts on this path use the frozen SDK-MVP format.
+function referenceHash(artifact: ResolvedArtifact, expectedHash?: string): string {
+  return artifact.kind === "dacs-1-listing"
+    ? storedListingHash(artifact.raw, expectedHash)
+    : legacyListingHash(stripSignature(artifact.raw));
+}
+
 interface ExpectedArtifact {
   kind: string;
   id: string;
@@ -136,7 +147,8 @@ function expectedArtifacts(verification: BundleVerification): ExpectedArtifact[]
   // The pinned compatibility SDK does not resolve or report amendments/ratings.
   // A nonempty set must fail closed here instead of receiving a partial "strict"
   // verdict. The current-profile evidence graph resolves ratingRefs separately.
-  if (!bundle || bundle.agreementRef.kind !== "dacs-3-agreement" ||
+  if (!isLegacyMvpAttestationBundle(bundle) ||
+      !bundle.agreementRef || bundle.agreementRef.kind !== "dacs-3-agreement" ||
       bundle.settlementEvidence.some((ref) => ref.kind !== "dacs-4-evidence") ||
       bundle.vetRecords.some((ref) => ref.kind !== "dacs-2-verifyresult") ||
       [extended?.amendments, extended?.ratingRefs].some((refs) => refs !== undefined &&
@@ -197,7 +209,7 @@ export async function verifyReferencedArtifactSignature(
       ? [raw.signature] : [];
   if (entries.length === 0) return false;
   const validSigners = new Set<string>();
-  const message = Buffer.from(separator + contentHash(scope), "utf8");
+  const message = Buffer.from(separator + legacyListingHash(scope), "utf8");
   for (const entry of entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
     const s = entry as Record<string, unknown>;
@@ -251,7 +263,13 @@ export async function refsPassStrictPolicy(
         (artifact.raw.buyer !== bundleBuyers[0].primaryClaim ||
          artifact.raw.seller !== bundleSellers[0].primaryClaim)) return false;
     try {
-      if (contentHash(stripSignature(artifact.raw)) !== want.contentHash) return false;
+      if (referenceHash(artifact, want.contentHash) !== want.contentHash) return false;
+      if (artifact.kind === "dacs-1-listing") {
+        const listing = artifact.locator
+          ? await verifyStoredListing(artifact.raw, artifact.locator, resolveKey)
+          : await verifyListing(artifact.raw, resolveKey);
+        if (listing?.contentHash !== want.contentHash) return false;
+      }
     } catch {
       return false;
     }
@@ -284,18 +302,11 @@ export function verifiedListingTerms(
       : null;
   if (version === null) return undefined;
   try {
-    if (listingId !== ref.listingId || version !== ref.version || contentHash(scope) !== ref.contentHash) return undefined;
+    if (listingId !== ref.listingId || version !== ref.version || referenceHash(artifact, ref.contentHash) !== ref.contentHash) return undefined;
   } catch {
     return undefined;
   }
   return scope.terms && typeof scope.terms === "object" && !Array.isArray(scope.terms)
     ? scope.terms as Record<string, unknown>
     : undefined;
-}
-
-export function bundleCategory(
-  bundle: AttestationBundle | undefined,
-  categoriesByListing: Map<string, string>,
-): string | undefined {
-  return bundle ? categoriesByListing.get(String(bundle.listingRef.listingId)) : undefined;
 }
