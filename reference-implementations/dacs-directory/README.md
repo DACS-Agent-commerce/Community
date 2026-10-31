@@ -707,3 +707,5 @@ wallet hex and the Standard vector's padded Base64 beside Base64URL; the Listing
 signature stays SIG-6 Base64URL. A string `verificationMethod` is refused, a revocation
 marker accepts a numeric `revokedAt` within ±(2^53−1), and its binding carries the exact `presentedBy`
 (RB-2). `test/listing-verification.test.ts` and `test/revocation-vectors.test.ts` pin them.
+
+Directory API freshness and coverage fields: [scan progress and revocation coverage](docs/freshness-api.md).

@@ -55,6 +55,8 @@ export interface ScannedArtifacts {
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
   chainTip: number;
+  /** Null unless the scan actually observed a valid tip. */
+  observedTip: number | null;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
@@ -436,6 +438,7 @@ export async function scanChain(
   let highestTxId = since;
   let complete = false;
   let chainTip = since;
+  let observedTip: number | null = null;
   let scanError: string | undefined;
   const finalityDepth = nonNegativeInt(process.env.DACS_SCAN_FINALITY_DEPTH, 2);
 
@@ -454,7 +457,10 @@ export async function scanChain(
       break;
     }
     const ids = page.map((t) => t.id).filter((i): i is number => typeof i === "number");
-    if (cursor === "latest" && ids.length) chainTip = Math.max(...ids);
+    if (cursor === "latest" && ids.length) {
+      chainTip = Math.max(...ids);
+      if (Number.isSafeInteger(chainTip) && chainTip >= 0) observedTip = chainTip;
+    }
     const finalizedTip = Math.max(0, chainTip - finalityDepth);
     // Only txs beyond the cursor are new work.
     const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= finalizedTip));
@@ -616,5 +622,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
 }
