@@ -29,6 +29,7 @@ import {
 } from "./bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "./types.js";
 import { contentHash } from "./canonical.js";
+import { deriveStorageAddress } from "./chain.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -44,6 +45,8 @@ export interface ScannedArtifacts {
   programs: Map<string, string | null>;
   /** listing content hash → every revocation candidate seen in this window, oldest first. */
   revocations: Map<string, string[]>;
+  /** Unreadable revocation candidate locator → the owner its confirmed CREATE transaction proves. */
+  unreadRevocationOwners: Map<string, string>;
   /** jobId → BB-4-verified BundleBindings discovered in this scan window. */
   bundleBindings: Map<string, BundleBinding[]>;
   /** jobId + role keys whose deterministic total-work cap was exhausted. */
@@ -223,6 +226,31 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
   const json = parseWireJson(await res.text()) as { result?: number; response?: unknown } | null;
   if (json?.result !== 200) throw new Error(`nodeCall ${message} → ${json?.result}`);
   return json.response;
+}
+
+/**
+ * A revocation marker named by a confirmed CREATE whose storage read failed. The address is
+ * derived from the sender, name, nonce and salt, so the sender is the program's owner; the
+ * listing hash comes from the marker value in the transaction. Discovery only: the indexer
+ * still reads and verifies the marker (RB-4) before publishing a revocation.
+ */
+export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; owner: string } | null {
+  const tx = objectValue(value);
+  if (!tx || tx.status !== "confirmed" || tx.type !== "storageProgram") return null;
+  if (typeof tx.to !== "string" || !/^stor-[0-9a-f]{40}$/.test(tx.to)) return null;
+  const envelope = parsedObject(tx.content);
+  if (!envelope || envelope.type !== "storageProgram" || envelope.to !== tx.to) return null;
+  // The node reports the nonce as a number or a decimal string.
+  const nonce = typeof envelope.nonce === "string" && /^\d{1,15}$/.test(envelope.nonce) ? Number(envelope.nonce) : envelope.nonce;
+  if (typeof envelope.from !== "string" || !/^(0x)?[0-9a-fA-F]{64}$/.test(envelope.from) || !Number.isSafeInteger(nonce)) return null;
+  if (!Array.isArray(envelope.data) || envelope.data.length !== 2 || envelope.data[0] !== "storageProgram") return null;
+  const write = objectValue(envelope.data[1]);
+  if (!write || write.operation !== "CREATE_STORAGE_PROGRAM" || write.storageAddress !== tx.to) return null;
+  if (typeof write.programName !== "string" || typeof write.salt !== "string") return null;
+  if (deriveStorageAddress(envelope.from, write.programName, Number(nonce), write.salt) !== tx.to) return null;
+  if (!isListingRevocationCandidate(write.data)) return null;
+  const listingHash = String((write.data as Record<string, unknown>).listingContentHash).toLowerCase();
+  return { locator: tx.to, listingHash, owner: `0x${envelope.from.replace(/^0x/, "").toLowerCase()}` };
 }
 
 interface StorageWriteCandidate {
@@ -434,6 +462,7 @@ export async function scanChain(
   const addresses = new Set<string>();
   for (const locator of opts.retryLocators ?? []) if (/^stor-[0-9a-f]{40}$/.test(locator)) addresses.add(locator);
   const writeCandidates: StorageWriteCandidate[] = [];
+  const revocationCreates = new Map<string, { listingHash: string; owner: string }>();
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
@@ -472,6 +501,8 @@ export async function scanChain(
       for (const address of inTx) addresses.add(address);
       const candidate = storageWriteCandidate(tx);
       if (candidate) writeCandidates.push(candidate);
+      const unread = unreadRevocationCreate(tx);
+      if (unread && !revocationCreates.has(unread.locator)) revocationCreates.set(unread.locator, unread);
     }
     if (ids.length === 0) break;
     const lowest = Math.min(...ids);
@@ -485,6 +516,7 @@ export async function scanChain(
   const listings = new Map<string, string>();
   const programs = new Map<string, string | null>(opts.knownPrograms);
   const revocations = new Map<string, Set<string>>();
+  const unreadRevocationOwners = new Map<string, string>();
   const bundleBindings = new Map<string, BundleBinding[]>();
   const bundleBindingOverflow = new Set<string>();
   const observations: ScannedArtifacts["observations"] = [];
@@ -508,6 +540,13 @@ export async function scanChain(
         code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
         message: "storage program could not be read under the public indexer policy",
       });
+      // An unread marker its owner created still counts as a candidate, so the indexer
+      // can hold that owner's Listing until a read settles it (RB-6).
+      const create = revocationCreates.get(address);
+      if (create) {
+        addRevocationCandidate(revocations, create.listingHash, address);
+        unreadRevocationOwners.set(address, create.owner);
+      }
       continue;
     }
     const name = read.programName;
@@ -621,6 +660,6 @@ export async function scanChain(
   // Transactions are walked newest first; candidates queue in chain order.
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
-    bundleBindings, bundleBindingOverflow, omittedBindings,
+    unreadRevocationOwners, bundleBindings, bundleBindingOverflow, omittedBindings,
     txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
 }

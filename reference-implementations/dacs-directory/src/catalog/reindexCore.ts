@@ -251,9 +251,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const json = data ? boundedJson(data) : null;
       return json === null ? null : createHash("sha256").update(json, "utf8").digest("hex");
     };
+    const unreadOwners = scan.unreadRevocationOwners;
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
-        ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
+        ({ locator, owner: observed.get(locator)?.owner ?? unreadOwners.get(locator),
+          contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);

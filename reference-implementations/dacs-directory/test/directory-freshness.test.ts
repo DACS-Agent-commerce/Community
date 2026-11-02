@@ -165,3 +165,64 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
   assert.ok(!('revocationCoverage' in row));assert.ok(!('lastVerifiedAt' in row));
  }
 });
+
+// A storage read can fail for a marker the seller really created. The confirmed CREATE names its
+// sender, and the address derived from that sender proves ownership, so the seller's own Listing is
+// held until a read settles; anyone else's CREATE, or one whose address does not derive, holds nothing.
+async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean}){
+ const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
+ const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=7;const programName='dacs1-revoked:fixture';
+ const derived=deriveStorageAddress(from,programName,nonce,'');const markerRef=opts.to?opts.to(derived):derived;
+ const content=JSON.stringify({type:'storageProgram',from,to:markerRef,amount:0,nonce:opts.nonceText?String(nonce):nonce,timestamp:1,
+  data:['storageProgram',{operation:'CREATE_STORAGE_PROGRAM',storageAddress:markerRef,programName,encoding:'json',data:f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
+ const tx={id:3,to:markerRef,status:'confirmed',type:'storageProgram',blockNumber:3,hash:'ab'.repeat(32),content};
+ seedScanState({schemaVersion:10,chainIdentity:PINNED_DEMOS_CHAIN_IDENTITY,lastSeenTxId:0,listings:{},deals:{}});
+ store.saveRegistrations([{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
+ const old=globalThis.fetch;let recovered=false;
+ globalThis.fetch=async(input,init)=>{
+  if(init?.method==='POST') return Response.json({result:200,response:[{id:5},{id:4},tx,{id:2},{id:1}]});
+  const locator=String(input).split('/').at(-1);
+  if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
+  if(locator===markerRef && recovered) return Response.json({success:true,owner:from,programName,data:f.marker});
+  return new Response('',{status:503});
+ };
+ const {reindexAll}=await import('../src/catalog/reindexCore.js');
+ const opts2={nodeDeployment:onPinnedChain,resolveIdentities:async()=>({}),log:()=>{}};
+ const row=()=>store.loadCatalog().sellers.flatMap(s=>s.listings).find(l=>l.contentHash===f.hash);
+ try{
+  await reindexAll(opts2);const first=row();
+  return {first,recover:async()=>{
+   const db=new Database(join(root,'directory.sqlite'));
+   // Test-only: make the artifact and candidate retries due now instead of after their backoff.
+   try{db.prepare("UPDATE artifacts SET status='retry',next_retry_at=0 WHERE locator=?").run(markerRef);
+    db.prepare("DELETE FROM revocation_candidate_retries WHERE locator=?").run(markerRef);}finally{db.close();}
+   store.saveScanState({...store.loadScanState(),lastSeenTxId:10});recovered=true;
+   globalThis.fetch=async(input,init)=>{
+    if(init?.method==='POST') return Response.json({result:200,response:[{id:5},{id:4},tx,{id:2},{id:1}]});
+    const locator=String(input).split('/').at(-1);
+    if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
+    if(locator===markerRef) return Response.json({success:true,owner:from,programName,data:f.marker});
+    return new Response('',{status:503});
+   };
+   try{await reindexAll(opts2);return row();}finally{globalThis.fetch=old;}
+  }};
+ }finally{if(!recovered)globalThis.fetch=old;}
+}
+test('owner-created marker that cannot be read holds the listing, then revokes it once read',async()=>{
+ const pass=await unreadCreatePass({});
+ assert.equal(pass.first,undefined,'held, not published active');
+ const after=await pass.recover();
+ assert.equal(after?.status,'revoked');assert.ok(after?.revocation);
+});
+test('a CREATE whose nonce the node reports as text still holds the listing',async()=>{
+ const pass=await unreadCreatePass({nonceText:true});
+ assert.equal(pass.first,undefined);
+});
+test('unreadable marker created by another key does not hold the listing',async()=>{
+ const pass=await unreadCreatePass({from:'0x'+'e'.repeat(64)});
+ assert.equal(pass.first?.status,'active');
+});
+test('unreadable marker whose address does not derive from its sender does not hold the listing',async()=>{
+ const pass=await unreadCreatePass({to:()=> 'stor-'+'f'.repeat(40)});
+ assert.equal(pass.first?.status,'active');
+});
