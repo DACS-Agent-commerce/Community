@@ -75,7 +75,7 @@ test("the service page labels catalog authentication per profile and leaves tran
   assert.match(evidenceRow(fixtureHtml, "Transaction readiness"), /^Unassessed here/);
 });
 
-test("the service page hides the contact button when the seller was unreachable and shows how to buy", async (t) => {
+test("the service page keeps the contact button after a failed check and shows how to buy", async (t) => {
   const data = mkdtempSync(join(tmpdir(), "service-page-"));
   t.after(() => rmSync(data, { recursive: true, force: true }));
   process.env.DACS_DIRECTORY_DATA = data;

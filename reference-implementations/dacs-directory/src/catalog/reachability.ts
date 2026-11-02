@@ -16,8 +16,10 @@ const boundedInt = (value: unknown, fallback: number, min: number, max: number):
 
 /**
  * Classify a failed probe. A redirect with no target, or one past the redirect
- * limit, still came from the target, so it proves reachability. Any other
- * redirect failure (an unparseable target, a failing next host) counts as unreachable.
+ * limit, still came from the target, so it proves reachability. A redirect to a
+ * target the outbound policy rejects is unknown, like any rejected target; other
+ * failures while following a redirect (an unparseable target, a failing next host)
+ * count as unreachable.
  */
 export function reachabilityFromProbeError(error: unknown): ReachabilityHint["status"] {
   if (error instanceof RedirectLimitError) return "reachable";
