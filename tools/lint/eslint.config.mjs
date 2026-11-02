@@ -29,8 +29,8 @@ export default [
     linterOptions: { reportUnusedDisableDirectives: "off" },
   },
   {
-    // .vendor holds the pinned SDK copy that the setup script fetches.
-    ignores: ["**/node_modules/**", "**/.next/**", "**/.vendor/**", "**/vendor/**", "**/test-results/**", "**/playwright-report/**"],
+    // vendor holds the pinned SDK copy that the setup script fetches.
+    ignores: ["**/node_modules/**", "**/.next/**", "reference-implementations/dacs-directory/vendor/**", "**/test-results/**", "**/playwright-report/**"],
   },
   {
     files: ["**/*.{js,mjs,cjs}"],
