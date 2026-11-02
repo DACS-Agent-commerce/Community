@@ -1,7 +1,7 @@
 /**
  * Startup gate of the testnet deployment (deploy/testnet): exits 1 unless this
  * environment is the testnet profile, both RPCs name the same endpoint and it serves the
- * pinned testnet chain. The systemd units run it before the web server and
+ * pinned chain. The systemd units run it before the web server and
  * before every index pass, with --built to also check the compiled manifest.
  *
  *   npm run check:testnet
@@ -23,4 +23,4 @@ if (!result.ok) {
   console.error(`refusing to start: ${result.reason}`);
   process.exit(1);
 }
-console.log(`testnet chain ${result.chainIdentity} confirmed`);
+console.log(`pinned chain ${result.chainIdentity} confirmed`);

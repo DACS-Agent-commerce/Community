@@ -21,7 +21,7 @@ Both units run `npm run check:testnet -- --built` before they start
 - the two RPC settings name different endpoints (this profile requires one
   endpoint for the server and public readers);
 - the compiled manifest advertises an RPC different from those settings;
-- `DEMOS_CHAIN_IDENTITY` is set to anything but a reviewed testnet identity
+- `DEMOS_CHAIN_IDENTITY` is set to anything but an accepted chain identity
   (`TESTNET_CHAIN_IDENTITIES` in `src/catalog/testnetDeployment.ts`);
 - the configured node serves another chain, or cannot be read within 30 seconds.
 
@@ -48,6 +48,7 @@ and `npm` on systemd's default `PATH`. As root:
 5. Copy the three unit files to `/etc/systemd/system/`, then
    `systemctl daemon-reload && systemctl enable --now dacs-directory.service dacs-directory-index.timer`.
 6. Add the site from `Caddyfile.example` to the Caddy configuration and reload Caddy.
+   Its `reverse_proxy` port must match `PORT` in the settings file (3400 in the example).
 
 ## Check
 

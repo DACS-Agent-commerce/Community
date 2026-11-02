@@ -13,8 +13,10 @@ import { PINNED_DEMOS_CHAIN_IDENTITY } from "./nodeDeployment.js";
 export const TESTNET_NETWORK = "testnet";
 
 /**
- * Reviewed Demos testnet chain identities, in the form DEMOS_CHAIN_IDENTITY
- * takes. An entry is added by a reviewed source change, never by a setting.
+ * Chain identities this profile accepts, in the form DEMOS_CHAIN_IDENTITY takes:
+ * today only the pinned chain (nodeDeployment.ts). The node reports its own chain,
+ * so a match shows the configured node serves the pinned chain; it does not prove
+ * the chain is the testnet. An entry is added by a source change, never by a setting.
  */
 export const TESTNET_CHAIN_IDENTITIES: readonly string[] = [PINNED_DEMOS_CHAIN_IDENTITY];
 
@@ -61,7 +63,7 @@ export function testnetConfigRefusal(env: Readonly<Record<string, string | undef
   }
   const identity = env.DEMOS_CHAIN_IDENTITY?.trim().toLowerCase();
   if (identity && !TESTNET_CHAIN_IDENTITIES.includes(identity)) {
-    return "DEMOS_CHAIN_IDENTITY is not a reviewed testnet chain identity";
+    return "DEMOS_CHAIN_IDENTITY is not an accepted chain identity";
   }
   return null;
 }

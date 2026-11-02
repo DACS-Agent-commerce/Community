@@ -70,8 +70,8 @@ five minutes) — the catalog is a cache and re-verifies everything against chai
 server and a five-minute index timer, an example settings file and a Caddy site. Both
 units first run `npm run check:testnet`, which refuses to start unless
 `DACS_DIRECTORY_NETWORK=testnet`, both RPC settings are credential-free HTTPS URLs whose
-hosts do not name mainnet, any `DEMOS_CHAIN_IDENTITY` is a reviewed testnet identity, and
-the configured node serves the pinned testnet chain.
+hosts do not name mainnet, any `DEMOS_CHAIN_IDENTITY` is one of the accepted chain identities (today only the
+pinned chain in `src/catalog/nodeDeployment.ts`), and the configured node serves that chain.
 
 ### Fixture agent: Counterparty Evidence Desk
 

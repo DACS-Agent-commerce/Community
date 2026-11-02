@@ -45,9 +45,9 @@ test("an RPC that names mainnet, is not https, carries a user or is missing is r
   }
 });
 
-test("a configured chain identity that is not a reviewed testnet identity is refused", () => {
+test("a configured chain identity that is not an accepted chain identity is refused", () => {
   assert.match(String(testnetConfigRefusal({ ...profile, DEMOS_CHAIN_IDENTITY: "ab".repeat(32) })),
-    /not a reviewed testnet chain identity/);
+    /not an accepted chain identity/);
   assert.equal(testnetConfigRefusal({ ...profile, DEMOS_CHAIN_IDENTITY: TESTNET_CHAIN_IDENTITIES[0].toUpperCase() }), null);
 });
 
@@ -94,7 +94,7 @@ test("startup refuses distinct public and private RPCs before reading either nod
   }
 });
 
-test("startup accepts the testnet profile on the reviewed testnet chain", async () => {
+test("startup accepts the testnet profile on the pinned chain", async () => {
   assert.deepEqual(await checkTestnetStartup(), { ok: true, chainIdentity: TESTNET_CHAIN_IDENTITIES[0] });
 });
 
