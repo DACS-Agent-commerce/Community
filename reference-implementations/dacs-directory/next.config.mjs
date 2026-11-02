@@ -30,9 +30,19 @@ const nextConfig = {
           }),
         );
       }
-      config.plugins.push(
-        new webpack.ProvidePlugin({ Buffer: [...BROWSER_BUFFER_PROVISION] }),
-      );
+      // Next registers its own ProvidePlugin for Buffer (the plain npm
+      // `buffer`), and the first registration wins, so point that one at the
+      // base64url-aware shim instead of adding a second.
+      let provided = false;
+      for (const plugin of config.plugins) {
+        if (plugin instanceof webpack.ProvidePlugin && plugin.definitions.Buffer) {
+          plugin.definitions.Buffer = [...BROWSER_BUFFER_PROVISION];
+          provided = true;
+        }
+      }
+      if (!provided) {
+        config.plugins.push(new webpack.ProvidePlugin({ Buffer: [...BROWSER_BUFFER_PROVISION] }));
+      }
     }
     return config;
   },
