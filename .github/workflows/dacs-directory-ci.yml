@@ -9,9 +9,6 @@ on:
       - "reference-implementations/dacs-directory/**"
       - ".github/workflows/dacs-directory-ci.yml"
   pull_request:
-    paths:
-      - "reference-implementations/dacs-directory/**"
-      - ".github/workflows/dacs-directory-ci.yml"
 
 # Cancel superseded runs for the same ref to save runner minutes.
 concurrency:
