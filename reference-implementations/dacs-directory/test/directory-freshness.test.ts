@@ -170,7 +170,7 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
 // marker, and the Listing is held only while that carried value passes RB-4 against it and the
 // anchor stays unreadable. The node reports the transaction, so a forged value (not even kept),
 // another key's CREATE or an address that does not derive from its inputs holds nothing.
-async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean}){
+async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean;emptyRead?:boolean}){
  const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
  const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=100+(++seq);const programName='dacs1-revoked:fixture'; // a fresh nonce gives each case its own address
  const derived=deriveStorageAddress(from,programName,nonce,'');const markerRef=opts.to?opts.to(derived):derived;
@@ -186,6 +186,7 @@ async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;
   const locator=String(input).split('/').at(-1);
   if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
   if(locator===markerRef && recovered) return Response.json({success:true,owner:from,programName,data:f.marker});
+  if(locator===markerRef && opts.emptyRead) return Response.json({success:true,owner:from,programName,data:null});
   return new Response('',{status:503});
  };
  const {reindexAll}=await import('../src/catalog/reindexCore.js');
@@ -215,6 +216,12 @@ test('owner-created marker that cannot be read holds the listing, then revokes i
  assert.equal(pass.first,undefined,'held, not published active');
  const after=await pass.recover();
  assert.equal(after?.status,'revoked');assert.ok(after?.revocation);
+});
+test('a storage reply that succeeds without the carried marker still holds the listing',async()=>{
+ const pass=await unreadCreatePass({emptyRead:true});
+ assert.equal(pass.first,undefined,'a reply with no marker has not settled it');
+ const after=await pass.recover();
+ assert.equal(after?.status,'revoked');
 });
 test('a CREATE whose nonce the node reports as text still holds the listing',async()=>{
  const pass=await unreadCreatePass({nonceText:true});
@@ -270,6 +277,8 @@ test('seller markers past the bound queue under the seller and hold the listing 
  try{db.prepare('DELETE FROM revocation_candidate_retries').run();}finally{db.close();}
  assert.equal((await f.index(read)).listings[0]?.status,'active');
  assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[]});
+ const kv=new Database(join(root,'directory.sqlite'));
+ try{assert.equal((kv.prepare("SELECT count(*) AS n FROM kv_state WHERE key LIKE ?").get(`unread-revocation:${f.hash}:%`) as {n:number}).n,0,'a settled set frees its place');}finally{kv.close();}
 });
 test('the carried-marker store is bounded: new sets past it queue instead',async()=>{
  const f=await fixture();const other=(n:number)=>'did:demos:agent:'+n.toString(16).padStart(64,'0');

@@ -287,9 +287,11 @@ export async function indexRegistration(
       const marker = readMarkers.get(found.markerAnchor.locator);
       if (marker) retainListingRevocation(found, marker);
     }
-    // A marker whose CREATE was seen but whose storage could not be read holds this Listing
+    // A kept marker whose CREATE was seen but whose storage could not be read holds this Listing
     // only while its carried value passes RB-4 against it; a forged or foreign value never
-    // does. Once the anchor reads in this pass, the ordinary path above decides it.
+    // does. Once the anchor reads in this pass, the ordinary path above decides it. A seller's
+    // entries past the store's bound wait in the candidate queue instead, which holds the
+    // Listing until each reads, whatever its tuple.
     let unreadMarkerHold = false;
     const settledUnread = new Set<string>();
     for (const entry of unreadMarkers) {

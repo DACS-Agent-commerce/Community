@@ -538,7 +538,10 @@ export async function scanChain(
 
   for (const address of addresses) {
     const read = await readStorage(address);
-    if (!read?.success || !read.programName || !read.owner) {
+    // A read that succeeds without a marker where a confirmed CREATE carried one has not
+    // settled that marker: it is unresolved, like a failed read.
+    const carriedUnresolved = revocationCreates.has(address) && Boolean(read?.success) && !isListingRevocationCandidate(read?.data);
+    if (!read?.success || !read.programName || !read.owner || carriedUnresolved) {
       failures.push({
         locator: address,
         kind: "unknown",

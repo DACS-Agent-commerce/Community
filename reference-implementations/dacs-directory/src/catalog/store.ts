@@ -297,10 +297,14 @@ export const recordUnreadRevocationMarkers = db.transaction((listingHash: string
     if (owner) admitRevocationCandidates(listingHash, queued.map(({ locator }) => ({ locator, owner: `0x${owner}` })));
   }
 });
+const deleteUnreadRevocationSet = db.prepare("DELETE FROM kv_state WHERE key = ?");
 export const dropUnreadRevocationMarkers = (listingHash: string, signer: string, locators: ReadonlySet<string>): void => {
   if (locators.size === 0) return;
-  const set = unreadRevocationMarkers(listingHash, signer);
-  setJson(unreadRevocationKey(listingHash, signer), { entries: set.entries.filter((kept) => !locators.has(kept.locator)) });
+  const key = unreadRevocationKey(listingHash, signer);
+  const entries = unreadRevocationMarkers(listingHash, signer).entries.filter((kept) => !locators.has(kept.locator));
+  // A settled set frees its place under the store's bound.
+  if (entries.length === 0) deleteUnreadRevocationSet.run(key);
+  else setJson(key, { entries });
 };
 
 /** Exact authenticated create inputs retained for recovery, never proof of success. */
