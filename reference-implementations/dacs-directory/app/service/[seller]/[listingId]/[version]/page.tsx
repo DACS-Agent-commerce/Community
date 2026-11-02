@@ -14,10 +14,14 @@ import { catalogAuthenticationLabel, directoryEvidenceState } from "@/src/compon
 export const dynamic = "force-dynamic";
 
 const DACS_PLUGIN_REPOSITORY = "https://github.com/DACS-Agent-commerce/dacs-plugin";
-// The plugin prepares fixed-price purchases paid in DEM on the Demos testnet only.
-const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM", "pay-dem"]);
+// The plugin prepares fixed-price purchases paid in DEM on the Demos testnet only. `pay-dem` is a
+// historical alias that pays only on legacy listings (see activeOffer).
+const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM"]);
+const pluginDemRail = (rail: string, profile: string | undefined) =>
+  PLUGIN_DEM_RAILS.has(rail) || (rail === "pay-dem" && profile !== "dacs-v0.1");
 // A published amount the plugin could offer: a plain positive decimal.
-const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d+)?$/.test(amount ?? "") && Number(amount) > 0;
+// DEM settles in base units of 10^-9, so a finer amount is no offer the plugin could pay.
+const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d{1,9})?$/.test(amount ?? "") && Number(amount) > 0;
 
 type Params = { seller: string; listingId: string; version: string };
 
@@ -58,12 +62,13 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const inspectHref = inspectServicePath(listing);
   const executable = activeOffer(listing);
   const engagementEndpoint = executable ? evidence.endpoint.url : undefined;
-  // A fresh failed probe means the button would open a dead address; say so instead.
-  const sellerOffline = Boolean(engagementEndpoint) && evidence.reachability.kind === "unreachable";
+  // One failed probe is a hint, not proof the seller is down: keep the link and say so.
+  const lastCheckFailed = Boolean(engagementEndpoint) && evidence.reachability.kind === "unreachable";
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
   const pluginCanBuy = Boolean(executable) && !isFixtureListing && listing.pricing.kind === "fixed" &&
-    listing.pricing.currency === "DEM" && hasPositiveAmount(listing.pricing.priceHint) && (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
+    listing.pricing.currency === "DEM" && hasPositiveAmount(listing.pricing.priceHint) &&
+    (listing.offering.rails ?? []).some((rail) => pluginDemRail(rail, listing.artifactProfile));
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
   const endpointDeclarationNote = isFixtureListing && evidence.endpoint.kind === "not-declared"
@@ -107,12 +112,12 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           )}
         </div>
         <div className="service-actions">
-          {engagementEndpoint && !sellerOffline && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
-          <a className={engagementEndpoint && !sellerOffline ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
+          {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
+          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
           <a className="btn secondary" href={inspectHref}>Inspect service</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
-        {sellerOffline && <p className="note"><strong>Seller offline:</strong> the Directory could not reach this agent in its last check, so the contact link is hidden.</p>}
+        {lastCheckFailed && <p className="note"><strong>Last check failed:</strong> the Directory could not reach this agent in its last check. It may be back; the link is kept.</p>}
         <p className="note">
           {endpointDeclarationNote} <strong>Reachability:</strong> {evidence.reachability.label}.
           {engagementEndpoint && " A declared contact route is not a health check or cryptographic trust anchor."}
@@ -128,7 +133,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
             Claude Code, find this listing, check it, and prepare a fixed-price purchase on the Demos testnet, with you
             approving the payment in your own wallet.
           </p>
-          {sellerOffline && <p><strong>This seller is offline right now,</strong> so a purchase would fail until it is reachable again.</p>}
+          {lastCheckFailed && <p><strong>This seller was unreachable in the Directory&apos;s last check,</strong> so a purchase may fail until it is reachable again.</p>}
           <p>
             Give the assistant both: another seller can publish a listing with the same name.
           </p>
