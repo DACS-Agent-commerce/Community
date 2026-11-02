@@ -269,6 +269,28 @@ test("same-chain tip regression resets only beyond the configured threshold", as
   }
 });
 
+test("after a tip-regression reset, the published cursor time is this run's, not the old cursor's", async () => {
+  const CHAIN = "e".repeat(64);
+  store.saveRegistrations([]);
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: 5000, lastChainTip: 1,
+    cursorAdvancedAt: 123, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [],
+    scanProgress: { cursor: 5000, tip: 5000, lag: 0, cursorAdvancedAt: 123, lastSuccessfulFullScanAt: 124, fromTx: 4998 } });
+  // One transaction, inside the finality depth: the reset cursor cannot advance in this pass.
+  globalThis.fetch = async () => Response.json({ result: 200, response: [{ id: 1 }] });
+  const before = Date.now();
+  try {
+    const logs: string[] = [];
+    await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeOnChain(CHAIN) });
+    assert.equal(logs.some((line) => line.includes("chain replacement detected")), true);
+    const progress = store.loadCatalog().scanProgress!;
+    assert.equal(progress.cursor, 0);
+    assert.ok(progress.cursorAdvancedAt !== null && progress.cursorAdvancedAt >= before, `cursorAdvancedAt ${progress.cursorAdvancedAt} is from the old cursor`);
+  } finally {
+    serveFiveTransactions();
+  }
+});
+
 // A node re-pointed after the gate: the pass fails before it saves what it read since.
 const CHANGED_CHAIN = "c".repeat(64);
 const servedChainChanged = /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /;
