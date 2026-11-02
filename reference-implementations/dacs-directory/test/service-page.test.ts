@@ -93,18 +93,23 @@ test("the service page hides the contact button when the seller was unreachable 
   const stale = fixedDem({ listingId: "stale", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() - 2 * 60 * 60_000 } });
   const fixture = fixedDem({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
   const x402 = fixedDem({ listingId: "x402", offering: { title: "Service", category: "services.other", tags: [], rails: ["x402:default"] } });
+  // `pay-dem` is a historical alias on current listings: there x402 is the only usable rail.
+  const aliasX402 = fixedDem({ listingId: "alias-x402", offering: { title: "Service", category: "services.other", tags: [], rails: ["pay-dem", "x402:default"] } });
+  const legacyPayDem = fixedDem({ listingId: "legacy-pay-dem", artifactProfile: "legacy-sdk-v0.1", offering: { title: "Service", category: "services.other", tags: [], rails: ["pay-dem"] } });
   const auction = fixedDem({ listingId: "auction", pricing: { kind: "auction", currency: "DEM" } });
   const usd = fixedDem({ listingId: "usd", pricing: { kind: "fixed", priceHint: "1", currency: "USD" } });
   const noAmount = fixedDem({ listingId: "no-amount", pricing: { kind: "fixed", currency: "DEM" } });
   const zero = fixedDem({ listingId: "zero", pricing: { kind: "fixed", priceHint: "0", currency: "DEM" } });
-  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, auction, usd, noAmount, zero])] });
+  const subUnit = fixedDem({ listingId: "sub-unit", pricing: { kind: "fixed", priceHint: "0.0000000001", currency: "DEM" } });
+  const finest = fixedDem({ listingId: "finest", pricing: { kind: "fixed", priceHint: "0.000000001", currency: "DEM" } });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, aliasX402, legacyPayDem, auction, usd, noAmount, zero, subUnit, finest])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
   }));
 
   const onlineHtml = await render(online);
   assert.match(onlineHtml, /Begin with agent/);
-  assert.doesNotMatch(onlineHtml, /Seller offline/);
+  assert.doesNotMatch(onlineHtml, /Last check failed/);
   assert.match(onlineHtml, /Buy through your AI assistant/);
   assert.match(onlineHtml, /The planned DACS plugin will let/, "the buying path is described as not yet usable");
   const buyBox = onlineHtml.slice(onlineHtml.indexOf('id="buy-heading"'), onlineHtml.indexOf("</section>", onlineHtml.indexOf('id="buy-heading"')));
@@ -112,19 +117,24 @@ test("the service page hides the contact button when the seller was unreachable 
   assert.match(buyBox, new RegExp(`title="${SELLER_CLAIM}"`), "the box names the seller, since listing IDs are unique only per seller");
 
   const offlineHtml = await render(offline);
-  assert.doesNotMatch(offlineHtml, /Begin with agent/);
-  assert.doesNotMatch(offlineHtml, new RegExp(`href="${endpoint}"`), "the dead address is not linked");
-  assert.match(offlineHtml, /Seller offline/);
-  assert.match(offlineHtml, /This seller is offline right now/, "the buy box warns a purchase would fail");
+  assert.match(offlineHtml, /Begin with agent/, "one failed check is a hint, so the link is kept");
+  assert.match(offlineHtml, new RegExp(`href="${endpoint}"`));
+  assert.match(offlineHtml, /Last check failed/);
+  assert.match(offlineHtml, /unreachable in the Directory&#x27;s last check/, "the buy box warns a purchase may fail");
+  assert.doesNotMatch(offlineHtml, /offline right now/);
 
   const staleHtml = await render(stale);
   assert.match(staleHtml, /Begin with agent/, "an hours-old failed check does not hide the button");
-  assert.doesNotMatch(staleHtml, /Seller offline/);
+  assert.doesNotMatch(staleHtml, /Last check failed/);
 
   assert.doesNotMatch(await render(fixture), /Buy through your AI assistant/, "a fixture is not offered for sale");
   assert.doesNotMatch(await render(x402), /Buy through your AI assistant/, "the plugin does not pay over x402");
+  assert.doesNotMatch(await render(aliasX402), /Buy through your AI assistant/, "pay-dem on a current listing is only an alias");
+  assert.match(await render(legacyPayDem), /Buy through your AI assistant/, "pay-dem pays on a legacy listing");
   assert.doesNotMatch(await render(auction), /Buy through your AI assistant/, "the plugin buys only at a fixed price");
   assert.doesNotMatch(await render(usd), /Buy through your AI assistant/, "the plugin pays only DEM prices");
   assert.doesNotMatch(await render(noAmount), /Buy through your AI assistant/, "no published amount, nothing to buy");
   assert.doesNotMatch(await render(zero), /Buy through your AI assistant/, "a zero amount is not an offer");
+  assert.doesNotMatch(await render(subUnit), /Buy through your AI assistant/, "DEM has nine decimal places");
+  assert.match(await render(finest), /Buy through your AI assistant/, "one base unit is payable");
 });
