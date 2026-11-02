@@ -255,6 +255,28 @@ const setJson = db.transaction((key: string, value: unknown) => {
     .run(key, JSON.stringify(value), Date.now());
 });
 
+/**
+ * Marker values carried by confirmed CREATE transactions whose storage program could not be
+ * read, per listing hash. They are unauthenticated until the indexer checks them against the
+ * Listing; the first entries are kept, up to the bound, and settled ones are dropped.
+ */
+export const UNREAD_REVOCATION_MARKERS_PER_LISTING = 16;
+type UnreadRevocationMarker = { locator: string; marker: Record<string, unknown> };
+export const unreadRevocationMarkers = (listingHash: string): UnreadRevocationMarker[] =>
+  getJson<UnreadRevocationMarker[]>(`unread-revocation:${listingHash}`, []);
+export const recordUnreadRevocationMarkers = db.transaction((listingHash: string, entries: readonly UnreadRevocationMarker[]): void => {
+  const kept = unreadRevocationMarkers(listingHash);
+  for (const entry of entries) {
+    if (kept.length >= UNREAD_REVOCATION_MARKERS_PER_LISTING) break;
+    if (!kept.some((k) => k.locator === entry.locator)) kept.push(entry);
+  }
+  setJson(`unread-revocation:${listingHash}`, kept);
+});
+export const dropUnreadRevocationMarkers = (listingHash: string, locators: ReadonlySet<string>): void => {
+  if (locators.size === 0) return;
+  setJson(`unread-revocation:${listingHash}`, unreadRevocationMarkers(listingHash).filter((k) => !locators.has(k.locator)));
+};
+
 /** Exact authenticated create inputs retained for recovery, never proof of success. */
 export interface ListingPreparation {
   anchorAddress: string;

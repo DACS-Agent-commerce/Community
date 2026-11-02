@@ -32,6 +32,7 @@ import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
+  verifyListingRevocation,
   revocationSellerClaim,
   ownerClaim,
   REVOCATION_VERIFICATIONS_PER_PASS,
@@ -55,6 +56,8 @@ import {
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
+  unreadRevocationMarkers,
+  dropUnreadRevocationMarkers,
   hasIncompleteWellKnownWithdrawal,
   boundWellKnownRevocations,
   wellKnownWithdrawalRevision,
@@ -248,11 +251,13 @@ export async function indexRegistration(
     admitWellKnownRevocationCandidates(verified.contentHash, carriedBindings.map((binding) => binding.markerAnchor.locator));
     const progress: RevocationCandidateProgress = { unread: [], rejected: [] };
     const knownMarkers = (verifiedRevocations[verified.contentHash] ?? []).slice(0, limit);
+    const unreadMarkers = unreadRevocationMarkers(verified.contentHash);
     const unavailableMarkers = new Set<string>();
     const readMarkers = new Map<string, Record<string, unknown>>();
     const found = await findValidListingRevocation(
       [
         ...knownMarkers,
+        ...unreadMarkers.map((entry) => entry.locator),
         ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
       ],
       verified,
@@ -279,6 +284,17 @@ export async function indexRegistration(
       const marker = readMarkers.get(found.markerAnchor.locator);
       if (marker) retainListingRevocation(found, marker);
     }
+    // A marker whose CREATE was seen but whose storage could not be read holds this Listing
+    // only while its carried value passes RB-4 against it; a forged or foreign value never
+    // does. Once the anchor reads, the ordinary path above decides it.
+    let unreadMarkerHold = false;
+    const settledUnread = new Set<string>();
+    for (const entry of unreadMarkers) {
+      if (readMarkers.has(entry.locator)) settledUnread.add(entry.locator);
+      else if (await verifyListingRevocation(entry.marker, verified, version)) unreadMarkerHold = true;
+      else settledUnread.add(entry.locator);
+    }
+    dropUnreadRevocationMarkers(verified.contentHash, settledUnread);
     const retained = retainedListingRevocation(verified.contentHash);
     const boundRetained = retained?.sellerPrimaryClaim === revocationSellerClaim(verified) && retained.listingId === listingId &&
       retained.listingVersion === version ? retained : null;
@@ -292,7 +308,7 @@ export async function indexRegistration(
     // Anyone can anchor other candidates, so an outage on those cannot hold it.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
       : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
-        knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
+        knownMarkers.some((locator) => unavailableMarkers.has(locator)) || unreadMarkerHold ||
         hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
         ? "indeterminate" : "absent";
     const presentation = listingPresentation(scope);

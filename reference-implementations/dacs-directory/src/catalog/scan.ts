@@ -45,8 +45,8 @@ export interface ScannedArtifacts {
   programs: Map<string, string | null>;
   /** listing content hash → every revocation candidate seen in this window, oldest first. */
   revocations: Map<string, string[]>;
-  /** Unreadable revocation candidate locator → the owner its confirmed CREATE transaction proves. */
-  unreadRevocationOwners: Map<string, string>;
+  /** listing content hash → markers carried by confirmed CREATEs whose storage could not be read. */
+  unreadRevocationMarkers: Map<string, Array<{ locator: string; marker: Record<string, unknown> }>>;
   /** jobId → BB-4-verified BundleBindings discovered in this scan window. */
   bundleBindings: Map<string, BundleBinding[]>;
   /** jobId + role keys whose deterministic total-work cap was exhausted. */
@@ -231,13 +231,12 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
 /**
  * A revocation marker named by a confirmed CREATE whose storage read failed. The address is
  * derived from the sender, name, nonce and salt, so the sender is the program's owner; the
- * listing hash comes from the marker value in the transaction. The marker's declared signer
- * must be that same key, so nobody can queue unreadable markers against another seller's
- * Listing. Discovery only: the indexer still reads and verifies the marker (RB-4) before
- * publishing a revocation. While the read keeps failing the owner's Listing stays held,
- * even if no readable program ever appears (RB-6: undecided, not absent).
+ * listing hash and the marker value come from the transaction, and its declared signer must
+ * be the sender. None of this is authenticated: the node reports it. The indexer holds a
+ * Listing on it only after the carried marker passes the full RB-4 check against that Listing,
+ * and publishes `revoked` only from a read of the anchored marker.
  */
-export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; owner: string } | null {
+export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; marker: Record<string, unknown> } | null {
   const tx = objectValue(value);
   if (!tx || tx.status !== "confirmed" || tx.type !== "storageProgram") return null;
   if (typeof tx.to !== "string" || !/^stor-[0-9a-f]{40}$/.test(tx.to)) return null;
@@ -256,7 +255,7 @@ export function unreadRevocationCreate(value: unknown): { locator: string; listi
   const owner = `0x${envelope.from.replace(/^0x/, "").toLowerCase()}`;
   const signer = canonicalDemosAgentClaim(String((marker.signature as Record<string, unknown>).signer));
   if (signer !== canonicalDemosAgentClaim(didOf(owner))) return null;
-  return { locator: tx.to, listingHash: String(marker.listingContentHash).toLowerCase(), owner };
+  return { locator: tx.to, listingHash: String(marker.listingContentHash).toLowerCase(), marker };
 }
 
 interface StorageWriteCandidate {
@@ -468,7 +467,7 @@ export async function scanChain(
   const addresses = new Set<string>();
   for (const locator of opts.retryLocators ?? []) if (/^stor-[0-9a-f]{40}$/.test(locator)) addresses.add(locator);
   const writeCandidates: StorageWriteCandidate[] = [];
-  const revocationCreates = new Map<string, { listingHash: string; owner: string }>();
+  const revocationCreates = new Map<string, { listingHash: string; marker: Record<string, unknown> }>();
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
@@ -522,7 +521,7 @@ export async function scanChain(
   const listings = new Map<string, string>();
   const programs = new Map<string, string | null>(opts.knownPrograms);
   const revocations = new Map<string, Set<string>>();
-  const unreadRevocationOwners = new Map<string, string>();
+  const unreadRevocationMarkers = new Map<string, Array<{ locator: string; marker: Record<string, unknown> }>>();
   const bundleBindings = new Map<string, BundleBinding[]>();
   const bundleBindingOverflow = new Set<string>();
   const observations: ScannedArtifacts["observations"] = [];
@@ -546,12 +545,13 @@ export async function scanChain(
         code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
         message: "storage program could not be read under the public indexer policy",
       });
-      // An unread marker its owner created still counts as a candidate, so the indexer
-      // can hold that owner's Listing until a read settles it (RB-6).
+      // Keep the value its CREATE carried, so the indexer can check it against the Listing
+      // and hold that Listing until a read settles the marker (RB-6).
       const create = revocationCreates.get(address);
       if (create) {
-        addRevocationCandidate(revocations, create.listingHash, address);
-        unreadRevocationOwners.set(address, create.owner);
+        const entries = unreadRevocationMarkers.get(create.listingHash) ?? [];
+        entries.push({ locator: address, marker: create.marker });
+        unreadRevocationMarkers.set(create.listingHash, entries);
       }
       continue;
     }
@@ -666,6 +666,6 @@ export async function scanChain(
   // Transactions are walked newest first; candidates queue in chain order.
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
-    unreadRevocationOwners, bundleBindings, bundleBindingOverflow, omittedBindings,
+    unreadRevocationMarkers, bundleBindings, bundleBindingOverflow, omittedBindings,
     txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
 }

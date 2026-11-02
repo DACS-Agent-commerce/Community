@@ -166,15 +166,17 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
  }
 });
 
-// A storage read can fail for a marker the seller really created. The confirmed CREATE names its
-// sender, and the address derived from that sender proves ownership, so the seller's own Listing is
-// held until a read settles; anyone else's CREATE, or one whose address does not derive, holds nothing.
-async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean}){
+// A storage read can fail for a marker the seller really created. The confirmed CREATE carries the
+// marker, and the Listing is held only while that carried value passes RB-4 against it and the
+// anchor stays unreadable. The node reports the transaction, so a forged value, another key's
+// CREATE or an address that does not derive from its inputs holds nothing.
+async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean}){
  const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
- const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=7;const programName='dacs1-revoked:fixture';
+ const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=100+(++seq);const programName='dacs1-revoked:fixture'; // a fresh nonce gives each case its own address
  const derived=deriveStorageAddress(from,programName,nonce,'');const markerRef=opts.to?opts.to(derived):derived;
  const content=JSON.stringify({type:'storageProgram',from,to:markerRef,amount:0,nonce:opts.nonceText?String(nonce):nonce,timestamp:1,
-  data:['storageProgram',{operation:'CREATE_STORAGE_PROGRAM',storageAddress:markerRef,programName,encoding:'json',data:f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
+  data:['storageProgram',{operation:'CREATE_STORAGE_PROGRAM',storageAddress:markerRef,programName,encoding:'json',
+  data:opts.forge?{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}:f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
  const tx={id:3,to:markerRef,status:'confirmed',type:'storageProgram',blockNumber:3,hash:'ab'.repeat(32),content};
  seedScanState({schemaVersion:10,chainIdentity:PINNED_DEMOS_CHAIN_IDENTITY,lastSeenTxId:0,listings:{},deals:{}});
  store.saveRegistrations([{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
@@ -217,6 +219,10 @@ test('owner-created marker that cannot be read holds the listing, then revokes i
 test('a CREATE whose nonce the node reports as text still holds the listing',async()=>{
  const pass=await unreadCreatePass({nonceText:true});
  assert.equal(pass.first,undefined);
+});
+test('a carried marker with a forged signature does not hold the listing',async()=>{
+ const pass=await unreadCreatePass({forge:true});
+ assert.equal(pass.first?.status,'active');
 });
 test('unreadable marker created by another key neither holds the listing nor joins its queue',async()=>{
  const pass=await unreadCreatePass({from:'0x'+'e'.repeat(64)});

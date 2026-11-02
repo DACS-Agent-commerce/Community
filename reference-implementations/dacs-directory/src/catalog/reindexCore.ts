@@ -35,6 +35,7 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
+  recordUnreadRevocationMarkers,
   retainListingRevocation,
   retainedListingRevocation,
   recordWellKnownWithdrawalCheck,
@@ -251,12 +252,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const json = data ? boundedJson(data) : null;
       return json === null ? null : createHash("sha256").update(json, "utf8").digest("hex");
     };
-    const unreadOwners = scan.unreadRevocationOwners;
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
-        ({ locator, owner: observed.get(locator)?.owner ?? unreadOwners.get(locator),
-          contentHash: storedValueHash(observed.get(locator)?.data) })));
+        ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
+    for (const [hash, entries] of scan.unreadRevocationMarkers) recordUnreadRevocationMarkers(hash, entries);
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
       state.bundleBindings[jobId] = bounded.bindings;
