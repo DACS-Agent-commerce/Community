@@ -58,3 +58,20 @@ test("browser IP entry points refuse non-string runtime inputs without coercion"
     assert.equal(isIP(value as unknown as string), 0);
   }
 });
+
+test("the browser Buffer shim encodes and decodes base64url like node:buffer", async () => {
+  // The browser bundle's Buffer is src/shims/buffer.ts wrapping the npm `buffer` package; `buffer/` resolves that package under Node.
+  const { createRequire } = await import("node:module");
+  const { randomBytes } = await import("node:crypto");
+  const { addBase64url } = await import("../src/shims/buffer.js");
+  const Polyfill = addBase64url(createRequire(import.meta.url)("buffer/").Buffer);
+  // The SDK's bundle verifier runs this when its module loads.
+  assert.equal(Polyfill.alloc(64).toString("base64url"), Buffer.alloc(64).toString("base64url"));
+  for (let length = 0; length <= 70; length += 1) {
+    const bytes = randomBytes(length);
+    const encoded = Buffer.from(bytes).toString("base64url");
+    assert.equal(Polyfill.from(bytes).toString("base64url"), encoded, `encode ${length}`);
+    assert.deepEqual(Uint8Array.from(Polyfill.from(encoded, "base64url")), Uint8Array.from(bytes), `decode ${length}`);
+  }
+  assert.equal(Polyfill.from("hello").toString("hex"), "68656c6c6f", "other encodings are unchanged");
+});
