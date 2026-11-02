@@ -487,8 +487,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       publishCatalogChain({ catalogVersion: "1", generatedAt, sellers: catalogSellers,
         scanProgress: { cursor: state.lastSeenTxId, tip: completedScan.observedTip,
           lag: completedScan.observedTip === null ? null : Math.max(0, completedScan.observedTip - state.lastSeenTxId),
-          // After a reset the prior catalog's time describes the old cursor, not this one.
-          cursorAdvancedAt: nextCursor > initialCursor || chainReset ? state.cursorAdvancedAt ?? null
+          // After a reset the prior catalog's time describes the old cursor, not this one. Only a
+          // reset moves the cursor back, so a published cursor past this one means a reset since,
+          // in this pass or in an earlier one that failed before it published.
+          cursorAdvancedAt: nextCursor > initialCursor || chainReset ||
+            (prior.scanProgress?.cursor ?? -1) > state.lastSeenTxId
+            ? state.cursorAdvancedAt ?? null
             : prior.scanProgress?.cursorAdvancedAt ?? null,
           lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity);
       finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,

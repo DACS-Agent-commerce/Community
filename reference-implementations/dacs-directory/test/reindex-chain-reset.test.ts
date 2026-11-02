@@ -291,6 +291,34 @@ test("after a tip-regression reset, the published cursor time is this run's, not
   }
 });
 
+test("a tip-regression reset pass that fails leaves the next pass publishing that run's time, not the old cursor's", async () => {
+  const CHAIN = "d".repeat(64);
+  store.saveRegistrations([]);
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: 5000, lastChainTip: 1,
+    cursorAdvancedAt: 123, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [],
+    scanProgress: { cursor: 5000, tip: 5000, lag: 0, cursorAdvancedAt: 123, lastSuccessfulFullScanAt: 124, fromTx: 4998 } });
+  // The tip read succeeds and triggers the reset; the history walk then fails, so nothing is published.
+  let calls = 0;
+  globalThis.fetch = async () => {
+    if (++calls > 1) throw new Error("synthetic node outage");
+    return Response.json({ result: 200, response: [{ id: 1 }] });
+  };
+  const before = Date.now();
+  try {
+    await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }));
+    assert.equal(store.loadScanState().lastSeenTxId, 0, "the reset was saved");
+    assert.equal(store.loadCatalog().scanProgress?.cursor, 5000, "nothing was published");
+    globalThis.fetch = async () => Response.json({ result: 200, response: [{ id: 1 }] });
+    await reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) });
+    const progress = store.loadCatalog().scanProgress!;
+    assert.equal(progress.cursor, 0);
+    assert.ok(progress.cursorAdvancedAt !== null && progress.cursorAdvancedAt >= before, `cursorAdvancedAt ${progress.cursorAdvancedAt} is from the old cursor`);
+  } finally {
+    serveFiveTransactions();
+  }
+});
+
 // A node re-pointed after the gate: the pass fails before it saves what it read since.
 const CHANGED_CHAIN = "c".repeat(64);
 const servedChainChanged = /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /;
