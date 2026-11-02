@@ -17,6 +17,7 @@ ExecStart=/usr/bin/env node node_modules/next/dist/bin/next start --hostname 127
 Restart=on-failure
 RestartSec=30
 StateDirectory=dacs-directory
+StateDirectoryMode=0750
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
