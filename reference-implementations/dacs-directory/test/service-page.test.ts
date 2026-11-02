@@ -107,7 +107,9 @@ test("the service page hides the contact button when the seller was unreachable 
   assert.doesNotMatch(onlineHtml, /Seller offline/);
   assert.match(onlineHtml, /Buy through your AI assistant/);
   assert.match(onlineHtml, /The planned DACS plugin will let/, "the buying path is described as not yet usable");
-  assert.match(onlineHtml, /title="online@1"/, "the listing to ask for is online@1");
+  const buyBox = onlineHtml.slice(onlineHtml.indexOf('id="buy-heading"'), onlineHtml.indexOf("</section>", onlineHtml.indexOf('id="buy-heading"')));
+  assert.match(buyBox, /title="online@1"/, "the listing to ask for is online@1");
+  assert.match(buyBox, new RegExp(`title="${SELLER_CLAIM}"`), "the box names the seller, since listing IDs are unique only per seller");
 
   const offlineHtml = await render(offline);
   assert.doesNotMatch(offlineHtml, /Begin with agent/);

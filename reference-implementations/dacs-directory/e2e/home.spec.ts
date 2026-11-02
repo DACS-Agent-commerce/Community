@@ -45,4 +45,5 @@ test("the mobile landing page keeps primary actions and catalog state visible", 
   await expect(summary).toBeVisible();
   // Services, sellers and freshness; the bundle count is hidden while it is zero.
   await expect(summary.locator(":scope > div")).toHaveCount(3);
+  await expect(summary).not.toContainText("signature-checked bundles");
 });

@@ -1,4 +1,4 @@
-import { boundedPublicHttpsRequest, OutboundTargetError } from "./boundedHttps.js";
+import { boundedPublicHttpsRequest, OutboundTargetError, RedirectLimitError } from "./boundedHttps.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   effectiveReachabilityStatus,
@@ -13,6 +13,18 @@ const boundedInt = (value: unknown, fallback: number, min: number, max: number):
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 };
+
+/**
+ * Classify a failed probe. A redirect the probe won't follow still came from
+ * the target, so it proves reachability like any other HTTP response.
+ */
+export function reachabilityFromProbeError(error: unknown): ReachabilityHint["status"] {
+  if (error instanceof RedirectLimitError) return "reachable";
+  // A target rejected by outbound policy was deliberately not contacted;
+  // do not claim it is unreachable or disclose internal network details.
+  if (error instanceof OutboundTargetError) return "unknown";
+  return "unreachable";
+}
 
 /** Probe only network reachability; an HTTP error response still proves reachability. */
 export async function probeReachabilitySurface(surface: string): Promise<ReachabilityHint> {
@@ -32,9 +44,7 @@ export async function probeReachabilitySurface(surface: string): Promise<Reachab
     };
   } catch (error) {
     return {
-      // A target rejected by outbound policy was deliberately not contacted;
-      // do not claim it is unreachable or disclose internal network details.
-      status: error instanceof OutboundTargetError ? "unknown" : "unreachable",
+      status: reachabilityFromProbeError(error),
       checkedAt,
       surface,
     };

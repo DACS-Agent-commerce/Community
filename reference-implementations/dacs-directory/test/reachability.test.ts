@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isPrivateAddress } from "../src/catalog/boundedHttps.js";
+import { isPrivateAddress, OutboundTargetError, RedirectLimitError } from "../src/catalog/boundedHttps.js";
 import {
   effectiveReachabilityStatus,
   probeReachabilitySurface,
+  reachabilityFromProbeError,
   REACHABILITY_FRESH_MS,
   refreshReachabilityHints,
 } from "../src/catalog/reachability.js";
@@ -99,4 +100,11 @@ test("outbound policy rejects reserved and metadata-equivalent address forms", (
   ]) assert.equal(isPrivateAddress(address), true, address);
   assert.equal(isPrivateAddress("8.8.8.8"), false);
   assert.equal(isPrivateAddress("2606:4700:4700::1111"), false);
+});
+
+test("a probe that only got redirects counts the target as reachable", () => {
+  // The target answered with a 3xx the probe would not follow (no Location, or past the limit).
+  assert.equal(reachabilityFromProbeError(new RedirectLimitError()), "reachable");
+  assert.equal(reachabilityFromProbeError(new OutboundTargetError("private target")), "unknown");
+  assert.equal(reachabilityFromProbeError(new Error("whole-request timeout")), "unreachable");
 });

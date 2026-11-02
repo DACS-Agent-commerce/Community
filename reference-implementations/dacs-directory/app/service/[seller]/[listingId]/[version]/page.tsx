@@ -129,7 +129,11 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
             approving the payment in your own wallet.
           </p>
           {sellerOffline && <p><strong>This seller is offline right now,</strong> so a purchase would fail until it is reachable again.</p>}
-          <p><strong>Listing to ask for:</strong> <CopyText value={`${listing.listingId}@${listing.version}`} head={40} tail={8} /></p>
+          <p>
+            Give the assistant both: another seller can publish a listing with the same name.
+          </p>
+          <p><strong>Listing:</strong> <CopyText value={`${listing.listingId}@${listing.version}`} head={40} tail={8} /></p>
+          <p><strong>Seller:</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
           <p className="note">
             The plugin is in development and not released yet.{" "}
             <a className="text-link" href={DACS_PLUGIN_REPOSITORY} target="_blank" rel="noreferrer">Plugin source ↗</a>
