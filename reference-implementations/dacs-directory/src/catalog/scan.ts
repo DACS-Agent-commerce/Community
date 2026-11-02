@@ -231,8 +231,11 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
 /**
  * A revocation marker named by a confirmed CREATE whose storage read failed. The address is
  * derived from the sender, name, nonce and salt, so the sender is the program's owner; the
- * listing hash comes from the marker value in the transaction. Discovery only: the indexer
- * still reads and verifies the marker (RB-4) before publishing a revocation.
+ * listing hash comes from the marker value in the transaction. The marker's declared signer
+ * must be that same key, so nobody can queue unreadable markers against another seller's
+ * Listing. Discovery only: the indexer still reads and verifies the marker (RB-4) before
+ * publishing a revocation. While the read keeps failing the owner's Listing stays held,
+ * even if no readable program ever appears (RB-6: undecided, not absent).
  */
 export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; owner: string } | null {
   const tx = objectValue(value);
@@ -249,8 +252,11 @@ export function unreadRevocationCreate(value: unknown): { locator: string; listi
   if (typeof write.programName !== "string" || typeof write.salt !== "string") return null;
   if (deriveStorageAddress(envelope.from, write.programName, Number(nonce), write.salt) !== tx.to) return null;
   if (!isListingRevocationCandidate(write.data)) return null;
-  const listingHash = String((write.data as Record<string, unknown>).listingContentHash).toLowerCase();
-  return { locator: tx.to, listingHash, owner: `0x${envelope.from.replace(/^0x/, "").toLowerCase()}` };
+  const marker = write.data as Record<string, unknown>;
+  const owner = `0x${envelope.from.replace(/^0x/, "").toLowerCase()}`;
+  const signer = canonicalDemosAgentClaim(String((marker.signature as Record<string, unknown>).signer));
+  if (signer !== canonicalDemosAgentClaim(didOf(owner))) return null;
+  return { locator: tx.to, listingHash: String(marker.listingContentHash).toLowerCase(), owner };
 }
 
 interface StorageWriteCandidate {

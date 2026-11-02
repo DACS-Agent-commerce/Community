@@ -191,7 +191,7 @@ async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;
  const row=()=>store.loadCatalog().sellers.flatMap(s=>s.listings).find(l=>l.contentHash===f.hash);
  try{
   await reindexAll(opts2);const first=row();
-  return {first,recover:async()=>{
+  return {first,hash:f.hash,recover:async()=>{
    const db=new Database(join(root,'directory.sqlite'));
    // Test-only: make the artifact and candidate retries due now instead of after their backoff.
    try{db.prepare("UPDATE artifacts SET status='retry',next_retry_at=0 WHERE locator=?").run(markerRef);
@@ -218,9 +218,11 @@ test('a CREATE whose nonce the node reports as text still holds the listing',asy
  const pass=await unreadCreatePass({nonceText:true});
  assert.equal(pass.first,undefined);
 });
-test('unreadable marker created by another key does not hold the listing',async()=>{
+test('unreadable marker created by another key neither holds the listing nor joins its queue',async()=>{
  const pass=await unreadCreatePass({from:'0x'+'e'.repeat(64)});
  assert.equal(pass.first?.status,'active');
+ const db=new Database(join(root,'directory.sqlite'));
+ try{assert.equal((db.prepare('SELECT count(*) AS n FROM revocation_candidates WHERE listing_hash=?').get(pass.hash) as {n:number}).n,0);}finally{db.close();}
 });
 test('unreadable marker whose address does not derive from its sender does not hold the listing',async()=>{
  const pass=await unreadCreatePass({to:()=> 'stor-'+'f'.repeat(40)});
