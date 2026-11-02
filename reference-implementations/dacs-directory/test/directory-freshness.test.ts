@@ -234,3 +234,19 @@ test('unreadable marker whose address does not derive from its sender does not h
  const pass=await unreadCreatePass({to:()=> 'stor-'+'f'.repeat(40)});
  assert.equal(pass.first?.status,'active');
 });
+test('carried markers are kept per signer: another key cannot displace the seller, a chain reset clears them',async()=>{
+ const f=await fixture();const other='did:demos:agent:'+'e'.repeat(64);
+ const entry=(n:number,signer:string)=>({locator:'stor-'+n.toString(16).padStart(40,'0'),marker:{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),signer}}});
+ store.recordUnreadRevocationMarkers(f.hash,[...Array.from({length:20},(_,i)=>entry(1000+i,other)),entry(2000,claim)]);
+ assert.equal(store.unreadRevocationMarkers(f.hash,other).overflow,true);
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[entry(2000,claim)],overflow:false});
+ store.clearChainDerivedArtifacts();
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[],overflow:false});
+});
+test('an overflowing set of the seller\'s own carried markers holds the listing',async()=>{
+ const f=await fixture();
+ assert.equal((await f.index(new Map())).listings[0]?.status,'active');
+ store.recordUnreadRevocationMarkers(f.hash,Array.from({length:17},(_,i)=>({locator:'stor-'+(3000+i).toString(16).padStart(40,'0'),marker:{...f.marker,listingContentHash:'0'.repeat(64)}})));
+ assert.equal(store.unreadRevocationMarkers(f.hash,claim).overflow,true);
+ assert.equal((await f.index(new Map())).listings.length,0,'held: an entry was dropped at the bound');
+});

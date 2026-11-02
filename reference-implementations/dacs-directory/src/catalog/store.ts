@@ -1,5 +1,6 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
 import { boundedJson } from "./artifactLimits.js";
+import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
 import Database from "better-sqlite3";
@@ -257,24 +258,38 @@ const setJson = db.transaction((key: string, value: unknown) => {
 
 /**
  * Marker values carried by confirmed CREATE transactions whose storage program could not be
- * read, per listing hash. They are unauthenticated until the indexer checks them against the
- * Listing; the first entries are kept, up to the bound, and settled ones are dropped.
+ * read, kept per listing hash and declared signer. They are unauthenticated until the indexer
+ * checks them against the Listing, which reads only its own signer's set: another key's entries
+ * can neither hold a Listing nor displace its seller's. A set past the bound records `overflow`,
+ * which holds the Listing, so a dropped entry can't turn into `active`; only that signer can fill it.
  */
-export const UNREAD_REVOCATION_MARKERS_PER_LISTING = 16;
+export const UNREAD_REVOCATION_MARKERS_PER_SIGNER = 16;
 type UnreadRevocationMarker = { locator: string; marker: Record<string, unknown> };
-export const unreadRevocationMarkers = (listingHash: string): UnreadRevocationMarker[] =>
-  getJson<UnreadRevocationMarker[]>(`unread-revocation:${listingHash}`, []);
+type UnreadRevocationSet = { entries: UnreadRevocationMarker[]; overflow: boolean };
+const signerKey = (signer: string) => canonicalDemosAgentClaim(signer) ?? signer;
+const unreadRevocationKey = (listingHash: string, signer: string) => `unread-revocation:${listingHash}:${signerKey(signer)}`;
+export const unreadRevocationMarkers = (listingHash: string, signer: string): UnreadRevocationSet =>
+  getJson<UnreadRevocationSet>(unreadRevocationKey(listingHash, signer), { entries: [], overflow: false });
 export const recordUnreadRevocationMarkers = db.transaction((listingHash: string, entries: readonly UnreadRevocationMarker[]): void => {
-  const kept = unreadRevocationMarkers(listingHash);
+  const bySigner = new Map<string, UnreadRevocationMarker[]>();
   for (const entry of entries) {
-    if (kept.length >= UNREAD_REVOCATION_MARKERS_PER_LISTING) break;
-    if (!kept.some((k) => k.locator === entry.locator)) kept.push(entry);
+    const signer = String((entry.marker.signature as Record<string, unknown> | undefined)?.signer ?? "");
+    bySigner.set(signer, [...(bySigner.get(signer) ?? []), entry]);
   }
-  setJson(`unread-revocation:${listingHash}`, kept);
+  for (const [signer, fresh] of bySigner) {
+    const set = unreadRevocationMarkers(listingHash, signer);
+    for (const entry of fresh) {
+      if (set.entries.some((kept) => kept.locator === entry.locator)) continue;
+      if (set.entries.length >= UNREAD_REVOCATION_MARKERS_PER_SIGNER) set.overflow = true;
+      else set.entries.push(entry);
+    }
+    setJson(unreadRevocationKey(listingHash, signer), set);
+  }
 });
-export const dropUnreadRevocationMarkers = (listingHash: string, locators: ReadonlySet<string>): void => {
+export const dropUnreadRevocationMarkers = (listingHash: string, signer: string, locators: ReadonlySet<string>): void => {
   if (locators.size === 0) return;
-  setJson(`unread-revocation:${listingHash}`, unreadRevocationMarkers(listingHash).filter((k) => !locators.has(k.locator)));
+  const set = unreadRevocationMarkers(listingHash, signer);
+  setJson(unreadRevocationKey(listingHash, signer), { ...set, entries: set.entries.filter((kept) => !locators.has(kept.locator)) });
 };
 
 /** Exact authenticated create inputs retained for recovery, never proof of success. */
@@ -729,6 +744,7 @@ export const saveScanState = db.transaction((state: ScanState): void => {
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'").run();
+  db.prepare("DELETE FROM kv_state WHERE key LIKE 'unread-revocation:%'").run();
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();
