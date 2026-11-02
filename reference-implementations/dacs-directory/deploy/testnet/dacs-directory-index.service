@@ -16,6 +16,7 @@ ExecStart=/usr/bin/env npm run --silent index
 # A pass that hangs is stopped; the timer skips ticks while a pass is still running.
 TimeoutStartSec=15min
 StateDirectory=dacs-directory
+StateDirectoryMode=0750
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
