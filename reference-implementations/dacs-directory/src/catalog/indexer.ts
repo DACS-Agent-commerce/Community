@@ -228,7 +228,10 @@ export async function indexRegistration(
     const version = typeof rawVersion === "number" && Number.isSafeInteger(rawVersion) && rawVersion > 0
       ? rawVersion
       : 1;
-    listingArtifacts.set(`${listingId}\n${version}\n${verified.contentHash}`, { locator: anchor, raw: anchored.data });
+    // The same signed bytes stored under a second anchor are one Listing: keep the first anchor's summary.
+    const listingKey = `${listingId}\n${version}\n${verified.contentHash}`;
+    if (listingArtifacts.has(listingKey)) continue;
+    listingArtifacts.set(listingKey, { locator: anchor, raw: anchored.data });
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
     if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
