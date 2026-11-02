@@ -319,6 +319,26 @@ test("a tip-regression reset pass that fails leaves the next pass publishing tha
   }
 });
 
+test("after a re-pin pass that fails, the next pass publishes no cursor time until the cursor moves", async () => {
+  store.saveRegistrations([]);
+  seedScanState({ ...oldChainState(), cursorAdvancedAt: 123 });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [],
+    scanProgress: { cursor: 5000, tip: 5000, lag: 0, cursorAdvancedAt: 123, lastSuccessfulFullScanAt: 124, fromTx: 4998 } });
+  globalThis.fetch = async () => { throw new Error("node unavailable"); };
+  try {
+    await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(NEW_CHAIN) }), /chain scan failed/);
+    assert.equal(store.loadCatalog().scanProgress, undefined, "the re-pin emptied the catalog");
+    // One transaction, inside the finality depth: the cursor cannot advance in this pass.
+    globalThis.fetch = async () => Response.json({ result: 200, response: [{ id: 1 }] });
+    await reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(NEW_CHAIN) });
+    const progress = store.loadCatalog().scanProgress!;
+    assert.equal(progress.cursor, 0);
+    assert.equal(progress.cursorAdvancedAt, null, "unknown, never the old cursor's 123");
+  } finally {
+    serveFiveTransactions();
+  }
+});
+
 // A node re-pointed after the gate: the pass fails before it saves what it read since.
 const CHANGED_CHAIN = "c".repeat(64);
 const servedChainChanged = /catalog not updated: the served chain changed during the pass: WRONG_CHAIN: /;

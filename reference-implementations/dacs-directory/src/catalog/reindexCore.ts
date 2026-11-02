@@ -489,7 +489,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           lag: completedScan.observedTip === null ? null : Math.max(0, completedScan.observedTip - state.lastSeenTxId),
           // After a reset the prior catalog's time describes the old cursor, not this one. Only a
           // reset moves the cursor back, so a published cursor past this one means a reset since,
-          // in this pass or in an earlier one that failed before it published.
+          // in this pass or in an earlier one that failed before it published. A re-pin empties
+          // the catalog, so after a failed re-pin there is no prior time to carry.
           cursorAdvancedAt: nextCursor > initialCursor || chainReset ||
             (prior.scanProgress?.cursor ?? -1) > state.lastSeenTxId
             ? state.cursorAdvancedAt ?? null
