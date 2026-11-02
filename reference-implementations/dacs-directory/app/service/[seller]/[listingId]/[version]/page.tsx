@@ -16,8 +16,8 @@ export const dynamic = "force-dynamic";
 const DACS_PLUGIN_REPOSITORY = "https://github.com/DACS-Agent-commerce/dacs-plugin";
 // The plugin prepares fixed-price purchases paid in DEM on the Demos testnet only. `pay-dem` is a
 // historical alias that pays only on legacy listings (see activeOffer).
-// A current-spec listing pays only through a signed `pay-dem` phase naming that rail; the SDK
-// refuses a rail that phases of different kinds name.
+// A current-spec listing pays only through signed `pay-dem` phases naming that rail; the SDK
+// requires every payment phase to bind the selected rail.
 const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM"]);
 const pluginDemRail = (rail: string, profile: string | undefined) =>
   PLUGIN_DEM_RAILS.has(rail) || (rail === "pay-dem" && profile !== "dacs-v0.1");
@@ -25,8 +25,8 @@ const pluginDemRail = (rail: string, profile: string | undefined) =>
 const pluginCanPay = (offering: { rails?: string[]; paymentPhases?: Array<{ kind: string; rail: string }> }, profile: string | undefined) =>
   profile === "dacs-v0.1"
     ? [...PLUGIN_DEM_RAILS].some((rail) => {
-      const phases = (offering.paymentPhases ?? []).filter((phase) => phase.rail === rail);
-      return phases.length > 0 && phases.every((phase) => phase.kind === "pay-dem") && (offering.rails ?? []).includes(rail);
+      const phases = offering.paymentPhases ?? [];
+      return phases.length > 0 && phases.every((phase) => phase.kind === "pay-dem" && phase.rail === rail) && (offering.rails ?? []).includes(rail);
     })
     : (offering.rails ?? []).some((rail) => pluginDemRail(rail, profile));
 // A published amount the plugin could offer: a plain positive decimal.

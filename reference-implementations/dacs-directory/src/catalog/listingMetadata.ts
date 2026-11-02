@@ -39,13 +39,18 @@ export function listingPresentation(scope: Record<string, unknown>) {
       .map((step) => step.kind).filter((kind): kind is string => typeof kind === "string")
     : [];
   // Payment phases and the rail each names (DACS-4: a payment phase pays exactly `parameters.rail`).
+  // All or nothing: a payment phase without a valid rail, or more than 16, leaves the list empty,
+  // so a reader never judges a pipeline from part of it.
   const paymentPhases = currentOffering && Array.isArray(scope.pipeline)
-    ? scope.pipeline.flatMap((step) => {
-      const phase = record(step);
-      const rail = record(phase?.parameters)?.rail;
-      return typeof phase?.kind === "string" && phase.kind.startsWith("pay-") && typeof rail === "string" &&
-        protocolId.test(phase.kind) && railId.test(rail) ? [{ kind: phase.kind, rail }] : [];
-    }).slice(0, 16)
+    ? (() => {
+      const phases: Array<{ kind: string; rail: string } | null> = scope.pipeline.flatMap((step) => {
+        const phase = record(step);
+        if (typeof phase?.kind !== "string" || !phase.kind.startsWith("pay-")) return [];
+        const rail = record(phase.parameters)?.rail;
+        return [protocolId.test(phase.kind) && typeof rail === "string" && railId.test(rail) ? { kind: phase.kind, rail } : null];
+      });
+      return phases.length <= 16 && phases.every((phase) => phase !== null) ? phases as Array<{ kind: string; rail: string }> : [];
+    })()
     : undefined;
   const acceptedRails = Array.isArray(scope.acceptedRails)
     ? scope.acceptedRails.filter((rail): rail is Record<string, unknown> => Boolean(rail) && typeof rail === "object" && !Array.isArray(rail))

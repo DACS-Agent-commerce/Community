@@ -155,7 +155,6 @@ test("the catalog projection keeps each signed payment phase with the rail it pa
       { kind: "negotiate-fixed-price" },
       { kind: "pay-x402", parameters: { rail: "x402:default" } },
       { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } },
-      { kind: "pay-dem" },
       { kind: "deliver-storage-program", parameters: { rail: "demos-native:DEM" } },
     ],
     acceptedRails: [{ railId: "demos-native:DEM" }],
@@ -165,6 +164,11 @@ test("the catalog projection keeps each signed payment phase with the rail it pa
     { kind: "pay-dem", rail: "demos-native:DEM" },
   ]);
   assert.equal(listingPresentation({ supportedPaymentRails: ["pay-dem"] }).paymentPhases, undefined, "legacy listings have no pipeline");
+  const offering = { title: "Phases", description: "", category: "services.other" };
+  const dem = { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } };
+  assert.deepEqual(listingPresentation({ offering, pipeline: [dem, { kind: "pay-dem" }] }).paymentPhases, [], "a payment phase without a rail empties the list");
+  assert.deepEqual(listingPresentation({ offering, pipeline: Array(17).fill(dem) }).paymentPhases, [], "more than 16 payment phases empties the list");
+  assert.equal(listingPresentation({ offering, pipeline: Array(16).fill(dem) }).paymentPhases?.length, 16);
 });
 
 test("the publisher never asserts a PA-1 signature it did not verify, and publishes only on LP-6 verified", () => {
