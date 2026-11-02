@@ -127,7 +127,8 @@ export interface ListingSummary {
   };
   buyerRequirement?: Record<string, unknown>;
   terms?: Record<string, unknown>;
-  status: "active" | "revoked";
+  /** superseded is a Directory presentation status, not a signed Listing field. */
+  status: "active" | "revoked" | "superseded";
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
   revocation?: RevocationBinding;
   catalogObservedAt: number;

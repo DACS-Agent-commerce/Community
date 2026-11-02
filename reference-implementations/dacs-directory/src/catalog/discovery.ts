@@ -50,5 +50,5 @@ export function primaryClaimMatches(claim: string, filter: string): boolean {
   return canonicalClaim === canonicalFilter || canonicalClaim.startsWith(canonicalFilter + ":");
 }
 
-/** Machine discovery retains authenticated withdrawal records. */
+/** Machine discovery omits internal supersession; authenticated withdrawals remain visible. */
 export const discoveryListing = (listing: ListingSummary): boolean => activeOffer(listing) || listing.status === "revoked" && Boolean(listing.revocation);

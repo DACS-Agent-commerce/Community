@@ -12,6 +12,7 @@ import { parseCciRecord } from "@kynesyslabs/dacs/identity";
 import { readAnchor } from "@/src/catalog/chain";
 import { storedListingHash } from "@/src/catalog/listingVerification";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
+import { discoveryListing } from "@/src/catalog/discovery";
 import { loadCatalog } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
@@ -32,7 +33,7 @@ export async function GET(req: NextRequest) {
   }
 
   const entries = [];
-  for (const l of seller.listings) {
+  for (const l of seller.listings.filter(discoveryListing)) {
     const raw = await readAnchor(l.anchor.locator);
     if (!raw) continue;
     let listingContentHash: string;
@@ -50,6 +51,7 @@ export async function GET(req: NextRequest) {
         ...(l.pricing.priceHint ? { priceHint: l.pricing.priceHint } : {}),
       },
       status: l.status,
+      ...(l.revocation ? { revocation: l.revocation } : {}),
     });
   }
 
