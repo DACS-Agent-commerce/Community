@@ -108,6 +108,8 @@ export interface ListingSummary {
     tags: string[];
     /** §9.5 payment rails the listing accepts (from supportedPaymentRails). */
     rails?: string[];
+    /** Current-spec payment phases from the signed pipeline, with the rail each pays. Absent on legacy SDK listings. */
+    paymentPhases?: Array<{ kind: string; rail: string }>;
     /** §9.6 delivery methods the listing offers (from supportedDelivery). */
     delivery?: string[];
     /** Negotiation modes the seller supports (from supportedNegotiation). */

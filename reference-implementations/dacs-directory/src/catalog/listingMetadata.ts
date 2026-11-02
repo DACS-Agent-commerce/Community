@@ -38,6 +38,15 @@ export function listingPresentation(scope: Record<string, unknown>) {
     ? scope.pipeline.filter((step): step is Record<string, unknown> => Boolean(step) && typeof step === "object" && !Array.isArray(step))
       .map((step) => step.kind).filter((kind): kind is string => typeof kind === "string")
     : [];
+  // Payment phases and the rail each names (DACS-4: a payment phase pays exactly `parameters.rail`).
+  const paymentPhases = currentOffering && Array.isArray(scope.pipeline)
+    ? scope.pipeline.flatMap((step) => {
+      const phase = record(step);
+      const rail = record(phase?.parameters)?.rail;
+      return typeof phase?.kind === "string" && phase.kind.startsWith("pay-") && typeof rail === "string" &&
+        protocolId.test(phase.kind) && railId.test(rail) ? [{ kind: phase.kind, rail }] : [];
+    }).slice(0, 16)
+    : undefined;
   const acceptedRails = Array.isArray(scope.acceptedRails)
     ? scope.acceptedRails.filter((rail): rail is Record<string, unknown> => Boolean(rail) && typeof rail === "object" && !Array.isArray(rail))
       .map((rail) => rail.railId).filter((rail): rail is string => typeof rail === "string")
@@ -63,6 +72,7 @@ export function listingPresentation(scope: Record<string, unknown>) {
     category,
     tags: boundedStrings(currentOffering?.tags ?? scope.tags, 16, 64),
     rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, railId),
+    paymentPhases,
     delivery: currentOffering
       ? pipeline.filter((kind) => kind.startsWith("deliver-"))
       : boundedStrings(scope.supportedDelivery, 16, 128, protocolId),
