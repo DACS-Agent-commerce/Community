@@ -61,7 +61,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
   const pluginCanBuy = Boolean(executable) && !isFixtureListing && listing.pricing.kind === "fixed" &&
-    (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
+    listing.pricing.currency === "DEM" && (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
   const endpointDeclarationNote = isFixtureListing && evidence.endpoint.kind === "not-declared"
@@ -122,9 +122,9 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           <div className="eyebrow">how to buy</div>
           <h2 id="buy-heading" className="card-section-title">Buy through your AI assistant</h2>
           <p>
-            Purchases don&apos;t happen on this site. The DACS plugin lets ChatGPT, or an MCP client such as Claude Code,
-            find this listing, check it, and prepare a fixed-price purchase on the Demos testnet. You approve the payment
-            in your own wallet.
+            Purchases won&apos;t happen on this site. The planned DACS plugin will let ChatGPT, or an MCP client such as
+            Claude Code, find this listing, check it, and prepare a fixed-price purchase on the Demos testnet, with you
+            approving the payment in your own wallet.
           </p>
           {sellerOffline && <p><strong>This seller is offline right now,</strong> so a purchase would fail until it is reachable again.</p>}
           <p><strong>Listing to ask for:</strong> <CopyText value={`${listing.listingId}@${listing.version}`} head={40} tail={8} /></p>
