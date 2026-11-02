@@ -334,8 +334,9 @@ current SDK seller runtime.
    anchored by the listing owner, then arrival order. The queue itself has no cap.
    An incomplete withdrawal check from a publisher-authenticated or operator-pinned
    well-known source is `indeterminate` (RB-5), so its listing is withheld from new
-   discovery. Unauthenticated chain hints cannot create holds on independently
-   discovered active listings. An unsigned revoked or incomplete index row cannot
+   discovery. Other unauthenticated chain hints cannot create holds on independently
+   discovered active listings, with one exception described below: a marker carried in a
+   confirmed CREATE that its sender signed, which holds only that sender's own listing. An unsigned revoked or incomplete index row cannot
    introduce an active offer; its binding must first resolve a verified marker, or
    a separate complete active source must establish discovery eligibility.
    Once a marker verifies, the listing stays `revoked` with its
