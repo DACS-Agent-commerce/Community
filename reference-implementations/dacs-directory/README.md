@@ -346,7 +346,10 @@ current SDK seller runtime.
    unavailable reads keep authenticated holds across recrawls and restarts.
    A marker that verified before, or a candidate the listing's owner anchored, that the
    node cannot serve (a storage `not found` included) also withholds the listing until it
-   can be read.
+   can be read. So does a marker that a confirmed CREATE by the listing's owner or signing
+   key carried to an anchor whose read fails or returns no marker: the scan queues that
+   anchor as a candidate under the CREATE's sender, and only a read that returns a marker
+   there settles it.
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
    `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The

@@ -250,7 +250,7 @@ export function unreadRevocationCreate(value: unknown): { locator: string; listi
   if (!write || write.operation !== "CREATE_STORAGE_PROGRAM" || write.storageAddress !== tx.to) return null;
   if (typeof write.programName !== "string" || typeof write.salt !== "string") return null;
   if (deriveStorageAddress(envelope.from, write.programName, Number(nonce), write.salt) !== tx.to) return null;
-  if (!isListingRevocationCandidate(write.data)) return null;
+  if (!isListingRevocationCandidate(write.data) || boundedJson(write.data) === null) return null;
   const marker = write.data as Record<string, unknown>;
   const owner = `0x${envelope.from.replace(/^0x/, "").toLowerCase()}`;
   const signer = canonicalDemosAgentClaim(String((marker.signature as Record<string, unknown>).signer));
@@ -546,7 +546,9 @@ export async function scanChain(
         locator: address,
         kind: "unknown",
         code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
-        message: "storage program could not be read under the public indexer policy",
+        message: carriedUnresolved
+          ? "storage program read returned no withdrawal marker where its confirmed CREATE carried one"
+          : "storage program could not be read under the public indexer policy",
       });
       // Keep the value its CREATE carried, so the reindex can queue the anchor under its
       // sender and hold that seller's Listing until a read settles the marker (RB-6).

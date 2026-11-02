@@ -330,3 +330,13 @@ test('a chain reset clears carried candidates',async()=>{
  store.clearChainDerivedArtifacts();
  assert.deepEqual(candidateRows(f.hash),[]);
 });
+test('carried candidates are found by the key that carried them, as storage owner or signing key',async()=>{
+ const f=await fixture();const locator='stor-'+(7400).toString(16).padStart(40,'0');const other='0x'+'9'.repeat(64);
+ store.admitRevocationCandidates(f.hash,[{locator,owner:sellerOwner,carried:true}]);
+ assert.equal(store.isOwnerCarriedRevocationCandidate(f.hash,locator,other,claim),true,'the signing key, as a claim, matches');
+ assert.equal(store.isOwnerCarriedRevocationCandidate(f.hash,locator,null,other),false);
+ assert.equal(store.hasPendingCarriedRevocationCandidate(f.hash,claim),true);
+ assert.equal(store.hasPendingCarriedRevocationCandidate(f.hash,other),false);
+ store.recordRevocationProgress(f.hash,{unread:[],rejected:[locator]});
+ assert.equal(store.hasPendingCarriedRevocationCandidate(f.hash,claim),false,'a settled candidate holds nothing');
+});

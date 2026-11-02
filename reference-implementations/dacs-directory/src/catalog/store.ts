@@ -568,14 +568,19 @@ export function retainListingRevocation(binding: RevocationBinding, marker: Reco
 }
 const ownerCarriedCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND locator = ? AND owner = ? AND carried = 1 LIMIT 1`);
+const pendingCarriedCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND carried = 1 AND state = 'pending' LIMIT 1`);
 /**
- * Whether a confirmed CREATE by the Listing's own owner carried a marker to this anchor. Until a
- * read returns a marker there, any other reply leaves the candidate unread. Returns false when
- * the owner is unknown.
+ * Whether a confirmed CREATE by one of the given keys carried a marker to this anchor. Callers
+ * pass the Listing's storage owner and its signing key: until a read returns a marker there, any
+ * other reply leaves the candidate unread. Unknown keys are skipped.
  */
-export function isOwnerCarriedRevocationCandidate(listingHash: string, locator: string, listingOwner: string | null): boolean {
-  if (!listingOwner) return false;
-  return ownerCarriedCandidate.get(listingHash, locator, canonicalProgramOwner(listingOwner)) !== undefined;
+export function isOwnerCarriedRevocationCandidate(listingHash: string, locator: string, ...owners: Array<string | null>): boolean {
+  return owners.some((owner) => owner !== null && ownerCarriedCandidate.get(listingHash, locator, canonicalProgramOwner(owner)) !== undefined);
+}
+/** Whether a marker this key carried in a confirmed CREATE is still unsettled for the listing. */
+export function hasPendingCarriedRevocationCandidate(listingHash: string, owner: string): boolean {
+  return pendingCarriedCandidate.get(listingHash, canonicalProgramOwner(owner)) !== undefined;
 }
 const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
