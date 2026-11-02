@@ -223,7 +223,7 @@ test('a CREATE whose nonce the node reports as text still holds the listing',asy
 test('a carried marker with a forged signature does not hold the listing and is not kept',async()=>{
  const pass=await unreadCreatePass({forge:true});
  assert.equal(pass.first?.status,'active');
- assert.deepEqual(store.unreadRevocationMarkers(pass.hash,claim),{entries:[],overflow:false},'forged entries cannot fill the seller\'s set');
+ assert.deepEqual(store.unreadRevocationMarkers(pass.hash,claim),{entries:[]},'forged entries cannot fill the seller\'s set');
 });
 test('only a marker its declared signer signed passes the carried-marker signature check',async()=>{
  const f=await fixture();const {selfSignedListingRevocation}=await import('../src/catalog/listingVerification.js');
@@ -243,19 +243,50 @@ test('unreadable marker whose address does not derive from its sender does not h
  const pass=await unreadCreatePass({to:()=> 'stor-'+'f'.repeat(40)});
  assert.equal(pass.first?.status,'active');
 });
+const candidateRows=(hash:string)=>{const db=new Database(join(root,'directory.sqlite'));
+ try{return db.prepare("SELECT locator, owner, state FROM revocation_candidates WHERE listing_hash=? ORDER BY seq").all(hash) as Array<{locator:string;owner:string|null;state:string}>;}finally{db.close();}};
 test('carried markers are kept per signer: another key cannot displace the seller, a chain reset clears them',async()=>{
  const f=await fixture();const other='did:demos:agent:'+'e'.repeat(64);
  const entry=(n:number,signer:string)=>({locator:'stor-'+n.toString(16).padStart(40,'0'),marker:{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),signer}}});
  store.recordUnreadRevocationMarkers(f.hash,[...Array.from({length:20},(_,i)=>entry(1000+i,other)),entry(2000,claim)]);
- assert.equal(store.unreadRevocationMarkers(f.hash,other).overflow,true);
- assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[entry(2000,claim)],overflow:false});
+ assert.equal(store.unreadRevocationMarkers(f.hash,other).entries.length,16);
+ assert.deepEqual(candidateRows(f.hash).map(r=>r.owner),Array(4).fill('0x'+'e'.repeat(64)),'past the bound, the other key\'s entries queue under that key');
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[entry(2000,claim)]});
  store.clearChainDerivedArtifacts();
- assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[],overflow:false});
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[]});
 });
-test('an overflowing set of the seller\'s own carried markers holds the listing',async()=>{
+test('seller markers past the bound queue under the seller and hold the listing until each reads',async()=>{
  const f=await fixture();
  assert.equal((await f.index(new Map())).listings[0]?.status,'active');
- store.recordUnreadRevocationMarkers(f.hash,Array.from({length:17},(_,i)=>({locator:'stor-'+(3000+i).toString(16).padStart(40,'0'),marker:{...f.marker,listingContentHash:'0'.repeat(64)}})));
- assert.equal(store.unreadRevocationMarkers(f.hash,claim).overflow,true);
- assert.equal((await f.index(new Map())).listings.length,0,'held: an entry was dropped at the bound');
+ const wrong={...f.marker,listingId:'another-listing'};
+ const entries=Array.from({length:17},(_,i)=>({locator:'stor-'+(3000+i).toString(16).padStart(40,'0'),marker:wrong}));
+ store.recordUnreadRevocationMarkers(f.hash,entries);
+ assert.equal(store.unreadRevocationMarkers(f.hash,claim).entries.length,16);
+ assert.deepEqual(candidateRows(f.hash).map(r=>[r.locator,r.owner]),[[entries[16]!.locator,'0x'+claim.slice(-64)]]);
+ assert.equal((await f.index(new Map())).listings.length,0,'held while the queued marker is unread');
+ // Every anchor reads and fails RB-4: the kept entries and the queued one all settle.
+ const read=new Map<string,unknown>(entries.map(e=>[e.locator,wrong]));
+ const db=new Database(join(root,'directory.sqlite'));
+ try{db.prepare('DELETE FROM revocation_candidate_retries').run();}finally{db.close();}
+ assert.equal((await f.index(read)).listings[0]?.status,'active');
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[]});
+});
+test('the carried-marker store is bounded: new sets past it queue instead',async()=>{
+ const f=await fixture();const other=(n:number)=>'did:demos:agent:'+n.toString(16).padStart(64,'0');
+ const entry=(n:number)=>({locator:'stor-'+(5000+n).toString(16).padStart(40,'0'),marker:{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),signer:other(n+1)}}});
+ store.clearChainDerivedArtifacts();
+ store.recordUnreadRevocationMarkers(f.hash,Array.from({length:store.UNREAD_REVOCATION_SETS+1},(_,i)=>entry(i)));
+ const db=new Database(join(root,'directory.sqlite'));
+ try{assert.equal((db.prepare("SELECT count(*) AS n FROM kv_state WHERE key LIKE 'unread-revocation:%'").get() as {n:number}).n,store.UNREAD_REVOCATION_SETS);}finally{db.close();}
+ assert.equal(candidateRows(f.hash).length,1);
+ store.clearChainDerivedArtifacts();
+});
+test('a cached rejected observation does not settle a carried marker whose anchor is unreadable now',async()=>{
+ const f=await fixture();const locator='stor-'+(7000).toString(16).padStart(40,'0');
+ const db=new Database(join(root,'directory.sqlite'));
+ try{db.prepare("INSERT INTO artifacts(locator,kind,profile,owner,observed_at,status,data_json) VALUES (?,'listing-revocation','dacs-v0.1',?,1,'observed',?)")
+  .run(locator,'0x'+claim.slice(-64),JSON.stringify({...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}));}finally{db.close();}
+ store.recordUnreadRevocationMarkers(f.hash,[{locator,marker:f.marker}]);
+ assert.equal((await f.index(new Map())).listings.length,0,'held: the anchor did not read in this pass');
+ assert.equal(store.unreadRevocationMarkers(f.hash,claim).entries.length,1);
 });

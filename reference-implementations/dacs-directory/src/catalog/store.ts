@@ -260,17 +260,20 @@ const setJson = db.transaction((key: string, value: unknown) => {
  * Marker values carried by confirmed CREATE transactions whose storage program could not be
  * read, kept per listing hash and declared signer. The reindex keeps only markers their declared
  * signer signed; the indexer still checks each against the Listing, which reads only its own
- * signer's set: another key's entries can neither hold a Listing nor displace its seller's. A set
- * past the bound records `overflow`, which holds the Listing, so a dropped entry can't turn into
- * `active`. Filling it takes markers the seller signed for that Listing hash.
+ * signer's set: another key's entries can neither hold a Listing nor displace its seller's.
+ * Entries past a set's bound, or new sets past the store's bound, join the revocation candidate
+ * queue under their signer as owner instead, so the Listing stays held until a read settles each
+ * one, and nothing is dropped.
  */
 export const UNREAD_REVOCATION_MARKERS_PER_SIGNER = 16;
+export const UNREAD_REVOCATION_SETS = 1024;
 type UnreadRevocationMarker = { locator: string; marker: Record<string, unknown> };
-type UnreadRevocationSet = { entries: UnreadRevocationMarker[]; overflow: boolean };
+type UnreadRevocationSet = { entries: UnreadRevocationMarker[] };
 const signerKey = (signer: string) => canonicalDemosAgentClaim(signer) ?? signer;
 const unreadRevocationKey = (listingHash: string, signer: string) => `unread-revocation:${listingHash}:${signerKey(signer)}`;
+const unreadRevocationSetCount = db.prepare("SELECT count(*) AS n FROM kv_state WHERE key LIKE 'unread-revocation:%'");
 export const unreadRevocationMarkers = (listingHash: string, signer: string): UnreadRevocationSet =>
-  getJson<UnreadRevocationSet>(unreadRevocationKey(listingHash, signer), { entries: [], overflow: false });
+  ({ entries: getJson<UnreadRevocationSet>(unreadRevocationKey(listingHash, signer), { entries: [] }).entries });
 export const recordUnreadRevocationMarkers = db.transaction((listingHash: string, entries: readonly UnreadRevocationMarker[]): void => {
   const bySigner = new Map<string, UnreadRevocationMarker[]>();
   for (const entry of entries) {
@@ -278,19 +281,26 @@ export const recordUnreadRevocationMarkers = db.transaction((listingHash: string
     bySigner.set(signer, [...(bySigner.get(signer) ?? []), entry]);
   }
   for (const [signer, fresh] of bySigner) {
+    const key = unreadRevocationKey(listingHash, signer);
+    const exists = getJson<UnreadRevocationSet | null>(key, null) !== null;
+    const room = exists || (unreadRevocationSetCount.get() as { n: number }).n < UNREAD_REVOCATION_SETS;
     const set = unreadRevocationMarkers(listingHash, signer);
+    const queued: UnreadRevocationMarker[] = [];
     for (const entry of fresh) {
       if (set.entries.some((kept) => kept.locator === entry.locator)) continue;
-      if (set.entries.length >= UNREAD_REVOCATION_MARKERS_PER_SIGNER) set.overflow = true;
-      else set.entries.push(entry);
+      if (room && set.entries.length < UNREAD_REVOCATION_MARKERS_PER_SIGNER) set.entries.push(entry);
+      else queued.push(entry);
     }
-    setJson(unreadRevocationKey(listingHash, signer), set);
+    if (room) setJson(key, set);
+    // The scan admitted only markers whose CREATE sender is their declared signer.
+    const owner = canonicalDemosAgentClaim(signer)?.slice(-64);
+    if (owner) admitRevocationCandidates(listingHash, queued.map(({ locator }) => ({ locator, owner: `0x${owner}` })));
   }
 });
 export const dropUnreadRevocationMarkers = (listingHash: string, signer: string, locators: ReadonlySet<string>): void => {
   if (locators.size === 0) return;
   const set = unreadRevocationMarkers(listingHash, signer);
-  setJson(unreadRevocationKey(listingHash, signer), { ...set, entries: set.entries.filter((kept) => !locators.has(kept.locator)) });
+  setJson(unreadRevocationKey(listingHash, signer), { entries: set.entries.filter((kept) => !locators.has(kept.locator)) });
 };
 
 /** Exact authenticated create inputs retained for recovery, never proof of success. */
