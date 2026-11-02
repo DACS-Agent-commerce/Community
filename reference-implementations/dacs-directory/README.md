@@ -334,8 +334,10 @@ current SDK seller runtime.
    anchored by the listing owner, then arrival order. The queue itself has no cap.
    An incomplete withdrawal check from a publisher-authenticated or operator-pinned
    well-known source is `indeterminate` (RB-5), so its listing is withheld from new
-   discovery. Unauthenticated chain hints cannot create holds on independently
-   discovered active listings. An unsigned revoked or incomplete index row cannot
+   discovery. Other unauthenticated chain hints cannot create holds on independently
+   discovered active listings, except as described below: a candidate the listing's owner
+   anchored, and a marker carried in a confirmed CREATE that its sender signed, which holds
+   only a listing that sender owns or signed. An unsigned revoked or incomplete index row cannot
    introduce an active offer; its binding must first resolve a verified marker, or
    a separate complete active source must establish discovery eligibility.
    Once a marker verifies, the listing stays `revoked` with its
@@ -346,7 +348,10 @@ current SDK seller runtime.
    unavailable reads keep authenticated holds across recrawls and restarts.
    A marker that verified before, or a candidate the listing's owner anchored, that the
    node cannot serve (a storage `not found` included) also withholds the listing until it
-   can be read.
+   can be read. So does a marker that a confirmed CREATE by the listing's owner or signing
+   key carried to an anchor whose read fails or returns no marker: the scan queues that
+   anchor as a candidate under the CREATE's sender, and only a read that returns a marker
+   there settles it.
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
    `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
