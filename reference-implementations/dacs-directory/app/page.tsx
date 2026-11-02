@@ -58,10 +58,13 @@ export default function Home() {
             <strong>{summary.sellers}</strong>
             <span>indexed sellers</span>
           </div>
-          <div>
-            <strong>{summary.verifiedDeals}</strong>
-            <span>{CHECKED_BUNDLES_LABEL}</span>
-          </div>
+          {/* Hidden at zero: an empty count reads as a stuck site, not as evidence. */}
+          {summary.verifiedDeals > 0 && (
+            <div>
+              <strong>{summary.verifiedDeals}</strong>
+              <span>{CHECKED_BUNDLES_LABEL}</span>
+            </div>
+          )}
           <div>
             <strong>{summary.freshness.value}</strong>
             <span>{summary.freshness.label}</span>

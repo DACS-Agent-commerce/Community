@@ -33,7 +33,7 @@ function catalog(generatedAt: number, sellers: Array<{ statuses: string[]; deals
   } as unknown as Catalog;
 }
 
-// The four value/label pairs of the summary strip, in page order.
+// The value/label pairs of the summary strip, in page order (the bundle count is hidden at zero).
 function summaryStrip(html: string): string[][] {
   const strip = html.match(/<div class="trust-strip" aria-label="Catalog summary">(.*?)<\/div><\/div>/);
   assert.ok(strip, "the homepage renders its catalog summary strip");
@@ -53,7 +53,6 @@ test("the homepage renders the stored catalog's summary and links only Directory
   assert.deepEqual(summaryStrip(render()), [
     ["0", "active services"],
     ["0", "indexed sellers"],
-    ["0", "signature-checked bundles; not counted as outcomes"],
     ["pending", "initial chain index"],
   ]);
 
@@ -61,7 +60,6 @@ test("the homepage renders the stored catalog's summary and links only Directory
   assert.deepEqual(summaryStrip(render()), [
     ["0", "active services"],
     ["0", "indexed sellers"],
-    ["0", "signature-checked bundles; not counted as outcomes"],
     ["5m", "last index; no active listings"],
   ]);
 

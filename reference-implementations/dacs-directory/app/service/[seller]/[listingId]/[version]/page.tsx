@@ -13,6 +13,12 @@ import { catalogAuthenticationLabel, directoryEvidenceState } from "@/src/compon
 
 export const dynamic = "force-dynamic";
 
+const DACS_PLUGIN_REPOSITORY = "https://github.com/DACS-Agent-commerce/dacs-plugin";
+// The plugin prepares fixed-price purchases paid in DEM on the Demos testnet only.
+const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM", "pay-dem"]);
+// A published amount the plugin could offer: a plain positive decimal.
+const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d+)?$/.test(amount ?? "") && Number(amount) > 0;
+
 type Params = { seller: string; listingId: string; version: string };
 
 function findService(sellerClaim: string, listingId: string, version: string) {
@@ -52,8 +58,12 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const inspectHref = inspectServicePath(listing);
   const executable = activeOffer(listing);
   const engagementEndpoint = executable ? evidence.endpoint.url : undefined;
+  // A fresh failed probe means the button would open a dead address; say so instead.
+  const sellerOffline = Boolean(engagementEndpoint) && evidence.reachability.kind === "unreachable";
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
+  const pluginCanBuy = Boolean(executable) && !isFixtureListing && listing.pricing.kind === "fixed" &&
+    listing.pricing.currency === "DEM" && hasPositiveAmount(listing.pricing.priceHint) && (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
   const endpointDeclarationNote = isFixtureListing && evidence.endpoint.kind === "not-declared"
@@ -97,16 +107,39 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
           )}
         </div>
         <div className="service-actions">
-          {engagementEndpoint && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
-          <a className={engagementEndpoint ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
+          {engagementEndpoint && !sellerOffline && <a className="btn" href={engagementEndpoint} target="_blank" rel="noreferrer">Begin with agent <span aria-hidden>↗</span></a>}
+          <a className={engagementEndpoint && !sellerOffline ? "btn secondary" : "btn"} href={apiHref}>{listingArtifactLabel}</a>
           <a className="btn secondary" href={inspectHref}>Inspect service</a>
           <Link className="btn secondary" href={`/seller/${encodeURIComponent(seller.primaryClaim)}`}>View seller evidence</Link>
         </div>
+        {sellerOffline && <p className="note"><strong>Seller offline:</strong> the Directory could not reach this agent in its last check, so the contact link is hidden.</p>}
         <p className="note">
           {endpointDeclarationNote} <strong>Reachability:</strong> {evidence.reachability.label}.
           {engagementEndpoint && " A declared contact route is not a health check or cryptographic trust anchor."}
         </p>
       </section>
+
+      {pluginCanBuy && (
+        <section className="card" aria-labelledby="buy-heading">
+          <div className="eyebrow">how to buy</div>
+          <h2 id="buy-heading" className="card-section-title">Buy through your AI assistant</h2>
+          <p>
+            Purchases won&apos;t happen on this site. The planned DACS plugin will let ChatGPT, or an MCP client such as
+            Claude Code, find this listing, check it, and prepare a fixed-price purchase on the Demos testnet, with you
+            approving the payment in your own wallet.
+          </p>
+          {sellerOffline && <p><strong>This seller is offline right now,</strong> so a purchase would fail until it is reachable again.</p>}
+          <p>
+            Give the assistant both: another seller can publish a listing with the same name.
+          </p>
+          <p><strong>Listing:</strong> <CopyText value={`${listing.listingId}@${listing.version}`} head={40} tail={8} /></p>
+          <p><strong>Seller:</strong> <CopyText value={seller.primaryClaim} head={32} tail={8} /></p>
+          <p className="note">
+            The plugin is in development and not released yet.{" "}
+            <a className="text-link" href={DACS_PLUGIN_REPOSITORY} target="_blank" rel="noreferrer">Plugin source ↗</a>
+          </p>
+        </section>
+      )}
 
       <div className="service-layout">
         <section className="card" aria-labelledby="offer-heading">

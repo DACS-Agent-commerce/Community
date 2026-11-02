@@ -74,3 +74,57 @@ test("the service page labels catalog authentication per profile and leaves tran
   assert.equal(evidenceRow(fixtureHtml, "Catalog candidate"), catalogAuthenticationLabel("fixture-listing"));
   assert.match(evidenceRow(fixtureHtml, "Transaction readiness"), /^Unassessed here/);
 });
+
+test("the service page hides the contact button when the seller was unreachable and shows how to buy", async (t) => {
+  const data = mkdtempSync(join(tmpdir(), "service-page-"));
+  t.after(() => rmSync(data, { recursive: true, force: true }));
+  process.env.DACS_DIRECTORY_DATA = data;
+  const { saveCatalog } = await import("../src/catalog/store.js");
+  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+  const endpoint = "https://seller.example/agent";
+  // What the plugin can buy: a fixed price paid in DEM.
+  const fixedDem = (overrides: Partial<ListingSummary>) => listing({
+    offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"] },
+    pricing: { kind: "fixed", priceHint: "1", currency: "DEM" },
+    ...overrides,
+  });
+  const online = fixedDem({ listingId: "online", publicEndpoint: endpoint, reachabilityHint: { status: "reachable", checkedAt: Date.now() } });
+  const offline = fixedDem({ listingId: "offline", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() } });
+  const stale = fixedDem({ listingId: "stale", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() - 2 * 60 * 60_000 } });
+  const fixture = fixedDem({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
+  const x402 = fixedDem({ listingId: "x402", offering: { title: "Service", category: "services.other", tags: [], rails: ["x402:default"] } });
+  const auction = fixedDem({ listingId: "auction", pricing: { kind: "auction", currency: "DEM" } });
+  const usd = fixedDem({ listingId: "usd", pricing: { kind: "fixed", priceHint: "1", currency: "USD" } });
+  const noAmount = fixedDem({ listingId: "no-amount", pricing: { kind: "fixed", currency: "DEM" } });
+  const zero = fixedDem({ listingId: "zero", pricing: { kind: "fixed", priceHint: "0", currency: "DEM" } });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, auction, usd, noAmount, zero])] });
+  const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
+    params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
+  }));
+
+  const onlineHtml = await render(online);
+  assert.match(onlineHtml, /Begin with agent/);
+  assert.doesNotMatch(onlineHtml, /Seller offline/);
+  assert.match(onlineHtml, /Buy through your AI assistant/);
+  assert.match(onlineHtml, /The planned DACS plugin will let/, "the buying path is described as not yet usable");
+  const buyBox = onlineHtml.slice(onlineHtml.indexOf('id="buy-heading"'), onlineHtml.indexOf("</section>", onlineHtml.indexOf('id="buy-heading"')));
+  assert.match(buyBox, /title="online@1"/, "the listing to ask for is online@1");
+  assert.match(buyBox, new RegExp(`title="${SELLER_CLAIM}"`), "the box names the seller, since listing IDs are unique only per seller");
+
+  const offlineHtml = await render(offline);
+  assert.doesNotMatch(offlineHtml, /Begin with agent/);
+  assert.doesNotMatch(offlineHtml, new RegExp(`href="${endpoint}"`), "the dead address is not linked");
+  assert.match(offlineHtml, /Seller offline/);
+  assert.match(offlineHtml, /This seller is offline right now/, "the buy box warns a purchase would fail");
+
+  const staleHtml = await render(stale);
+  assert.match(staleHtml, /Begin with agent/, "an hours-old failed check does not hide the button");
+  assert.doesNotMatch(staleHtml, /Seller offline/);
+
+  assert.doesNotMatch(await render(fixture), /Buy through your AI assistant/, "a fixture is not offered for sale");
+  assert.doesNotMatch(await render(x402), /Buy through your AI assistant/, "the plugin does not pay over x402");
+  assert.doesNotMatch(await render(auction), /Buy through your AI assistant/, "the plugin buys only at a fixed price");
+  assert.doesNotMatch(await render(usd), /Buy through your AI assistant/, "the plugin pays only DEM prices");
+  assert.doesNotMatch(await render(noAmount), /Buy through your AI assistant/, "no published amount, nothing to buy");
+  assert.doesNotMatch(await render(zero), /Buy through your AI assistant/, "a zero amount is not an offer");
+});
