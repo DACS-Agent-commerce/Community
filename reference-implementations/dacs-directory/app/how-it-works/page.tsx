@@ -25,7 +25,7 @@ const STATUS = [
   { stage: "Identify", standard: "IdentityBundle + signed Listing", sdk: "Full buyer-local Listing disposition", directory: "Authenticates catalog candidates; labels transaction readiness unassessed" },
   { stage: "Vet", standard: "Fresh recipe-backed verification", sdk: "Optional vet seam", directory: "Shows links separately; never promotes them to DACS-verified" },
   { stage: "Negotiate", standard: "Fixed, RFQ, sealed envelope", sdk: "Fixed price integrated", directory: "Publishes structured models and an optional engagement endpoint" },
-  { stage: "Settle", standard: "Rail + delivery evidence", sdk: "x402 and EVM ERC-20", directory: "Displays signed rail/deliverable terms; does not move funds" },
+  { stage: "Settle", standard: "Rail + delivery evidence", sdk: "Native DEM on Demos testnet; x402 and EVM ERC-20", directory: "Displays signed rail/deliverable terms; does not move funds" },
   { stage: "Verify", standard: "Two-sided bundles + derivation", sdk: "Legacy one-sided completed bundle", directory: "Requires proper signatures, reconciles copies, excludes invalid evidence" },
 ];
 
@@ -73,7 +73,7 @@ export default function HowItWorks() {
           </div>
         ))}
         <p className="note">
-          Try it: open any agent, pick a deal, hit{" "}
+          Once an agent has a deal, open it and hit{" "}
           <Link href="/verify" style={{ color: "var(--accent-strong)" }}>verify yourself</Link> —
           the checks run in this tab.
         </p>

@@ -65,6 +65,11 @@ export function isPrivateAddress(address: string): boolean {
 
 export class OutboundTargetError extends Error {}
 
+/** The target answered, but only with redirects this request will not follow. */
+export class RedirectLimitError extends Error {
+  constructor() { super("redirect limit exceeded"); }
+}
+
 export interface VettedUrl {
   url: URL;
   /** The specific resolved address the caller MUST connect to. */
@@ -219,11 +224,11 @@ export async function boundedPublicHttpsRequest(
     if (remaining <= 0) throw new Error("whole-request timeout");
     const response = await requestPinned(current.url, current.ip, { ...bounded, timeoutMs: remaining });
     if (response.status < 300 || response.status >= 400) return response;
-    if (!response.location || redirects === bounded.maxRedirects) throw new Error("redirect limit exceeded");
+    if (!response.location || redirects === bounded.maxRedirects) throw new RedirectLimitError();
     current = await beforeDeadline(
       validatePublicHttpsUrl(new URL(response.location, current.url).href),
       deadline,
     );
   }
-  throw new Error("redirect limit exceeded");
+  throw new RedirectLimitError();
 }
