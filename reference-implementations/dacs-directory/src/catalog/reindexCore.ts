@@ -35,7 +35,6 @@ import {
   loadRegistrations,
   loadScanState,
   admitRevocationCandidates,
-  recordUnreadRevocationMarkers,
   retainListingRevocation,
   retainedListingRevocation,
   recordWellKnownWithdrawalCheck,
@@ -256,14 +255,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       admitRevocationCandidates(hash, addresses.map((locator) =>
         ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
-    // Only markers within the artifact size bound that their declared signer really signed are
-    // carried, so forged or oversized entries can't fill a seller's set.
+    // A marker a confirmed CREATE carried to an unreadable anchor joins the candidate queue
+    // under its signer, who sent that CREATE, as owner. Only markers within the artifact size
+    // bound that their declared signer really signed are admitted. The queue holds the signer's
+    // own Listing until a read of the anchor returns a marker that settles it.
     for (const [hash, entries] of scan.unreadRevocationMarkers) {
-      const signed = [];
+      const carried = [];
       for (const entry of entries) {
-        if (boundedJson(entry.marker) !== null && await selfSignedListingRevocation(entry.marker)) signed.push(entry);
+        if (boundedJson(entry.marker) === null || !await selfSignedListingRevocation(entry.marker)) continue;
+        const owner = canonicalDemosAgentClaim(String((entry.marker.signature as Record<string, unknown>).signer))?.slice(-64);
+        if (owner) carried.push({ locator: entry.locator, owner: `0x${owner}`, carried: true });
       }
-      if (signed.length) recordUnreadRevocationMarkers(hash, signed);
+      if (carried.length) admitRevocationCandidates(hash, carried);
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);

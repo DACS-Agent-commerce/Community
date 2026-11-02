@@ -206,3 +206,14 @@ test("read version 2 runs once: a later rejection stays rejected across restarts
     assert.equal(JSON.parse(child.stdout), false);
   }
 });
+
+test("an earlier candidate table gains the carried column, unset on its rows", () => {
+  const db = new Database(join(directory, "directory.sqlite"));
+  try {
+    const rows = db.prepare("SELECT locator, carried FROM revocation_candidates WHERE locator IN (?,?,?) ORDER BY locator")
+      .all(ownerMarker, otherMarker, laterMarker);
+    assert.deepEqual(rows, [{ locator: ownerMarker, carried: 0 }, { locator: otherMarker, carried: 0 }, { locator: laterMarker, carried: 0 }]);
+  } finally { db.close(); }
+  store.admitRevocationCandidates(laterHash, [{ locator: laterMarker, owner, carried: true }]);
+  assert.equal(store.isOwnerCarriedRevocationCandidate(laterHash, laterMarker, owner), true);
+});

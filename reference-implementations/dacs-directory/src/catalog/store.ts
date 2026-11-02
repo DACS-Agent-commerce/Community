@@ -1,6 +1,5 @@
 /** Transactional index repository backed by SQLite, with one-time JSON migration. */
 import { boundedJson } from "./artifactLimits.js";
-import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
 import Database from "better-sqlite3";
@@ -159,6 +158,7 @@ db.exec(`
     content_hash TEXT,
     seq INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending',
+    carried INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(listing_hash, locator)
   );
   CREATE TABLE IF NOT EXISTS revocation_candidate_retries (
@@ -193,6 +193,15 @@ db.transaction(() => {
     // Earlier coordinates were not authenticated; never promote them to notices.
     db.exec("ALTER TABLE listing_rejections ADD COLUMN public_notice INTEGER NOT NULL DEFAULT 0");
     db.exec("UPDATE listing_rejections SET listing_id = NULL, listing_version = NULL");
+  }
+}).immediate();
+
+// A candidate named by a confirmed CREATE that carried a marker is marked, so a later
+// non-marker reply leaves it unread instead of settling it.
+db.transaction(() => {
+  const columns = db.pragma("table_info(revocation_candidates)") as Array<{ name: string }>;
+  if (!columns.some((entry) => entry.name === "carried")) {
+    db.exec("ALTER TABLE revocation_candidates ADD COLUMN carried INTEGER NOT NULL DEFAULT 0");
   }
 }).immediate();
 
@@ -255,57 +264,6 @@ const setJson = db.transaction((key: string, value: unknown) => {
     ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`)
     .run(key, JSON.stringify(value), Date.now());
 });
-
-/**
- * Marker values carried by confirmed CREATE transactions whose storage program could not be
- * read, kept per listing hash and declared signer. The reindex keeps only markers their declared
- * signer signed; the indexer still checks each against the Listing, which reads only its own
- * signer's set: another key's entries can neither hold a Listing nor displace its seller's.
- * Entries past a set's bound, or new sets past the store's bound, join the revocation candidate
- * queue under their signer as owner instead, so the Listing stays held until a read settles each
- * one, and nothing is dropped.
- */
-export const UNREAD_REVOCATION_MARKERS_PER_SIGNER = 16;
-export const UNREAD_REVOCATION_SETS = 1024;
-type UnreadRevocationMarker = { locator: string; marker: Record<string, unknown> };
-type UnreadRevocationSet = { entries: UnreadRevocationMarker[] };
-const signerKey = (signer: string) => canonicalDemosAgentClaim(signer) ?? signer;
-const unreadRevocationKey = (listingHash: string, signer: string) => `unread-revocation:${listingHash}:${signerKey(signer)}`;
-const unreadRevocationSetCount = db.prepare("SELECT count(*) AS n FROM kv_state WHERE key LIKE 'unread-revocation:%'");
-export const unreadRevocationMarkers = (listingHash: string, signer: string): UnreadRevocationSet =>
-  ({ entries: getJson<UnreadRevocationSet>(unreadRevocationKey(listingHash, signer), { entries: [] }).entries });
-export const recordUnreadRevocationMarkers = db.transaction((listingHash: string, entries: readonly UnreadRevocationMarker[]): void => {
-  const bySigner = new Map<string, UnreadRevocationMarker[]>();
-  for (const entry of entries) {
-    const signer = String((entry.marker.signature as Record<string, unknown> | undefined)?.signer ?? "");
-    bySigner.set(signer, [...(bySigner.get(signer) ?? []), entry]);
-  }
-  for (const [signer, fresh] of bySigner) {
-    const key = unreadRevocationKey(listingHash, signer);
-    const exists = getJson<UnreadRevocationSet | null>(key, null) !== null;
-    const room = exists || (unreadRevocationSetCount.get() as { n: number }).n < UNREAD_REVOCATION_SETS;
-    const set = unreadRevocationMarkers(listingHash, signer);
-    const queued: UnreadRevocationMarker[] = [];
-    for (const entry of fresh) {
-      if (set.entries.some((kept) => kept.locator === entry.locator)) continue;
-      if (room && set.entries.length < UNREAD_REVOCATION_MARKERS_PER_SIGNER) set.entries.push(entry);
-      else queued.push(entry);
-    }
-    if (room) setJson(key, set);
-    // The scan admitted only markers whose CREATE sender is their declared signer.
-    const owner = canonicalDemosAgentClaim(signer)?.slice(-64);
-    if (owner) admitRevocationCandidates(listingHash, queued.map(({ locator }) => ({ locator, owner: `0x${owner}` })));
-  }
-});
-const deleteUnreadRevocationSet = db.prepare("DELETE FROM kv_state WHERE key = ?");
-export const dropUnreadRevocationMarkers = (listingHash: string, signer: string, locators: ReadonlySet<string>): void => {
-  if (locators.size === 0) return;
-  const key = unreadRevocationKey(listingHash, signer);
-  const entries = unreadRevocationMarkers(listingHash, signer).entries.filter((kept) => !locators.has(kept.locator));
-  // A settled set frees its place under the store's bound.
-  if (entries.length === 0) deleteUnreadRevocationSet.run(key);
-  else setJson(key, { entries });
-};
 
 /** Exact authenticated create inputs retained for recovery, never proof of success. */
 export interface ListingPreparation {
@@ -515,14 +473,16 @@ db.transaction(() => {
  * is admitted again only when the chain shows it with a different stored
  * value (`content_hash` hashes the whole value, signature envelope included).
  * `seq` is arrival order; an unreadable candidate is given a new one, so it
- * moves behind the others and is retried later.
+ * moves behind the others and is retried later. `carried` marks a locator a
+ * confirmed CREATE carried a marker to before its storage could be read.
  */
-export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null }
+export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null; carried?: boolean }
 const nextCandidateSeq = db.prepare("SELECT COALESCE(MAX(seq),0) + 1 seq FROM revocation_candidates");
-const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state)
-  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending')
+const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state,carried)
+  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending',@carried)
   ON CONFLICT(listing_hash,locator) DO UPDATE SET
     owner=COALESCE(excluded.owner,revocation_candidates.owner),
+    carried=MAX(excluded.carried,revocation_candidates.carried),
     content_hash=COALESCE(excluded.content_hash,revocation_candidates.content_hash),
     seq=CASE WHEN revocation_candidates.state='rejected' AND excluded.content_hash IS NOT NULL
       AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN excluded.seq ELSE revocation_candidates.seq END,
@@ -533,7 +493,8 @@ export const admitRevocationCandidates = db.transaction(
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
     for (const candidate of candidates) {
       upsertCandidate.run({ listingHash, locator: candidate.locator, seq: seq++,
-        owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null });
+        owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null,
+        carried: candidate.carried ? 1 : 0 });
     }
   },
 );
@@ -604,6 +565,17 @@ export function retainedListingRevocation(hash: string): RevocationBinding | nul
 /** Call only after RB-4 verification against the independently verified listing signer. */
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
   setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+}
+const ownerCarriedCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND locator = ? AND owner = ? AND carried = 1 LIMIT 1`);
+/**
+ * Whether a confirmed CREATE by the Listing's own owner carried a marker to this anchor. Until a
+ * read returns a marker there, any other reply leaves the candidate unread. Returns false when
+ * the owner is unknown.
+ */
+export function isOwnerCarriedRevocationCandidate(listingHash: string, locator: string, listingOwner: string | null): boolean {
+  if (!listingOwner) return false;
+  return ownerCarriedCandidate.get(listingHash, locator, canonicalProgramOwner(listingOwner)) !== undefined;
 }
 const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);
@@ -759,7 +731,6 @@ export const saveScanState = db.transaction((state: ScanState): void => {
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
   db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'").run();
-  db.prepare("DELETE FROM kv_state WHERE key LIKE 'unread-revocation:%'").run();
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
   db.prepare("DELETE FROM artifacts").run();

@@ -232,9 +232,9 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
  * A revocation marker named by a confirmed CREATE whose storage read failed. The address is
  * derived from the sender, name, nonce and salt, so the sender is the program's owner; the
  * listing hash and the marker value come from the transaction, and its declared signer must
- * be the sender. None of this is authenticated: the node reports it. The indexer holds a
- * Listing on it only after the carried marker passes the full RB-4 check against that Listing,
- * and publishes `revoked` only from a read of the anchored marker.
+ * be the sender. None of this is authenticated: the node reports it. The reindex queues the
+ * anchor as a revocation candidate under the sender, which holds only the sender's own Listing,
+ * and the indexer publishes `revoked` only from a read of the anchored marker.
  */
 export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; marker: Record<string, unknown> } | null {
   const tx = objectValue(value);
@@ -548,8 +548,8 @@ export async function scanChain(
         code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
         message: "storage program could not be read under the public indexer policy",
       });
-      // Keep the value its CREATE carried, so the indexer can check it against the Listing
-      // and hold that Listing until a read settles the marker (RB-6).
+      // Keep the value its CREATE carried, so the reindex can queue the anchor under its
+      // sender and hold that seller's Listing until a read settles the marker (RB-6).
       const create = revocationCreates.get(address);
       if (create) {
         const entries = unreadRevocationMarkers.get(create.listingHash) ?? [];
