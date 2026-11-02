@@ -95,7 +95,9 @@ test("the service page hides the contact button when the seller was unreachable 
   const x402 = fixedDem({ listingId: "x402", offering: { title: "Service", category: "services.other", tags: [], rails: ["x402:default"] } });
   const auction = fixedDem({ listingId: "auction", pricing: { kind: "auction", currency: "DEM" } });
   const usd = fixedDem({ listingId: "usd", pricing: { kind: "fixed", priceHint: "1", currency: "USD" } });
-  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, auction, usd])] });
+  const noAmount = fixedDem({ listingId: "no-amount", pricing: { kind: "fixed", currency: "DEM" } });
+  const zero = fixedDem({ listingId: "zero", pricing: { kind: "fixed", priceHint: "0", currency: "DEM" } });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, auction, usd, noAmount, zero])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
   }));
@@ -121,4 +123,6 @@ test("the service page hides the contact button when the seller was unreachable 
   assert.doesNotMatch(await render(x402), /Buy through your AI assistant/, "the plugin does not pay over x402");
   assert.doesNotMatch(await render(auction), /Buy through your AI assistant/, "the plugin buys only at a fixed price");
   assert.doesNotMatch(await render(usd), /Buy through your AI assistant/, "the plugin pays only DEM prices");
+  assert.doesNotMatch(await render(noAmount), /Buy through your AI assistant/, "no published amount, nothing to buy");
+  assert.doesNotMatch(await render(zero), /Buy through your AI assistant/, "a zero amount is not an offer");
 });

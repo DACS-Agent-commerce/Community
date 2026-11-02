@@ -16,6 +16,8 @@ export const dynamic = "force-dynamic";
 const DACS_PLUGIN_REPOSITORY = "https://github.com/DACS-Agent-commerce/dacs-plugin";
 // The plugin prepares fixed-price purchases paid in DEM on the Demos testnet only.
 const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM", "pay-dem"]);
+// A published amount the plugin could offer: a plain positive decimal.
+const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d+)?$/.test(amount ?? "") && Number(amount) > 0;
 
 type Params = { seller: string; listingId: string; version: string };
 
@@ -61,7 +63,7 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
   const isCounterpartyEvidenceDemo = isCounterpartyEvidenceDemoListing(seller.primaryClaim, listing);
   const isFixtureListing = listing.anchor.kind === "fixture";
   const pluginCanBuy = Boolean(executable) && !isFixtureListing && listing.pricing.kind === "fixed" &&
-    listing.pricing.currency === "DEM" && (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
+    listing.pricing.currency === "DEM" && hasPositiveAmount(listing.pricing.priceHint) && (listing.offering.rails ?? []).some((rail) => PLUGIN_DEM_RAILS.has(rail));
   const technicalArtifactProfile = isFixtureListing ? "fixture-listing" : (listing.artifactProfile ?? "legacy-sdk-v0.1");
   const listingArtifactLabel = isFixtureListing ? "View fixture contract" : "View signed listing artifact";
   const endpointDeclarationNote = isFixtureListing && evidence.endpoint.kind === "not-declared"
