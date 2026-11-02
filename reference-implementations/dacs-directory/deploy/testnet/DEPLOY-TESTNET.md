@@ -32,7 +32,10 @@ change to `TESTNET_CHAIN_IDENTITIES`, not a setting.
 ## Install
 
 Node 22.23.3 (`.nvmrc`) must be installed system-wide, since the units find `node`
-and `npm` on systemd's default `PATH`. As root:
+and `npm` on systemd's default `PATH`. The release must match exactly: both units run
+`scripts/check-node-runtime.mjs` before starting, and it refuses any other release,
+including another 22.x. If the server keeps a different Node, install 22.23.3 for
+these units or remove that `ExecStartPre` line and accept the unpinned runtime. As root:
 
 1. Create the service user: `useradd --system --home-dir /var/lib/dacs-directory --shell /usr/sbin/nologin dacs-directory`.
 2. Check out a reviewed commit of this repository at `/opt/dacs-directory`, owned by
