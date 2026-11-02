@@ -74,3 +74,32 @@ test("the service page labels catalog authentication per profile and leaves tran
   assert.equal(evidenceRow(fixtureHtml, "Catalog candidate"), catalogAuthenticationLabel("fixture-listing"));
   assert.match(evidenceRow(fixtureHtml, "Transaction readiness"), /^Unassessed here/);
 });
+
+test("the service page hides the contact button when the seller was unreachable and shows how to buy", async (t) => {
+  const data = mkdtempSync(join(tmpdir(), "service-page-"));
+  t.after(() => rmSync(data, { recursive: true, force: true }));
+  process.env.DACS_DIRECTORY_DATA = data;
+  const { saveCatalog } = await import("../src/catalog/store.js");
+  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+  const endpoint = "https://seller.example/agent";
+  const online = listing({ listingId: "online", publicEndpoint: endpoint, reachabilityHint: { status: "reachable", checkedAt: Date.now() } });
+  const offline = listing({ listingId: "offline", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() } });
+  const fixture = listing({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, fixture])] });
+  const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
+    params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
+  }));
+
+  const onlineHtml = await render(online);
+  assert.match(onlineHtml, /Begin with agent/);
+  assert.doesNotMatch(onlineHtml, /Seller offline/);
+  assert.match(onlineHtml, /Buy through your AI assistant/);
+  assert.match(onlineHtml, /title="online@1"/, "the listing to ask for is online@1");
+
+  const offlineHtml = await render(offline);
+  assert.doesNotMatch(offlineHtml, /Begin with agent/);
+  assert.doesNotMatch(offlineHtml, new RegExp(`href="${endpoint}"`), "the dead address is not linked");
+  assert.match(offlineHtml, /Seller offline/);
+
+  assert.doesNotMatch(await render(fixture), /Buy through your AI assistant/, "a fixture is not offered for sale");
+});
