@@ -12,7 +12,7 @@ import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
+import { findValidListingRevocation, revocationSellerClaim, selfSignedListingRevocation, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -256,7 +256,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       admitRevocationCandidates(hash, addresses.map((locator) =>
         ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
-    for (const [hash, entries] of scan.unreadRevocationMarkers) recordUnreadRevocationMarkers(hash, entries);
+    // Only markers their declared signer really signed are carried, so forged entries can't fill a
+    // seller's set and hold the Listing after its reads recover.
+    for (const [hash, entries] of scan.unreadRevocationMarkers) {
+      const signed = [];
+      for (const entry of entries) if (await selfSignedListingRevocation(entry.marker)) signed.push(entry);
+      if (signed.length) recordUnreadRevocationMarkers(hash, signed);
+    }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
       state.bundleBindings[jobId] = bounded.bindings;

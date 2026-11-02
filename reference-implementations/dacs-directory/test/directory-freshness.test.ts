@@ -168,8 +168,8 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
 
 // A storage read can fail for a marker the seller really created. The confirmed CREATE carries the
 // marker, and the Listing is held only while that carried value passes RB-4 against it and the
-// anchor stays unreadable. The node reports the transaction, so a forged value, another key's
-// CREATE or an address that does not derive from its inputs holds nothing.
+// anchor stays unreadable. The node reports the transaction, so a forged value (not even kept),
+// another key's CREATE or an address that does not derive from its inputs holds nothing.
 async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean}){
  const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
  const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=100+(++seq);const programName='dacs1-revoked:fixture'; // a fresh nonce gives each case its own address
@@ -220,9 +220,18 @@ test('a CREATE whose nonce the node reports as text still holds the listing',asy
  const pass=await unreadCreatePass({nonceText:true});
  assert.equal(pass.first,undefined);
 });
-test('a carried marker with a forged signature does not hold the listing',async()=>{
+test('a carried marker with a forged signature does not hold the listing and is not kept',async()=>{
  const pass=await unreadCreatePass({forge:true});
  assert.equal(pass.first?.status,'active');
+ assert.deepEqual(store.unreadRevocationMarkers(pass.hash,claim),{entries:[],overflow:false},'forged entries cannot fill the seller\'s set');
+});
+test('only a marker its declared signer signed passes the carried-marker signature check',async()=>{
+ const f=await fixture();const {selfSignedListingRevocation}=await import('../src/catalog/listingVerification.js');
+ const sig=f.marker.signature as Record<string,unknown>;
+ assert.equal(await selfSignedListingRevocation(f.marker),true);
+ assert.equal(await selfSignedListingRevocation({...f.marker,signature:{...sig,value:'A'.repeat(86)}}),false);
+ assert.equal(await selfSignedListingRevocation({...f.marker,revokedAt:Number((f.marker as Record<string,unknown>).revokedAt)+1}),false);
+ assert.equal(await selfSignedListingRevocation({...f.marker,signature:{...sig,signer:'did:demos:agent:'+'e'.repeat(64)}}),false);
 });
 test('unreadable marker created by another key neither holds the listing nor joins its queue',async()=>{
  const pass=await unreadCreatePass({from:'0x'+'e'.repeat(64)});

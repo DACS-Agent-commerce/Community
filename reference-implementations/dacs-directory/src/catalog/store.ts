@@ -258,10 +258,11 @@ const setJson = db.transaction((key: string, value: unknown) => {
 
 /**
  * Marker values carried by confirmed CREATE transactions whose storage program could not be
- * read, kept per listing hash and declared signer. They are unauthenticated until the indexer
- * checks them against the Listing, which reads only its own signer's set: another key's entries
- * can neither hold a Listing nor displace its seller's. A set past the bound records `overflow`,
- * which holds the Listing, so a dropped entry can't turn into `active`; only that signer can fill it.
+ * read, kept per listing hash and declared signer. The reindex keeps only markers their declared
+ * signer signed; the indexer still checks each against the Listing, which reads only its own
+ * signer's set: another key's entries can neither hold a Listing nor displace its seller's. A set
+ * past the bound records `overflow`, which holds the Listing, so a dropped entry can't turn into
+ * `active`. Filling it takes markers the seller signed for that Listing hash.
  */
 export const UNREAD_REVOCATION_MARKERS_PER_SIGNER = 16;
 type UnreadRevocationMarker = { locator: string; marker: Record<string, unknown> };
