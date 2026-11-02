@@ -9,7 +9,7 @@ All six scanProgress members are integer or null; legacy missing progress return
 - cursor: finalized transaction cursor reached by this completed pass.
 - tip: node tip observed during the scan, not a global or independently authenticated tip.
 - lag: max(0, tip - cursor), including configured finality depth (default two transactions).
-- cursorAdvancedAt: actual observed cursor increase, carried through published snapshots. An upgraded cursor with no observed increase is unknown. Existing upstream diagnostic seeding remains separate and unchanged.
+- cursorAdvancedAt: actual observed cursor increase, carried through published snapshots. An upgraded cursor with no observed increase is unknown. After a chain reset it is the time of the reset pass, even when that pass did not move the cursor: the old cursor's time no longer applies. Existing upstream diagnostic seeding remains separate and unchanged.
 - lastSuccessfulFullScanAt: completion of this successful whole indexing pass, including the walk from fromTx to its stop boundary and listing processing. It does not mean every incremental pass was a genesis rebuild. Failed/truncated scans do not advance it.
 - fromTx: walk's lower boundary; zero means the pass walked to genesis.
 
