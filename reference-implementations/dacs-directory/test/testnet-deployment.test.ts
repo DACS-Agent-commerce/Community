@@ -160,6 +160,7 @@ test("the index timer fires every five minutes and both units run the startup ch
     const check = text.search(/^ExecStartPre=\/usr\/bin\/env npm run --silent check:testnet -- --built$/m);
     assert.ok(check >= 0 && check < text.search(/^ExecStart=/m), unit);
     assert.match(text, /^EnvironmentFile=\/etc\/dacs-directory\/directory\.env$/m, unit);
+    assert.match(text, /^StateDirectoryMode=0750$/m, `${unit} keeps the data folder at the mode the install guide sets`);
   }
   assert.match(deployFile("dacs-directory-index.service"), /^ExecStart=\/usr\/bin\/env npm run --silent index$/m);
   const scripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
