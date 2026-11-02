@@ -10,17 +10,22 @@ type Resource = { request: string };
 type Replacement = { pattern: RegExp; replace: (resource: Resource) => void };
 type WebpackHook = (config: { resolve: object; plugins: unknown[] }, context: { isServer: boolean; webpack: object }) => unknown;
 
-/** Run next.config.mjs's webpack hook for the client build with plugin recorders. */
-function clientBuildPlugins() {
+/**
+ * Run next.config.mjs's webpack hook for the client build with plugin recorders.
+ * `nextProvides` stands in for the ProvidePlugin definitions Next registers itself.
+ */
+function clientBuildPlugins(nextProvides?: Record<string, string[]>) {
   const replacements: Replacement[] = [];
   const provided: Array<Record<string, string[]>> = [];
   class NormalModuleReplacementPlugin {
     constructor(pattern: RegExp, replace: (resource: Resource) => void) { replacements.push({ pattern, replace }); }
   }
   class ProvidePlugin {
-    constructor(definitions: Record<string, string[]>) { provided.push(definitions); }
+    definitions: Record<string, string[]>;
+    constructor(definitions: Record<string, string[]>) { this.definitions = definitions; provided.push(definitions); }
   }
   const config = { resolve: {}, plugins: [] as unknown[] };
+  if (nextProvides) config.plugins.push(new ProvidePlugin(nextProvides));
   (nextConfig.webpack as unknown as WebpackHook)(config,{ isServer: false, webpack: { NormalModuleReplacementPlugin, ProvidePlugin } });
   return { replacements, provided };
 }
@@ -42,4 +47,11 @@ test("the production browser bundle replaces exactly the shared Node built-ins w
 test("the production browser bundle provides the shared Buffer global", () => {
   const { provided } = clientBuildPlugins();
   assert.deepEqual(provided, [{ [BROWSER_BUFFER_PROVISION[1]]: [...BROWSER_BUFFER_PROVISION] }]);
+});
+
+test("the production browser bundle redirects Next's own Buffer provision to the shared Buffer", () => {
+  // Next provides Buffer from the plain npm `buffer`, and webpack uses the first
+  // ProvidePlugin that defines a name, so a second definition would never apply.
+  const { provided } = clientBuildPlugins({ Buffer: ["buffer", "Buffer"], process: ["process"] });
+  assert.deepEqual(provided, [{ Buffer: [...BROWSER_BUFFER_PROVISION], process: ["process"] }]);
 });
