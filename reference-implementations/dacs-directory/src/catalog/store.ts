@@ -662,9 +662,13 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
 // The one-time migration above promoted every legacy `revocationBinding` that
 // names its Listing. One seen later is never revocation evidence: it is
 // dropped, and a revoked row without `revocation` stays out of discovery.
+// Retired coverage fields from an earlier build are dropped too, so a saved
+// catalog never publishes them before the next successful reindex.
 const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
     Reflect.deleteProperty(listing, "revocationBinding");
+    Reflect.deleteProperty(listing, "revocationCoverage");
+    Reflect.deleteProperty(listing, "lastVerifiedAt");
   }
   return catalog;
 };

@@ -21,7 +21,7 @@ Example (synthetic):
 
 A buyer relying on scan progress should refuse unknown or stale pass times, implausible cursor/tip/lag, future timestamps and inconsistent pages under its configured age/finality/node/profile/origin policies. A fresh catalogObservedAt or fetch time establishes none of those policies. Independent listing/marker verification and explicit purchase authorization remain the buyer's responsibility. No signed catalog/key, second-origin trust, capacity evidence or signing operation is added here.
 
-Listings carry no revocation-coverage flag. An earlier draft published `revocationCoverage` and `lastVerifiedAt`, but its guard counted every unresolved storage read in the Directory against every listing, so one unrelated unreadable address marked all listings incomplete. Withdrawal handling is unchanged: verified and retained revocations use `status: revoked` with the revocation binding, and authenticated unresolved withdrawal sources still hold a listing.
+Listings carry no revocation-coverage flag; `revocationCoverage` and `lastVerifiedAt` saved by an earlier build are dropped when the catalog is read. Withdrawal handling is unchanged: verified and retained revocations use `status: revoked` with the revocation binding, and authenticated unresolved withdrawal sources still hold a listing.
 
 When no valid tip was observed in the scan, published `scanProgress.tip` and `scanProgress.lag` are both null, including on an empty page. Upstream operational diagnostics still seed `chainTip` from the scan start (`scan.ts`) and copy it to `lastChainTip` and run diagnostics (`reindexCore.ts`); those diagnostics are outside this extension's published progress surface and remain unchanged.
 

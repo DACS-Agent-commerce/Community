@@ -153,3 +153,15 @@ test('retained revoked binding survives an unrelated unresolved storage read',as
  assert.equal(current.listings[0]?.status,'revoked');assert.ok(current.listings[0]?.revocation);
  assert.ok(!('revocationCoverage' in current.listings[0]!),'no coverage flag is published');
 });
+
+test('a saved catalog from an earlier build serves no retired coverage fields',async()=>{
+ const f=await fixture();const seller=await f.index(new Map());
+ const listings=seller.listings.map(l=>({...l,revocationCoverage:'complete',lastVerifiedAt:123}));
+ store.saveCatalog({catalogVersion:'1',generatedAt:4,sellers:[{...seller,listings}]});
+ const {GET}=await import('../app/api/dacs/listings/route.js');const {NextRequest}=await import('next/server');
+ const response=await GET(new NextRequest('https://fixture.test/api/dacs/listings?limit=200'));const body=await response.json();
+ assert.equal(response.status,200);assert.ok(body.listings.length>0);
+ for(const row of [...body.listings,...store.loadStoredCatalog().sellers.flatMap(s=>s.listings)]){
+  assert.ok(!('revocationCoverage' in row));assert.ok(!('lastVerifiedAt' in row));
+ }
+});
