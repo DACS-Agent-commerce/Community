@@ -1,0 +1,150 @@
+{
+  "reference-implementations/dacs-directory/app/register/page.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/app/verify/page.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/catalog/buildListing.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/catalog/gcr.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/catalog/scan.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/components/CatalogStatus.tsx": {
+    "@typescript-eslint/no-floating-promises": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/components/CopyText.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/components/CounterpartyEvidenceRunner.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/components/VerifyAttestation.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/src/components/VerifyDeal.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/bundle-binding.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/catalog-routes.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/current-indexer.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 3
+    }
+  },
+  "reference-implementations/dacs-directory/test/fixtures/commitment-proof.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/fixtures/current-evidence.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 4
+    }
+  },
+  "reference-implementations/dacs-directory/test/fixtures/listing-preparation-boundaries.mjs": {
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/index-now.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/legacy-listing-hash.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/listing-withdrawal-hold.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/malformed-artifacts.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/primary-claim-key.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/revocation-vectors.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/scan-fairness.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/scan-robustness.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/sdk-build-integrity.test.mjs": {
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/setup-sdk.test.mjs": {
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "reference-implementations/dacs-directory/test/verification.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 21
+    }
+  },
+  "reference-implementations/dacs-directory/test/verify-page-outcome.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    }
+  },
+  "reference-implementations/dacs-directory/test/wire-negative-zero.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  }
+}
