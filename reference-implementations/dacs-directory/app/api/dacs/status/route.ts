@@ -4,6 +4,8 @@
  * cursor, the chain's latest tx id (live nodeCall), and when the catalog
  * was last generated.
  */
+
+import { catalogScanProgress } from "@/src/catalog/freshness";
 import { NextRequest, NextResponse } from "next/server";
 import { indexerDiagnostics, loadCatalog, loadScanState } from "@/src/catalog/store";
 import {
@@ -52,6 +54,7 @@ export async function GET(req: NextRequest) {
   const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
+    scanProgress: catalogScanProgress(catalog),
     legacyVetUnsupportedDeals: catalog.sellers.reduce((count, seller) => count + (seller.deals ?? []).filter(
       (deal) => deal.verificationLimitation === "legacy-vet-unsupported",
     ).length, 0),

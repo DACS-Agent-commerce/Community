@@ -8,6 +8,12 @@ const claimBoundDescription = (purpose: string): string =>
 
 export const artifactProfiles = ["dacs-v0.1", "legacy-sdk-v0.1", "fixture-listing"] as const;
 
+export const scanProgressSchema = {
+  type: "object", additionalProperties: false,
+  required: ["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"],
+  properties: Object.fromEntries(["cursor", "tip", "lag", "cursorAdvancedAt", "lastSuccessfulFullScanAt", "fromTx"]
+    .map((key) => [key, { type: ["integer", "null"], minimum: 0 }])),
+} as const;
 // Local Directory constraint: non-negative safe integer counts and Unix milliseconds.
 const safeUint = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
 
@@ -73,6 +79,8 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
+    revocationCoverage: { enum: ["complete", "incomplete"] },
+    lastVerifiedAt: { type: ["integer", "null"], minimum: 0 },
     revocation: {
       type: "object",
       required: [
@@ -211,9 +219,10 @@ export const catalogStatusSchema = {
   required: [
     "generatedAt", "legacyVetUnsupportedDeals", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
-    "cursorStallThresholdSeconds", "cursorStalled", "indexer",
+    "cursorStallThresholdSeconds", "cursorStalled", "indexer", "scanProgress",
   ],
   properties: {
+    scanProgress: scanProgressSchema,
     generatedAt: { type: "integer" },
     legacyVetUnsupportedDeals: { type: "integer", minimum: 0 },
     syncedToTx: { type: "integer" },
@@ -364,7 +373,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "cursor", in: "query", schema: { type: "string" } },
         ],
-        responses: { "200": { description: "A cursor-paginated listing page" }, "400": { description: `Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over ${MAX_CLAIM_QUERY_BYTES} bytes` } },
+        responses: { "200": { description: "A cursor-paginated listing page with persisted scan progress", content: { "application/json": { schema: { type: "object", required: ["listings", "total", "scanProgress"], properties: { listings: { type: "array", items: { $ref: "#/components/schemas/ListingSummary" } }, total: { type: "integer" }, cursor: { type: "string" }, scanProgress: scanProgressSchema } } } } }, "400": { description: `Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over ${MAX_CLAIM_QUERY_BYTES} bytes` } },
       },
     },
     "/api/dacs/listings/{listingId}/{version}": {
