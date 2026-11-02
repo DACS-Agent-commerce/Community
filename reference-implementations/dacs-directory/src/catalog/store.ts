@@ -662,9 +662,13 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
 // The one-time migration above promoted every legacy `revocationBinding` that
 // names its Listing. One seen later is never revocation evidence: it is
 // dropped, and a revoked row without `revocation` stays out of discovery.
+// Retired coverage fields from an earlier build are dropped too, so a saved
+// catalog never publishes them before the next successful reindex.
 const normalizeStoredCatalog = (catalog: Catalog): Catalog => {
   for (const seller of catalog.sellers) for (const listing of seller.listings) {
     Reflect.deleteProperty(listing, "revocationBinding");
+    Reflect.deleteProperty(listing, "revocationCoverage");
+    Reflect.deleteProperty(listing, "lastVerifiedAt");
   }
   return catalog;
 };
@@ -1297,12 +1301,6 @@ export const pruneListingRejections = db.transaction((
     }
   }
 });
-/** Unresolved storage bytes may conceal a marker; rejected content was successfully read. */
-export function hasUnresolvedStorageReads(): boolean {
-  return Boolean(db.prepare(`SELECT 1 FROM artifacts
-    WHERE status IN ('retry','dead-letter') AND error_code IS NOT 'ARTIFACT_REJECTED' LIMIT 1`).get());
-}
-
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
