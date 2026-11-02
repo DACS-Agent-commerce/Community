@@ -141,6 +141,26 @@ test("unreadable listing anchors retain rejection notices and history until admi
   }
 });
 
+test("one signed Listing stored under two anchors is indexed once, from the first anchor", async () => {
+  const first = `stor-${"5".repeat(40)}`;
+  const second = `stor-${"6".repeat(40)}`;
+  const listing = signedListing("stored-twice", attested({ kind: "self-signed" }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => [first, second].includes(String(input).split("/").pop() ?? "")
+    ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: listing })
+    : new Response(null, { status: 404 });
+  try {
+    const record = await indexRegistration(
+      { primaryClaim: seller, displayName: "Twice Desk", listingAnchors: [first, second] },
+      undefined,
+      async () => ({}),
+    );
+    assert.deepEqual(record.listings.map((summary) => [summary.listingId, summary.anchor.locator]), [["stored-twice", first]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("published summaries never claim transaction readiness the Directory did not assess", async () => {
   const summary = (listingId: string, transactionReadiness?: unknown): ListingSummary => ({
     listingId,
