@@ -45,6 +45,7 @@ import { decideListingNotice, listingDiagnosticCoordinates, type ListingAnchorEv
 import { canonicalDemosAgentClaim, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
+import { isListingRevocationCandidate } from "./scan.js";
 import { ownerSignedRegistration } from "./registrationSig.js";
 import {
   artifactAnchorTime,
@@ -277,7 +278,9 @@ export async function indexRegistration(
         // Cached invalid bytes cannot adjudicate either a repaired marker or
         // its current source binding, even if only its signature has changed.
         const marker = await readRevocationCandidate(locator, unavailableMarkers);
-        if (marker) { readMarkers.set(locator, marker); currentMarkers.add(locator); }
+        if (marker) readMarkers.set(locator, marker);
+        // Only a marker settles a carried value: another object is unresolved, as in the scan.
+        if (marker && isListingRevocationCandidate(marker)) currentMarkers.add(locator);
         return marker;
       },
     );
@@ -295,7 +298,8 @@ export async function indexRegistration(
     let unreadMarkerHold = false;
     const settledUnread = new Set<string>();
     for (const entry of unreadMarkers) {
-      if (currentMarkers.has(entry.locator)) settledUnread.add(entry.locator);
+      // A verified revocation from this locator is retained above (RB-3), so its entry is done.
+      if (currentMarkers.has(entry.locator) || found?.markerAnchor.locator === entry.locator) settledUnread.add(entry.locator);
       else if (await verifyListingRevocation(entry.marker, verified, version)) unreadMarkerHold = true;
       else settledUnread.add(entry.locator);
     }

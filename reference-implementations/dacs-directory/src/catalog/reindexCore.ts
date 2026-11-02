@@ -256,11 +256,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       admitRevocationCandidates(hash, addresses.map((locator) =>
         ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
     }
-    // Only markers their declared signer really signed are carried, so forged entries can't fill a
-    // seller's set and hold the Listing after its reads recover.
+    // Only markers within the artifact size bound that their declared signer really signed are
+    // carried, so forged or oversized entries can't fill a seller's set.
     for (const [hash, entries] of scan.unreadRevocationMarkers) {
       const signed = [];
-      for (const entry of entries) if (await selfSignedListingRevocation(entry.marker)) signed.push(entry);
+      for (const entry of entries) {
+        if (boundedJson(entry.marker) !== null && await selfSignedListingRevocation(entry.marker)) signed.push(entry);
+      }
       if (signed.length) recordUnreadRevocationMarkers(hash, signed);
     }
     for (const [jobId, bindings] of scan.bundleBindings) {

@@ -170,13 +170,13 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
 // marker, and the Listing is held only while that carried value passes RB-4 against it and the
 // anchor stays unreadable. The node reports the transaction, so a forged value (not even kept),
 // another key's CREATE or an address that does not derive from its inputs holds nothing.
-async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean;emptyRead?:boolean}){
+async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean;emptyRead?:boolean;objectRead?:boolean;marker?:(f:Awaited<ReturnType<typeof fixture>>)=>Record<string,unknown>}){
  const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
  const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=100+(++seq);const programName='dacs1-revoked:fixture'; // a fresh nonce gives each case its own address
  const derived=deriveStorageAddress(from,programName,nonce,'');const markerRef=opts.to?opts.to(derived):derived;
  const content=JSON.stringify({type:'storageProgram',from,to:markerRef,amount:0,nonce:opts.nonceText?String(nonce):nonce,timestamp:1,
   data:['storageProgram',{operation:'CREATE_STORAGE_PROGRAM',storageAddress:markerRef,programName,encoding:'json',
-  data:opts.forge?{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}:f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
+  data:opts.forge?{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}:opts.marker?.(f)??f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
  const tx={id:3,to:markerRef,status:'confirmed',type:'storageProgram',blockNumber:3,hash:'ab'.repeat(32),content};
  seedScanState({schemaVersion:10,chainIdentity:PINNED_DEMOS_CHAIN_IDENTITY,lastSeenTxId:0,listings:{},deals:{}});
  store.saveRegistrations([{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
@@ -187,6 +187,7 @@ async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;
   if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
   if(locator===markerRef && recovered) return Response.json({success:true,owner:from,programName,data:f.marker});
   if(locator===markerRef && opts.emptyRead) return Response.json({success:true,owner:from,programName,data:null});
+  if(locator===markerRef && opts.objectRead) return Response.json({success:true,owner:from,programName,data:{}});
   return new Response('',{status:503});
  };
  const {reindexAll}=await import('../src/catalog/reindexCore.js');
@@ -222,6 +223,30 @@ test('a storage reply that succeeds without the carried marker still holds the l
  assert.equal(pass.first,undefined,'a reply with no marker has not settled it');
  const after=await pass.recover();
  assert.equal(after?.status,'revoked');
+});
+test('a storage reply with an object that is not a marker still holds the listing',async()=>{
+ const pass=await unreadCreatePass({objectRead:true});
+ assert.equal(pass.first,undefined,'an empty object has not settled the carried marker');
+ assert.equal(store.unreadRevocationMarkers(pass.hash,claim).entries.length,1,'the indexer keeps the entry');
+});
+test('a carried marker over the artifact size bound is not kept',async()=>{
+ const big=(f:Awaited<ReturnType<typeof fixture>>)=>{
+  const {signature:_,...scope}=f.marker as Record<string,unknown>;const body={...scope,reason:'x'.repeat(300_000)};
+  return {...body,signature:{algorithm:'ed25519',signer:claim,value:Buffer.from(ed25519Sign(Buffer.from('dacs-revocation:v1:'+contentHash(body)),key)).toString('base64url')}};
+ };
+ const {selfSignedListingRevocation}=await import('../src/catalog/listingVerification.js');
+ assert.equal(await selfSignedListingRevocation(big(await fixture())),true,'the oversized marker is genuinely signed');
+ const pass=await unreadCreatePass({marker:big});
+ assert.deepEqual(store.unreadRevocationMarkers(pass.hash,claim),{entries:[]});
+});
+test('a carried marker verified from a stored observation frees its entry',async()=>{
+ const f=await fixture();const locator='stor-'+(7100).toString(16).padStart(40,'0');
+ const db=new Database(join(root,'directory.sqlite'));
+ try{db.prepare("INSERT INTO artifacts(locator,kind,profile,owner,observed_at,status,data_json) VALUES (?,'listing-revocation','dacs-v0.1',?,1,'observed',?)")
+  .run(locator,'0x'+claim.slice(-64),JSON.stringify(f.marker));}finally{db.close();}
+ store.recordUnreadRevocationMarkers(f.hash,[{locator,marker:f.marker}]);
+ assert.equal((await f.index(new Map())).listings[0]?.status,'revoked');
+ assert.deepEqual(store.unreadRevocationMarkers(f.hash,claim),{entries:[]});
 });
 test('a CREATE whose nonce the node reports as text still holds the listing',async()=>{
  const pass=await unreadCreatePass({nonceText:true});
