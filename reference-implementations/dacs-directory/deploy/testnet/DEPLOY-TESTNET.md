@@ -37,7 +37,8 @@ and `npm` on systemd's default `PATH`. The release must match exactly: both unit
 including another 22.x. If the server keeps a different Node, install 22.23.3 for
 these units or remove that `ExecStartPre` line and accept the unpinned runtime. As root:
 
-1. Create the service user: `useradd --system --home-dir /var/lib/dacs-directory --shell /usr/sbin/nologin dacs-directory`.
+1. Create the service user and its data folder (the build in step 4 opens the store there):
+   `useradd --system --home-dir /var/lib/dacs-directory --shell /usr/sbin/nologin dacs-directory && install -d -o dacs-directory -g dacs-directory -m 0750 /var/lib/dacs-directory`.
 2. Check out a reviewed commit of this repository at `/opt/dacs-directory`, owned by
    `dacs-directory` (the server writes its Next cache there).
 3. Copy `directory.env.example` to `/etc/dacs-directory/directory.env` (owner root, group
@@ -45,7 +46,9 @@ these units or remove that `ExecStartPre` line and accept the unpinned runtime. 
    `DACS_ADMIN_TOKEN` to a long random value generated on the server.
 4. As `dacs-directory`, in `/opt/dacs-directory/reference-implementations/dacs-directory`,
    install and build with the settings loaded (`NEXT_PUBLIC_*` values are built into the pages):
-   `set -a; . /etc/dacs-directory/directory.env; set +a; bash scripts/setup-sdk.sh && npm run check:testnet && npm run build`.
+   `set -a; . /etc/dacs-directory/directory.env; set +a; bash scripts/setup-sdk.sh && npm run check:deploy-config && npm run check:testnet && npm run build`.
+   `check:deploy-config` refuses a placeholder or non-public `NEXT_PUBLIC_DIRECTORY_URL`,
+   which the compiled manifest gives to every machine client.
    Rebuild after changing the RPC settings; the startup check reads the compiled
    manifest, including the public RPC fixed at build time.
 5. Copy the three unit files to `/etc/systemd/system/`, then
