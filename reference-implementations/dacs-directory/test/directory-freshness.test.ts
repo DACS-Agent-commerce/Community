@@ -38,30 +38,15 @@ async function fixture(){
  return {scope,listing,marker,hash,candidate,index};
 }
 test.after(()=>rmSync(root,{recursive:true,force:true}));
-test('unread raw candidate exposes incomplete coverage without granting withdrawal authority',async()=>{
- const f=await fixture();const before=await f.index(new Map());assert.equal(before.listings[0]?.revocationCoverage,'complete');
+test('unread raw candidate does not grant withdrawal authority',async()=>{
+ const f=await fixture();const before=await f.index(new Map());
  f.candidate(1);const after=await f.index(new Map(),before);
- assert.equal(after.listings[0]?.status,'active');assert.equal(after.listings[0]?.revocationCoverage,'incomplete');
- assert.equal(after.listings[0]?.lastVerifiedAt,before.listings[0]?.lastVerifiedAt);
+ assert.equal(after.listings[0]?.status,'active');
 });
-test('first incomplete check has unknown prior verification time',async()=>{
- const f=await fixture();f.candidate(1);const after=await f.index(new Map());
- assert.equal(after.listings[0]?.revocationCoverage,'incomplete');assert.equal(after.listings[0]?.lastVerifiedAt,null);
-});
-test('complete positive records verification time',async()=>{
- const f=await fixture();const row=(await f.index(new Map())).listings[0]!;
- assert.equal(row.status,'active');assert.equal(row.revocationCoverage,'complete');assert.equal(typeof row.lastVerifiedAt,'number');
-});
-test('candidate overflow remains incomplete until remaining candidates are checked',async()=>{
- const f=await fixture();const refs=f.candidate(17);const records=new Map(refs.map(r=>[r,{}]));
- const first=await f.index(records);assert.equal(first.listings[0]?.revocationCoverage,'incomplete');
- const next=await f.index(records,first);assert.equal(next.listings[0]?.revocationCoverage,'complete');
-});
-test('verified revocation remains complete through later marker read failures under RB-3',async()=>{
+test('verified revocation stays revoked through later marker read failures under RB-3',async()=>{
  const f=await fixture();const [ref]=f.candidate(1);const revoked=await f.index(new Map([[ref!,f.marker]]));
- assert.equal(revoked.listings[0]?.status,'revoked');assert.equal(revoked.listings[0]?.revocationCoverage,'complete');
- assert.ok(revoked.listings[0]?.revocation);
- const retained=await f.index(new Map(),revoked);assert.equal(retained.listings[0]?.status,'revoked');assert.equal(retained.listings[0]?.revocationCoverage,'complete');
+ assert.equal(revoked.listings[0]?.status,'revoked');assert.ok(revoked.listings[0]?.revocation);
+ const retained=await f.index(new Map(),revoked);assert.equal(retained.listings[0]?.status,'revoked');
 });
 test('catalog progress is committed with catalog, not mutable working scanner state',async()=>{
  const {reindexAll}=await import('../src/catalog/reindexCore.js');const {catalogScanProgress}=await import('../src/catalog/freshness.js');
@@ -87,13 +72,13 @@ test('listing API publishes committed progress and retains existing withdrawal c
  const response=await GET(new NextRequest('https://fixture.test/api/dacs/listings?limit=200'));const body=await response.json();
  assert.equal(response.status,200);assert.deepEqual(body.scanProgress,progress);assert.deepEqual(body.listings,[]);
 });
-test('schema adds coverage fields while retaining upstream active/revoked status vocabulary',async()=>{
+test('schema keeps the upstream active/revoked status vocabulary and publishes no coverage flag',async()=>{
  const {listingSummarySchema}=await import('../src/catalog/contracts.js');
  assert.deepEqual(listingSummarySchema.properties.status.enum,['active','revoked']);
- assert.deepEqual(listingSummarySchema.properties.revocationCoverage.enum,['complete','incomplete']);
+ assert.ok(!('revocationCoverage' in listingSummarySchema.properties));assert.ok(!('lastVerifiedAt' in listingSummarySchema.properties));
 });
 
-test('unclassified seller marker 503 keeps coverage incomplete through backoff and recovers to revoked', async()=>{
+test('unclassified seller marker 503 keeps the listing active through backoff and recovers to revoked', async()=>{
  const f=await fixture(); const markerRef='stor-'+'d'.repeat(40);
  seedScanState({schemaVersion:10,chainIdentity:PINNED_DEMOS_CHAIN_IDENTITY,lastSeenTxId:0,listings:{},deals:{}});
  store.saveRegistrations([{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
@@ -111,17 +96,17 @@ test('unclassified seller marker 503 keeps coverage incomplete through backoff a
   const opts={nodeDeployment:onPinnedChain,resolveIdentities:async()=>({}),log:()=>{}};
   await reindexAll(opts);
   const first=store.loadCatalog();const row=first.sellers.flatMap(s=>s.listings).find(l=>l.contentHash===f.hash)!;
-  assert.equal(first.scanProgress?.cursor,3);assert.equal(row.status,'active');assert.equal(row.revocationCoverage,'incomplete');assert.equal(row.lastVerifiedAt,null);
+  assert.equal(first.scanProgress?.cursor,3);assert.equal(row.status,'active');
   // It remains unresolved even when not due or exhausted; use the real persisted queue.
   db.prepare("UPDATE artifacts SET status='dead-letter',next_retry_at=NULL WHERE locator=?").run(markerRef);
-  assert.equal((await f.index(new Map())).listings[0]?.revocationCoverage,'incomplete');
+  assert.equal((await f.index(new Map())).listings[0]?.status,'active');
   // Test-only requeue: production does not automatically retry exhausted/dead-letter rows.
   // Move the overlap past the marker so recovery must come from the due retry queue.
   store.saveScanState({...store.loadScanState(),lastSeenTxId:10});
   db.prepare("UPDATE artifacts SET status='retry',next_retry_at=0 WHERE locator=?").run(markerRef);
   recovered=true;await reindexAll(opts);
   const after=store.loadCatalog().sellers.flatMap(s=>s.listings).find(l=>l.contentHash===f.hash)!;
-  assert.equal(after.status,'revoked');assert.equal(after.revocationCoverage,'complete');assert.ok(after.lastVerifiedAt!>0);
+  assert.equal(after.status,'revoked');assert.ok(after.revocation);
  }finally{globalThis.fetch=old;db.close();}
 });
 test('empty scan publishes unknown tip and lag even with a saved nonzero cursor',async()=>{
@@ -158,14 +143,13 @@ test('OpenAPI requires scanProgress and defines the listing schema identity once
  assert.equal(ids.filter(id=>id==='/schemas/listing-summary.schema.json').length,1);
 });
 
-test('retained revoked binding does not hide an unresolved storage coverage gap',async()=>{
+test('retained revoked binding survives an unrelated unresolved storage read',async()=>{
  const f=await fixture();const [ref]=f.candidate(1);
  const prior=await f.index(new Map([[ref!,f.marker]]));
- assert.equal(prior.listings[0]?.status,'revoked');assert.equal(prior.listings[0]?.revocationCoverage,'complete');
+ assert.equal(prior.listings[0]?.status,'revoked');
  const gap='stor-'+'e'.repeat(40);
  store.recordArtifactFailure(gap,'unknown','STORAGE_RPC_UNAVAILABLE','synthetic unresolved storage',1);
  const current=await f.index(new Map(),prior);
  assert.equal(current.listings[0]?.status,'revoked');assert.ok(current.listings[0]?.revocation);
- assert.equal(current.listings[0]?.revocationCoverage,'incomplete');
- assert.equal(current.listings[0]?.lastVerifiedAt,prior.listings[0]?.lastVerifiedAt);
+ assert.ok(!('revocationCoverage' in current.listings[0]!),'no coverage flag is published');
 });

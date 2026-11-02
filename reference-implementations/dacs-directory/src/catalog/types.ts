@@ -128,9 +128,6 @@ export interface ListingSummary {
   buyerRequirement?: Record<string, unknown>;
   terms?: Record<string, unknown>;
   status: "active" | "revoked";
-  /** Coverage of discovered candidates; not withdrawal authority or global absence. */
-  revocationCoverage?: "complete" | "incomplete";
-  lastVerifiedAt?: number | null;
   /** Required for revoked records; forbidden on active records (DACS-1 RB-3). */
   revocation?: RevocationBinding;
   catalogObservedAt: number;

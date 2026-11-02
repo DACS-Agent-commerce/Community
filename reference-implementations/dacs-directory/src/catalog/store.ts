@@ -1297,12 +1297,6 @@ export const pruneListingRejections = db.transaction((
     }
   }
 });
-/** Unresolved storage bytes may conceal a marker; rejected content was successfully read. */
-export function hasUnresolvedStorageReads(): boolean {
-  return Boolean(db.prepare(`SELECT 1 FROM artifacts
-    WHERE status IN ('retry','dead-letter') AND error_code IS NOT 'ARTIFACT_REJECTED' LIMIT 1`).get());
-}
-
 /**
  * Due retry locators for one pass, at most RETRY_READS_PER_PASS. Up to
  * REJECTED_RETRY_READS_PER_PASS of them are reserved for due rejected
