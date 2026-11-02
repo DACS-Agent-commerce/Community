@@ -64,8 +64,6 @@ import {
   loadScanState,
   recordListingRejection,
   recordRevocationProgress,
-  hasPendingRevocationCandidates,
-  hasUnresolvedStorageReads,
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
@@ -297,10 +295,6 @@ export async function indexRegistration(
         knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
         hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
         ? "indeterminate" : "absent";
-    const complete = !hasUnresolvedStorageReads() && (Boolean(revocationBinding) || (progress.unread.length === 0 &&
-      !hasPendingRevocationCandidates(verified.contentHash)));
-    const previous = prior?.listings.find((item) => item.contentHash === verified.contentHash &&
-      item.listingId === listingId && item.version === version);
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -342,8 +336,6 @@ export async function indexRegistration(
       terms: scope.terms && typeof scope.terms === "object"
         ? scope.terms as Record<string, unknown> : undefined,
       status: revocation === "revoked" ? "revoked" : "active",
-      revocationCoverage: complete ? "complete" : "incomplete",
-      lastVerifiedAt: complete ? now : previous?.lastVerifiedAt ?? null,
       ...(revocationBinding ? { revocation: revocationBinding } : {}),
       catalogObservedAt: now,
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,

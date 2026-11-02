@@ -79,8 +79,6 @@ export const listingSummarySchema = {
       },
     },
     status: { enum: ["active", "revoked"] },
-    revocationCoverage: { enum: ["complete", "incomplete"] },
-    lastVerifiedAt: { type: ["integer", "null"], minimum: 0 },
     revocation: {
       type: "object",
       required: [
