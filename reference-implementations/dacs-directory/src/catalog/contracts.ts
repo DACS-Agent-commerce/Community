@@ -380,6 +380,7 @@ export const openApiDocument = (origin: string) => ({
           "400": { description: `seller over ${MAX_CLAIM_QUERY_BYTES} bytes` },
           "404": { description: "Listing not found" },
           "502": { description: "Anchor verification failed" },
+          "503": { description: "The Demos node could not be read; no cached copy is served" },
         },
       },
     },
