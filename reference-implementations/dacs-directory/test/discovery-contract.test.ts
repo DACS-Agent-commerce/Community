@@ -72,9 +72,10 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   assert.equal(document.info.version, "2.0.0");
   const listings = document.paths["/api/dacs/listings"].get;
   assert.deepEqual(listings.parameters.map((parameter) => parameter.name).sort(), [...manifest.filters].sort());
-  assert.deepEqual(listings.responses, {
-    "200": { description: "A cursor-paginated listing page" },
-    "400": { description: "Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over 1024 bytes" },
+  assert.equal(listings.responses["200"].description, "A cursor-paginated listing page with persisted scan progress");
+  assert.deepEqual(listings.responses["200"].content["application/json"].schema.required, ["listings", "total", "scanProgress"]);
+  assert.deepEqual(listings.responses["400"], {
+    description: "Invalid query, an unlisted query name, unavailable rate/score filtering or ranking, or primaryClaim over 1024 bytes",
   });
   assert.match(listings.description, /Completion verification unavailable.*minCompletionRate and minRating.*400/);
   assert.match(listings.description, /every query name not listed here are refused with 400/);

@@ -318,14 +318,16 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       state.anchorBackfillComplete = true;
       state.anchorBackfillTargetKey = unresolvedKey;
     }
-    const nextCursor = Math.max(state.lastSeenTxId, scan.highestTxId);
-    if (nextCursor > state.lastSeenTxId) state.cursorAdvancedAt = Date.now();
+    const initialCursor = state.lastSeenTxId;
+    const nextCursor = Math.max(initialCursor, scan.highestTxId);
+    if (nextCursor > state.lastSeenTxId) {
+      state.cursorAdvancedAt = Date.now();
+    }
     // Seed upgraded state once so an already-frozen cursor becomes diagnosable
     // after the configured interval instead of remaining "unknown" forever.
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
-    saveScanState(state);
     finishWithdrawalCarriageReplay();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +
@@ -438,7 +440,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, undefined, opts.commitment).catch((error: unknown) => {
+      }, undefined, opts.commitment, state).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
@@ -477,12 +479,19 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const indexChainChange = await chainChange();
     if (indexChainChange) throw new Error(`catalog not updated: ${indexChainChange}`);
     // A failed crawl hides the pointers only it discovers; absence from an incomplete pass is not removal.
+    const completedScan = scan;
     commitChainReadWindow(() => {
       if (!crawlIncomplete) pruneListingRejections(allRegs);
-      publishCatalogChain({ catalogVersion: "1", generatedAt, sellers: catalogSellers }, state, served.chainIdentity);
+      const completedAt = Date.now();
+      publishCatalogChain({ catalogVersion: "1", generatedAt, sellers: catalogSellers,
+        scanProgress: { cursor: state.lastSeenTxId, tip: completedScan.observedTip,
+          lag: completedScan.observedTip === null ? null : Math.max(0, completedScan.observedTip - state.lastSeenTxId),
+          cursorAdvancedAt: nextCursor > initialCursor ? state.cursorAdvancedAt ?? null
+            : prior.scanProgress?.cursorAdvancedAt ?? null,
+          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity);
+      finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,
+        artifacts: completedScan.observations.length, rejected: completedScan.failures.length });
     });
-    finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan.chainTip, txs: scan.txsScanned,
-      artifacts: scan.observations.length, rejected: scan.failures.length });
 
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
