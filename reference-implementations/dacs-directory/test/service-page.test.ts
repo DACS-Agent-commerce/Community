@@ -82,10 +82,19 @@ test("the service page hides the contact button when the seller was unreachable 
   const { saveCatalog } = await import("../src/catalog/store.js");
   const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
   const endpoint = "https://seller.example/agent";
-  const online = listing({ listingId: "online", publicEndpoint: endpoint, reachabilityHint: { status: "reachable", checkedAt: Date.now() } });
-  const offline = listing({ listingId: "offline", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() } });
-  const fixture = listing({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
-  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, fixture])] });
+  // What the plugin can buy: a fixed price paid in DEM.
+  const fixedDem = (overrides: Partial<ListingSummary>) => listing({
+    offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"] },
+    pricing: { kind: "fixed", priceHint: "1", currency: "DEM" },
+    ...overrides,
+  });
+  const online = fixedDem({ listingId: "online", publicEndpoint: endpoint, reachabilityHint: { status: "reachable", checkedAt: Date.now() } });
+  const offline = fixedDem({ listingId: "offline", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() } });
+  const stale = fixedDem({ listingId: "stale", publicEndpoint: endpoint, reachabilityHint: { status: "unreachable", checkedAt: Date.now() - 2 * 60 * 60_000 } });
+  const fixture = fixedDem({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
+  const x402 = fixedDem({ listingId: "x402", offering: { title: "Service", category: "services.other", tags: [], rails: ["x402:default"] } });
+  const auction = fixedDem({ listingId: "auction", pricing: { kind: "auction", currency: "DEM" } });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, auction])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
   }));
@@ -100,6 +109,13 @@ test("the service page hides the contact button when the seller was unreachable 
   assert.doesNotMatch(offlineHtml, /Begin with agent/);
   assert.doesNotMatch(offlineHtml, new RegExp(`href="${endpoint}"`), "the dead address is not linked");
   assert.match(offlineHtml, /Seller offline/);
+  assert.match(offlineHtml, /This seller is offline right now/, "the buy box warns a purchase would fail");
+
+  const staleHtml = await render(stale);
+  assert.match(staleHtml, /Begin with agent/, "an hours-old failed check does not hide the button");
+  assert.doesNotMatch(staleHtml, /Seller offline/);
 
   assert.doesNotMatch(await render(fixture), /Buy through your AI assistant/, "a fixture is not offered for sale");
+  assert.doesNotMatch(await render(x402), /Buy through your AI assistant/, "the plugin does not pay over x402");
+  assert.doesNotMatch(await render(auction), /Buy through your AI assistant/, "the plugin buys only at a fixed price");
 });
