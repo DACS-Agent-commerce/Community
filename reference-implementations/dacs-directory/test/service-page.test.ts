@@ -100,6 +100,7 @@ test("the service page keeps the contact button after a failed check and shows h
   // The rail is accepted, but no signed phase pays it in DEM: the plugin cannot select it.
   const x402Phase = fixedDem({ listingId: "x402-phase", offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"], paymentPhases: [{ kind: "pay-x402", rail: "x402:default" }] } });
   const mismatchedPhase = fixedDem({ listingId: "mismatched-phase", offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"], paymentPhases: [{ kind: "pay-dem", rail: "demos-native:OTHER" }] } });
+  const mixedPhases = fixedDem({ listingId: "mixed-phases", offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"], paymentPhases: [{ kind: "pay-x402", rail: "demos-native:DEM" }, ...demPhase] } });
   const noPhases = fixedDem({ listingId: "no-phases", offering: { title: "Service", category: "services.other", tags: [], rails: ["demos-native:DEM"] } });
   const auction = fixedDem({ listingId: "auction", pricing: { kind: "auction", currency: "DEM" } });
   const usd = fixedDem({ listingId: "usd", pricing: { kind: "fixed", priceHint: "1", currency: "USD" } });
@@ -107,7 +108,7 @@ test("the service page keeps the contact button after a failed check and shows h
   const zero = fixedDem({ listingId: "zero", pricing: { kind: "fixed", priceHint: "0", currency: "DEM" } });
   const subUnit = fixedDem({ listingId: "sub-unit", pricing: { kind: "fixed", priceHint: "0.0000000001", currency: "DEM" } });
   const finest = fixedDem({ listingId: "finest", pricing: { kind: "fixed", priceHint: "0.000000001", currency: "DEM" } });
-  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, aliasX402, legacyPayDem, x402Phase, mismatchedPhase, noPhases, auction, usd, noAmount, zero, subUnit, finest])] });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, aliasX402, legacyPayDem, x402Phase, mismatchedPhase, mixedPhases, noPhases, auction, usd, noAmount, zero, subUnit, finest])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
   }));
@@ -138,6 +139,7 @@ test("the service page keeps the contact button after a failed check and shows h
   assert.match(await render(legacyPayDem), /Buy through your AI assistant/, "pay-dem pays on a legacy listing");
   assert.doesNotMatch(await render(x402Phase), /Buy through your AI assistant/, "a DEM rail with only an x402 payment phase is not payable in DEM");
   assert.doesNotMatch(await render(mismatchedPhase), /Buy through your AI assistant/, "the pay-dem phase must name the DEM rail");
+  assert.doesNotMatch(await render(mixedPhases), /Buy through your AI assistant/, "the SDK refuses a rail that phases of different kinds name");
   assert.doesNotMatch(await render(noPhases), /Buy through your AI assistant/, "a current summary without phases shows no box until reindexed");
   assert.doesNotMatch(await render(auction), /Buy through your AI assistant/, "the plugin buys only at a fixed price");
   assert.doesNotMatch(await render(usd), /Buy through your AI assistant/, "the plugin pays only DEM prices");
