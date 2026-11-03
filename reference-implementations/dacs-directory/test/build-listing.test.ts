@@ -126,13 +126,47 @@ test("Listing signature decoding and verifier exceptions refuse transaction rele
   syncBuiltinESMExports();
   try {
     const response = await POST(request({ ...authenticated, listingSignature }));
-    assert.ok(listingCalls > 0, "the Listing verifier exception path was reached");
+    // Exactly two calls: the allowed control above retained a preparation for
+    // this serviceId, so the route first checks whether this request repeats it
+    // (repeatsPreparation), then verifies the submitted signature. A third call
+    // would be a duplicate verification; a single one would mean the repeat
+    // check was skipped.
+    assert.equal(listingCalls, 2, "the Listing verifier exception path was reached at both call sites");
     assert.equal(response.status, 400);
     const body = await response.json();
     assert.ok(typeof body.error === "string" && body.error.length > 0);
     assert.equal(body.tx, undefined);
     assert.equal(body.listing, undefined);
+    // A serviceId with no retained preparation skips the repeat check and
+    // verifies exactly once.
+    listingCalls = 0;
+    const fresh = await POST(request({ ...authenticated, serviceId: "signature-refusal-fresh", listingSignature }));
+    assert.equal(listingCalls, 1, "a fresh serviceId reaches the verifier exactly once");
+    assert.equal(fresh.status, 400);
+    assert.equal((await fresh.json()).tx, undefined);
   } finally { verifier.mock.restore(); syncBuiltinESMExports(); }
+  // A failed repeat check is not overridden by a later successful signature
+  // check: with a retained preparation, the route refuses as unresolved and
+  // releases no transaction, after exactly the two calls.
+  const outcomes: boolean[] = [];
+  const twoFaced = t.mock.method(crypto, "verify", (algorithm: null, data: Uint8Array,
+    key: crypto.KeyObject, signature: Uint8Array) => {
+    if (Buffer.from(data).toString("utf8").startsWith("dacs-listing:v1:")) {
+      const outcome = outcomes.length === 0 ? false : originalVerify(algorithm, data, key, signature);
+      outcomes.push(outcome);
+      return outcome;
+    }
+    return originalVerify(algorithm, data, key, signature);
+  });
+  syncBuiltinESMExports();
+  try {
+    const response = await POST(request({ ...authenticated, listingSignature }));
+    assert.deepEqual(outcomes, [false, true], "repeat check refused, submitted signature genuine");
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.match(body.error, /unresolved/);
+    assert.equal(body.tx, undefined);
+  } finally { twoFaced.mock.restore(); syncBuiltinESMExports(); }
 });
 
 test("publisher uses PA-1 rail resolution and signs the exact staged Listing before creating a transaction", async (t) => {
