@@ -12,7 +12,7 @@ import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { createHash } from "node:crypto";
 import { indexRegistration, listingBindingRejection, type ResolveIdentities } from "./indexer";
 import { readAnchorResult, type AnchorRead } from "./chain";
-import { findValidListingRevocation, revocationSellerClaim, verifyStoredListing } from "./listingVerification";
+import { findValidListingRevocation, revocationSellerClaim, selfSignedListingRevocation, verifyStoredListing } from "./listingVerification";
 import { catalogBundleBindings, verifyBundleBinding } from "./bundleBinding";
 import {
   readChainTip,
@@ -255,6 +255,19 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     for (const [hash, addresses] of scan.revocations) {
       admitRevocationCandidates(hash, addresses.map((locator) =>
         ({ locator, owner: observed.get(locator)?.owner, contentHash: storedValueHash(observed.get(locator)?.data) })));
+    }
+    // A marker a confirmed CREATE carried to an unreadable anchor joins the candidate queue
+    // under its signer, who sent that CREATE, as owner. The scan keeps only markers within the
+    // artifact size bound; only those their declared signer really signed are admitted. The queue
+    // holds the signer's own Listing until a read of the anchor returns a marker that settles it.
+    for (const [hash, entries] of scan.unreadRevocationMarkers) {
+      const carried = [];
+      for (const entry of entries) {
+        if (!await selfSignedListingRevocation(entry.marker)) continue;
+        const owner = canonicalDemosAgentClaim(String((entry.marker.signature as Record<string, unknown>).signer))?.slice(-64);
+        if (owner) carried.push({ locator: entry.locator, owner: `0x${owner}`, carried: true });
+      }
+      if (carried.length) admitRevocationCandidates(hash, carried);
     }
     for (const [jobId, bindings] of scan.bundleBindings) {
       const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
