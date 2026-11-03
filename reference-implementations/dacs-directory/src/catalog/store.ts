@@ -158,6 +158,7 @@ db.exec(`
     content_hash TEXT,
     seq INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending',
+    carried INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(listing_hash, locator)
   );
   CREATE TABLE IF NOT EXISTS revocation_candidate_retries (
@@ -192,6 +193,15 @@ db.transaction(() => {
     // Earlier coordinates were not authenticated; never promote them to notices.
     db.exec("ALTER TABLE listing_rejections ADD COLUMN public_notice INTEGER NOT NULL DEFAULT 0");
     db.exec("UPDATE listing_rejections SET listing_id = NULL, listing_version = NULL");
+  }
+}).immediate();
+
+// A candidate named by a confirmed CREATE that carried a marker is marked, so a later
+// non-marker reply leaves it unread instead of settling it.
+db.transaction(() => {
+  const columns = db.pragma("table_info(revocation_candidates)") as Array<{ name: string }>;
+  if (!columns.some((entry) => entry.name === "carried")) {
+    db.exec("ALTER TABLE revocation_candidates ADD COLUMN carried INTEGER NOT NULL DEFAULT 0");
   }
 }).immediate();
 
@@ -463,14 +473,16 @@ db.transaction(() => {
  * is admitted again only when the chain shows it with a different stored
  * value (`content_hash` hashes the whole value, signature envelope included).
  * `seq` is arrival order; an unreadable candidate is given a new one, so it
- * moves behind the others and is retried later.
+ * moves behind the others and is retried later. `carried` marks a locator a
+ * confirmed CREATE carried a marker to before its storage could be read.
  */
-export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null }
+export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null; carried?: boolean }
 const nextCandidateSeq = db.prepare("SELECT COALESCE(MAX(seq),0) + 1 seq FROM revocation_candidates");
-const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state)
-  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending')
+const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state,carried)
+  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending',@carried)
   ON CONFLICT(listing_hash,locator) DO UPDATE SET
     owner=COALESCE(excluded.owner,revocation_candidates.owner),
+    carried=MAX(excluded.carried,revocation_candidates.carried),
     content_hash=COALESCE(excluded.content_hash,revocation_candidates.content_hash),
     seq=CASE WHEN revocation_candidates.state='rejected' AND excluded.content_hash IS NOT NULL
       AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN excluded.seq ELSE revocation_candidates.seq END,
@@ -481,7 +493,8 @@ export const admitRevocationCandidates = db.transaction(
     let seq = (nextCandidateSeq.get() as { seq: number }).seq;
     for (const candidate of candidates) {
       upsertCandidate.run({ listingHash, locator: candidate.locator, seq: seq++,
-        owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null });
+        owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null,
+        carried: candidate.carried ? 1 : 0 });
     }
   },
 );
@@ -552,6 +565,22 @@ export function retainedListingRevocation(hash: string): RevocationBinding | nul
 /** Call only after RB-4 verification against the independently verified listing signer. */
 export function retainListingRevocation(binding: RevocationBinding, marker: Record<string, unknown>): void {
   setJson(`listing-revocation:${binding.listingContentHash}`, { binding, marker });
+}
+const ownerCarriedCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND locator = ? AND owner = ? AND carried = 1 LIMIT 1`);
+const pendingCarriedCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
+  WHERE listing_hash = ? AND owner = ? AND carried = 1 AND state = 'pending' LIMIT 1`);
+/**
+ * Whether a confirmed CREATE by one of the given keys carried a marker to this anchor. Callers
+ * pass the Listing's storage owner and its signing key: until a read returns a marker there, any
+ * other reply leaves the candidate unread. Unknown keys are skipped.
+ */
+export function isOwnerCarriedRevocationCandidate(listingHash: string, locator: string, ...owners: Array<string | null>): boolean {
+  return owners.some((owner) => owner !== null && ownerCarriedCandidate.get(listingHash, locator, canonicalProgramOwner(owner)) !== undefined);
+}
+/** Whether a marker this key carried in a confirmed CREATE is still unsettled for the listing. */
+export function hasPendingCarriedRevocationCandidate(listingHash: string, owner: string): boolean {
+  return pendingCarriedCandidate.get(listingHash, canonicalProgramOwner(owner)) !== undefined;
 }
 const ownerPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' LIMIT 1`);

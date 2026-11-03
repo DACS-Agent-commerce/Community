@@ -44,6 +44,7 @@ import { decideListingNotice, listingDiagnosticCoordinates, type ListingAnchorEv
 import { canonicalDemosAgentClaim, canonicalSigningIdentity } from "./claimRef.js";
 import { resolveDemosPrimaryClaimKey } from "./primaryClaimKey.js";
 import { listingPresentation } from "./listingMetadata.js";
+import { isListingRevocationCandidate } from "./scan.js";
 import { ownerSignedRegistration } from "./registrationSig.js";
 import {
   artifactAnchorTime,
@@ -55,6 +56,8 @@ import {
   observedRevocationCandidate,
   retainedListingRevocation,
   retainListingRevocation,
+  isOwnerCarriedRevocationCandidate,
+  hasPendingCarriedRevocationCandidate,
   hasIncompleteWellKnownWithdrawal,
   boundWellKnownRevocations,
   wellKnownWithdrawalRevision,
@@ -269,6 +272,13 @@ export async function indexRegistration(
         // Cached invalid bytes cannot adjudicate either a repaired marker or
         // its current source binding, even if only its signature has changed.
         const marker = await readRevocationCandidate(locator, unavailableMarkers);
+        // Where the Listing's owner or signing key carried a marker in a confirmed CREATE, only a
+        // marker settles it: another reply, `{}` included, leaves it unread, as in the scan.
+        if (marker && !isListingRevocationCandidate(marker) &&
+          isOwnerCarriedRevocationCandidate(verified.contentHash, locator, anchored.owner ?? null, verified.signer)) {
+          unavailableMarkers.add(locator);
+          return null;
+        }
         if (marker) readMarkers.set(locator, marker);
         return marker;
       },
@@ -288,12 +298,14 @@ export async function indexRegistration(
     // can leave an unresolved hold; a verified marker is retained above (RB-3).
     // A storage `not found` is indeterminate too (DEMOS-MAPPING §A.2), so an unreadable
     // marker verified on an earlier pass holds the Listing, and so does a marker the
-    // Listing's owner anchored that no read has settled, even while it backs off.
+    // Listing's owner anchored, or its signing key carried in a confirmed CREATE, that no read
+    // has settled, even while it backs off.
     // Anyone can anchor other candidates, so an outage on those cannot hold it.
     const revocation: RevocationCheck = revocationBinding ? "revoked"
       : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
         knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
-        hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null)
+        hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null) ||
+        hasPendingCarriedRevocationCandidate(verified.contentHash, verified.signer)
         ? "indeterminate" : "absent";
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)

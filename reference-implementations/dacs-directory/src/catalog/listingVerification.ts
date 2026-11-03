@@ -550,6 +550,34 @@ export async function verifyListingRevocation(
   return (await authenticatedRevocationHash(raw, listing, expectedVersion, resolveKey)) !== null;
 }
 
+/**
+ * Whether a withdrawal marker is signed by the key its own `signature.signer` names, under either
+ * supported hash with canonical SIG-6 encoding. It does not bind the marker to a Listing:
+ * verifyListingRevocation still decides that. Used to keep forged markers out of stores that are
+ * filled before their Listing is known.
+ */
+export async function selfSignedListingRevocation(
+  raw: Record<string, unknown>,
+  resolveKey: ResolvePrimaryClaimKey = resolveDemosPrimaryClaimKey,
+): Promise<boolean> {
+  let scope: Record<string, unknown>;
+  try { scope = stripSignature(raw); } catch { return false; }
+  const signature = raw.signature;
+  if (!signature || typeof signature !== "object" || Array.isArray(signature)) return false;
+  const s = signature as Record<string, unknown>;
+  if (s.algorithm !== "ed25519" || typeof s.signer !== "string" || typeof s.value !== "string") return false;
+  const sig = canonicalSignatureBytes(s.value);
+  if (!sig) return false;
+  for (const hashScope of [contentHash, legacyListingHash]) {
+    let hash: string;
+    try { hash = hashScope(scope); } catch { continue; }
+    if (await verifyPrimaryClaimSignature(
+      Buffer.from(`dacs-revocation:v1:${hash}`, "utf8"), sig, s.signer, s.algorithm, resolveKey,
+    )) return true;
+  }
+  return false;
+}
+
 async function authenticatedRevocationHash(
   raw: Record<string, unknown>,
   listing: VerifiedListing,
