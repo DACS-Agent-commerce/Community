@@ -26,12 +26,12 @@ git_with_sdk_auth() {
 # The DACS Standard revision the pinned SDK declares (package.json
 # dacs.standardRevision); the Directory implements the profile in SPEC_PIN.
 STANDARD_REV="d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20"
-SDK_PATCH_SHA256="3ecd61e84c6d819fdc3321e4f4d38c1446a20e0f382a09a5c61ccb13f0d19aaa"
+SDK_PATCH_SHA256="cc51f773c447b5202bb619b8d43a7396c8fadfbaacec0cf16bf55dd6d5119629"
 # The markers sit beside dist, not in it: the digest covers every file in dist.
 SDK_REV_MARKER="vendor/dacs-sdk/.dacs-sdk-revision"
 SDK_MANIFEST="vendor/dacs-sdk/.dacs-sdk-manifest"
 # Exact sdk-dist-digest.mjs output after the pinned Node build and sdk-compat-output.mjs.
-SDK_DIST_SHA256="a05fd6014fb10694a23eae8ec08eb651eeb4f2e51dc85f0c7fcb07240c5b997d"
+SDK_DIST_SHA256="5dab74b62d41836f2611bda10691c1795f51ba3ac8988552a036307c382cf9fe"
 
 require_standard_revision() {
   local declared

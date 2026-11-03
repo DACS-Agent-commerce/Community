@@ -327,6 +327,25 @@ test("RB-2: a published revocation binding carries the exact presentedBy bytes a
   assert.equal(sdk.disposition, "revoked", JSON.stringify(sdk));
 });
 
+test("RB-1: a marker with a negative revokedAt is revoked for the Directory and for the SDK reader", async () => {
+  const listing = signedCurrentListing({});
+  const verified = await verifyListing(listing);
+  assert.ok(verified);
+  for (const revokedAt of [-1, -Number.MAX_SAFE_INTEGER]) {
+    const scope = { listingId: "sig5-preserve-unknown", listingVersion: 1, listingContentHash: verified.contentHash, revokedAt };
+    const marker = { ...scope, signature: { algorithm: "ed25519", signer: claim, value: signMessage(`dacs-revocation:v1:${contentHash(scope)}`) } };
+    const binding = await findValidListingRevocation(["marker"], verified, 1, async () => marker);
+    assert.ok(binding, `the Directory accepts revokedAt ${revokedAt}`);
+    const sdk = await checkListingRevocation(listing as never, verified.contentHash, {
+      nowMs: () => 2,
+      surfaces: [{ kind: "catalog", status: "revoked", catalogObservedAt: 2, binding }],
+      readMarker: async () => marker,
+      verifyMarkerSignature: sdkListingSignatureVerifier(),
+    });
+    assert.equal(sdk.disposition, "revoked", `${revokedAt}: ${JSON.stringify(sdk)}`);
+  }
+});
+
 test("RB-1: revocations require the exact Listing signer reference, including advisory parameters", async () => {
   const signer = `${claim}?purpose=listing`;
   const listing = signedCurrentListing({}, signer);
