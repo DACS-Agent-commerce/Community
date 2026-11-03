@@ -196,9 +196,11 @@ test("cached hints outside the Directory contract fall back to the synthesized h
 
 test("a cached hint whose bundle count changed is served with the recomputation time", async () => {
   const fixture = noRateCatalog();
-  Object.assign(fixture.sellers[0].listings[0].reputationHint!, { bundleCount: 3, computedAt: 50 });
+  Object.assign(fixture.sellers[0].listings[0].reputationHint!, { bundleCount: 3, windowEnd: 150, computedAt: 50 });
+  assert.equal(fixture.generatedAt, 200);
   const { hint } = await listingPageHint(fixture);
-  assert.deepEqual([hint.bundleCount, hint.windowStart, hint.windowEnd, hint.computedAt], [6, 0, 200, fixture.generatedAt]);
+  const generatedAt = 200;
+  assert.deepEqual([hint.bundleCount, hint.windowStart, hint.windowEnd, hint.computedAt], [6, 0, 150, generatedAt]);
   assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 6, not verified");
 });
 

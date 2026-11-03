@@ -53,7 +53,8 @@ function listingObservationHint(listing: ListingSummary, generatedAt: number, de
     bundleCount,
     windowStart: hint.windowStart,
     windowEnd: hint.windowEnd,
-    // A count that differs from the cached one was computed now, at the catalog's generation time.
+    // A count that differs from the cached one is reported at the catalog's generation time (generatedAt).
+    // Keep it the catalog's own time, not Date.now() at read time, which would change the value on every restart.
     computedAt: cachedHint?.bundleCount === bundleCount ? hint.computedAt : generatedAt,
     ...UNAVAILABLE_TESTNET_METRICS,
     observedOutcomesLabel: observedOutcomesLabel(bundleCount),
