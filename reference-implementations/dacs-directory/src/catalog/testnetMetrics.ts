@@ -34,7 +34,8 @@ function withoutMetricKeys<T extends object>(record: T): T {
 
 function listingObservationHint(listing: ListingSummary, generatedAt: number, deals: DealRecord[], counts: Map<string, number>): ReputationHint {
   const category = listing.offering?.category ?? "";
-  const hint = isServableCachedHint(listing.reputationHint, category) ? listing.reputationHint : {
+  const cachedHint = isServableCachedHint(listing.reputationHint, category) ? listing.reputationHint : undefined;
+  const hint = cachedHint ?? {
     categoryScope: category,
     windowStart: 0,
     windowEnd: generatedAt,
@@ -52,7 +53,8 @@ function listingObservationHint(listing: ListingSummary, generatedAt: number, de
     bundleCount,
     windowStart: hint.windowStart,
     windowEnd: hint.windowEnd,
-    computedAt: hint.computedAt,
+    // A count that differs from the cached one was computed now, at the catalog's generation time.
+    computedAt: cachedHint?.bundleCount === bundleCount ? hint.computedAt : generatedAt,
     ...UNAVAILABLE_TESTNET_METRICS,
     observedOutcomesLabel: observedOutcomesLabel(bundleCount),
   };

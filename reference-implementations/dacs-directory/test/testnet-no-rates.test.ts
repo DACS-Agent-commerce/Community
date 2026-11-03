@@ -194,6 +194,21 @@ test("cached hints outside the Directory contract fall back to the synthesized h
   assert.deepEqual([hint.categoryScope, hint.bundleCount, hint.windowStart, hint.windowEnd, hint.computedAt], ["services", 6, 10, 200, 150]);
 });
 
+test("a cached hint whose bundle count changed is served with the recomputation time", async () => {
+  const fixture = noRateCatalog();
+  Object.assign(fixture.sellers[0].listings[0].reputationHint!, { bundleCount: 3, computedAt: 50 });
+  const { hint } = await listingPageHint(fixture);
+  assert.deepEqual([hint.bundleCount, hint.windowStart, hint.windowEnd, hint.computedAt], [6, 0, 200, fixture.generatedAt]);
+  assert.equal(hint.observedOutcomesLabel, "Observed outcomes: 6, not verified");
+});
+
+test("a cached hint whose bundle count did not change keeps its cached computedAt", async () => {
+  const fixture = noRateCatalog();
+  fixture.sellers[0].listings[0].reputationHint!.computedAt = 50;
+  const { hint } = await listingPageHint(fixture);
+  assert.deepEqual([hint.bundleCount, hint.computedAt], [6, 50]);
+});
+
 test("a cached scope that is a prefix but not a canonical string falls back to the listing category", async () => {
   const fixture = noRateCatalog();
   fixture.sellers[0].listings[0].offering.category = "services .test";
