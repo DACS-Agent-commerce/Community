@@ -86,6 +86,61 @@ function payoutBindingShapeOk(value: unknown): boolean {
     typeof binding.payeeAddress === "string" && binding.payeeAddress.length > 0);
 }
 
+const unixMsOk = (value: unknown): boolean => Number.isSafeInteger(value) && Number(value) >= 0;
+const nonNegativeNumberOk = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const optional = (value: unknown, valid: (present: unknown) => boolean): boolean => value === undefined || valid(value);
+const ATTESTATION_ANCHOR_KINDS = new Set(["storage-program", "ipfs", "https"]);
+
+/** DACS-2 AttestationRef: an anchor, a sha256 content hash and an optional signer. */
+function attestationRefShapeOk(value: unknown): boolean {
+  const attestation = rec(value); const anchor = rec(attestation?.anchor);
+  return Boolean(attestation && anchor && ATTESTATION_ANCHOR_KINDS.has(String(anchor.kind)) &&
+    typeof anchor.locator === "string" && anchor.locator.length > 0 &&
+    /^[0-9a-f]{64}$/.test(normalizedHash(attestation.contentHash)) && optional(attestation.signer, (signer) => typeof signer === "string"));
+}
+
+/** DACS-3 §8.5 AgreementParty: the post-Vet bundle hash and the Vet record reference are required. */
+function agreementPartyShapeOk(value: unknown): boolean {
+  const party = rec(value);
+  return Boolean(party && /^[0-9a-f]{64}$/.test(normalizedHash(party.bundleHash)) && attestationRefShapeOk(party.vetRecordRef));
+}
+
+const FEE_PRICE_BASES = new Set(["inclusive", "exclusive"]);
+const FEE_ITEM_KINDS = new Set(["network", "platform", "processing", "spread", "subscription", "other"]);
+const FEE_RECURRENCE_PERIODS = new Set(["daily", "weekly", "monthly", "quarterly", "annual"]);
+
+function feeRecurrenceShapeOk(value: unknown): boolean {
+  const recurrence = rec(value); const period = rec(recurrence?.period);
+  return Boolean(recurrence && (FEE_RECURRENCE_PERIODS.has(String(recurrence.period)) ||
+      (period && Number.isSafeInteger(period.everySeconds) && Number(period.everySeconds) > 0)) &&
+    optional(recurrence.count, (count) => Number.isSafeInteger(count) && Number(count) > 0) &&
+    optional(recurrence.until, unixMsOk));
+}
+
+/** DACS-3 §8.5.3 FS-2: a FeeItem carries exactly one of `fixed` and `rateBps`. */
+function feeItemShapeOk(value: unknown): boolean {
+  const item = rec(value);
+  return Boolean(item && FEE_ITEM_KINDS.has(String(item.kind)) &&
+    typeof item.collector === "string" && item.collector.length > 0 &&
+    optional(item.label, (label) => typeof label === "string") &&
+    (item.fixed === undefined) !== (item.rateBps === undefined) &&
+    optional(item.fixed, priceTermOk) && optional(item.rateBps, nonNegativeNumberOk) &&
+    optional(item.toleranceBps, nonNegativeNumberOk) && optional(item.recurrence, feeRecurrenceShapeOk));
+}
+
+/**
+ * DACS-3 §8.5.3 FS-1/FS-2: shape of the optional fee disclosure. Disclosure only (FS-3): this checks the
+ * signed shape and never reconciles totals against items, price or settlement.
+ */
+function feeScheduleShapeOk(value: unknown, price: unknown): boolean {
+  const schedule = rec(value); const oneOffTotal = rec(schedule?.oneOffTotal);
+  return Boolean(schedule && FEE_PRICE_BASES.has(String(schedule.priceBasis)) &&
+    Array.isArray(schedule.items) && schedule.items.every(feeItemShapeOk) &&
+    priceTermOk(oneOffTotal) && oneOffTotal?.currency === rec(price)?.currency &&
+    optional(schedule.recurringTotal, priceTermOk) && optional(schedule.minimumTermSeconds, nonNegativeNumberOk) &&
+    optional(schedule.earlyTerminationFee, feeItemShapeOk) && optional(schedule.disclosureNote, (note) => typeof note === "string"));
+}
+
 /** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
 function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
   const profile = agreementProfile(agreement);
@@ -225,7 +280,8 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
       typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
-      arr(raw.parties).length >= 2 && terms && priceTermOk(terms.price) &&
+      unixMsOk(raw.generatedAt) && Array.isArray(raw.parties) && raw.parties.length >= 2 && raw.parties.every(agreementPartyShapeOk) &&
+      terms && unixMsOk(terms.deadline) && priceTermOk(terms.price) && optional(terms.feeSchedule, (schedule) => feeScheduleShapeOk(schedule, terms.price)) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
         : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));
