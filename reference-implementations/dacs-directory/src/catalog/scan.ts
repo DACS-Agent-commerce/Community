@@ -144,9 +144,12 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
         return { success: false, failureCode: "ARTIFACT_REJECTED" };
       }
       // A refused reply keeps its metadata so the locator is recorded as rejected, never its data.
-      return refusal
-        ? { ...body, data: undefined, admissionRefusal: refusal.code }
-        : { ...body, data: objectValue(body.data) ?? undefined };
+      // The refusal code is set after the spread so a reply member of the same name cannot supply it.
+      return {
+        ...body,
+        data: refusal ? undefined : objectValue(body.data) ?? undefined,
+        admissionRefusal: refusal?.code,
+      };
     }
     lastFailure = failure;
     if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));

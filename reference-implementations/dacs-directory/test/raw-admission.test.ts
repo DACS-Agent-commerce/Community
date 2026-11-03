@@ -38,7 +38,7 @@ const equivalentSpellingListingText = canonicalListingText.replace('"listingVers
 
 async function withStorageReply<T>(text: string | Uint8Array, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
-  globalThis.fetch = async () => new Response(text);
+  globalThis.fetch = async () => new Response(text as BodyInit);
   try { return await run(); } finally { globalThis.fetch = original; }
 }
 const refusalOf = async (text: string) => (await storageArtifactResponseJson(new Response(text))).refusal;
@@ -66,6 +66,17 @@ test("a Listing reply with an unsafe integer is refused and its data withheld", 
   const read = await withStorageReply(replyText(unsafeIntegerListingText), () => readStorage(locator, 1));
   assert.equal(read.data, undefined);
   assert.equal(read.admissionRefusal, "NUMBER-OUTSIDE-DACS-MAGNITUDE");
+});
+
+test("a reply member named admissionRefusal is not read as a refusal", async () => {
+  const injected = (text: string) => text.replace('"success":true', '"success":true,"admissionRefusal":"INJECTED"');
+  const clean = await withStorageReply(injected(replyText(canonicalListingText)), () => readStorage(locator, 1));
+  assert.equal(clean.success, true);
+  assert.equal(clean.admissionRefusal, undefined);
+  assert.deepEqual(clean.data, signedListing);
+  const refused = await withStorageReply(injected(replyText(duplicateMemberListingText)), () => readStorage(locator, 1));
+  assert.equal(refused.data, undefined);
+  assert.equal(refused.admissionRefusal, "DUPLICATE-MEMBER");
 });
 
 test("the refusal keeps its stage and code", async () => {
@@ -108,7 +119,7 @@ const parseStageReplies: Array<[string, Buffer, string]> = [
 ];
 for (const [name, bytes, code] of parseStageReplies) {
   test(`documents current behaviour: ${name} in a storage reply is a parse-stage SyntaxError, unreadable to a scan and invalid JSON to an anchor read`, async () => {
-    await assert.rejects(storageArtifactResponseJson(new Response(bytes)), (error: unknown) => error instanceof SyntaxError &&
+    await assert.rejects(storageArtifactResponseJson(new Response(bytes as BodyInit)), (error: unknown) => error instanceof SyntaxError &&
       error.cause instanceof RawJsonAdmissionError && error.cause.stage === "parse" && error.cause.code === code);
     const read = await withStorageReply(bytes, () => readStorage(locator, 1));
     assert.deepEqual(read, { success: false, failureCode: "STORAGE_INVALID_RESPONSE" }, "no data admitted, no admission refusal recorded");
