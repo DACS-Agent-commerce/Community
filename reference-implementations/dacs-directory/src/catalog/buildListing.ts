@@ -45,6 +45,7 @@ import {
   type ListingPreparation,
 } from "@/src/catalog/store";
 import { registrationMessage } from "@/src/catalog/registrationSig";
+import { negotiationBandFloorError } from "@/src/catalog/negotiationBandFloor";
 import { safePublicEndpoint } from "@/src/catalog/publicEndpoint";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
 import { importLegacySignatureValue } from "@/src/catalog/signatureValue";
@@ -229,6 +230,10 @@ return async function POST(req: NextRequest) {
     !Number.isSafeInteger(body.pricing?.minPct) || !Number.isSafeInteger(body.pricing?.maxPct) ||
     Number(body.pricing?.minPct) < 0 || Number(body.pricing?.minPct) >= 100 || Number(body.pricing?.maxPct) < 0
   )) return NextResponse.json({ error: "negotiation percentages must be nonnegative integers in this publisher profile" }, { status: 400 });
+  const floorError = pricingKind === "negotiable"
+    ? negotiationBandFloorError({ amount }, Number(body.pricing?.minPct))
+    : undefined;
+  if (floorError) return NextResponse.json({ error: floorError }, { status: 400 });
   if (pricingKind === "auction" && body.pricing?.selectionRule && !["lowest-price", "highest-price", "first-acceptable"].includes(body.pricing.selectionRule)) {
     return NextResponse.json({ error: "unsupported auction selection rule" }, { status: 400 });
   }
