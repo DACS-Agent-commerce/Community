@@ -191,8 +191,17 @@ export async function indexRegistration(
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
   // Per registration (seller), track all admitted versions before presentation
-  // filters, once notBefore has arrived. Expiry/withdrawal/holds never reactivate old terms.
+  // filters, once notBefore has arrived. Expiry/withdrawal/holds never reactivate old terms:
+  // a held anchor keeps the versions it listed on the prior pass.
   const listingVersions = new Map<string, { highest: number; hashes: Map<number, Set<string>> }>();
+  const noteVersion = (listingId: string, version: number, contentHash: string) => {
+    const versions = listingVersions.get(listingId) ?? { highest: version, hashes: new Map<number, Set<string>>() };
+    versions.highest = Math.max(versions.highest, version);
+    const hashes = versions.hashes.get(version) ?? new Set<string>();
+    hashes.add(contentHash);
+    versions.hashes.set(version, hashes);
+    listingVersions.set(listingId, versions);
+  };
   const listingArtifacts = new Map<string, ListingEvidence>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
@@ -221,6 +230,9 @@ export async function indexRegistration(
       recordListingRejection(anchor, reg.primaryClaim, decision.code, decision.coordinates && verification?.ok
         ? listingDiagnosticCoordinates(verification.value.scope) : undefined, decision.publicNotice);
     }
+    if (decision.action === "hold") for (const held of prior?.listings ?? []) {
+      if (held.anchor.locator === anchor) noteVersion(held.listingId, held.version, held.contentHash);
+    }
     if (decision.action !== "clear" || !anchored || !verification?.ok) continue;
     clearListingRejection(anchor, reg.primaryClaim);
     const verified = verification.value;
@@ -238,12 +250,7 @@ export async function indexRegistration(
     listingArtifacts.set(listingKey, { locator: anchor, raw: anchored.data });
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
     if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
-    const versions = listingVersions.get(listingId) ?? { highest: version, hashes: new Map<number, Set<string>>() };
-    versions.highest = Math.max(versions.highest, version);
-    const hashes = versions.hashes.get(version) ?? new Set<string>();
-    hashes.add(verified.contentHash);
-    versions.hashes.set(version, hashes);
-    listingVersions.set(listingId, versions);
+    noteVersion(listingId, version, verified.contentHash);
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,

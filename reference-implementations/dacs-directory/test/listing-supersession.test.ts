@@ -191,3 +191,71 @@ test("a successor supersedes only when its notBefore arrives in either anchor or
     assert.deepEqual(valid.listings.map(l => [l.version, l.status]).sort(), [[1, "superseded"], [2, "active"]]);
   }
 });
+
+test("a revoked lower version keeps its withdrawal status under an active successor", async (t) => {
+  const { admitRevocationCandidates, saveCatalog } = await import("../src/catalog/store.js");
+  const { artifactHash } = await import("../src/catalog/evidenceGraph.js");
+  const { contentHash } = await import("@kynesyslabs/dacs/canonical");
+  const { ed25519Sign, privateKeyFromSeed } = await import("@kynesyslabs/dacs/crypto");
+  const { seeds } = await import("./fixtures/current-evidence.js");
+  // Versions unused above: revocation and scan state persist across this file's tests.
+  const { anchors, registration } = await listings(t, [3, 4]);
+  const hash = artifactHash(maps.get(anchors[0])!, "listing");
+  const scope = { listingId: "svc", listingVersion: 3, listingContentHash: hash, revokedAt: Date.now() - 1 };
+  const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
+  const marker = locator(7201);
+  maps.set(marker, { ...scope, signature: { algorithm: "ed25519", signer: dids[1], value } });
+  admitRevocationCandidates(hash, [{ locator: marker, owner: `0x${dids[1].slice(-64)}` }]);
+  const record = await indexRegistration(registration, undefined, offline);
+  assert.deepEqual(record.listings.map(l => [l.version, l.status]), [[3, "revoked"], [4, "active"]]);
+  const { NextRequest } = await import("next/server");
+  const { GET: wellknown } = await import("../app/api/dacs/wellknown-files/route.js");
+  saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [record] });
+  const response = await wellknown(new NextRequest(`https://directory.example/api/dacs/wellknown-files?claim=${dids[1]}`));
+  assert.equal(response.status, 200);
+  const entries = JSON.parse((await response.json()).files["/.well-known/dacs/listings.json"]).listings;
+  assert.deepEqual(entries.map((l: { version: number; status: string }) => [l.version, l.status]), [[3, "revoked"], [4, "active"]]);
+  assert.deepEqual(entries[0].revocation, record.listings[0].revocation);
+});
+
+test("an unreadable successor anchor keeps superseding the versions it listed on the prior pass", async (t) => {
+  const down = new Map<string, Response>();
+  const { anchors, registration } = await listings(t, [5, 6, 6]);
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => {
+    const at = String(input).split("/").pop() ?? "";
+    const outage = down.get(at);
+    if (outage) return outage.clone();
+    const data = maps.get(at);
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  });
+  const outages = [new Response("unavailable", { status: 503 }),
+    Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })];
+  const pair = { ...registration, listingAnchors: anchors.slice(0, 2) };
+  const first = await indexRegistration(pair, undefined, offline);
+  assert.deepEqual(first.listings.map(l => [l.version, l.status]), [[5, "superseded"], [6, "active"]]);
+  for (const outage of outages) {
+    down.set(anchors[1], outage);
+    const held = await indexRegistration(pair, first, offline);
+    assert.deepEqual(held.listings.map(l => [l.version, l.status]), [[5, "superseded"]]);
+    down.clear();
+  }
+  down.set(anchors[1], outages[0]);
+  assert.deepEqual((await indexRegistration(pair, undefined, offline)).listings.map(l => [l.version, l.status]), [[5, "active"]]);
+  down.clear();
+
+  const scope = signedScope(maps.get(anchors[2])!, "listing");
+  scope.offering = { ...(scope.offering as Obj), title: "conflicting signed terms" };
+  maps.set(anchors[2], { ...scope, signature: await sign(scope, "listing", 1) });
+  const ambiguous = await indexRegistration(registration, undefined, offline);
+  assert.ok(ambiguous.listings.length === 3 && ambiguous.listings.every(l => l.status === "superseded"));
+  for (const at of anchors.slice(1)) {
+    for (const outage of outages) {
+      down.set(at, outage);
+      const held = await indexRegistration(registration, ambiguous, offline);
+      assert.equal(held.listings.length, 2);
+      assert.ok(held.listings.every(l => l.status === "superseded"), JSON.stringify(held.listings.map(l => [l.version, l.status])));
+      down.clear();
+    }
+  }
+});
