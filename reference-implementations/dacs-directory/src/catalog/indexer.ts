@@ -192,7 +192,8 @@ export async function indexRegistration(
   const listings: ListingSummary[] = [];
   // Per registration (seller), track all admitted versions before presentation
   // filters, once notBefore has arrived. Expiry/withdrawal/holds never reactivate old terms:
-  // a held anchor keeps the versions it listed on the prior pass.
+  // a held anchor keeps the versions it listed on an earlier pass, through consecutive holds.
+  const heldListingVersions: NonNullable<SellerRecord["heldListingVersions"]> = [];
   const listingVersions = new Map<string, { highest: number; hashes: Map<number, Set<string>> }>();
   const noteVersion = (listingId: string, version: number, contentHash: string) => {
     const versions = listingVersions.get(listingId) ?? { highest: version, hashes: new Map<number, Set<string>>() };
@@ -230,8 +231,15 @@ export async function indexRegistration(
       recordListingRejection(anchor, reg.primaryClaim, decision.code, decision.coordinates && verification?.ok
         ? listingDiagnosticCoordinates(verification.value.scope) : undefined, decision.publicNotice);
     }
-    if (decision.action === "hold") for (const held of prior?.listings ?? []) {
-      if (held.anchor.locator === anchor) noteVersion(held.listingId, held.version, held.contentHash);
+    if (decision.action === "hold") {
+      for (const held of [
+        ...(prior?.listings ?? []).map((l) => ({ locator: l.anchor.locator, listingId: l.listingId, version: l.version, contentHash: l.contentHash })),
+        ...(prior?.heldListingVersions ?? []),
+      ]) {
+        if (held.locator !== anchor) continue;
+        noteVersion(held.listingId, held.version, held.contentHash);
+        heldListingVersions.push(held);
+      }
     }
     if (decision.action !== "clear" || !anchored || !verification?.ok) continue;
     clearListingRejection(anchor, reg.primaryClaim);
@@ -682,6 +690,7 @@ export async function indexRegistration(
     identityBundle,
     cci,
     listings: listingsWithHint,
+    ...(heldListingVersions.length ? { heldListingVersions } : {}),
     deals,
     reputation,
     registeredAt: prior?.registeredAt ?? now,

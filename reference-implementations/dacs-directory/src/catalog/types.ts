@@ -265,6 +265,8 @@ export interface SellerRecord {
   identityBundle?: Record<string, unknown>;
   cci: CciBadge[];
   listings: ListingSummary[];
+  /** Versions a held anchor carried from an earlier pass into supersession (DACS-1 §6.3.4). Never served. */
+  heldListingVersions?: Array<{ locator: string; listingId: string; version: number; contentHash: string }>;
   deals: DealRecord[];
   reputation: {
     metricsUnavailableReason?: string;

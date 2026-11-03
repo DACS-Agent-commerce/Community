@@ -225,7 +225,7 @@ test("a revoked lower version keeps its withdrawal status under an active succes
   assert.deepEqual(entries[0].revocation, record.listings[0].revocation);
 });
 
-test("an unreadable successor anchor keeps superseding the versions it listed on the prior pass", async (t) => {
+test("an unreadable successor anchor keeps superseding the versions it listed, across consecutive passes", async (t) => {
   const down = new Map<string, Response>();
   const { anchors, registration } = await listings(t, [5, 6, 6]);
   t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => {
@@ -243,9 +243,14 @@ test("an unreadable successor anchor keeps superseding the versions it listed on
   assert.deepEqual(first.listings.map(l => [l.version, l.status]), [[5, "superseded"], [6, "active"]]);
   for (const outage of outages) {
     down.set(anchors[1], outage);
-    const held = await indexRegistration(pair, first, offline);
-    assert.deepEqual(held.listings.map(l => [l.version, l.status]), [[5, "superseded"]]);
+    let held = first;
+    for (let pass = 0; pass < 2; pass++) {
+      held = await indexRegistration(pair, held, offline);
+      assert.deepEqual(held.listings.map(l => [l.version, l.status]), [[5, "superseded"]]);
+    }
     down.clear();
+    const restored = await indexRegistration(pair, held, offline);
+    assert.deepEqual(restored.listings.map(l => [l.version, l.status]), [[5, "superseded"], [6, "active"]]);
   }
   down.set(anchors[1], outages[0]);
   assert.deepEqual((await indexRegistration(pair, undefined, offline)).listings.map(l => [l.version, l.status]), [[5, "active"]]);
@@ -259,9 +264,12 @@ test("an unreadable successor anchor keeps superseding the versions it listed on
   for (const at of anchors.slice(1)) {
     for (const outage of outages) {
       down.set(at, outage);
-      const held = await indexRegistration(registration, ambiguous, offline);
-      assert.equal(held.listings.length, 2);
-      assert.ok(held.listings.every(l => l.status === "superseded"), JSON.stringify(held.listings.map(l => [l.version, l.status])));
+      let held = ambiguous;
+      for (let pass = 0; pass < 2; pass++) {
+        held = await indexRegistration(registration, held, offline);
+        assert.equal(held.listings.length, 2);
+        assert.ok(held.listings.every(l => l.status === "superseded"), JSON.stringify(held.listings.map(l => [l.version, l.status])));
+      }
       down.clear();
     }
   }
