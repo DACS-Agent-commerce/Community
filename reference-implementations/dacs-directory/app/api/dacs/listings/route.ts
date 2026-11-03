@@ -13,6 +13,7 @@ import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 import { artifactProfiles } from "@/src/catalog/contracts";
 import { unavailableMetricQuery } from "@/src/catalog/testnetMetricPolicy";
+import { scaledDecimals } from "@/src/catalog/decimal";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -31,14 +32,9 @@ export async function GET(req: NextRequest) {
   const query = q.get("q")?.trim().toLowerCase();
   const profile = q.get("profile");
   const identityTier = q.get("identityTier");
-  const numericFilters: Array<[string, string | null, number, number]> = [
-    ["priceMax", priceMax, 0, Number.POSITIVE_INFINITY],
-  ];
-  for (const [name, raw, min, max] of numericFilters) {
-    const value = raw === null ? null : Number(raw);
-    if (value !== null && (!Number.isFinite(value) || value < min || value > max)) {
-      return NextResponse.json({ error: `${name} is outside its allowed range` }, { status: 400 });
-    }
+  // DACS-1 §6.3.6 priceMax is a decimal, compared exactly with the decimal-string priceHint.
+  if (priceMax !== null && !scaledDecimals([priceMax])) {
+    return NextResponse.json({ error: "priceMax is outside its allowed range" }, { status: 400 });
   }
   if (profile && !(artifactProfiles as readonly string[]).includes(profile)) {
     return NextResponse.json({ error: "unsupported artifact profile" }, { status: 400 });
@@ -70,9 +66,8 @@ export async function GET(req: NextRequest) {
       if (!required.some((item) => item.scheme === credential)) return false;
     }
     if (priceMax !== null) {
-      const max = Number(priceMax);
-      const price = Number(l.pricing.priceHint);
-      if (!Number.isFinite(max) || max < 0 || !Number.isFinite(price) || price > max) return false;
+      const scaled = scaledDecimals([l.pricing.priceHint, priceMax]);
+      if (!scaled || scaled.units[0] > scaled.units[1]) return false;
     }
     if (tags.length && !tags.every((t) => l.offering.tags.includes(t))) return false;
     if (query) {

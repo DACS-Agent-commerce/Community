@@ -1,6 +1,7 @@
 import type { DealRecord, SellerRecord } from "./types.js";
 import { observedOutcomesLabel, OBSERVED_REPUTATION_COUNTS, UNAVAILABLE_TESTNET_METRICS } from "./testnetMetricPolicy.js";
 import { canonicalSigningIdentity } from "./claimRef.js";
+import { scaledDecimals } from "./decimal.js";
 
 // §10.5.3(2): determinism-receipt ordering is byte-order lexicographic. `String.localeCompare`
 // is ICU/locale-collation dependent and is NOT guaranteed byte-stable across runtimes/locales,
@@ -130,15 +131,10 @@ export function deriveSellerReputation(
 
 /** Exact non-negative decimal addition without binary floating-point drift. */
 function sumDecimals(values: string[]): string | null {
-  let scale = 0;
-  const parsed = values.map((value) => {
-    if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
-    const [whole, fraction = ""] = value.split(".");
-    scale = Math.max(scale, fraction.length);
-    return { whole, fraction };
-  });
-  if (parsed.some((value) => !value)) return null;
-  const total = parsed.reduce((sum, value) => sum + BigInt(value!.whole + value!.fraction.padEnd(scale, "0")), 0n);
+  const scaled = scaledDecimals(values);
+  if (!scaled) return null;
+  const { scale } = scaled;
+  const total = scaled.units.reduce((sum, value) => sum + value, 0n);
   const digits = total.toString().padStart(scale + 1, "0");
   if (!scale) return digits;
   const result = `${digits.slice(0, -scale)}.${digits.slice(-scale)}`.replace(/\.?0+$/, "");
