@@ -3,7 +3,7 @@ import test from "node:test";
 import { contentHash, RawJsonAdmissionError } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
 import { storageArtifactResponseJson } from "../src/catalog/artifactLimits.js";
-import { readAnchorResult } from "../src/catalog/chain.js";
+import { readAnchorResult, resolveOwnedAnchorByName } from "../src/catalog/chain.js";
 import { readStorage } from "../src/catalog/scan.js";
 import { verifyListing } from "../src/catalog/listingVerification.js";
 
@@ -36,7 +36,7 @@ const unsafeIntegerListingText = canonicalListingText.replace('"listingVersion":
 const overflowListingText = canonicalListingText.replace('"listingVersion":2', '"listingVersion":1e999');
 const equivalentSpellingListingText = canonicalListingText.replace('"listingVersion":2', '"listingVersion":2.0e0');
 
-async function withStorageReply<T>(text: string, run: () => Promise<T>): Promise<T> {
+async function withStorageReply<T>(text: string | Uint8Array, run: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response(text);
   try { return await run(); } finally { globalThis.fetch = original; }
@@ -96,4 +96,39 @@ test("a reply that is not JSON stays a SyntaxError and keeps the admission error
 test("an anchor read names a raw-admission refusal as its reason", async () => {
   const read = await withStorageReply(replyText(duplicateMemberListingText), () => readAnchorResult(locator));
   assert.deepEqual(read, { status: "unavailable", reason: "anchor reply refused by raw JSON admission: DUPLICATE-MEMBER" });
+});
+
+// Documents today's behaviour: invalid UTF-8 and a byte-order mark are refused at the parse stage, so
+// they surface as a SyntaxError (an unreadable reply), not as the profile-stage refusal that is recorded.
+const canonicalReply = replyText(canonicalListingText);
+const splitAt = canonicalReply.indexOf("raw-fixture") + 3;
+const parseStageReplies: Array<[string, Buffer, string]> = [
+  ["invalid UTF-8", Buffer.concat([Buffer.from(canonicalReply.slice(0, splitAt)), Buffer.from([0xff]), Buffer.from(canonicalReply.slice(splitAt))]), "INVALID-UTF8"],
+  ["a byte-order mark", Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(canonicalReply)]), "BOM"],
+];
+for (const [name, bytes, code] of parseStageReplies) {
+  test(`documents current behaviour: ${name} in a storage reply is a parse-stage SyntaxError, unreadable to a scan and invalid JSON to an anchor read`, async () => {
+    await assert.rejects(storageArtifactResponseJson(new Response(bytes)), (error: unknown) => error instanceof SyntaxError &&
+      error.cause instanceof RawJsonAdmissionError && error.cause.stage === "parse" && error.cause.code === code);
+    const read = await withStorageReply(bytes, () => readStorage(locator, 1));
+    assert.deepEqual(read, { success: false, failureCode: "STORAGE_INVALID_RESPONSE" }, "no data admitted, no admission refusal recorded");
+    const anchor = await withStorageReply(bytes, () => readAnchorResult(locator));
+    assert.deepEqual(anchor, { status: "unavailable", reason: "anchor reply is invalid JSON" });
+  });
+}
+
+test("a program-name lookup does not resolve an anchor from a refused reply and stays indeterminate", async () => {
+  const owner = `0x${did.slice(-64)}`;
+  const original = globalThis.fetch;
+  const reply = (text: string) => async (_input: unknown, init?: RequestInit) => init?.method === "POST"
+    ? Response.json({ result: 200, response: [{ storageAddress: locator, programName: "raw-fixture" }] })
+    : new Response(text);
+  try {
+    globalThis.fetch = reply(canonicalReply) as typeof fetch;
+    const control = await resolveOwnedAnchorByName("raw-fixture", owner);
+    assert.equal(control.status, "present", "the same reply without the duplicate member resolves");
+    globalThis.fetch = reply(replyText(duplicateMemberListingText)) as typeof fetch;
+    assert.deepEqual(await resolveOwnedAnchorByName("raw-fixture", owner),
+      { status: "indeterminate", reason: "a candidate returned invalid storage metadata" });
+  } finally { globalThis.fetch = original; }
 });
