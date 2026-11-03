@@ -42,8 +42,8 @@ const attested = (verificationMethod?: unknown): Obj => ({
   ...(verificationMethod === undefined ? {} : { verificationMethod }),
 });
 
-/** A correctly signed current Listing; only its id and deliverable vary. */
-function signedListing(listingId: string, deliverable: Obj): Obj {
+/** A correctly signed current Listing; only its id, deliverable and validity vary. */
+function signedListing(listingId: string, deliverable: Obj, validity: Obj = { notBefore: 1 }): Obj {
   const identity: Obj = { bundleVersion: "1", presentedBy: seller, presentedAt: 1, claims: [{ ref: seller }] };
   identity.presentation = {
     kind: "per-claim",
@@ -60,10 +60,48 @@ function signedListing(listingId: string, deliverable: Obj): Obj {
     pricing: { kind: "fixed", price: { amount: "1", currency: "DEM" } },
     acceptedRails: [{ railId: "pay-dem" }],
     terms: {},
-    validity: { notBefore: 1 },
+    validity,
   };
   return { ...scope, signature: { algorithm: "ed25519", signer: seller, value: sign(`dacs-listing:v1:${contentHash(scope)}`) } };
 }
+
+test("a Listing whose validity starts in the future is absent until notBefore and present once it has passed", async (t) => {
+  // #150: the indexer skips a Listing before its notBefore without recording a
+  // rejection, so a later pass admits it unchanged once the time has passed.
+  const anchor = `stor-${"7".repeat(40)}`;
+  const effectiveAnchor = `stor-${"8".repeat(40)}`;
+  const start = Date.UTC(2026, 0, 1);
+  const anchors: Record<string, Obj> = {
+    [anchor]: signedListing("not-yet-valid", attested({ kind: "self-signed" }), { notBefore: start }),
+    // An already-effective sibling in the same registration is unaffected by the gate.
+    [effectiveAnchor]: signedListing("already-valid", attested({ kind: "self-signed" })),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const data = anchors[String(input).split("/").pop() ?? ""];
+    return data ? Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data })
+      : new Response(null, { status: 404 });
+  };
+  const ids = (record: Awaited<ReturnType<typeof indexRegistration>>) => record.listings.map((summary) => summary.listingId).sort();
+  t.mock.timers.enable({ apis: ["Date"], now: start - 1 });
+  try {
+    const registration = { primaryClaim: seller, displayName: "Future Desk", listingAnchors: [anchor, effectiveAnchor] };
+    const before = await indexRegistration(registration, undefined, async () => ({}));
+    assert.deepEqual(ids(before), ["already-valid"], "one millisecond before notBefore the future Listing is absent");
+    assert.equal(store.indexerDiagnostics().listingRejectionDiagnostics.items.some((item) => item.locator === anchor), false,
+      "a not-yet-valid Listing is not a rejection");
+    t.mock.timers.setTime(start);
+    const at = await indexRegistration(registration, before, async () => ({}));
+    assert.deepEqual(ids(at), ["already-valid", "not-yet-valid"], "at notBefore the same signed bytes are admitted");
+    const admitted = at.listings.find((summary) => summary.listingId === "not-yet-valid");
+    assert.deepEqual([admitted?.status, admitted?.anchor.locator], ["active", anchor]);
+    t.mock.timers.setTime(start + 24 * 60 * 60_000);
+    const after = await indexRegistration(registration, at, async () => ({}));
+    assert.deepEqual(ids(after), ["already-valid", "not-yet-valid"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("the indexer excludes verification-method failures with diagnostics and admits the conforming listing", async () => {
   const anchors = {
