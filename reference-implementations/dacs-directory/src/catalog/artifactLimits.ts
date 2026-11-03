@@ -1,3 +1,5 @@
+import { admitRawJson, RawJsonAdmissionError } from "@kynesyslabs/dacs/canonical";
+
 /**
  * A DACS artifact must fit the substrate's 128 KB storage soft cap (DACS-5 §10.4.2, DEMOS-MAPPING
  * SR-2); a larger session uses the extended-pointer pattern, which this indexer does not follow.
@@ -60,7 +62,10 @@ export class StorageResponseTooLarge extends Error {}
  * deeply nested reply must stay a bounded rejection, not a stack overflow.
  */
 export function parseWireJson(text: string): unknown {
-  const root = JSON.parse(text) as unknown;
+  return readNegativeZeroAsZero(JSON.parse(text) as unknown);
+}
+
+function readNegativeZeroAsZero(root: unknown): unknown {
   const pending: unknown[] = [root];
   while (pending.length) {
     const node = pending.pop();
@@ -74,8 +79,35 @@ export function parseWireJson(text: string): unknown {
   return Object.is(root, -0) ? 0 : root;
 }
 
+/**
+ * A storage-program reply read on its received bytes. `refusal` is set when the SDK's CORE §B.2
+ * CF-5 raw admission (duplicate members, UTF-8, number profile) refused the bytes; `reply` is then
+ * the plain parse, kept only so the caller can record bounded metadata, and its `data` must not be
+ * used.
+ */
+export interface StorageArtifactReply {
+  reply: unknown;
+  refusal?: RawJsonAdmissionError;
+}
+
+/**
+ * Admits the exact received bytes before JSON.parse, which cannot see duplicate members or
+ * number spellings. Throws a SyntaxError carrying the SDK error as `cause` when the bytes are not
+ * JSON at all. The check covers the whole reply, so the reply object counts as one of the 128
+ * nesting levels CF-5 admits: a stored artifact may nest 127 levels.
+ */
+function admitStorageArtifactReply(bytes: Buffer): StorageArtifactReply {
+  try {
+    return { reply: readNegativeZeroAsZero(admitRawJson(bytes, { maxBytes: MAX_STORAGE_RESPONSE_BYTES })) };
+  } catch (error) {
+    if (!(error instanceof RawJsonAdmissionError)) throw error;
+    if (error.stage === "parse") throw new SyntaxError(`storage response is not valid JSON: ${error.code}`, { cause: error });
+    return { reply: parseWireJson(bytes.toString("utf8")), refusal: error };
+  }
+}
+
 /** Bound bytes as they arrive; never call Response.json() on storage reads. */
-export async function storageResponseJson(response: Response): Promise<unknown> {
+async function storageResponseBytes(response: Response): Promise<Buffer> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("missing storage response body");
   const chunks: Uint8Array[] = [];
@@ -91,6 +123,19 @@ export async function storageResponseJson(response: Response): Promise<unknown> 
       }
       chunks.push(chunk.value);
     }
-    return parseWireJson(Buffer.concat(chunks, bytes).toString("utf8"));
+    return Buffer.concat(chunks, bytes);
   } finally { reader.releaseLock(); }
+}
+
+/** Bounded read of a node reply that carries no stored artifact (RPC envelopes, probes). */
+export async function storageResponseJson(response: Response): Promise<unknown> {
+  return parseWireJson((await storageResponseBytes(response)).toString("utf8"));
+}
+
+/**
+ * Bounded read of a storage-program reply whose `data` is an artifact, admitted on its received
+ * bytes. Throws StorageResponseTooLarge past the byte ceiling and a SyntaxError for non-JSON.
+ */
+export async function storageArtifactResponseJson(response: Response): Promise<StorageArtifactReply> {
+  return admitStorageArtifactReply(await storageResponseBytes(response));
 }

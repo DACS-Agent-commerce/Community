@@ -7,7 +7,7 @@ discovery layer (DACS-1 §6.3.6 catalog API), with a browsable directory UI and
 Agents do NOT need to register to appear here: the indexer **crawls the chain**
 (see *Discovery — three channels* below) and picks up current structured listings and
 the pinned SDK's explicit legacy read profile through program-name and content-shape detection. Current
-listings must pass the pinned SDK's `isListing()` gate with the Directory compatibility patch on their exact signed bytes, with CORE §B.7
+listings must arrive in a storage reply that passes the pinned SDK's raw JSON admission (CORE §B.2 CF-5: no duplicate members, valid UTF-8, the number profile) on its received bytes, and then pass the pinned SDK's `isListing()` gate with the Directory compatibility patch, with CORE §B.7
 SIG-6 base64url signature values, before catalog admission. They are exposed as
 authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
 rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display

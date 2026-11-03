@@ -15,9 +15,10 @@
  * Shape-defensive: the tx envelope is deep-walked for storage addresses
  * rather than assuming one schema (testnet payloads vary across versions).
  */
-import { boundedJson, parseWireJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
+import { boundedJson, parseWireJson, storageArtifactResponseJson, storageResponseJson, StorageResponseTooLarge, MAX_STORAGE_OWNER_LENGTH, MAX_STORAGE_NAME_LENGTH } from "./artifactLimits.js";
 import { verifiedDiscoveryAgreement } from "./evidenceGraph.js";
 import { isLegacyMvpAgreementDocument } from "@kynesyslabs/dacs/artifacts";
+import { RawJsonAdmissionError } from "@kynesyslabs/dacs/canonical";
 import { verifyReferencedArtifactSignature } from "./bundlePolicy.js";
 import { canonicalDemosAgentClaim } from "./claimRef.js";
 import { programBindingKey } from "./store.js";
@@ -72,6 +73,8 @@ interface StorageRead {
   data?: Record<string, unknown>;
   errorCode?: string;
   failureCode?: StorageReadFailureCode;
+  /** Code of the SDK raw JSON admission that refused the reply; `data` is then withheld. */
+  admissionRefusal?: string;
 }
 
 export type StorageReadFailureCode =
@@ -119,7 +122,12 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
       return { success: false, failureCode: statusFailure };
     }
     let body: StorageRead | null = null;
-    try { body = (await storageResponseJson(res)) as StorageRead; } catch (error) {
+    let refusal: RawJsonAdmissionError | undefined;
+    try {
+      const admitted = await storageArtifactResponseJson(res);
+      body = admitted.reply as StorageRead;
+      refusal = admitted.refusal;
+    } catch (error) {
       if (error instanceof StorageResponseTooLarge) return { success: false, failureCode: "ARTIFACT_REJECTED" };
     }
     const failure = storageReadFailureCode(res.status, body?.errorCode);
@@ -135,7 +143,10 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
         (body.data != null && !objectValue(body.data) && /^dacs[0-9]+[:-]/.test(body.programName))) {
         return { success: false, failureCode: "ARTIFACT_REJECTED" };
       }
-      return { ...body, data: objectValue(body.data) ?? undefined };
+      // A refused reply keeps its metadata so the locator is recorded as rejected, never its data.
+      return refusal
+        ? { ...body, data: undefined, admissionRefusal: refusal.code }
+        : { ...body, data: objectValue(body.data) ?? undefined };
     }
     lastFailure = failure;
     if (attempt < boundedAttempts) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** (attempt - 1)));
@@ -568,11 +579,16 @@ export async function scanChain(
       typeof data.jobId === "string" && Array.isArray(data.parties);
     const profile = currentListing || currentBundle ? "dacs-v0.1" : "legacy-sdk-v0.1";
     const dataHash = data ? storableContentHash(data) : undefined;
-    if (dataHash === null) {
-      // No canonical form, so no DACS signature can cover it: unclassified storage.
-      // Only bounded rejection metadata is kept, never the payload itself.
+    if (dataHash === null || read.admissionRefusal !== undefined) {
+      // No canonical form, or the received bytes failed raw admission, so no DACS signature can
+      // cover it: unclassified storage. Only bounded rejection metadata is kept, never the payload.
       observations.push({ locator: address, kind: "other", profile, owner: read.owner, observedAt: Date.now(), rejected: true });
-      failures.push({ locator: address, kind: "other", code: "ARTIFACT_REJECTED", message: "storage artifact has no canonical JSON form" });
+      failures.push({
+        locator: address, kind: "other", code: "ARTIFACT_REJECTED",
+        message: read.admissionRefusal === undefined
+          ? "storage artifact has no canonical JSON form"
+          : `storage artifact refused by raw JSON admission: ${read.admissionRefusal}`,
+      });
       continue;
     }
     // Duplicate owner/name programs are indeterminate, including across scan windows.

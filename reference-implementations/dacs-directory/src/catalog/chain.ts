@@ -10,7 +10,8 @@
  * path the StorageProgram API prescribes. The app stays free of the Demos
  * client's unrelated multichain dependency tree.
  */
-import { boundedJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
+import { RawJsonAdmissionError } from "@kynesyslabs/dacs/canonical";
+import { boundedJson, storageArtifactResponseJson, storageResponseJson, StorageResponseTooLarge } from "./artifactLimits.js";
 import { sha256Hex } from "./canonical.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
@@ -64,8 +65,9 @@ export type AnchorRead =
 function anchorReadFailure(error: unknown): { status: "unavailable"; reason: string } {
   const reason = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
     ? "anchor read timed out" : error instanceof StorageResponseTooLarge
-      ? "anchor reply exceeds the byte limit" : error instanceof SyntaxError
-        ? "anchor reply is invalid JSON" : "anchor could not be reached or read";
+      ? "anchor reply exceeds the byte limit" : error instanceof RawJsonAdmissionError
+        ? `anchor reply refused by raw JSON admission: ${error.code}` : error instanceof SyntaxError
+          ? "anchor reply is invalid JSON" : "anchor could not be reached or read";
   return { status: "unavailable", reason };
 }
 
@@ -99,7 +101,9 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
     storageAddress?: string; metadata?: Record<string, unknown>;
   };
   try {
-    json = (await storageResponseJson(res)) as typeof json;
+    const { reply, refusal } = await storageArtifactResponseJson(res);
+    if (refusal) return anchorReadFailure(refusal);
+    json = reply as typeof json;
   } catch (error) {
     return anchorReadFailure(error);
   }
@@ -247,7 +251,8 @@ export async function resolveOwnedAnchorByName(
     }
     let record: AnchorRecord | null = null;
     try {
-      const body = await storageResponseJson(read) as {
+      const { reply, refusal } = await storageArtifactResponseJson(read);
+      const body = reply as {
         success?: boolean;
         data?: Record<string, unknown>;
         owner?: string;
@@ -256,7 +261,7 @@ export async function resolveOwnedAnchorByName(
         metadata?: Record<string, unknown>;
       };
       if (
-        body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
+        !refusal && body.success && body.data != null && typeof body.data === "object" && !Array.isArray(body.data) &&
         boundedJson(body.data) !== null && body.programName === programName
       ) {
         record = {
