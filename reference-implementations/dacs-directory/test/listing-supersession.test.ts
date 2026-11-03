@@ -200,6 +200,13 @@ test("a revoked lower version keeps its withdrawal status under an active succes
   const { seeds } = await import("./fixtures/current-evidence.js");
   // Versions unused above: revocation and scan state persist across this file's tests.
   const { anchors, registration } = await listings(t, [3, 4]);
+  for (const anchor of anchors) {
+    const scope = signedScope(maps.get(anchor)!, "listing");
+    scope.acceptedRails = [{ railId: "demos-native:DEM" }];
+    scope.pipeline = (scope.pipeline as Obj[]).map(phase => phase.kind === "pay-dem"
+      ? { ...phase, parameters: { rail: "demos-native:DEM" } } : phase);
+    maps.set(anchor, { ...scope, signature: await sign(scope, "listing", 1) });
+  }
   const hash = artifactHash(maps.get(anchors[0])!, "listing");
   const scope = { listingId: "svc", listingVersion: 3, listingContentHash: hash, revokedAt: Date.now() - 1 };
   const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
