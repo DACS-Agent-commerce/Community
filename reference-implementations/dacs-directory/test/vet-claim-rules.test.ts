@@ -52,6 +52,29 @@ test("a well-formed oneOf group cannot hide a malformed later group", async () =
   assert.equal(await matchesVetRequirement(identity, req, [lei.result, domain.result], 30, 30), false);
 }));
 
+test("a self-signed lei result is refused as a required member and as a oneOf member", async () => {
+  const lei = proof("lei", "ABC", { method: "self-signed" });
+  const recipes = [{ ...policy("lei"), methods: ["self-signed"] }] as import("../src/catalog/recipePolicy.js").RecipePolicy[];
+  const identity = { claims: [lei.claim] };
+  const member = { scheme: "lei", verificationRequired: true };
+  assert.equal(await matchesVetRequirement(identity, { requirementVersion: "1", required: [member] }, [lei.result], 30, 30, recipes), false,
+    "required member");
+  assert.equal(await matchesVetRequirement(identity, { requirementVersion: "1", required: [], oneOf: [[member]] }, [lei.result], 30, 30, recipes), false,
+    "single-member oneOf group");
+  assert.equal(await matchesVetRequirement(identity, { requirementVersion: "1", required: [],
+    oneOf: [[member, { scheme: "domain", verificationRequired: true }]] }, [lei.result], 30, 30, recipes), false, "oneOf group with an alternative");
+});
+
+test("a self-signed key result still satisfies a required member and a oneOf member", async () => {
+  const keyIdentifier = "ab".repeat(32);
+  const key = proof("key", keyIdentifier, { method: "self-signed" });
+  const recipes = [{ ...policy("key"), methods: ["self-signed"] }] as import("../src/catalog/recipePolicy.js").RecipePolicy[];
+  const identity = { claims: [key.claim] };
+  const member = { scheme: "key", verificationRequired: true };
+  assert.equal(await matchesVetRequirement(identity, { requirementVersion: "1", required: [member] }, [key.result], 30, 30, recipes), true);
+  assert.equal(await matchesVetRequirement(identity, { requirementVersion: "1", required: [], oneOf: [[member]] }, [key.result], 30, 30, recipes), true);
+});
+
 test("a result verified after the signed vet time cannot satisfy a requirement", async () => withPolicies(async () => {
   const p = proof("lei", "ABC", { verifiedAt: 31, fetchedAt: 30 });
   const identity = { claims: [p.claim] };

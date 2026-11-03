@@ -7,6 +7,7 @@ import {
   sameResolvedPrimaryClaim,
   type ResolvePrimaryClaimKey,
 } from "./primaryClaimKey.js";
+import { resolveConfiguredRecipe } from "./recipePolicy.js";
 import type { IdentityTier } from "./types.js";
 
 type Obj = Record<string, unknown>;
@@ -24,13 +25,8 @@ export interface RecipePolicy {
 }
 export type ResolveRecipe = (scheme: string, version: number) => Promise<RecipePolicy | null>;
 
-/** Deployment policy is explicit and version-pinned; absent policy fails closed. */
-export const resolveConfiguredRecipe: ResolveRecipe = async (scheme, version) => {
-  try {
-    const policies = JSON.parse(process.env.DACS_RECIPE_POLICIES ?? "[]") as RecipePolicy[];
-    return policies.find((policy) => policy.scheme === scheme && policy.recipeVersion === version) ?? null;
-  } catch { return null; }
-};
+/** Identity-tier derivation reads the same operator policy as recipe admission, including its authority-scheme check. */
+export { resolveConfiguredRecipe };
 
 function claimParts(ref: unknown): { scheme: string; identifier: string } | null {
   if (typeof ref === "string") {

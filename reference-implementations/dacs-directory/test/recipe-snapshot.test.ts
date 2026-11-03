@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveConfiguredRecipeSnapshot, type RecipePolicy } from "../src/catalog/recipePolicy.js";
+import { SelfSignedAuthoritySchemeError, resolveConfiguredRecipeSnapshot, type RecipePolicy } from "../src/catalog/recipePolicy.js";
 import { matchesVetRequirement } from "../src/catalog/vetClaimRules.js";
 import type { ResolvedEvidence } from "../src/catalog/evidenceGraph.js";
 const signer = `did:demos:agent:${"a".repeat(64)}`;
@@ -16,6 +16,20 @@ test("session recipe pins resolve exact configured snapshots, never the unversio
     assert.deepEqual((await resolveConfiguredRecipeSnapshot(5))?.recipes, [policy(1), policy(2)]);
     process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 4, recipes: [policy(1), policy(1)] }]);
     assert.equal(await resolveConfiguredRecipeSnapshot(4), null);
+  } finally { if (old === undefined) delete process.env.DACS_RECIPE_SNAPSHOTS; else process.env.DACS_RECIPE_SNAPSHOTS = old; }
+});
+
+test("loading a snapshot refuses self-signed for an authority-issued scheme and names the scheme", async () => {
+  const old = process.env.DACS_RECIPE_SNAPSHOTS;
+  try {
+    process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 4, recipes: [policy(1)] },
+      { registryVersion: 5, recipes: [policy(1), { ...policy(2), methods: ["self-signed"] }] }]);
+    await assert.rejects(resolveConfiguredRecipeSnapshot(5), (error: unknown) => error instanceof SelfSignedAuthoritySchemeError &&
+      error.message.includes("lei") && error.message.includes("self-signed"));
+    assert.deepEqual((await resolveConfiguredRecipeSnapshot(4))?.recipes, [policy(1)], "a clean snapshot still loads");
+    process.env.DACS_RECIPE_SNAPSHOTS = JSON.stringify([{ registryVersion: 6,
+      recipes: [{ ...policy(1), scheme: "key", methods: ["self-signed"] }] }]);
+    assert.equal((await resolveConfiguredRecipeSnapshot(6))?.recipes.length, 1, "self-signed for another scheme still loads");
   } finally { if (old === undefined) delete process.env.DACS_RECIPE_SNAPSHOTS; else process.env.DACS_RECIPE_SNAPSHOTS = old; }
 });
 
