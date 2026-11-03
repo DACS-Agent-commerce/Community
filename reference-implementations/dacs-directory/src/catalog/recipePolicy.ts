@@ -29,7 +29,8 @@ export class SelfSignedAuthoritySchemeError extends Error {}
 /** True when the recipe targets an authority-issued scheme and lists the `self-signed` method. */
 function listsSelfSignedForAuthorityScheme(recipe: Partial<RecipePolicy>): boolean {
   return typeof recipe.scheme === "string" && AUTHORITY_ISSUED_SCHEMES.includes(recipe.scheme.toLowerCase()) &&
-    Array.isArray(recipe.methods) && recipe.methods.includes("self-signed");
+    Array.isArray(recipe.methods) &&
+    recipe.methods.some((method) => typeof method === "string" && method.trim().toLowerCase() === "self-signed");
 }
 
 /** Throws SelfSignedAuthoritySchemeError, naming the scheme, for the first recipe that lists `self-signed` for an authority-issued scheme. */
@@ -41,12 +42,14 @@ function assertNoSelfSignedAuthorityScheme(recipes: readonly Partial<RecipePolic
 
 /**
  * Deployment policy is explicit and version-pinned; absent or unparsable policy fails closed (null).
- * Throws SelfSignedAuthoritySchemeError when any configured recipe lists `self-signed` for an authority-issued scheme.
+ * Throws SelfSignedAuthoritySchemeError when the recipe selected by (scheme, version) lists `self-signed` for an
+ * authority-issued scheme; other entries in the list do not affect the lookup.
  */
 export const resolveConfiguredRecipe: ResolveRecipe = async (scheme, version) => {
   try {
     const policies = JSON.parse(process.env.DACS_RECIPE_POLICIES ?? "[]") as RecipePolicy[];
-    assertNoSelfSignedAuthorityScheme(policies);
+    assertNoSelfSignedAuthorityScheme(policies.filter((policy) => policy && policy.recipeVersion === version &&
+      typeof policy.scheme === "string" && policy.scheme.toLowerCase() === scheme.toLowerCase()));
     return policies.find((policy) => policy.scheme === scheme && policy.recipeVersion === version) ?? null;
   } catch (error) {
     if (error instanceof SelfSignedAuthoritySchemeError) throw error;

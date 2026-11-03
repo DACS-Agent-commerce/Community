@@ -89,8 +89,24 @@ test("self-signed stays accepted for a scheme that is not authority-issued", asy
 test("loading DACS_RECIPE_POLICIES refuses self-signed for an authority-issued scheme and names the scheme", async () => {
   for (const load of [resolveConfiguredRecipe, resolveTierRecipe])
     await withPolicyEnv([policy, selfSignedPolicy("sam-uei")], async () => {
-      await assert.rejects(load("lei", 1), (error: unknown) => error instanceof SelfSignedAuthoritySchemeError &&
+      await assert.rejects(load("sam-uei", 1), (error: unknown) => error instanceof SelfSignedAuthoritySchemeError &&
         error.message.includes("sam-uei") && error.message.includes("self-signed"));
+    });
+});
+
+test("a refused recipe does not affect the lookup of another recipe in the list", async () => {
+  for (const load of [resolveConfiguredRecipe, resolveTierRecipe])
+    await withPolicyEnv([policy, selfSignedPolicy("naics")], async () => {
+      assert.deepEqual(await load("lei", 1), policy);
+      await assert.rejects(load("naics", 1), SelfSignedAuthoritySchemeError);
+      assert.equal(await load("naics", 2), null, "another version of the scheme is not the selected recipe");
+    });
+});
+
+test("loading DACS_RECIPE_POLICIES refuses self-signed whatever its letter case or surrounding space", async () => {
+  for (const method of ["Self-Signed", "self-signed "])
+    await withPolicyEnv([{ ...policy, methods: [method] }], async () => {
+      await assert.rejects(resolveConfiguredRecipe("lei", 1), SelfSignedAuthoritySchemeError, method);
     });
 });
 
