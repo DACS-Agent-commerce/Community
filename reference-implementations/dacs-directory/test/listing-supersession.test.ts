@@ -274,3 +274,28 @@ test("an unreadable successor anchor keeps superseding the versions it listed, a
     }
   }
 });
+
+test("a held version stays out of the public catalog projection but remains in the stored record", async (t) => {
+  const down = new Map<string, Response>();
+  const { anchors, registration } = await listings(t, [8, 9]);
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => {
+    const at = String(input).split("/").pop() ?? "";
+    const outage = down.get(at);
+    if (outage) return outage.clone();
+    const data = maps.get(at);
+    return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, data })
+      : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  });
+  const first = await indexRegistration(registration, undefined, offline);
+  down.set(anchors[1], new Response("unavailable", { status: 503 }));
+  const held = await indexRegistration(registration, first, offline);
+  const heldHash = held.heldListingVersions?.[0]?.contentHash;
+  assert.ok(heldHash, "the indexer records the held version");
+  const { saveCatalog, loadCatalog, loadStoredCatalog } = await import("../src/catalog/store.js");
+  saveCatalog({ catalogVersion: "1", generatedAt: Date.now(), sellers: [held] });
+  const projected = loadCatalog();
+  assert.equal(projected.sellers.length, 1);
+  assert.ok(!("heldListingVersions" in projected.sellers[0]));
+  assert.ok(!JSON.stringify(projected).includes(heldHash));
+  assert.equal(loadStoredCatalog().sellers[0].heldListingVersions?.[0]?.contentHash, heldHash);
+});
