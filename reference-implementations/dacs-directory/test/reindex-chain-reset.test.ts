@@ -291,6 +291,27 @@ test("after a tip-regression reset, the published cursor time is this run's, not
   }
 });
 
+test("a tip-regression reset that cannot move the cursor and has no larger published cursor still publishes this run's time", async () => {
+  const CHAIN = "e".repeat(64);
+  store.saveRegistrations([]);
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: 5000, lastChainTip: 1,
+    cursorAdvancedAt: 123, listings: {}, deals: {} });
+  // No published scanProgress: only the reset itself can make this pass's cursor time current.
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [] });
+  globalThis.fetch = async () => Response.json({ result: 200, response: [{ id: 1 }] });
+  const before = Date.now();
+  try {
+    const logs: string[] = [];
+    await reindexAll({ log: (line) => logs.push(line), nodeDeployment: nodeOnChain(CHAIN) });
+    assert.equal(logs.some((line) => line.includes("chain replacement detected")), true);
+    const progress = store.loadCatalog().scanProgress!;
+    assert.equal(progress.cursor, 0);
+    assert.ok(progress.cursorAdvancedAt !== null && progress.cursorAdvancedAt >= before, `cursorAdvancedAt ${progress.cursorAdvancedAt} is not this run's`);
+  } finally {
+    serveFiveTransactions();
+  }
+});
+
 test("a tip-regression reset pass that fails leaves the next pass publishing that run's time, not the old cursor's", async () => {
   const CHAIN = "d".repeat(64);
   store.saveRegistrations([]);
