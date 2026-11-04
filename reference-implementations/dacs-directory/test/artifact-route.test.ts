@@ -17,8 +17,17 @@ test("the artifact route answers 503 when the node cannot be reached", async () 
     const response = await GET(request());
     assert.equal(response.status, 503);
     assert.deepEqual(await response.json(), {
-      error: "the node could not be read; the artifact is indeterminate", ref, status: "unavailable", value: null,
+      error: "the node could not be read; the artifact is indeterminate", ref, status: "unavailable", reason: "anchor could not be reached or read", value: null,
     });
+  });
+});
+
+test("the artifact route answers 503 with the reason when the reply is refused", async () => {
+  const duplicateMember = '{"success":true,"data":{"listingId":"a","listingId":"a"}}';
+  await withNodeAnswer(async () => new Response(duplicateMember), async () => {
+    const response = await GET(request());
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).reason, "storage reply refused by raw JSON admission: DUPLICATE-MEMBER");
   });
 });
 

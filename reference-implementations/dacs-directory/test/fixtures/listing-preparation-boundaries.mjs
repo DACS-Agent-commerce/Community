@@ -10,6 +10,9 @@ export function canonicalize(value) {
   }
   return JSON.stringify(value);
 }
+export class RawJsonAdmissionError extends Error {}
+// Stands in for the SDK's raw admission: the recovery tests only need bytes parsed as JSON.
+export const admitRawJson = (bytes) => JSON.parse(Buffer.from(bytes).toString("utf8"));
 export const sha256Hex = (value) => createHash("sha256").update(value).digest("hex");
 export const contentHash = (value) => sha256Hex(canonicalize(value));
 export const stripSignature = ({ signature: _signature, ...scope }) => scope;

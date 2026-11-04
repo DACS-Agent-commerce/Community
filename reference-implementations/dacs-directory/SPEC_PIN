@@ -96,6 +96,10 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 #   classifying STORAGE_NOT_FOUND. Proxy/bare/wrong-route 404s stay retryable
 #   STORAGE_RPC_UNAVAILABLE (test/scan-addresses.test.ts); structured permission
 #   denial is terminal until replay, never authoritative BB-8 absence evidence.
+# - CF-5 raw admission is applied to the whole storage reply, not only the signed document.
+#   Any CF-5 profile refusal anywhere in the reply (a number outside the profile, a duplicate
+#   member, a lone surrogate, or one extra nesting level), including in the wrapper around the
+#   document (for example its metadata), also refuses an artifact that passes CF-5 on its own.
 # - Node ac8f45f02fc9c25082ce9b83595c2e3916b49c5a is a source/API reference only;
 #   no remote deployment revision is attested by an RPC URL or successful read.
 #

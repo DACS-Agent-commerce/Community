@@ -220,7 +220,8 @@ test("signature depth sweep bounds whole values and normalizes persisted envelop
     await reindex();
     assert.ok(store.loadCatalog().generatedAt > 6);
     const saved = store.loadScanState().bundleBindings?.job ?? [];
-    assert.equal(saved.length, depth <= 126 ? 1 : 0, `depth ${depth}`);
+    // The raw admission of the whole reply counts the reply object as one nesting level.
+    assert.equal(saved.length, depth <= 125 ? 1 : 0, `depth ${depth}`);
     if (saved.length) {
       assert.equal(Object.keys(saved[0].signature).length, 3);
       assert.equal(JSON.stringify(saved[0]), JSON.stringify(extended));

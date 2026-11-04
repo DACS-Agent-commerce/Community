@@ -93,6 +93,27 @@ test("a storage artifact with no canonical form is observed unclassified and nev
   assert.equal(result.bundleBindings.size, 0);
 });
 
+test("a storage artifact with a duplicate member is observed as rejected, not as the marker JSON.parse would keep", async () => {
+  const duplicated = locatorOf("7");
+  const validMarker = locatorOf("8");
+  // The later listingId wins under JSON.parse, which would leave a well-formed marker.
+  const duplicateMemberMarker = JSON.stringify(marker).replace(/^{/, '{"listingId":"first",');
+  assert.deepEqual(JSON.parse(duplicateMemberMarker), marker);
+  const result = await scanFixture(
+    [memo(2, duplicated), memo(1, validMarker)],
+    { [duplicated]: duplicateMemberMarker, [validMarker]: JSON.stringify(marker) },
+  );
+
+  assert.equal(result.complete, true);
+  const observed = new Map(result.observations.map((item) => [item.locator, item]));
+  assert.equal(observed.get(duplicated)?.kind, "other");
+  assert.equal(observed.get(duplicated)?.rejected, true);
+  assert.equal(observed.get(duplicated)?.data, undefined);
+  assert.ok(result.failures.some((failure) => failure.locator === duplicated && failure.code === "ARTIFACT_REJECTED" &&
+    failure.message.includes("DUPLICATE-MEMBER")));
+  assert.deepEqual(result.revocations.get(marker.listingContentHash), [validMarker]);
+});
+
 test("a storage write with no canonical form never stops the scan", async () => {
   const written = locatorOf("5");
   const validMarker = locatorOf("6");
