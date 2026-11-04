@@ -393,10 +393,15 @@ test("further listing rules: band floor, step order, claim binding and every-mem
   const claim = { scheme: "lei", verificationRequired: true };
   const accepted = {
     "a minPct of 0": pricedWith({ ...negotiable, minPct: 0 }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "a band floor of half a unit, which rounds half-up to one": pricedWith({ ...negotiable, minPct: 50 }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "a band floor of half a cent at two decimals": pricedWith({ ...negotiable, bandCenter: { amount: "0.01", currency: "DEM" }, minPct: 50 }, { kind: "negotiate-rfq", parameters: RFQ }),
     "two pay phases on accepted rails": (scope: Obj) => { twoPays(scope); scope.acceptedRails = [{ railId: "pay-dem" }, { railId: "pay-x402" }]; },
     "every oneOf group complete": set("buyerRequirement", { requirementVersion: "1", required: [], oneOf: [[claim], [claim, { ...claim, scheme: "domain" }]] }),
   };
   const rejected = {
+    "a band floor of 0.01 that rounds to zero": pricedWith({ ...negotiable, minPct: 99 }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "a band floor of 0.49 that rounds to zero": pricedWith({ ...negotiable, minPct: 51 }, { kind: "negotiate-rfq", parameters: RFQ }),
+    "a band floor that rounds to zero at two decimals": pricedWith({ ...negotiable, bandCenter: { amount: "0.01", currency: "DEM" }, minPct: 51 }, { kind: "negotiate-rfq", parameters: RFQ }),
     "a second negotiation after the commitment": (scope: Obj) => { scope.pipeline = [{ kind: "negotiate-fixed-price" }, ...tail, { kind: "negotiate-rfq", parameters: RFQ }]; },
     "a publisher outside the claims": otherPublisher,
     "a pay phase on a rail the listing does not accept, beside one it does": twoPays,

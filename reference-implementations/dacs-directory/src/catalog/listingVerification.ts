@@ -20,6 +20,7 @@ import {
 import { identityBundleHash } from "../../vendor/dacs-sdk/dist/identity/bundle.js";
 import { sameCanonicalClaimIdentity } from "../../vendor/dacs-sdk/dist/identity/claimReference.js";
 import { isHistoricalListing } from "./legacyListingShape.js";
+import { negotiationBandFloorError } from "./negotiationBandFloor.js";
 import { safePublicEndpoint } from "./publicEndpoint.js";
 import {
   canonicalSigningIdentity,
@@ -112,6 +113,13 @@ function validPriceTerm(value: unknown): boolean {
     (term.unit === undefined || (typeof term.unit === "string" && term.unit.length > 0 && term.unit.length <= 64)));
 }
 
+/** A negotiable band whose lower bound rounds to zero can never be agreed (DACS-3 §8.5.2). */
+function negotiableFloorIsPositive(pricing: Record<string, unknown>): boolean {
+  const centre = record(pricing.bandCenter);
+  return typeof centre?.amount === "string" && typeof pricing.minPct === "number" &&
+    negotiationBandFloorError({ amount: centre.amount }, pricing.minPct) === undefined;
+}
+
 function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
   const seller = record(listing.seller);
   const offering = record(listing.offering);
@@ -119,7 +127,7 @@ function withinDirectoryProfile(listing: Record<string, unknown>): boolean {
   const terms = record(listing.terms);
   const pipeline = Array.isArray(listing.pipeline) ? listing.pipeline.map(record) : [];
   const pricingOk = pricing?.kind === "fixed" ? validPriceTerm(pricing.price)
-    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter)
+    : pricing?.kind === "negotiable" ? validPriceTerm(pricing.bandCenter) && negotiableFloorIsPositive(pricing)
       : pricing?.kind === "auction" ? (!pricing.reservePrice || validPriceTerm(pricing.reservePrice)) && validSelectionRule(pricing.selectionRule)
         : pricing?.kind === "metered" ? validPriceTerm(pricing.unitPrice) &&
           typeof pricing.unit === "string" && pricing.unit.length > 0 && pricing.unit.length <= 64 &&

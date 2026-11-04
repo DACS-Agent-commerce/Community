@@ -768,6 +768,69 @@ test("publisher rejects fractional percentages cleanly under its integer profile
   }
 });
 
+const negotiableBody = (amount: string, minPct: number) => ({
+  ...base,
+  serviceId: "negotiation-floor",
+  rails: ["demos-native:DEM"],
+  pricing: { kind: "negotiable", amount, currency: "DEM", minPct, maxPct: 20 },
+});
+
+/** Runs the publish steps up to the unsigned Listing; returns the first refusal instead when there is one. */
+async function buildNegotiableListing(amount: string, minPct: number) {
+  const body = negotiableBody(amount, minPct);
+  const first = await POST(request(body));
+  if (first.status !== 200) return { status: first.status, error: String((await first.json()).error) };
+  const identity = await first.json() as { identityMessage: string; identityPresentedAt: number; listingVersion: number };
+  const second = await POST(request({ ...body, listingVersion: identity.listingVersion, identityPresentedAt: identity.identityPresentedAt,
+    identitySignature: Buffer.from(ed25519Sign(Buffer.from(identity.identityMessage), privateKey)).toString("hex") }));
+  assert.equal(second.status, 200, await second.clone().text());
+  return { status: second.status, listing: (await second.json() as { listing: Record<string, unknown> }).listing };
+}
+
+async function withChainReplies<T>(run: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const call = JSON.parse(String(init?.body)).params?.[0];
+    return deploymentReply(init) ?? Response.json({ result: 200, response: call?.message === "searchStoragePrograms" ? [] : 0 });
+  };
+  try { return await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("publisher refuses a negotiation band whose lower bound rounds to zero", async () => {
+  // A centre of 1 keeps no whole unit once 99% (or 51%) is taken off: 0.01 and 0.49 round half-up to 0.
+  for (const minPct of [99, 51]) {
+    const response = await POST(request(negotiableBody("1", minPct)));
+    assert.equal(response.status, 400, `minPct ${minPct}`);
+    assert.match((await response.json()).error, /lower bound/);
+  }
+});
+
+test("publisher accepts the smallest negotiation band whose lower bound still rounds to a positive unit", async () => {
+  // 1 x 50% = 0.5 rounds half-up to 1, the nearest accepted band beside the refused 51%.
+  const built = await withChainReplies(() => buildNegotiableListing("1", 50));
+  assert.equal(built.status, 200);
+  assert.deepEqual((built.listing?.pricing as Record<string, unknown>).bandCenter, { amount: "1", currency: "DEM" });
+  assert.equal((built.listing?.pricing as Record<string, unknown>).minPct, 50);
+});
+
+test("builder and stored Listing admission agree on the band floor", async () => {
+  const cases: Array<[string, number, boolean]> = [
+    ["1", 99, false], ["1", 51, false], ["1", 50, true], ["100", 99, true], ["0.01", 51, false], ["0.01", 50, true],
+  ];
+  const template = await withChainReplies(() => buildNegotiableListing("1", 50));
+  const admits = (pricing: Record<string, unknown>) => {
+    const { signature: _unsigned, ...scope } = { ...template.listing, pricing } as Record<string, unknown>;
+    const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-listing:v1:${contentHash(scope)}`, "utf8"), privateKey)).toString("base64url");
+    return verifyListing({ ...scope, signature: { algorithm: "ed25519", signer: claim, value } });
+  };
+  for (const [amount, minPct, accepted] of cases) {
+    const built = await withChainReplies(() => buildNegotiableListing(amount, minPct));
+    assert.equal(built.status === 200, accepted, `builder ${amount} @ ${minPct}%`);
+    const pricing = { ...(template.listing?.pricing as Record<string, unknown>), bandCenter: { amount, currency: "DEM" }, minPct };
+    assert.equal((await admits(pricing)) !== null, accepted, `admission ${amount} @ ${minPct}%`);
+  }
+});
+
 test("publication rejects lone high/low surrogate keys and values and accepts a valid pair", async () => {
   for (const surrogate of ["\ud800", "\udfff"]) {
     for (const extra of [{ description: surrogate }, { [surrogate]: "extension" }]) {

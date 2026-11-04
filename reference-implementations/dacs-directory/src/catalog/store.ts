@@ -387,7 +387,7 @@ if (getJson("listing-summary-readiness-schema-version", 0) < 1) db.transaction((
 const LISTING_VERSION_FLOORS_KEY = "listing-version-floors";
 const listingVersionFloorKey = (seller: string, listingId: string): string => `${seller}\n${listingId}`;
 db.transaction(() => {
-  if (getJson("listing-admission-schema-version", 0) >= 1) return;
+  if (getJson("listing-admission-schema-version", 0) >= 2) return;
   const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
   const floors = getJson<Record<string, number>>(LISTING_VERSION_FLOORS_KEY, {});
   // Persisted rows predate any shape guarantee: a row without an anchor is
@@ -409,7 +409,7 @@ db.transaction(() => {
     const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false }));
     return { ...seller, deals, listings: seller.listings.filter(retained), reputation: deriveSellerReputation(deals, 0, windowEnd) };
   }) });
-  setJson("listing-admission-schema-version", 1);
+  setJson("listing-admission-schema-version", 2);
 }).immediate();
 
 // Old catalog verdicts predate commitment authentication. Clear only derived deal
