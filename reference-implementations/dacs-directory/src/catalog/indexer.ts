@@ -193,6 +193,19 @@ export async function indexRegistration(
 
   // ── Listings: read from chain, validate shape ─────────────────────────────
   const listings: ListingSummary[] = [];
+  // Per registration (seller), track all admitted versions before presentation
+  // filters, once notBefore has arrived. Expiry/withdrawal/holds never reactivate old terms:
+  // a held anchor keeps the versions it listed on an earlier pass, through consecutive holds.
+  const heldListingVersions: NonNullable<SellerRecord["heldListingVersions"]> = [];
+  const listingVersions = new Map<string, { highest: number; hashes: Map<number, Set<string>> }>();
+  const noteVersion = (listingId: string, version: number, contentHash: string) => {
+    const versions = listingVersions.get(listingId) ?? { highest: version, hashes: new Map<number, Set<string>>() };
+    versions.highest = Math.max(versions.highest, version);
+    const hashes = versions.hashes.get(version) ?? new Set<string>();
+    hashes.add(contentHash);
+    versions.hashes.set(version, hashes);
+    listingVersions.set(listingId, versions);
+  };
   const listingArtifacts = new Map<string, ListingEvidence>();
   let identityBundle: Record<string, unknown> | undefined;
   const identityBundles: Record<string, unknown>[] = [];
@@ -221,6 +234,16 @@ export async function indexRegistration(
       recordListingRejection(anchor, reg.primaryClaim, decision.code, decision.coordinates && verification?.ok
         ? listingDiagnosticCoordinates(verification.value.scope) : undefined, decision.publicNotice);
     }
+    if (decision.action === "hold") {
+      for (const held of [
+        ...(prior?.listings ?? []).map((l) => ({ locator: l.anchor.locator, listingId: l.listingId, version: l.version, contentHash: l.contentHash })),
+        ...(prior?.heldListingVersions ?? []),
+      ]) {
+        if (held.locator !== anchor) continue;
+        noteVersion(held.listingId, held.version, held.contentHash);
+        heldListingVersions.push(held);
+      }
+    }
     if (decision.action !== "clear" || !anchored || !verification?.ok) continue;
     clearListingRejection(anchor, reg.primaryClaim);
     const verified = verification.value;
@@ -238,6 +261,7 @@ export async function indexRegistration(
     listingArtifacts.set(listingKey, { locator: anchor, raw: anchored.data });
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
     if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
+    noteVersion(listingId, version, verified.contentHash);
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
@@ -355,6 +379,16 @@ export async function indexRegistration(
     });
   }
   pruneRegistrationListingRejections(reg.primaryClaim, reg.listingAnchors, ownerSigned?.anchors);
+
+  // DACS-1 §6.3.4, Versioning: new versions supersede prior versions for
+  // new sessions; prior versions remain readable. Distinct verified hashes at
+  // one version are ambiguous; repeated anchors of identical content are not.
+  for (const listing of listings) {
+    const versions = listingVersions.get(listing.listingId)!;
+    if (listing.status === "active" && (listing.version < versions.highest || versions.hashes.get(listing.version)!.size > 1)) {
+      listing.status = "superseded";
+    }
+  }
 
   // ── Deals: dereference + verify each bundle from chain ────────────────────
   const dealCandidates: DealRecord[] = [];
@@ -669,6 +703,7 @@ export async function indexRegistration(
     identityBundle,
     cci,
     listings: listingsWithHint,
+    ...(heldListingVersions.length ? { heldListingVersions } : {}),
     deals,
     reputation,
     registeredAt: prior?.registeredAt ?? now,

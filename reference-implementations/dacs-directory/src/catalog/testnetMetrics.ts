@@ -77,7 +77,8 @@ export function projectTestnetCatalog(catalog: Catalog): Catalog {
   };
   return {
     ...observed,
-    sellers: observed.sellers.map((seller) => ({
+    // heldListingVersions is internal restart state and never part of the public projection.
+    sellers: observed.sellers.map(({ heldListingVersions: _held, ...seller }) => ({
       ...withoutMetricKeys(seller),
       deals: (seller.deals ?? []).map((deal) => ({
         ...withoutMetricKeys(deal),
