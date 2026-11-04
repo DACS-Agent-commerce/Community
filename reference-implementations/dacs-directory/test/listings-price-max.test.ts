@@ -44,10 +44,24 @@ test("priceMax admits a priceHint equal to it, at any scale and at 9 decimals", 
 });
 
 test("priceMax refuses a value that is not a non-negative decimal", async () => {
-  for (const priceMax of ["-1", "1e2", "Infinity", "", " 3", "3\n", "0x10", ".5", "1."]) {
+  for (const priceMax of ["-1", "+1", "1e2", "5e-1", "Infinity", "abc", "", ".", " 3", "3\n", "0x10", "1.2.3", "1,5"]) {
     const response = await listings.GET(new NextRequest(
       `https://directory.test/api/dacs/listings?${new URLSearchParams({ priceMax })}`));
     assert.equal(response.status, 400, priceMax);
     assert.deepEqual(await response.json(), { error: "priceMax is outside its allowed range" });
   }
+});
+
+test("priceMax accepts the SDK decimal grammar and canonicalizes it before comparing", async () => {
+  const low = ["0.30000000000000001"];
+  const upTo25 = ["0.30000000000000001", "2.5"];
+  assert.deepEqual(await prices(".5"), low);
+  assert.deepEqual(await prices("1."), low);
+  assert.deepEqual(await prices("007"), upTo25);
+  assert.deepEqual(await prices("00.5"), low);
+  assert.deepEqual(await prices("0.50"), low);
+  assert.deepEqual(await prices("02.50"), upTo25);
+  assert.deepEqual(await prices("0"), []);
+  assert.deepEqual(await prices("0."), []);
+  assert.deepEqual(await prices(".30000000000000001"), low);
 });

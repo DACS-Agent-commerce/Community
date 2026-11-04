@@ -369,7 +369,7 @@ export const openApiDocument = (origin: string) => ({
           { name: "credential", in: "query", schema: { type: "string" } },
           { name: "primaryClaim", in: "query", description: claimBoundDescription("Seller claim or claim-scheme prefix"), schema: { type: "string" } },
           { name: "identityTier", in: "query", schema: { enum: ["institutional", "verified", "self-declared"] } },
-          { name: "priceMax", in: "query", schema: { type: "string", pattern: "^(?:0|[1-9]\\d*)(?:\\.\\d+)?$" } },
+          { name: "priceMax", in: "query", schema: { type: "string", pattern: "^(?=.*[0-9])[0-9]*\\.?[0-9]*$" } },
           { name: "q", in: "query", description: "Directory full-text search extension", schema: { type: "string" } },
           { name: "profile", in: "query", description: "Artifact compatibility profile", schema: { enum: artifactProfiles } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200 } },

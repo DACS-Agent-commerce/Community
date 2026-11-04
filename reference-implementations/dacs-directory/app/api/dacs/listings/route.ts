@@ -13,7 +13,7 @@ import { requestBaseUrl } from "@/src/catalog/publicUrl";
 import { withDirectoryInspectionAffordance } from "@/src/catalog/inspection";
 import { artifactProfiles } from "@/src/catalog/contracts";
 import { unavailableMetricQuery } from "@/src/catalog/testnetMetricPolicy";
-import { scaledDecimals } from "@/src/catalog/decimal";
+import { canonicalPlainDecimal, scaledDecimals } from "@/src/catalog/decimal";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -28,12 +28,14 @@ export async function GET(req: NextRequest) {
   const claimFilter = claimQuery(q.get("primaryClaim"), "primaryClaim");
   if ("refused" in claimFilter) return claimFilter.refused;
   const primaryClaim = claimFilter.value;
-  const priceMax = q.get("priceMax");
+  const priceMaxParam = q.get("priceMax");
+  // Same grammar as the SDK's canonicalizeDecimal; canonicalized once, before filtering.
+  const priceMax = priceMaxParam === null ? null : canonicalPlainDecimal(priceMaxParam);
   const query = q.get("q")?.trim().toLowerCase();
   const profile = q.get("profile");
   const identityTier = q.get("identityTier");
   // DACS-1 §6.3.6 priceMax is a decimal, compared exactly with the decimal-string priceHint.
-  if (priceMax !== null && !scaledDecimals([priceMax])) {
+  if (priceMaxParam !== null && (priceMax === null || !scaledDecimals([priceMax]))) {
     return NextResponse.json({ error: "priceMax is outside its allowed range" }, { status: 400 });
   }
   if (profile && !(artifactProfiles as readonly string[]).includes(profile)) {
