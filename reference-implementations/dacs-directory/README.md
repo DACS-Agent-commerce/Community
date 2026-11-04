@@ -11,7 +11,7 @@ listings must arrive in a storage reply that passes the pinned SDK's raw JSON ad
 SIG-6 base64url signature values, before catalog admission. They are exposed as
 authenticated catalog candidates with `transactionReadiness.disposition = unassessed`: buyer-local revocation,
 rail-authority, payload-capability and delegated signer-control policy remains the transacting SDK's job. Registration adds a display
-name and (when owner-signed) the "owner-registered" badge — it is never a gate. The raw admission check covers the whole storage reply, not only the artifact, so a number outside the profile in `metadata`, or one extra level of nesting, also refuses an otherwise clean artifact.
+name and (when owner-signed) the "owner-registered" badge — it is never a gate. The raw admission check covers the whole storage reply, not only the artifact, so any raw-admission refusal anywhere in the reply (a number outside the profile, a duplicate member, a lone surrogate in `metadata`, or one extra level of nesting) also refuses an otherwise clean artifact.
 
 Live thesis: a Web2 marketplace *asks you to trust its database*. This directory is a
 **cache of chain state**. Listings and strict bundle-history figures come from signed
