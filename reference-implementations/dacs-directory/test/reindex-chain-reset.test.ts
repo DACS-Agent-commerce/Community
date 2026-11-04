@@ -87,8 +87,8 @@ const emptyCatalog = { catalogVersion: "1" as const, generatedAt: 1, sellers: []
 const lastRunRow = () => {
   const db = new Database(join(dataDirectory, "directory.sqlite"), { readonly: true });
   try {
-    return db.prepare("SELECT status, error, txs_scanned FROM scan_runs ORDER BY id DESC LIMIT 1").get() as
-      { status: string; error: string | null; txs_scanned: number };
+    return db.prepare("SELECT status, error, txs_scanned, to_tx FROM scan_runs ORDER BY id DESC LIMIT 1").get() as
+      { status: string; error: string | null; txs_scanned: number; to_tx: number | null };
   } finally { db.close(); }
 };
 /** Nothing the replaced chain produced is left in the scan state, the catalog or the artifact tables. */
@@ -368,6 +368,54 @@ test("a node that changes chain while sellers are indexed saves no catalog and r
   assert.deepEqual(store.loadCatalog(), catalog);
   assert.equal(readyChain(), undefined);
   assert.equal(lastRunRow().status, "failed");
+});
+
+test("a pass that fails after scanning records the saved cursor as its run's end, not the one it reached", async () => {
+  serveFiveTransactions();
+  store.saveRegistrations([]);
+  store.clearChainDerivedArtifacts();
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 0, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [replacedChainSeller()] });
+  await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeServingInTurn(NEW_CHAIN, NEW_CHAIN, NEW_CHAIN, CHANGED_CHAIN) }),
+    servedChainChanged);
+  const run = lastRunRow();
+  assert.equal(run.status, "failed");
+  assert.equal(run.txs_scanned, 3, "the pass scanned past the saved cursor before it failed");
+  assert.equal(store.loadScanState().lastSeenTxId, 0, "the failed pass saved no cursor");
+  assert.equal(run.to_tx, 0, "the failed run records the saved cursor");
+});
+
+test("a pass that fails after saving the catalog records the cursor it saved", async () => {
+  serveFiveTransactions();
+  store.saveRegistrations([]);
+  store.clearChainDerivedArtifacts();
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, lastSeenTxId: 0, listings: {}, deals: {} });
+  store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [] });
+  const log = (line: string) => { if (line.startsWith("catalog written")) throw new Error("log sink failed"); };
+  await assert.rejects(reindexAll({ log, nodeDeployment: nodeOnChain(NEW_CHAIN) }), /log sink failed/);
+  const saved = store.loadScanState().lastSeenTxId;
+  assert.ok(saved > 0, "the catalog and its cursor were saved before the failure");
+  assert.equal(lastRunRow().to_tx, saved);
+});
+
+test("a reset pass that fails records the reset cursor it saved, not the cursor before the reset", async () => {
+  const CHAIN = "d".repeat(64);
+  store.saveRegistrations([]);
+  seedScanState({ schemaVersion: SCAN_STATE_SCHEMA_VERSION, chainIdentity: CHAIN, lastSeenTxId: 5000, lastChainTip: 1,
+    listings: {}, deals: {} });
+  // The tip read succeeds and triggers the reset; the history walk then fails.
+  let calls = 0;
+  globalThis.fetch = async () => {
+    if (++calls > 1) throw new Error("synthetic node outage");
+    return Response.json({ result: 200, response: [{ id: 1 }] });
+  };
+  try {
+    await assert.rejects(reindexAll({ log: () => {}, nodeDeployment: nodeOnChain(CHAIN) }));
+    assert.equal(store.loadScanState().lastSeenTxId, 0, "the reset was saved");
+    assert.equal(lastRunRow().to_tx, 0);
+  } finally {
+    serveFiveTransactions();
+  }
 });
 
 test("a low tip read after the node changed chain does not reset the cache", async () => {

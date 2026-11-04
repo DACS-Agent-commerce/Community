@@ -147,6 +147,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
   const overlap = Number.isSafeInteger(configuredOverlap) && configuredOverlap >= 0 ? configuredOverlap : 2;
   const sinceTxId = needsHistoryReplay ? 0 : Math.max(0, state.lastSeenTxId - overlap);
   const runId = beginScanRun(sinceTxId);
+  // The cursor as last saved: here, after any reset, and again below once the catalog commit has saved the
+  // pass's cursor. Until then state.lastSeenTxId runs ahead of it in memory, so a failed run records this one.
+  let savedCursor = state.lastSeenTxId;
   let scan: Awaited<ReturnType<typeof scanChain>> | undefined;
   try {
     // Provenance survives every failure; absence of readiness requires full replay next time.
@@ -512,12 +515,13 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,
         artifacts: completedScan.observations.length, rejected: completedScan.failures.length });
     });
+    savedCursor = state.lastSeenTxId;
 
     log(`catalog written: ${catalogSellers.length} seller(s)`);
     return { sellers: catalogSellers.length, newTxs: scan.txsScanned, cursor: state.lastSeenTxId };
   } catch (error) {
     revertChainReadWindow();
-    finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: scan?.chainTip,
+    finishScanRun(runId, { ...omitted, toTx: savedCursor, chainTip: scan?.chainTip,
       txs: scan?.txsScanned ?? 0, artifacts: scan?.observations.length ?? 0, rejected: scan?.failures.length ?? 0,
       error: error instanceof Error ? error.message : String(error) });
     throw error;
