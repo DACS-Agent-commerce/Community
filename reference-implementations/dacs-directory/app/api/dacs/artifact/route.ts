@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
   if (!ref) return NextResponse.json({ error: "need ?ref= or ?owner=&name=" }, { status: 400 });
   const read = await readAnchorResult(ref);
   if (read.status === "unavailable") {
-    return NextResponse.json({ error: "the node could not be read; the artifact is indeterminate", ref, status: read.status, value: null }, { status: 503 });
+    return NextResponse.json({ error: "the node could not be read; the artifact is indeterminate", ref, status: read.status, reason: read.reason, value: null }, { status: 503 });
   }
   return NextResponse.json({ ref, status: read.status, value: read.status === "present" ? read.record.data : null });
 }

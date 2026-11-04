@@ -92,8 +92,8 @@ export interface StorageArtifactReply {
 
 /**
  * Admits the exact received bytes before JSON.parse, which cannot see duplicate members or
- * number spellings. Throws a SyntaxError carrying the SDK error as `cause` when the bytes are not
- * JSON at all. The check covers the whole reply, so the reply object counts as one of the 128
+ * number spellings. Throws a SyntaxError when the bytes are not JSON at all; it carries the SDK
+ * error as `cause` when the SDK refused the bytes (a reply that never closes has no cause). The check covers the whole reply, so the reply object counts as one of the 128
  * nesting levels CF-5 admits: a stored artifact may nest 127 levels.
  */
 function admitStorageArtifactReply(bytes: Buffer): StorageArtifactReply {

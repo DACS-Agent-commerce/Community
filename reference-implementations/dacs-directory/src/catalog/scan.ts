@@ -590,7 +590,7 @@ export async function scanChain(
         locator: address, kind: "other", code: "ARTIFACT_REJECTED",
         message: read.admissionRefusal === undefined
           ? "storage artifact has no canonical JSON form"
-          : `storage artifact refused by raw JSON admission: ${read.admissionRefusal}`,
+          : `storage reply refused by raw JSON admission: ${read.admissionRefusal}`,
       });
       continue;
     }

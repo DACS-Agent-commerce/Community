@@ -66,7 +66,7 @@ function anchorReadFailure(error: unknown): { status: "unavailable"; reason: str
   const reason = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
     ? "anchor read timed out" : error instanceof StorageResponseTooLarge
       ? "anchor reply exceeds the byte limit" : error instanceof RawJsonAdmissionError
-        ? `anchor reply refused by raw JSON admission: ${error.code}` : error instanceof SyntaxError
+        ? `storage reply refused by raw JSON admission: ${error.code}` : error instanceof SyntaxError
           ? "anchor reply is invalid JSON" : "anchor could not be reached or read";
   return { status: "unavailable", reason };
 }

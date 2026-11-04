@@ -106,7 +106,7 @@ test("a reply that is not JSON stays a SyntaxError and keeps the admission error
 
 test("an anchor read names a raw-admission refusal as its reason", async () => {
   const read = await withStorageReply(replyText(duplicateMemberListingText), () => readAnchorResult(locator));
-  assert.deepEqual(read, { status: "unavailable", reason: "anchor reply refused by raw JSON admission: DUPLICATE-MEMBER" });
+  assert.deepEqual(read, { status: "unavailable", reason: "storage reply refused by raw JSON admission: DUPLICATE-MEMBER" });
 });
 
 // Documents today's behaviour: invalid UTF-8 and a byte-order mark are refused at the parse stage, so
