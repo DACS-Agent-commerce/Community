@@ -347,6 +347,15 @@ index 7743f4e9..41099dd9 100644
    } catch {
      return false;
    }
+@@ -969,7 +969,7 @@ export function isRevocationMarker(v: unknown): v is RevocationMarker {
+     isPositiveSafeInt(v.listingVersion) &&
+     isStr(v.listingContentHash) &&
+     /^[0-9a-f]{64}$/.test(v.listingContentHash) &&
+-    isSafeUint(v.revokedAt) &&
++    isNum(v.revokedAt) && Number.isSafeInteger(v.revokedAt) &&
+     isOptionalStr(v.reason) &&
+     isComponentSignature(v.signature) &&
+     isCanonicalBase64Url(v.signature.value)
 diff --git a/src/canonical/hash.ts b/src/canonical/hash.ts
 --- a/src/canonical/hash.ts
 +++ b/src/canonical/hash.ts
