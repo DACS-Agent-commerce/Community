@@ -54,8 +54,11 @@ function twoClaimListing(listingSigner: KitSeller, listingId: string) {
   return { listing, hash, marker };
 }
 
-/** First pass: K's CREATE carries the marker and its storage replies `firstReply`; `recover` then serves the marker. */
-async function carriedPass(listingSigner: KitSeller, firstReply: "503" | "empty-object") {
+/**
+ * First pass: K's CREATE carries the marker (unless `carried` is false: the page then has no CREATE)
+ * and its storage replies `firstReply`; `recover` then serves the marker.
+ */
+async function carriedPass(listingSigner: KitSeller, firstReply: "503" | "empty-object", carried = true) {
   const { listing, hash, marker } = twoClaimListing(listingSigner, `two-claim-${++nonce}`);
   const programName = "dacs1-revoked:two-claim";
   const markerRef = deriveStorageAddress(K.owner, programName, 100 + nonce, "");
@@ -67,7 +70,7 @@ async function carriedPass(listingSigner: KitSeller, firstReply: "503" | "empty-
   store.saveRegistrations([{ primaryClaim: O.claim, displayName: "two claims", listingAnchors: [anchor] }]);
   let recovered = false;
   globalThis.fetch = async (input, init) => {
-    if (init?.method === "POST") return Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, tx, { id: 2 }, { id: 1 }] });
+    if (init?.method === "POST") return Response.json({ result: 200, response: [{ id: 5 }, { id: 4 }, ...(carried ? [tx] : []), { id: 2 }, { id: 1 }] });
     const at = String(input).split("/").at(-1);
     if (at === anchor) return Response.json({ success: true, owner: O.owner, programName: "dacs1:listing:two-claim", data: listing });
     if (at === markerRef && recovered) return Response.json({ success: true, owner: K.owner, programName, data: marker });
@@ -111,4 +114,14 @@ test("a {} reply leaves the signing key's carried marker unread, pass after pass
 test("a key that is only a claim in the bundle, and did not sign the listing, cannot hold it", async () => {
   const pass = await carriedPass(O, "503");
   assert.equal(pass.first?.status, "active");
+});
+
+test("the signing key's Listing with no carried marker is published active", async () => {
+  // #230: the baseline for the first two tests. With no CREATE on the page, nothing holds a
+  // Listing K signed, so the hold they see comes from K's carried marker, not from K signing.
+  // K's marker for another of its Listings is left unread first: it must not hold this one.
+  assert.equal((await carriedPass(K, "503")).first, undefined, "the other Listing is held");
+  const pass = await carriedPass(K, "503", false);
+  assert.equal(pass.first?.status, "active");
+  assert.equal(pass.first?.revocation, undefined);
 });
