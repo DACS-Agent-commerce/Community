@@ -111,6 +111,10 @@ const editedSchedule = (edit: (schedule: Obj) => void): Mutation[1] => (scope) =
 };
 const firstItem = (schedule: Obj) => (schedule.items as Obj[])[0];
 const platformItem = (schedule: Obj) => (schedule.items as Obj[])[1];
+// A recurring item needs a recurringTotal, so recurrence-shape cases carry one to isolate the field under test.
+const withRecurrence = (recurrence: unknown): Mutation[1] => editedSchedule((schedule) => {
+  firstItem(schedule).recurrence = recurrence; schedule.recurringTotal = fixedFee("0.03");
+});
 
 test("agreements without a feeSchedule, or with a well-formed one, are accepted", async () => {
   for (const [profile, make] of PROFILES) {
@@ -157,14 +161,16 @@ const malformedFeeSchedules: Mutation[] = [
   ["item rateBps null", editedSchedule((schedule) => { platformItem(schedule).rateBps = null; })],
   ["item toleranceBps a string", editedSchedule((schedule) => { firstItem(schedule).toleranceBps = "5"; })],
   ["item toleranceBps negative", editedSchedule((schedule) => { firstItem(schedule).toleranceBps = -1; })],
-  ["recurrence a string", editedSchedule((schedule) => { firstItem(schedule).recurrence = "monthly"; })],
-  ["recurrence period absent", editedSchedule((schedule) => { firstItem(schedule).recurrence = { count: 2 }; })],
-  ["recurrence period unknown", editedSchedule((schedule) => { firstItem(schedule).recurrence = { period: "hourly" }; })],
-  ["recurrence everySeconds a string", editedSchedule((schedule) => { firstItem(schedule).recurrence = { period: { everySeconds: "60" } }; })],
-  ["recurrence everySeconds zero", editedSchedule((schedule) => { firstItem(schedule).recurrence = { period: { everySeconds: 0 } }; })],
-  ["recurrence count a string", editedSchedule((schedule) => { firstItem(schedule).recurrence = { period: "daily", count: "12" }; })],
-  ["recurrence until a string", editedSchedule((schedule) => { firstItem(schedule).recurrence = { period: "daily", until: "soon" }; })],
-  ["recurringTotal malformed", editedSchedule((schedule) => { schedule.recurringTotal = { amount: "x", currency: "DEM" }; })],
+  ["recurrence a string", withRecurrence("monthly")],
+  ["recurrence period absent", withRecurrence({ count: 2 })],
+  ["recurrence period unknown", withRecurrence({ period: "hourly" })],
+  ["recurrence everySeconds a string", withRecurrence({ period: { everySeconds: "60" } })],
+  ["recurrence everySeconds zero", withRecurrence({ period: { everySeconds: 0 } })],
+  ["recurrence count a string", withRecurrence({ period: "daily", count: "12" })],
+  ["recurrence until a string", withRecurrence({ period: "daily", until: "soon" })],
+  ["recurringTotal malformed", editedSchedule((schedule) => {
+    firstItem(schedule).recurrence = { period: "monthly" }; schedule.recurringTotal = { amount: "x", currency: "DEM" };
+  })],
   ["minimumTermSeconds a string", editedSchedule((schedule) => { schedule.minimumTermSeconds = "30"; })],
   ["earlyTerminationFee has neither fixed nor rateBps", editedSchedule((schedule) => { schedule.earlyTerminationFee = { kind: "other", collector: dids[1] }; })],
   ["disclosureNote not a string", editedSchedule((schedule) => { schedule.disclosureNote = 7; })],
@@ -173,5 +179,61 @@ const malformedFeeSchedules: Mutation[] = [
 test("agreements with a malformed feeSchedule are rejected for each profile", async () => {
   for (const [profile, make] of PROFILES) {
     for (const [name, apply] of malformedFeeSchedules) await assertRejected(profile, name, make, apply);
+  }
+});
+
+test("a monthly fee without a recurringTotal is rejected for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertRejected(profile, "monthly fee without recurringTotal", make, editedSchedule((schedule) => {
+      firstItem(schedule).recurrence = { period: "monthly" };
+    }));
+  }
+});
+
+test("a recurringTotal without a recurring item is rejected for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertRejected(profile, "recurringTotal without a recurring item", make, editedSchedule((schedule) => {
+      schedule.recurringTotal = fixedFee("0.03");
+    }));
+  }
+});
+
+test("a recurrence that sets both count and until is rejected for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertRejected(profile, "count and until", make, withRecurrence({ period: "daily", count: 12, until: 5000 }));
+  }
+});
+
+test("recurring schedules bounded by count, until or neither are accepted for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    for (const recurrence of [{ period: "monthly", count: 12 }, { period: "weekly", until: 5000 }, { period: { everySeconds: 60 } }]) {
+      await assertAccepted(profile, JSON.stringify(recurrence), make, withRecurrence(recurrence));
+    }
+  }
+});
+
+const PREFIXED_UPPERCASE = `SHA256-${"A".repeat(64)}`;
+
+test("a party bundleHash in SHA256- uppercase spelling is rejected for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertRejected(profile, "bundleHash SHA256- uppercase", make, (scope) => { partyOf(scope, 0).bundleHash = PREFIXED_UPPERCASE; });
+  }
+});
+
+test("a vetRecordRef contentHash in SHA256- uppercase spelling is rejected for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertRejected(profile, "contentHash SHA256- uppercase", make, (scope) => {
+      partyOf(scope, 1).vetRecordRef = { ...validRef(), contentHash: PREFIXED_UPPERCASE };
+    });
+  }
+});
+
+test("the exact wire spellings of the party hashes are accepted for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertAccepted(profile, "bare lowercase bundleHash", make, (scope) => { partyOf(scope, 0).bundleHash = "e".repeat(64); });
+    await assertAccepted(profile, "sha256: bundleHash", make, (scope) => { partyOf(scope, 0).bundleHash = `sha256:${"e".repeat(64)}`; });
+    await assertAccepted(profile, "bare lowercase contentHash", make, (scope) => {
+      partyOf(scope, 1).vetRecordRef = { ...validRef(), contentHash: "e".repeat(64) };
+    });
   }
 });
