@@ -85,9 +85,10 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # - Current canonicalization accepts bounded fractional numbers; Listing readers allow
 #   fractional negotiation percentages. Frozen historical hashing requires safe integers.
 #   Publication rejects fractional negotiation percentages.
-# - Admission and publication refuse a negotiable Listing whose band lower bound rounds
-#   to zero at the centre's precision (DACS-3 8.5.2): the pinned SDK's isListing accepts
-#   it, but no Agreement could ever meet it.
+# - DACS-3 8.5.2 requires a verifier to reject a Listing whose computed lower bound is
+#   not positive. The pinned SDK's isListing is looser than the Standard here; admission
+#   and publication follow the Standard and refuse a band whose lower bound rounds to
+#   zero at the centre's precision.
 # - Discovery excludes revoked offers and carries revoked tombstones with their
 #   normative revocation binding. Procurement listings remain unsupported.
 # - Generated A2A cards infer an endpoint/HTTP+JSON transport from the hosting domain.
