@@ -6,6 +6,10 @@ import test from "node:test";
 import { isIP, isIPv6 } from "../src/shims/node-net.js";
 import { domainToASCII, domainToUnicode } from "../src/shims/node-url.js";
 
+// Under Node, src/shims/buffer.ts imports node's own Buffer and replaces its `from` and `toString`, so once the
+// shim is imported, Buffer's base64url output is the shim's. Node's own encoder is kept here, before that import.
+const nodeToString = Buffer.prototype.toString;
+
 // The SDK's DACS-1 DCR-2 hostname check (identity/domainHost) reaches the
 // browser bundle through its ClaimReference parser. Signed-artifact readers
 // take its ASCII branch: domainToASCII, then isIP on the result and the input.
@@ -66,10 +70,19 @@ test("the browser Buffer shim encodes and decodes base64url like node:buffer", a
   const { addBase64url } = await import("../src/shims/buffer.js");
   const Polyfill = addBase64url(createRequire(import.meta.url)("buffer/").Buffer);
   // The SDK's bundle verifier runs this when its module loads.
-  assert.equal(Polyfill.alloc(64).toString("base64url"), Buffer.alloc(64).toString("base64url"));
+  assert.equal(Polyfill.alloc(64).toString("base64url"), "A".repeat(86));
+  // #214: fixed vectors (RFC 4648 §5 alphabet, no padding): one and two trailing bytes, and '-' and '_'.
+  const VECTORS: [number[], string][] = [
+    [[], ""], [[0x66], "Zg"], [[0x66, 0x6f], "Zm8"], [[0x66, 0x6f, 0x6f], "Zm9v"],
+    [[0xfb, 0xff], "-_8"], [[0xff, 0xfe], "__4"], [[0xfb, 0xef, 0xbe], "----"], [[0xff, 0xff, 0xff], "____"],
+  ];
+  for (const [bytes, encoded] of VECTORS) {
+    assert.equal(Polyfill.from(bytes).toString("base64url"), encoded, `encode ${bytes}`);
+    assert.deepEqual(Uint8Array.from(Polyfill.from(encoded, "base64url")), Uint8Array.from(bytes), `decode ${encoded}`);
+  }
   for (let length = 0; length <= 70; length += 1) {
     const bytes = randomBytes(length);
-    const encoded = Buffer.from(bytes).toString("base64url");
+    const encoded = nodeToString.call(bytes, "base64url");
     assert.equal(Polyfill.from(bytes).toString("base64url"), encoded, `encode ${length}`);
     assert.deepEqual(Uint8Array.from(Polyfill.from(encoded, "base64url")), Uint8Array.from(bytes), `decode ${length}`);
   }
