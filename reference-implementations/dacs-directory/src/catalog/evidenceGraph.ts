@@ -127,6 +127,9 @@ function feeRecurrenceShapeOk(value: unknown): boolean {
     !(recurrence.count !== undefined && recurrence.until !== undefined));
 }
 
+/** Fee amounts are wire strings: unlike `priceTermOk`, numbers and arrays are not coerced. */
+const feeAmountOk = (value: unknown): boolean => typeof rec(value)?.amount === "string" && priceTermOk(value);
+
 /** DACS-3 §8.5.3 FS-2: a FeeItem carries exactly one of `fixed` and `rateBps`. */
 function feeItemShapeOk(value: unknown): boolean {
   const item = rec(value);
@@ -134,7 +137,7 @@ function feeItemShapeOk(value: unknown): boolean {
     typeof item.collector === "string" && item.collector.length > 0 &&
     optional(item.label, (label) => typeof label === "string") &&
     (item.fixed === undefined) !== (item.rateBps === undefined) &&
-    optional(item.fixed, priceTermOk) && optional(item.rateBps, nonNegativeNumberOk) &&
+    optional(item.fixed, feeAmountOk) && optional(item.rateBps, nonNegativeNumberOk) &&
     optional(item.toleranceBps, nonNegativeNumberOk) && optional(item.recurrence, feeRecurrenceShapeOk));
 }
 
@@ -148,8 +151,8 @@ function feeScheduleShapeOk(value: unknown, price: unknown): boolean {
   return Boolean(schedule && typeof schedule.priceBasis === "string" && FEE_PRICE_BASES.has(schedule.priceBasis) &&
     Array.isArray(schedule.items) && schedule.items.every(feeItemShapeOk) &&
     schedule.items.some((item) => rec(item)?.recurrence !== undefined) === (schedule.recurringTotal !== undefined) &&
-    priceTermOk(oneOffTotal) && oneOffTotal?.currency === rec(price)?.currency &&
-    optional(schedule.recurringTotal, priceTermOk) && optional(schedule.minimumTermSeconds, nonNegativeNumberOk) &&
+    feeAmountOk(oneOffTotal) && oneOffTotal?.currency === rec(price)?.currency &&
+    optional(schedule.recurringTotal, feeAmountOk) && optional(schedule.minimumTermSeconds, nonNegativeNumberOk) &&
     optional(schedule.earlyTerminationFee, feeItemShapeOk) && optional(schedule.disclosureNote, (note) => typeof note === "string"));
 }
 

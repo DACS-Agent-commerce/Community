@@ -149,7 +149,9 @@ const malformedFeeSchedules: Mutation[] = [
   ["oneOffTotal absent", editedSchedule((schedule) => delete schedule.oneOffTotal)],
   ["oneOffTotal not an object", editedSchedule((schedule) => { schedule.oneOffTotal = "0.04"; })],
   ["oneOffTotal amount malformed", editedSchedule((schedule) => { schedule.oneOffTotal = fixedFee("abc"); })],
-  ["oneOffTotal currency differs from price", editedSchedule((schedule) => { schedule.oneOffTotal = { amount: "0.04", currency: "USD" }; })],
+  ["oneOffTotal amount array-wrapped", editedSchedule((schedule) => { schedule.oneOffTotal = { amount: ["0.04"], currency: "DEM" }; })],
+  ["item fixed amount a number", editedSchedule((schedule) => { firstItem(schedule).fixed = { amount: 1, currency: "DEM" }; })],
+  ["oneOffTotal currency differs from price",editedSchedule((schedule) => { schedule.oneOffTotal = { amount: "0.04", currency: "USD" }; })],
   ["item kind absent", editedSchedule((schedule) => delete firstItem(schedule).kind)],
   ["item kind unknown", editedSchedule((schedule) => { firstItem(schedule).kind = "tax"; })],
   ["item kind array-wrapped", editedSchedule((schedule) => { firstItem(schedule).kind = ["network"]; })],
@@ -176,7 +178,10 @@ const malformedFeeSchedules: Mutation[] = [
   ["recurringTotal malformed", editedSchedule((schedule) => {
     firstItem(schedule).recurrence = { period: "monthly" }; schedule.recurringTotal = { amount: "x", currency: "DEM" };
   })],
-  ["minimumTermSeconds a string", editedSchedule((schedule) => { schedule.minimumTermSeconds = "30"; })],
+  ["recurringTotal amount array-wrapped", editedSchedule((schedule) => {
+    firstItem(schedule).recurrence = { period: "monthly" }; schedule.recurringTotal = { amount: ["0.03"], currency: "DEM" };
+  })],
+  ["minimumTermSeconds a string",editedSchedule((schedule) => { schedule.minimumTermSeconds = "30"; })],
   ["earlyTerminationFee has neither fixed nor rateBps", editedSchedule((schedule) => { schedule.earlyTerminationFee = { kind: "other", collector: dids[1] }; })],
   ["disclosureNote not a string", editedSchedule((schedule) => { schedule.disclosureNote = 7; })],
 ];
