@@ -7,7 +7,8 @@ import { type Obj, dids, locator, vector, payeeBoundVector, installAgreement, gr
 
 // DACS-3 §8.5: AgreementDocument and PayeeBoundAgreementDocument require terms.deadline, generatedAt,
 // and bundleHash plus vetRecordRef on every party. §8.5.3 (FS-1..FS-5): terms.feeSchedule is optional,
-// shape-checked disclosure that never gates acceptance.
+// shape-checked disclosure: a malformed schedule rejects the agreement, but reconciling its totals against
+// items, price or settlement never gates acceptance.
 const PROFILES = [["legacy", vector], ["payee-bound", payeeBoundVector]] as const;
 const AGREEMENT_REFERENCE_FAILURE = "agreement reference failed";
 const ABSENT = Symbol("absent");
@@ -49,6 +50,7 @@ const badVetRefs: Array<[string, unknown]> = [
   ["anchor absent", { contentHash: "c".repeat(64) }],
   ["anchor kind unknown", { ...validRef(), anchor: { kind: "ftp", locator: "x" } }],
   ["anchor kind absent", { ...validRef(), anchor: { locator: "x" } }],
+  ["anchor kind array-wrapped", { ...validRef(), anchor: { kind: ["storage-program"], locator: "x" } }],
   ["anchor locator empty", { ...validRef(), anchor: { kind: "https", locator: "" } }],
   ["anchor locator not a string", { ...validRef(), anchor: { kind: "https", locator: 7 } }],
   ["content hash absent", { anchor: validRef().anchor }],
@@ -140,6 +142,7 @@ const malformedFeeSchedules: Mutation[] = [
   ["priceBasis absent", editedSchedule((schedule) => delete schedule.priceBasis)],
   ["priceBasis unknown", editedSchedule((schedule) => { schedule.priceBasis = "all-in"; })],
   ["priceBasis not a string", editedSchedule((schedule) => { schedule.priceBasis = 7; })],
+  ["priceBasis array-wrapped", editedSchedule((schedule) => { schedule.priceBasis = ["exclusive"]; })],
   ["items absent", editedSchedule((schedule) => delete schedule.items)],
   ["items not an array", editedSchedule((schedule) => { schedule.items = {}; })],
   ["item not an object", editedSchedule((schedule) => { schedule.items = ["network"]; })],
@@ -149,6 +152,7 @@ const malformedFeeSchedules: Mutation[] = [
   ["oneOffTotal currency differs from price", editedSchedule((schedule) => { schedule.oneOffTotal = { amount: "0.04", currency: "USD" }; })],
   ["item kind absent", editedSchedule((schedule) => delete firstItem(schedule).kind)],
   ["item kind unknown", editedSchedule((schedule) => { firstItem(schedule).kind = "tax"; })],
+  ["item kind array-wrapped", editedSchedule((schedule) => { firstItem(schedule).kind = ["network"]; })],
   ["item collector absent", editedSchedule((schedule) => delete firstItem(schedule).collector)],
   ["item collector not a string", editedSchedule((schedule) => { firstItem(schedule).collector = 7; })],
   ["item collector empty", editedSchedule((schedule) => { firstItem(schedule).collector = ""; })],
@@ -164,6 +168,7 @@ const malformedFeeSchedules: Mutation[] = [
   ["recurrence a string", withRecurrence("monthly")],
   ["recurrence period absent", withRecurrence({ count: 2 })],
   ["recurrence period unknown", withRecurrence({ period: "hourly" })],
+  ["recurrence period array-wrapped", withRecurrence({ period: ["monthly"] })],
   ["recurrence everySeconds a string", withRecurrence({ period: { everySeconds: "60" } })],
   ["recurrence everySeconds zero", withRecurrence({ period: { everySeconds: 0 } })],
   ["recurrence count a string", withRecurrence({ period: "daily", count: "12" })],

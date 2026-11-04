@@ -97,7 +97,7 @@ const wireSha256Ok = (value: unknown): boolean => typeof value === "string" && /
 /** DACS-2 AttestationRef: an anchor, a sha256 content hash in wire spelling and an optional signer. */
 function attestationRefShapeOk(value: unknown): boolean {
   const attestation = rec(value); const anchor = rec(attestation?.anchor);
-  return Boolean(attestation && anchor && ATTESTATION_ANCHOR_KINDS.has(String(anchor.kind)) &&
+  return Boolean(attestation && anchor && typeof anchor.kind === "string" && ATTESTATION_ANCHOR_KINDS.has(anchor.kind) &&
     typeof anchor.locator === "string" && anchor.locator.length > 0 &&
     wireSha256Ok(attestation.contentHash) && optional(attestation.signer, (signer) => typeof signer === "string"));
 }
@@ -120,7 +120,7 @@ const FEE_RECURRENCE_PERIODS = new Set(["daily", "weekly", "monthly", "quarterly
 /** DACS-3 §8.5.3: a recurrence is bounded by at most one of `count` and `until`. */
 function feeRecurrenceShapeOk(value: unknown): boolean {
   const recurrence = rec(value); const period = rec(recurrence?.period);
-  return Boolean(recurrence && (FEE_RECURRENCE_PERIODS.has(String(recurrence.period)) ||
+  return Boolean(recurrence && ((typeof recurrence.period === "string" && FEE_RECURRENCE_PERIODS.has(recurrence.period)) ||
       (period && Number.isSafeInteger(period.everySeconds) && Number(period.everySeconds) > 0)) &&
     optional(recurrence.count, (count) => Number.isSafeInteger(count) && Number(count) > 0) &&
     optional(recurrence.until, unixMsOk) &&
@@ -130,7 +130,7 @@ function feeRecurrenceShapeOk(value: unknown): boolean {
 /** DACS-3 §8.5.3 FS-2: a FeeItem carries exactly one of `fixed` and `rateBps`. */
 function feeItemShapeOk(value: unknown): boolean {
   const item = rec(value);
-  return Boolean(item && FEE_ITEM_KINDS.has(String(item.kind)) &&
+  return Boolean(item && typeof item.kind === "string" && FEE_ITEM_KINDS.has(item.kind) &&
     typeof item.collector === "string" && item.collector.length > 0 &&
     optional(item.label, (label) => typeof label === "string") &&
     (item.fixed === undefined) !== (item.rateBps === undefined) &&
@@ -145,7 +145,7 @@ function feeItemShapeOk(value: unknown): boolean {
  */
 function feeScheduleShapeOk(value: unknown, price: unknown): boolean {
   const schedule = rec(value); const oneOffTotal = rec(schedule?.oneOffTotal);
-  return Boolean(schedule && FEE_PRICE_BASES.has(String(schedule.priceBasis)) &&
+  return Boolean(schedule && typeof schedule.priceBasis === "string" && FEE_PRICE_BASES.has(schedule.priceBasis) &&
     Array.isArray(schedule.items) && schedule.items.every(feeItemShapeOk) &&
     schedule.items.some((item) => rec(item)?.recurrence !== undefined) === (schedule.recurringTotal !== undefined) &&
     priceTermOk(oneOffTotal) && oneOffTotal?.currency === rec(price)?.currency &&
