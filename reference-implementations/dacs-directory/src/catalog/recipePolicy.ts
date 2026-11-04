@@ -33,8 +33,17 @@ function listsSelfSignedForAuthorityScheme(recipe: Partial<RecipePolicy>): boole
     recipe.methods.some((method) => typeof method === "string" && method.trim().toLowerCase() === "self-signed");
 }
 
-/** Throws SelfSignedAuthoritySchemeError, naming the scheme, for the first recipe that lists `self-signed` for an authority-issued scheme. */
+/** True when the recipe targets an authority-issued scheme and its `methods` is not an array (a string would pass a substring test). */
+function hasNonArrayMethodsForAuthorityScheme(recipe: Partial<RecipePolicy>): boolean {
+  return typeof recipe.scheme === "string" && AUTHORITY_ISSUED_SCHEMES.includes(recipe.scheme.toLowerCase()) &&
+    !Array.isArray(recipe.methods);
+}
+
+/** Throws SelfSignedAuthoritySchemeError, naming the scheme, for the first recipe that lists `self-signed`, or does not give `methods` as an array, for an authority-issued scheme. */
 function assertNoSelfSignedAuthorityScheme(recipes: readonly Partial<RecipePolicy>[]): void {
+  const malformed = recipes.find((recipe) => recipe && hasNonArrayMethodsForAuthorityScheme(recipe));
+  if (malformed) throw new SelfSignedAuthoritySchemeError(
+    `recipe for authority-issued scheme "${malformed.scheme}": methods must be an array (DACS-2 §7.3.9)`);
   const offender = recipes.find((recipe) => recipe && listsSelfSignedForAuthorityScheme(recipe));
   if (offender) throw new SelfSignedAuthoritySchemeError(
     `recipe for authority-issued scheme "${offender.scheme}" must not list the self-signed method (DACS-2 §7.3.9)`);

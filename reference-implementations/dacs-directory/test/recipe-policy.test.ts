@@ -116,6 +116,24 @@ test("loading DACS_RECIPE_POLICIES refuses the scheme whatever its letter case",
   });
 });
 
+test("loading DACS_RECIPE_POLICIES refuses methods that is not an array for an authority-issued scheme", async () => {
+  for (const methods of ["self-signed", "verifiable-credential,self-signed", "verifiable-credential"])
+    for (const load of [resolveConfiguredRecipe, resolveTierRecipe])
+      await withPolicyEnv([{ ...policy, methods }], async () => {
+        await assert.rejects(load("lei", 1), (error: unknown) => error instanceof SelfSignedAuthoritySchemeError &&
+          error.message.includes("lei") && error.message.includes("methods must be an array"), methods);
+      });
+});
+
+test("methods that is not an array on a scheme that is not authority-issued is left to the existing handling", async () => {
+  const stringMethods = { ...policy, scheme: "key", methods: "self-signed" };
+  await withPolicyEnv([policy, stringMethods], async () => {
+    assert.deepEqual(await resolveConfiguredRecipe("key", 1), stringMethods);
+    assert.equal(await validateRecipeResult({ ...raw, scheme: "key", method: "self-signed" },
+      async () => stringMethods as unknown as RecipePolicy), null);
+  });
+});
+
 test("loading DACS_RECIPE_POLICIES still returns clean policies and self-signed for other schemes", async () => {
   for (const load of [resolveConfiguredRecipe, resolveTierRecipe])
     await withPolicyEnv([policy, selfSignedPolicy("key")], async () => {
