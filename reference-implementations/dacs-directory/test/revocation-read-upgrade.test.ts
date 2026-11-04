@@ -38,7 +38,7 @@ const seeded = new Database(join(directory, "directory.sqlite"));
 seeded.exec(`
   CREATE TABLE kv_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
   INSERT INTO kv_state VALUES ('schema-version','1',0), ('sr2-anchor-schema-version','2',0),
-    ('listing-admission-schema-version','1',0), ('revocation-read-schema-version','1',0);
+    ('listing-admission-schema-version','2',0), ('revocation-read-schema-version','1',0);
   CREATE TABLE revocation_candidates (
     listing_hash TEXT NOT NULL, locator TEXT NOT NULL, owner TEXT, content_hash TEXT,
     seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(listing_hash,locator)
@@ -94,7 +94,7 @@ function startUpgraded(candidates: SeededCandidate[], { readVersion = 1 as numbe
     CREATE TABLE artifacts (locator TEXT PRIMARY KEY, kind TEXT NOT NULL, profile TEXT NOT NULL, owner TEXT, content_hash TEXT,
       observed_at INTEGER NOT NULL, anchor_time INTEGER, status TEXT NOT NULL DEFAULT 'observed', error_code TEXT,
       error_message TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER, data_json TEXT);`);
-  const versions = { "schema-version": 1, "sr2-anchor-schema-version": 2, "listing-admission-schema-version": 1,
+  const versions = { "schema-version": 1, "sr2-anchor-schema-version": 2, "listing-admission-schema-version": 2,
     ...(readVersion === null ? {} : { "revocation-read-schema-version": readVersion }) };
   for (const [key, value] of Object.entries(versions)) db.prepare("INSERT INTO kv_state VALUES (?,?,0)").run(key, JSON.stringify(value));
   const legacyQueue: Record<string, string[]> = {};
