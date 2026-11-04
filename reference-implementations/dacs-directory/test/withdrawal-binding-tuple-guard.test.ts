@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { contentHash } from "../src/catalog/canonical.js";
+import { canonicalDemosAgentClaim, canonicalDemosAgentReference } from "../src/catalog/claimRef.js";
 import { findValidListingRevocation, verifyListing } from "../src/catalog/listingVerification.js";
 import type { WellKnownAgent } from "../src/catalog/wellknown.js";
 import { ingestWellKnownRevocations } from "../src/catalog/reindexCore.js";
@@ -16,6 +17,12 @@ import { dids, locator, seeds, vector } from "./fixtures/current-evidence.js";
 // the case only that guard rejects: the later marker comparison would accept it.
 
 const presentedBy = `${dids[1]}?channel=tuple-guard`;
+const otherChannel = `${dids[1]}?channel=other`;
+// Both references identify the same CF-3 party, but differ in CF-2 reference bytes.
+assert.equal(canonicalDemosAgentClaim(otherChannel), canonicalDemosAgentClaim(presentedBy));
+assert.equal(canonicalDemosAgentClaim(dids[1]), canonicalDemosAgentClaim(presentedBy));
+assert.equal(canonicalDemosAgentReference(otherChannel), otherChannel);
+assert.equal(canonicalDemosAgentReference(dids[1]), dids[1]);
 const { listing } = await vector("tuple-guard", 0, presentedBy);
 const verified = await verifyListing(listing);
 assert.ok(verified);
@@ -49,6 +56,12 @@ test("a carried binding whose tuple names another Listing never enters the candi
   try {
     const foreign: Array<[string, Partial<typeof binding>]> = [
       ["seller", { sellerPrimaryClaim: `${dids[2]}?channel=tuple-guard` }],
+      // #250: the same key under other CF-2 parameters, and the bare DID. Both are
+      // the publisher's CF-3 party, but the binding's seller must equal the
+      // publisher's exact reference (RB-2, kept exact on #179); a guard that
+      // compares CF-3 identities would admit both.
+      ["seller-cf3-other-channel", { sellerPrimaryClaim: otherChannel }],
+      ["seller-cf3-bare-did", { sellerPrimaryClaim: dids[1] }],
       ["listingId", { listingId: "other" }],
       ["listingVersion", { listingVersion: 2 }],
       ["listingContentHash", { listingContentHash: "f".repeat(64) }],
@@ -69,7 +82,7 @@ test("a carried binding whose tuple names another Listing never enters the candi
 });
 
 test("in one pass the exact binding is admitted beside the foreign ones", async () => {
-  // The guard rejects per binding, not per source: a source carrying four
+  // The guard rejects per binding, not per source: a source carrying three
   // foreign tuples and the exact one still gets the exact one admitted.
   const mixedBy = `${dids[1]}?channel=tuple-guard-mixed`;
   const { listing: mixedListing } = await vector("tuple-guard-mixed", 0, mixedBy);
