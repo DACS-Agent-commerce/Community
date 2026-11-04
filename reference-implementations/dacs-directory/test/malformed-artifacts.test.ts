@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AGREEMENT_GENERATED_AT, agreementParty } from "./fixtures/agreement-fields.js";
 import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -267,8 +268,8 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const name = "dacs3:agreement:job-attribution";
   const buyerBundle = { data: JSON.stringify({ bundleVersion: "1", jobId: "job-attribution", parties: [], anchoredByRole: "buyer" }), owner: ownerOf(buyer) };
   const scope = { agreementVersion: "1", jobId: "job-attribution", derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
-    parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
-    terms: { price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    generatedAt: AGREEMENT_GENERATED_AT, parties: [agreementParty("buyer", buyer), agreementParty("seller", seller)],
+    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
   const program = (sellerClaim: string, member?: string) => {
     const raw = sellerClaim === seller ? validAgreement : { seller: sellerClaim };
@@ -347,7 +348,8 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const currentListing = { ...listingRaw, signature: await signArtifact(listingRaw, "listing", 1) };
   const listingRef = { listingId: "svc-current", version: 1, contentHash: artifactHash(currentListing, "listing") };
   const agreementScope: Obj = {
-    agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", parties: [{ role: "buyer", primaryClaim: buyer }, { role: "seller", primaryClaim: seller }],
+    agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", generatedAt: AGREEMENT_GENERATED_AT,
+    parties: [agreementParty("buyer", buyer), agreementParty("seller", seller)],
     terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };

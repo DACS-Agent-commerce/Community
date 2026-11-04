@@ -3,6 +3,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../../src/catalog/evidenceGraph.js";
 import { logicalBundleAddress } from "../../src/catalog/bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "../../src/catalog/types.js";
+import { AGREEMENT_GENERATED_AT, agreementParty } from "./agreement-fields.js";
 
 export type Obj = Record<string, unknown>;
 export const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -46,7 +47,8 @@ export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1],
   const listing: Obj = { ...listingScope, signature: await sign(listingScope, "listing", 1) }; maps.set(at(1), listing);
   const listingRef = { listingId: "svc", version: 1, contentHash: artifactHash(listing, "listing") };
   const agreementScope: Obj = { agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price",
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    generatedAt: AGREEMENT_GENERATED_AT,
+    parties: [agreementParty("buyer", dids[0]), agreementParty("seller", dids[1])],
     terms: {
       deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },
@@ -141,7 +143,8 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     derivedFromPattern: "fixed-price",
     jobId,
     listingRef,
-    parties: [{ role: "buyer", primaryClaim: dids[0] }, { role: "seller", primaryClaim: dids[1] }],
+    generatedAt: AGREEMENT_GENERATED_AT,
+    parties: [agreementParty("buyer", dids[0]), agreementParty("seller", dids[1])],
     terms: {
       deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },

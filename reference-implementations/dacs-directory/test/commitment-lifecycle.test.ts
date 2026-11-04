@@ -8,6 +8,7 @@ import { indexRegistration } from "../src/catalog/indexer.js";
 import { commitmentProof, fixtureCommitments, signCommitment } from "./fixtures/commitment-proof.js";
 import { vector, payeeBoundVector, maps, dids, sign, ref, locator, installAgreement, registeredDeal, bindingFor, type Obj }
   from "./fixtures/current-evidence.js";
+import { agreementParty } from "./fixtures/agreement-fields.js";
 
 type Fixture = Awaited<ReturnType<typeof vector>>;
 async function bundles(f: Fixture, change: (scope: Obj, role: "buyer" | "seller") => void, single = false) {
@@ -165,7 +166,7 @@ for (const payee of [false, true]) for (const legacy of [false, true]) {
       parameters: { commitDeadline: 1, revealWindow: 3600, selectionRule: "lowest-price" } };
       scope.pricing = { kind: "auction", selectionRule: "lowest-price" }; });
     await installAgreement(f, { ...signedScope(f.agreement, "agreement"), derivedFromPattern: "sealed-envelope",
-      parties: [...f.agreement.parties as Obj[], { role: "bidder-non-winning", primaryClaim: dids[2] }] });
+      parties: [...f.agreement.parties as Obj[], agreementParty("bidder-non-winning", dids[2])] });
     const proof = commitmentProof(f.agreement, f.agreement.listingRef as Obj, 90, legacy);
     proof.record.parties = [dids[0], dids[1]]; signCommitment(proof);
     const verifier = { ...fixtureCommitments, resolve: async () => proof };
