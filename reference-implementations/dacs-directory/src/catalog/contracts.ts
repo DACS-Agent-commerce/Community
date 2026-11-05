@@ -71,6 +71,7 @@ export const listingSummarySchema = {
           type: "array",
           items: { type: "object", required: ["kind", "rail"], properties: { kind: { type: "string" }, rail: { type: "string" } } },
         },
+        flowPhases: { type: "array", items: { type: "string" } },
         delivery: { type: "array", items: { type: "string" } }, negotiation: { type: "array", items: { type: "string" } },
         deliverable: { type: "object" },
       },

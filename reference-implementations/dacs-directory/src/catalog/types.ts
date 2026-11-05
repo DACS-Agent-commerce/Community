@@ -110,6 +110,8 @@ export interface ListingSummary {
     rails?: string[];
     /** Current-spec payment phases from the signed pipeline, with the rail each pays. Absent on legacy SDK listings. */
     paymentPhases?: Array<{ kind: string; rail: string }>;
+    /** Current-spec negotiation and commit phase kinds from the signed pipeline, in order. Absent on legacy SDK listings. */
+    flowPhases?: string[];
     /** §9.6 delivery methods the listing offers (from supportedDelivery). */
     delivery?: string[];
     /** Negotiation modes the seller supports (from supportedNegotiation). */

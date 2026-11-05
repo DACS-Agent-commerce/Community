@@ -171,6 +171,27 @@ test("the catalog projection keeps each signed payment phase with the rail it pa
   assert.equal(listingPresentation({ offering, pipeline: Array(16).fill(dem) }).paymentPhases?.length, 16);
 });
 
+test("the catalog projection keeps the negotiation and commit phases in signed order", () => {
+  const offering = { title: "Flow", description: "", category: "services.other" };
+  const flow = listingPresentation({
+    offering,
+    pipeline: [
+      { kind: "vet-credentials" },
+      { kind: "negotiate-fixed-price" },
+      { kind: "commit-agreement" },
+      { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } },
+      { kind: "deliver-storage-program" },
+    ],
+  });
+  assert.deepEqual(flow.flowPhases, ["negotiate-fixed-price", "commit-agreement"]);
+  assert.deepEqual(listingPresentation({ offering, pipeline: [{ kind: "commit-agreement" }, { kind: "negotiate-fixed-price" }] }).flowPhases,
+    ["commit-agreement", "negotiate-fixed-price"], "a misordered pair keeps its order");
+  assert.deepEqual(listingPresentation({ offering, pipeline: [{ kind: "pay-dem" }] }).flowPhases, [], "no such phases gives an empty list");
+  assert.equal(listingPresentation({ supportedNegotiation: ["negotiate-fixed-price"] }).flowPhases, undefined, "legacy listings have no pipeline");
+  assert.deepEqual(listingPresentation({ offering, pipeline: Array(17).fill({ kind: "negotiate-fixed-price" }) }).flowPhases, [], "more than 16 flow phases empties the list");
+  assert.equal(listingPresentation({ offering, pipeline: Array(16).fill({ kind: "negotiate-fixed-price" }) }).flowPhases?.length, 16);
+});
+
 test("the publisher never asserts a PA-1 signature it did not verify, and publishes only on LP-6 verified", () => {
   assert.equal(Object.isFrozen(PUBLISHER_IN_CODE_RAIL_DEFINITIONS), true);
   for (const definition of PUBLISHER_IN_CODE_RAIL_DEFINITIONS) {
