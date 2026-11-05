@@ -24,6 +24,7 @@ import {
   type ResolvedArtifact,
 } from "@/src/catalog/bundlePolicy";
 import { legacySessionAnchorName } from "@/src/catalog/legacySessionAnchorName";
+import { fetchArtifact, registeredBundleRefs } from "@/src/components/verify-deal-requests";
 
 const keyFromDid = (did: string): Uint8Array | null => {
   const hex = did.match(/(?:^|:)(?:0x)?([0-9a-fA-F]{64})$/)?.[1];
@@ -35,26 +36,6 @@ const anchorName: Record<string, (jobId: string) => string> = {
   "dacs-4-evidence": legacySessionAnchorName.evidence,
   "dacs-2-verifyresult": legacySessionAnchorName.vet,
 };
-
-async function fetchArtifact(params: string): Promise<Record<string, unknown> | null> {
-  const res = await fetch(`/api/dacs/artifact?${params}`);
-  const json = (await res.json()) as { value: Record<string, unknown> | null };
-  return json.value ?? null;
-}
-
-async function registeredBundleRefs(jobId: string, bundleRef: string): Promise<{
-  owners: unknown;
-  buyerBundleRef: unknown;
-  sellerBundleRef: unknown;
-} | null> {
-  try {
-    const res = await fetch(`/api/dacs/deal-owners?jobId=${encodeURIComponent(jobId)}&bundleRef=${encodeURIComponent(bundleRef)}`);
-    if (!res.ok) return null;
-    return await res.json() as { owners: unknown; buyerBundleRef: unknown; sellerBundleRef: unknown };
-  } catch {
-    return null;
-  }
-}
 
 // Plain-language translations of the protocol's check names.
 const REF_LABELS: Record<string, { what: string; means: string }> = {
