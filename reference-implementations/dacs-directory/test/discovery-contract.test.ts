@@ -171,6 +171,10 @@ test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   assert.ok(document.paths["/api/dacs/listings"]);
   assert.ok(document.paths["/api/dacs/listings/{listingId}/{version}"]);
   assert.ok(document.paths["/api/dacs/bundles/{jobId}"]);
+  const bundleQuery = document.paths["/api/dacs/bundles/{jobId}"].get.parameters.filter((parameter) => parameter.in === "query");
+  assert.deepEqual(bundleQuery.map((parameter) => [parameter.name, parameter.required]), [["limit", false], ["cursor", false]],
+    "bundle paging is an optional extension");
+  assert.equal("default" in bundleQuery[0].schema, false, "no default page size caps the plain response");
   assert.ok(document.paths["/api/dacs/inspect-service/{listingId}/{version}"]);
   const inspectSeller = document.paths["/api/dacs/inspect-service/{listingId}/{version}"].get.parameters
     .find((parameter) => parameter.name === "seller");

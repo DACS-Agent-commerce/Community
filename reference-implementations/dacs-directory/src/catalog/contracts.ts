@@ -400,11 +400,11 @@ export const openApiDocument = (origin: string) => ({
         summary: "Retrieve every BB-4-verified DACS-5 BundleBinding this catalog holds for the job, whoever signed it",
         parameters: [
           { name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } },
-          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
-          { name: "cursor", in: "query", description: "Opaque cursor from the previous page", schema: { type: "string" } },
+          { name: "limit", in: "query", required: false, description: "Optional paging extension: the most bindings in a reply. Without it the reply carries every binding after `cursor` (all of them when there is no cursor). Each paged request hashes and sorts the job's whole binding set, so for a large job the plain request is cheaper than paging", schema: { type: "integer", minimum: 1, maximum: 200 } },
+          { name: "cursor", in: "query", required: false, description: "Optional paging extension: the content hash of the last binding already read. Paged bindings are ordered by content hash, not by signer, and the reply starts after the cursor even if that binding is gone. Each paged request hashes and sorts the job's whole binding set, so for a large job the plain request is cheaper than paging", schema: { type: "string", pattern: "^[0-9a-f]{64}$" } },
         ],
         responses: {
-          "200": { description: "A page of signed BundleBindings with `total` and, when more remain, the next `cursor`" },
+          "200": { description: "`{ bindings }` with every BundleBinding, in unspecified order. A paged reply (with `limit` or `cursor`) is ordered by content hash, and with `limit` also carries `total` and, when more remain, the next `cursor`" },
           "400": { description: "Invalid jobId or pagination" },
         },
       },

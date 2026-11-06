@@ -129,18 +129,19 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
 test("§6.3.6: the catalog serves every BB-4-valid binding, from both parties, past the per-signer work cap", async () => {
   const served: Obj[] = [];
   const cursors: Array<string | undefined> = [];
-  let cursor: string | undefined = "0";
-  while (cursor !== undefined) {
-    const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${JOB}?limit=20&cursor=${cursor}`), { params: Promise.resolve({ jobId: JOB }) });
+  let cursor: string | undefined;
+  do {
+    const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${JOB}?limit=20${cursor ? `&cursor=${cursor}` : ""}`), { params: Promise.resolve({ jobId: JOB }) });
     assert.equal(response.status, 200);
     const body = await response.json() as { bindings: Obj[]; total: number; cursor?: string };
     assert.equal(body.total, sellerBindings.length + buyerBindings.length);
     served.push(...body.bindings);
     cursor = body.cursor;
     cursors.push(cursor);
-  }
-  assert.deepEqual(cursors, ["20", "40", undefined]);
+  } while (cursor !== undefined);
   const key = (value: Obj) => contentHash(value);
+  assert.deepEqual(cursors, [key(served[19]), key(served[39]), undefined], "each cursor is the last content hash served");
+  assert.deepEqual(served.map(key), [...served.map(key)].sort(), "pages are ordered by binding content hash");
   assert.deepEqual(new Set(served.map(key)), new Set([...sellerBindings, ...buyerBindings].map(key)));
   assert.equal(served.filter((value) => value.signer === dids[SELLER]).length, MAX_BUNDLE_BINDINGS_PER_JOB_ROLE + 8);
   assert.equal(served.filter((value) => value.signer === dids[BUYER]).length, 3);
@@ -190,4 +191,30 @@ test("well-known binding ingestion preserves all 40 records through reindex and 
   const body = await response.json() as { bindings: Obj[]; total: number };
   assert.equal(body.total, 40);
   assert.deepEqual(new Set(body.bindings.map(contentHash)), new Set(bindings.map(contentHash)));
+});
+
+test("well-known crawl stores no binding that fails BB-4", async () => {
+  const jobId = "well-known-refused-job";
+  const scopeOf = (job: string, n: number): Obj => ({ bindingVersion: "1", jobId: job, role: "seller", logicalAddress: logicalBundleAddress(job, "seller"),
+    nativeAddress: locator(0x7000 + n), bundleContentHash: contentHash({ n }), signer: dids[SELLER] });
+  const signed = async (scope: Obj, signer = SELLER) => ({ ...scope,
+    signature: { algorithm: "ed25519", signer: dids[SELLER], value: await sign(`dacs-bundle-binding:v1:${contentHash(scope)}`, signer) } });
+  const good = await signed(scopeOf(jobId, 1));
+  const { nativeAddress: _omitted, ...incomplete } = scopeOf(jobId, 4);
+  const refused = [await signed(scopeOf(jobId, 2), BUYER), { ...await signed(scopeOf("another-job", 3)), jobId }, await signed(incomplete)];
+  const listings = JSON.stringify({ indexVersion: "1", generatedAt: 1, seller: dids[SELLER], listings: [] });
+  const bindingIndex = JSON.stringify({ bindings: [good, ...refused] });
+  httpsAnswers.set("/listings.json", { status: 200, body: listings });
+  httpsAnswers.set("/bindings.json", { status: 200, body: bindingIndex });
+  httpsAnswers.set("/.well-known/agent.json", { status: 200, body: JSON.stringify({ dacs: { dacsVersion: "1",
+    listings: { indexUrl: `https://${DOMAIN}/listings.json`, indexHash: `sha256-${sha256Hex(listings)}` },
+    bundleBindings: { indexUrl: `https://${DOMAIN}/bindings.json`, indexHash: `sha256-${sha256Hex(bindingIndex)}` },
+  } }) });
+  const crawled = await crawlDomain(DOMAIN);
+  assert.ok(!("error" in crawled));
+  assert.deepEqual(crawled.bundleBindings.map(contentHash), [contentHash(good)], "the crawl keeps only the valid binding");
+  await reindexAll({ nodeDeployment: onPinnedChain, log: () => {}, resolveIdentities: async () => [] });
+  const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${jobId}`), { params: Promise.resolve({ jobId }) });
+  assert.deepEqual(((await response.json()) as { bindings: Obj[] }).bindings.map(contentHash), [contentHash(good)]);
+  assert.deepEqual(Object.keys(store.loadScanState().bundleBindings ?? {}).filter((job) => job === "another-job"), []);
 });
