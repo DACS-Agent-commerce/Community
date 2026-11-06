@@ -114,11 +114,18 @@ function agreementPartyShapeOk(value: unknown): boolean {
     attestationRefShapeOk(party.vetRecordRef));
 }
 
-/** DACS-4 §9.3 DeliverableRef: the deliverable kind, the sha256 hex of the anchored DeliverableSpec and an optional schema URL. */
+const DELIVERABLE_REF_KEYS = new Set(["deliverableType", "hash", "schemaUrl"]);
+const DELIVERABLE_KINDS = new Set(["storage-program", "entitlement", "attested-payload", "external"]);
+
+/**
+ * DACS-4 §9.3 DeliverableRef, exactly as the pinned SDK validator accepts it: only `deliverableType`, `hash` and
+ * `schemaUrl`, one of the four deliverable kinds, the sha256 hex of the anchored DeliverableSpec and an optional schema URL.
+ */
 function deliverableRefShapeOk(value: unknown): boolean {
   const deliverable = rec(value);
-  return Boolean(deliverable && typeof deliverable.deliverableType === "string" && wireSha256Ok(deliverable.hash) &&
-    optional(deliverable.schemaUrl, (schemaUrl) => typeof schemaUrl === "string"));
+  return Boolean(deliverable && Object.keys(deliverable).every((key) => DELIVERABLE_REF_KEYS.has(key)) &&
+    typeof deliverable.deliverableType === "string" && DELIVERABLE_KINDS.has(deliverable.deliverableType) &&
+    wireSha256Ok(deliverable.hash) && optional(deliverable.schemaUrl, (schemaUrl) => typeof schemaUrl === "string"));
 }
 
 const FEE_PRICE_BASES = new Set(["inclusive", "exclusive"]);

@@ -80,6 +80,14 @@ test("agreements whose terms.deliverable is missing or mistyped are refused as m
   }
 });
 
+test("an agreement whose deliverable carries a member beyond deliverableType, hash and schemaUrl is refused as malformed for each profile", async () => {
+  for (const [profile, make] of PROFILES) await assertMalformed(profile, "extra member", make, withMember("note", "extra"));
+});
+
+test("an agreement whose deliverableType is not one of the four deliverable kinds is refused as malformed for each profile", async () => {
+  for (const [profile, make] of PROFILES) await assertMalformed(profile, "unknown kind", make, withMember("deliverableType", "unknown-kind"));
+});
+
 test("an agreement whose deliverable equals the listing's is accepted for each profile", async () => {
   for (const [profile, make] of PROFILES) await assertAccepted(profile, "equal deliverable", make, () => undefined);
 });
