@@ -94,14 +94,30 @@ export async function validateRecipeResult(
   } catch { return null; }
 }
 
-/** Operator-authenticated historical registry snapshots; never infer a snapshot from
- * a list of individually live policies. The session pin selects this exact roster. */
+/** Historical registry snapshots from the operator-trusted DACS_RECIPE_SNAPSHOTS configuration. They are
+ * unauthenticated until the Standard defines a steward key to verify them against; never infer a snapshot
+ * from a list of individually live policies. The session pin selects this exact roster. */
 export interface RecipeSnapshot { registryVersion: number; recipes: RecipePolicy[] }
 export type ResolveRecipeSnapshot = (version: number) => Promise<RecipeSnapshot | null>;
+
+/** The DACS_RECIPE_SNAPSHOTS text whose summary line was last logged; the line is logged once per distinct value. */
+let loggedSnapshotConfig: string | undefined;
+
+/** Logs the source, snapshot count and distinct trusted signer count of the configuration, never signer keys or contents. */
+function logSnapshotConfigOnce(configText: string, snapshots: readonly RecipeSnapshot[]): void {
+  if (configText === loggedSnapshotConfig) return;
+  loggedSnapshotConfig = configText;
+  const signers = new Set(snapshots.flatMap((snapshot) => Array.isArray(snapshot?.recipes) ? snapshot.recipes : [])
+    .flatMap((recipe) => Array.isArray(recipe?.trustedResultSigners) ? recipe.trustedResultSigners : []));
+  console.info(`DACS_RECIPE_SNAPSHOTS: ${snapshots.length} snapshots, ${signers.size} trusted signers`);
+}
+
 /** Throws SelfSignedAuthoritySchemeError when the selected snapshot lists `self-signed` for an authority-issued scheme. */
 export const resolveConfiguredRecipeSnapshot: ResolveRecipeSnapshot = async (version) => {
   try {
-    const snapshots: RecipeSnapshot[] = JSON.parse(process.env.DACS_RECIPE_SNAPSHOTS ?? "[]");
+    const configText = process.env.DACS_RECIPE_SNAPSHOTS;
+    const snapshots: RecipeSnapshot[] = JSON.parse(configText ?? "[]");
+    if (configText !== undefined) logSnapshotConfigOnce(configText, snapshots);
     const matches = snapshots.filter((snapshot) => snapshot.registryVersion === version);
     if (matches.length !== 1 || !Array.isArray(matches[0].recipes)) return null;
     const recipes = matches[0].recipes;
