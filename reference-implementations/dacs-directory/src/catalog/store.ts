@@ -426,6 +426,19 @@ db.transaction(() => {
   setJson("commitment-finality-schema-version", 3);
 }).immediate();
 
+// An Agreement's terms.deliverable must now match its Listing's deliverable. Verdicts saved before this rule
+// were not checked against it. Clear only derived deal credit atomically; retain Listings, withdrawal evidence
+// and scan pointers, so the next successful reindex re-earns credit under the stricter rule.
+db.transaction(() => {
+  if (getJson("agreement-deliverable-schema-version", 0) >= 1) return;
+  const catalog = getJson<Catalog>("catalog", { catalogVersion: "1", generatedAt: 0, sellers: [] });
+  setJson("catalog", { ...catalog, sellers: catalog.sellers.map((seller) => {
+    const deals = (seller.deals ?? []).map((deal) => ({ ...deal, refsVerified: false, reputationEligible: false, ratings: [] }));
+    return { ...seller, deals, reputation: deriveSellerReputation(deals, 0, catalog.generatedAt) };
+  }) });
+  setJson("agreement-deliverable-schema-version", 1);
+}).immediate();
+
 /**
  * The highest version of a seller's Listing that a past admission reset
  * withheld from the catalog, or 0. The publisher numbers new versions after it.

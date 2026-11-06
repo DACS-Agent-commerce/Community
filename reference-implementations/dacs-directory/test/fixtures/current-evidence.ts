@@ -3,7 +3,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 import { artifactHash, buildCurrentEvidenceGraph, signedScope } from "../../src/catalog/evidenceGraph.js";
 import { logicalBundleAddress } from "../../src/catalog/bundleBinding.js";
 import type { BundleBinding, RegisteredDeal } from "../../src/catalog/types.js";
-import { AGREEMENT_GENERATED_AT, agreementParty } from "./agreement-fields.js";
+import { AGREEMENT_GENERATED_AT, SELF_SIGNED_DELIVERABLE, agreementParty, deliverableRefFor } from "./agreement-fields.js";
 
 export type Obj = Record<string, unknown>;
 export const seeds = [11, 12, 13].map((byte) => Uint8Array.from(Buffer.alloc(32, byte)));
@@ -25,8 +25,6 @@ export const sign = async (raw: Obj, kind: "listing" | "agreement" | "evidence" 
 export const ref = (at: string, raw: Obj, kind: Parameters<typeof artifactHash>[1], extra: Obj = {}) => ({
   anchor: { kind: "storage-program", locator: at }, contentHash: artifactHash(raw, kind), ...extra,
 });
-
-const SELF_SIGNED_DELIVERABLE: Obj = { kind: "attested-payload", payloadFormat: "application/json", verificationMethod: { kind: "self-signed" } };
 
 export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1], deliverable: Obj = SELF_SIGNED_DELIVERABLE) {
   maps.clear();
@@ -50,6 +48,7 @@ export async function vector(jobId = "job-1", offset = 0, presentedBy = dids[1],
     generatedAt: AGREEMENT_GENERATED_AT,
     parties: [agreementParty("buyer", dids[0]), agreementParty("seller", dids[1])],
     terms: {
+      deliverable: deliverableRefFor(deliverable),
       deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },
@@ -146,6 +145,7 @@ export async function payeeBoundVector(jobId = "payee-bound-job", offset = 0) {
     generatedAt: AGREEMENT_GENERATED_AT,
     parties: [agreementParty("buyer", dids[0]), agreementParty("seller", dids[1])],
     terms: {
+      deliverable: deliverableRefFor(SELF_SIGNED_DELIVERABLE),
       deadline: 1000,
       price: { amount: "1.25", currency: "DEM" },
       rail: { railId: "pay-dem" },

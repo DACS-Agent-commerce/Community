@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { onPinnedChain } from "./fixtures/pinned-node.js";
-import { AGREEMENT_GENERATED_AT, agreementParty } from "./fixtures/agreement-fields.js";
+import { AGREEMENT_GENERATED_AT, SELF_SIGNED_DELIVERABLE, agreementParty, deliverableRefFor } from "./fixtures/agreement-fields.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,7 +148,7 @@ const scanCounts = () => sql("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")
 async function agreementFor(jobId: string, sellerClaim = seller) {
   const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing!.contentHash },
     generatedAt: AGREEMENT_GENERATED_AT, parties: [agreementParty("buyer", buyer), agreementParty("seller", sellerClaim)],
-    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    terms: { deliverable: deliverableRefFor(SELF_SIGNED_DELIVERABLE), deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   return { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
 }
 
