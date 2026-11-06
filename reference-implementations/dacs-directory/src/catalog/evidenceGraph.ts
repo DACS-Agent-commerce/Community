@@ -1,6 +1,7 @@
 import { currentLifecycle, exactListingTuple, makeCommitmentContext, type CommitmentContext } from "./commitmentContext.js";
 import { verifyListingCommitment, type CommitmentVerifier, type ListingEvidence } from "./commitmentFinality.js";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
+import { canonicalize, sha256Hex } from "./canonical.js";
 import { bundleSignerPolicy } from "./bundleSignerPolicy.js";
 import { verifyStoredListing } from "./listingVerification.js";
 import {
@@ -113,6 +114,13 @@ function agreementPartyShapeOk(value: unknown): boolean {
     attestationRefShapeOk(party.vetRecordRef));
 }
 
+/** DACS-4 §9.3 DeliverableRef: the deliverable kind, the sha256 hex of the anchored DeliverableSpec and an optional schema URL. */
+function deliverableRefShapeOk(value: unknown): boolean {
+  const deliverable = rec(value);
+  return Boolean(deliverable && typeof deliverable.deliverableType === "string" && wireSha256Ok(deliverable.hash) &&
+    optional(deliverable.schemaUrl, (schemaUrl) => typeof schemaUrl === "string"));
+}
+
 const FEE_PRICE_BASES = new Set(["inclusive", "exclusive"]);
 const FEE_ITEM_KINDS = new Set(["network", "platform", "processing", "spread", "subscription", "other"]);
 const FEE_RECURRENCE_PERIODS = new Set(["daily", "weekly", "monthly", "quarterly", "annual"]);
@@ -156,6 +164,17 @@ function feeScheduleShapeOk(value: unknown, price: unknown): boolean {
     optional(schedule.earlyTerminationFee, feeItemShapeOk) && optional(schedule.disclosureNote, (note) => typeof note === "string"));
 }
 
+/**
+ * DACS-3 §8.5.2 check 4: the agreement's DeliverableRef must equal the one derived from the listing's
+ * `offering.deliverable` as anchored: its kind, the sha256 hex of its whole JCS form (DACS-4 §9.3) and its
+ * schemaUrl (both absent, or both present and equal). A listing without a deliverable cannot be matched.
+ */
+function deliverableMatchesOffering(reference: unknown, offered: unknown): boolean {
+  const deliverable = rec(reference); const spec = rec(offered);
+  return Boolean(deliverable && spec && deliverable.deliverableType === spec.kind &&
+    deliverable.hash === sha256Hex(canonicalize(spec)) && deliverable.schemaUrl === spec.schemaUrl);
+}
+
 /** DACS-3 §8.5: bind the artifact type and every payout destination to the pinned pipeline. */
 function agreementMatchesListing(agreement: Record<string, unknown>, listing: Record<string, unknown>): boolean {
   const profile = agreementProfile(agreement);
@@ -187,6 +206,8 @@ function agreementMatchesListing(agreement: Record<string, unknown>, listing: Re
     if (!priceTermOk(center) || !priceTermOk(price) ||
         price!.amount !== center!.amount || price!.currency !== center!.currency) return false;
   }
+
+  if (!deliverableMatchesOffering(terms.deliverable, rec(listing.offering)?.deliverable)) return false;
 
   if (profile === "legacy") return terms.payoutBindings === undefined;
   if (!Array.isArray(terms.payoutBindings) || !terms.payoutBindings.every(payoutBindingShapeOk)) return false;
@@ -296,7 +317,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
       typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
       unixMsOk(raw.generatedAt) && Array.isArray(raw.parties) && raw.parties.length >= 2 && raw.parties.every(agreementPartyShapeOk) &&
-      terms && unixMsOk(terms.deadline) && priceTermOk(terms.price) && optional(terms.feeSchedule, (schedule) => feeScheduleShapeOk(schedule, terms.price)) &&
+      terms && deliverableRefShapeOk(terms.deliverable) && unixMsOk(terms.deadline) && priceTermOk(terms.price) && optional(terms.feeSchedule, (schedule) => feeScheduleShapeOk(schedule, terms.price)) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
         : Array.isArray(terms.payoutBindings) && terms.payoutBindings.every(payoutBindingShapeOk)));

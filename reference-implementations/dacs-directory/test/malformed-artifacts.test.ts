@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { AGREEMENT_GENERATED_AT, agreementParty } from "./fixtures/agreement-fields.js";
+import { AGREEMENT_GENERATED_AT, SELF_SIGNED_DELIVERABLE, agreementParty, deliverableRefFor } from "./fixtures/agreement-fields.js";
 import { onPinnedChain } from "./fixtures/pinned-node.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -269,7 +269,7 @@ test("an unhashable program never shadows a valid agreement or supplies deal att
   const buyerBundle = { data: JSON.stringify({ bundleVersion: "1", jobId: "job-attribution", parties: [], anchoredByRole: "buyer" }), owner: ownerOf(buyer) };
   const scope = { agreementVersion: "1", jobId: "job-attribution", derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: verifiedListing.contentHash },
     generatedAt: AGREEMENT_GENERATED_AT, parties: [agreementParty("buyer", buyer), agreementParty("seller", seller)],
-    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    terms: { deliverable: deliverableRefFor(SELF_SIGNED_DELIVERABLE), deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   const validAgreement = { ...scope, signatures: [await signArtifact(scope, "agreement", 0, true), await signArtifact(scope, "agreement", 1, true)] };
   const program = (sellerClaim: string, member?: string) => {
     const raw = sellerClaim === seller ? validAgreement : { seller: sellerClaim };
@@ -350,7 +350,7 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
   const agreementScope: Obj = {
     agreementVersion: "1", jobId, listingRef, derivedFromPattern: "fixed-price", generatedAt: AGREEMENT_GENERATED_AT,
     parties: [agreementParty("buyer", buyer), agreementParty("seller", seller)],
-    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
+    terms: { deliverable: deliverableRefFor(SELF_SIGNED_DELIVERABLE), deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } },
   };
   const agreement = { ...agreementScope, signatures: [await signArtifact(agreementScope, "agreement", 0, true), await signArtifact(agreementScope, "agreement", 1, true)] };
   const evidenceScope: Obj = { evidenceVersion: "1", jobId, phase: "pay-dem", phaseIndex: 2, outcome: "success", paymentTxRefs, observedAt: 100 };

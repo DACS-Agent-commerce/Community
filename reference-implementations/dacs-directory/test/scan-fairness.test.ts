@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { onPinnedChain } from "./fixtures/pinned-node.js";
-import { AGREEMENT_GENERATED_AT, agreementParty } from "./fixtures/agreement-fields.js";
+import { AGREEMENT_GENERATED_AT, SELF_SIGNED_DELIVERABLE, agreementParty, deliverableRefFor } from "./fixtures/agreement-fields.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,7 +58,7 @@ const unsigned = (n: number) => ({ ...markerScope, revokedAt: 1_000 + n, signatu
 async function agreementFor(jobId: string, buyerIndex: number, sellerIndex: number) {
   const scope = { agreementVersion: "1", jobId, derivedFromPattern: "fixed-price", listingRef: { listingId: "svc", version: 1, contentHash: listingHash },
     generatedAt: AGREEMENT_GENERATED_AT, parties: [agreementParty("buyer", dids[buyerIndex]), agreementParty("seller", dids[sellerIndex])],
-    terms: { deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
+    terms: { deliverable: deliverableRefFor(SELF_SIGNED_DELIVERABLE), deadline: 1000, price: { amount: "1.25", currency: "DEM" }, rail: { railId: "pay-dem" } } };
   const sign = async (index: number) => ({ party: dids[index], algorithm: "ed25519",
     value: await signature(artifactHash(scope, "agreement"), "dacs-agreement:v1:", index) });
   return { ...scope, signatures: [await sign(buyerIndex), await sign(sellerIndex)] };
