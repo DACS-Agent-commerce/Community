@@ -401,10 +401,10 @@ export const openApiDocument = (origin: string) => ({
         parameters: [
           { name: "jobId", in: "path", required: true, schema: { type: "string", minLength: 1, maxLength: 160 } },
           { name: "limit", in: "query", required: false, description: "Optional paging extension: the most bindings in a reply. Without it the reply carries every binding after `cursor` (all of them when there is no cursor)", schema: { type: "integer", minimum: 1, maximum: 200 } },
-          { name: "cursor", in: "query", required: false, description: "Optional paging extension: the content hash of the last binding already read. Bindings are ordered by content hash, not by signer, and the reply starts after the cursor even if that binding is gone", schema: { type: "string", pattern: "^[0-9a-f]{64}$" } },
+          { name: "cursor", in: "query", required: false, description: "Optional paging extension: the content hash of the last binding already read. Paged bindings are ordered by content hash, not by signer, and the reply starts after the cursor even if that binding is gone", schema: { type: "string", pattern: "^[0-9a-f]{64}$" } },
         ],
         responses: {
-          "200": { description: "`{ bindings }` with every BundleBinding, ordered by content hash. With `limit`, a page that also carries `total` and, when more remain, the next `cursor`" },
+          "200": { description: "`{ bindings }` with every BundleBinding, in unspecified order. A paged reply (with `limit` or `cursor`) is ordered by content hash, and with `limit` also carries `total` and, when more remain, the next `cursor`" },
           "400": { description: "Invalid jobId or pagination" },
         },
       },

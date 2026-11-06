@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import crypto from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -106,7 +108,36 @@ test("a default request returns every binding in the plain response", async () =
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(Object.keys(body), ["bindings"], "no paging envelope when no paging is requested");
-  assert.deepEqual(servedHashes(body), hashOrder(all), "all 61 records, in content-hash order");
+  assert.deepEqual(servedHashes(body).sort(), hashOrder(all), "all 61 records; the order of a plain reply is unspecified");
+});
+
+/** Counts the calls a default (unpaged) GET makes to a node:crypto function. */
+async function cryptoCallsOnDefaultGet(t: TestContext, name: "verify" | "createHash") {
+  persistBindings(PAGE_JOB, Array.from({ length: 5 }, (_, n) => binding(n + 1, 0, PAGE_JOB)));
+  const spy = t.mock.method(crypto, name);
+  syncBuiltinESMExports();
+  try {
+    const body = await (await get("", PAGE_JOB)).json();
+    assert.equal(body.bindings.length, 5);
+    const plain = spy.mock.callCount();
+    await get("limit=2", PAGE_JOB);
+    return { plain, paged: spy.mock.callCount() - plain };
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+}
+
+test("a default request does not verify any binding signature", async (t) => {
+  const calls = await cryptoCallsOnDefaultGet(t, "verify");
+  assert.equal(calls.plain, 0, "the store holds only verified bindings, so the route never calls the signature verifier");
+  assert.equal(calls.paged, 0, "paged requests do not verify either");
+});
+
+test("a default request does not hash any binding, only paged requests do", async (t) => {
+  const calls = await cryptoCallsOnDefaultGet(t, "createHash");
+  assert.equal(calls.plain, 0, "the plain reply is served without content hashes");
+  assert.ok(calls.paged >= 5, "a paged reply hashes the set to order it and form the cursor");
 });
 
 test("paging across a reindex between pages omits no record", async () => {
