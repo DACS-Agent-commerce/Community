@@ -21,10 +21,14 @@ const DACS_PLUGIN_REPOSITORY = "https://github.com/DACS-Agent-commerce/dacs-plug
 const PLUGIN_DEM_RAILS = new Set(["demos-native:DEM"]);
 const pluginDemRail = (rail: string, profile: string | undefined) =>
   PLUGIN_DEM_RAILS.has(rail) || (rail === "pay-dem" && profile !== "dacs-v0.1");
+// The purchase flow expects exactly one fixed-price negotiation followed by one commit phase.
+const PLUGIN_FLOW_PHASES = ["negotiate-fixed-price", "commit-agreement"];
+const pluginFlowPhases = (flowPhases: string[] | undefined) =>
+  flowPhases?.length === PLUGIN_FLOW_PHASES.length && flowPhases.every((kind, index) => kind === PLUGIN_FLOW_PHASES[index]);
 // A summary saved by an earlier build has no phases, so it shows no box until the next reindex.
-const pluginCanPay = (offering: { rails?: string[]; paymentPhases?: Array<{ kind: string; rail: string }> }, profile: string | undefined) =>
+const pluginCanPay = (offering: { rails?: string[]; paymentPhases?: Array<{ kind: string; rail: string }>; flowPhases?: string[] }, profile: string | undefined) =>
   profile === "dacs-v0.1"
-    ? [...PLUGIN_DEM_RAILS].some((rail) => {
+    ? pluginFlowPhases(offering.flowPhases) && [...PLUGIN_DEM_RAILS].some((rail) => {
       const phases = offering.paymentPhases ?? [];
       return phases.length > 0 && phases.every((phase) => phase.kind === "pay-dem" && phase.rail === rail) && (offering.rails ?? []).includes(rail);
     })

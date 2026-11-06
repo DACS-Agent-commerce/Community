@@ -363,6 +363,7 @@ export async function indexRegistration(
         tags: presentation.tags,
         rails: presentation.rails,
         ...(presentation.paymentPhases ? { paymentPhases: presentation.paymentPhases } : {}),
+        ...(presentation.flowPhases ? { flowPhases: presentation.flowPhases } : {}),
         delivery: presentation.delivery,
         negotiation: presentation.negotiation,
         deliverable: presentation.deliverable,

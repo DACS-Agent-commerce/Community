@@ -52,6 +52,14 @@ export function listingPresentation(scope: Record<string, unknown>) {
       return phases.length <= 16 && phases.every((phase) => phase !== null) ? phases as Array<{ kind: string; rail: string }> : [];
     })()
     : undefined;
+  // Negotiation and commit phases in signed pipeline order (the purchase flow needs one negotiation
+  // followed by one commit). More than 16 leaves the list empty, so a reader never judges part of it.
+  const flowPhases = currentOffering
+    ? (() => {
+      const kinds = pipeline.filter((kind) => (kind.startsWith("negotiate-") || kind.startsWith("commit-")) && protocolId.test(kind));
+      return kinds.length <= 16 ? kinds : [];
+    })()
+    : undefined;
   const acceptedRails = Array.isArray(scope.acceptedRails)
     ? scope.acceptedRails.filter((rail): rail is Record<string, unknown> => Boolean(rail) && typeof rail === "object" && !Array.isArray(rail))
       .map((rail) => rail.railId).filter((rail): rail is string => typeof rail === "string")
@@ -78,6 +86,7 @@ export function listingPresentation(scope: Record<string, unknown>) {
     tags: boundedStrings(currentOffering?.tags ?? scope.tags, 16, 64),
     rails: boundedStrings(currentOffering ? acceptedRails : scope.supportedPaymentRails, 16, 128, railId),
     paymentPhases,
+    flowPhases,
     delivery: currentOffering
       ? pipeline.filter((kind) => kind.startsWith("deliver-"))
       : boundedStrings(scope.supportedDelivery, 16, 128, protocolId),
