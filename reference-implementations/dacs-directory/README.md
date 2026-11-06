@@ -363,8 +363,11 @@ current SDK seller runtime.
    reindex between pages never skips a binding present before and after it; a `cursor`
    without `limit` returns everything after it. A request with neither is served from the
    store as it is, without hashing or sorting, so the order of that reply is unspecified.
+   Each paged request hashes and sorts the job's whole binding set, so for a large job the
+   plain request is cheaper than reading it in pages.
    The store holds only bindings that passed BB-4 when they were written, so the route does
-   not re-verify them per request. The
+   not re-verify them per request; envelopes stored by an older build are served as stored
+   until the next index pass rewrites them. The
    Directory's own BB-6 resolution works through at most eight per signer of each job and
    role; another signer's bindings never use that budget. Overflow is sticky and makes
    that signer's side `indeterminate`, never absent. There is no total across signers,
