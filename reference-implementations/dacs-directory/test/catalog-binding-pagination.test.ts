@@ -80,14 +80,77 @@ test("scan to persisted unauthenticated pages carries every valid binding regard
   assert.equal(new Set(first.map(contentHash)).size, 41);
   assert.ok(first.some((value) => value.signer === signers[1]), "outsider record remains visible");
   assert.deepEqual(await readAll(), first, "an unchanged snapshot yields identical pages");
-  assert.deepEqual((await (await get("cursor=41")).json()).bindings, []);
+  assert.deepEqual((await (await get(`cursor=${"f".repeat(64)}`)).json()).bindings, []);
   assert.deepEqual((await (await get("", "missing-job")).json()).bindings, []);
 });
 
 test("binding pages reject invalid limits, cursors and job lengths", async () => {
-  for (const query of ["limit=0", "limit=201", "limit=1.5", "limit=NaN", "cursor=-1", "cursor=1.5", "cursor=Infinity", "cursor=9007199254740992"])
+  for (const query of ["limit=0", "limit=201", "limit=1.5", "limit=NaN", "cursor=", "cursor=-1", "cursor=20", "cursor=Infinity",
+    `cursor=${"A".repeat(64)}`, `cursor=${"a".repeat(63)}`, `cursor=${"a".repeat(65)}`])
     assert.equal((await get(query)).status, 400, query);
   for (const job of ["", "j".repeat(161)]) assert.equal((await get("", job)).status, 400);
+});
+
+/** Replaces the persisted catalog for one job, as a reindex pass does. */
+function persistBindings(job: string, bindings: BundleBinding[]) {
+  store.saveScanState({ schemaVersion: 10, lastSeenTxId: 0, listings: {}, deals: {}, bundleBindings: { [job]: bindings } });
+}
+const hashOrder = (bindings: BundleBinding[]) => bindings.map(contentHash).sort();
+const servedHashes = (body: { bindings: BundleBinding[] }) => body.bindings.map(contentHash);
+const PAGE_JOB = "catalog-keyset";
+
+test("a default request returns every binding in the plain response", async () => {
+  const all = [...Array.from({ length: 60 }, (_, n) => binding(n + 1, 0, PAGE_JOB)), binding(200, 1, PAGE_JOB)];
+  persistBindings(PAGE_JOB, all);
+  const response = await get("", PAGE_JOB);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body), ["bindings"], "no paging envelope when no paging is requested");
+  assert.deepEqual(servedHashes(body), hashOrder(all), "all 61 records, in content-hash order");
+});
+
+test("paging across a reindex between pages omits no record", async () => {
+  const before = Array.from({ length: 30 }, (_, n) => binding(n + 1, 0, PAGE_JOB));
+  persistBindings(PAGE_JOB, before);
+  const first = await (await get("limit=10", PAGE_JOB)).json();
+  assert.deepEqual(servedHashes(first), hashOrder(before).slice(0, 10));
+  assert.equal(first.cursor, hashOrder(before)[9], "the cursor is the last content hash served");
+  // The reindex drops three already-served records and adds records on both sides of the cursor.
+  const dropped = new Set(first.bindings.slice(0, 3).map(contentHash));
+  const added = Array.from({ length: 6 }, (_, n) => binding(100 + n, 0, PAGE_JOB));
+  const after = [...before.filter((value) => !dropped.has(contentHash(value))), ...added];
+  persistBindings(PAGE_JOB, after);
+  const seen = servedHashes(first);
+  let cursor: string | undefined = first.cursor;
+  while (cursor) {
+    const page: { bindings: BundleBinding[]; cursor?: string } = await (await get(`limit=10&cursor=${cursor}`, PAGE_JOB)).json();
+    seen.push(...servedHashes(page));
+    cursor = page.cursor;
+  }
+  const mustBeSeen = hashOrder(before).filter((hash) => hash > first.cursor && after.some((value) => contentHash(value) === hash));
+  for (const hash of mustBeSeen) assert.ok(seen.includes(hash), `record ${hash} survived the reindex and was skipped`);
+  assert.equal(new Set(seen).size, seen.length, "no record is served twice");
+  assert.ok(added.some((value) => contentHash(value) > first.cursor), "the fixture adds records after the cursor");
+  for (const value of added.filter((entry) => contentHash(entry) > first.cursor)) assert.ok(seen.includes(contentHash(value)));
+});
+
+test("cursor alone returns the rest after the cursor key", async () => {
+  const all = Array.from({ length: 12 }, (_, n) => binding(n + 1, 0, PAGE_JOB));
+  persistBindings(PAGE_JOB, all);
+  const { cursor } = await (await get("limit=5", PAGE_JOB)).json();
+  const rest = await (await get(`cursor=${cursor}`, PAGE_JOB)).json();
+  assert.deepEqual(Object.keys(rest), ["bindings"]);
+  assert.deepEqual(servedHashes(rest), hashOrder(all).slice(5));
+});
+
+test("a cursor key that no longer exists continues from the next key", async () => {
+  const all = Array.from({ length: 12 }, (_, n) => binding(n + 1, 0, PAGE_JOB));
+  persistBindings(PAGE_JOB, all);
+  const { cursor } = await (await get("limit=5", PAGE_JOB)).json();
+  persistBindings(PAGE_JOB, all.filter((value) => contentHash(value) !== cursor));
+  const response = await get(`limit=100&cursor=${cursor}`, PAGE_JOB);
+  assert.equal(response.status, 200, "a vanished cursor key is not an error");
+  assert.deepEqual(servedHashes(await response.json()), hashOrder(all).slice(5));
 });
 
 test("scanner groups a large same-signer catalog with subquadratic comparison work", async (t) => {

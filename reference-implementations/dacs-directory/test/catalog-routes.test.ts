@@ -129,18 +129,19 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
 test("§6.3.6: the catalog serves every BB-4-valid binding, from both parties, past the per-signer work cap", async () => {
   const served: Obj[] = [];
   const cursors: Array<string | undefined> = [];
-  let cursor: string | undefined = "0";
-  while (cursor !== undefined) {
-    const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${JOB}?limit=20&cursor=${cursor}`), { params: Promise.resolve({ jobId: JOB }) });
+  let cursor: string | undefined;
+  do {
+    const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${JOB}?limit=20${cursor ? `&cursor=${cursor}` : ""}`), { params: Promise.resolve({ jobId: JOB }) });
     assert.equal(response.status, 200);
     const body = await response.json() as { bindings: Obj[]; total: number; cursor?: string };
     assert.equal(body.total, sellerBindings.length + buyerBindings.length);
     served.push(...body.bindings);
     cursor = body.cursor;
     cursors.push(cursor);
-  }
-  assert.deepEqual(cursors, ["20", "40", undefined]);
+  } while (cursor !== undefined);
   const key = (value: Obj) => contentHash(value);
+  assert.deepEqual(cursors, [key(served[19]), key(served[39]), undefined], "each cursor is the last content hash served");
+  assert.deepEqual(served.map(key), [...served.map(key)].sort(), "pages are ordered by binding content hash");
   assert.deepEqual(new Set(served.map(key)), new Set([...sellerBindings, ...buyerBindings].map(key)));
   assert.equal(served.filter((value) => value.signer === dids[SELLER]).length, MAX_BUNDLE_BINDINGS_PER_JOB_ROLE + 8);
   assert.equal(served.filter((value) => value.signer === dids[BUYER]).length, 3);

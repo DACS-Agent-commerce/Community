@@ -356,7 +356,12 @@ current SDK seller runtime.
    there settles it.
    BB-4-valid BundleBindings are also classified and kept, all of them: DACS-1 §6.3.6
    requires a carrying catalog to serve every such record whoever signed it, and
-   `GET /api/dacs/bundles/{jobId}` pages through the full set (`limit`, `cursor`). The
+   `GET /api/dacs/bundles/{jobId}` returns the full set as `{ bindings }`. Paging is an
+   optional extension: `limit` caps a page and `cursor` is the content hash of the last
+   binding read, so paged results are ordered by binding content hash, not grouped by
+   signer. A page starts after the cursor key even if that binding has since gone, so a
+   reindex between pages never skips a binding present before and after it; a `cursor`
+   without `limit` returns everything after it. The
    Directory's own BB-6 resolution works through at most eight per signer of each job and
    role; another signer's bindings never use that budget. Overflow is sticky and makes
    that signer's side `indeterminate`, never absent. There is no total across signers,
