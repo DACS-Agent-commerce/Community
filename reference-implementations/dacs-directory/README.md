@@ -140,9 +140,10 @@ and evidence signatures and preserves the historical member-name hash profile
 only for explicit legacy references.
 The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
 profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
-integer. The patch also lets the SDK's `isRevocationMarker` accept a negative safe-integer
-`revokedAt`, as the Directory does (DACS-1 §6.3.4 types it as a number; CORE §B.2 bounds only
-its magnitude). A fractional `revokedAt` is still accepted by the Directory and refused by the SDK reader. Catalog admission alone does not promise SDK transaction readiness.
+integer. The patch also lets the SDK's `isRevocationMarker` accept finite integral and
+fractional `revokedAt` values within ±(2^53−1), as the Directory does (DACS-1 §6.3.4
+types it as a number; CORE §B.2 permits fractions and bounds their magnitude).
+Catalog admission alone does not promise SDK transaction readiness.
 Changing either the revision or patch requires rebuilding and updating `SDK_DIST_SHA256`.
 
 ### Configuration
