@@ -1,20 +1,22 @@
 import "./globals.css";
-import { Plus_Jakarta_Sans, Source_Code_Pro } from "next/font/google";
+import localFont from "next/font/local";
 import Link from "next/link";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import SiteNav from "@/src/components/SiteNav";
 import { directoryBaseUrl } from "@/src/catalog/publicUrl";
 
-const jakarta = Plus_Jakarta_Sans({
-  subsets: ["latin"],
+const jakarta = localFont({
+  src: "./fonts/PlusJakartaSans-variable.ttf",
+  display: "swap",
   variable: "--font-jakarta",
-  weight: ["400", "500", "600", "700"],
+  weight: "400 700",
 });
-const sourceCodePro = Source_Code_Pro({
-  subsets: ["latin"],
+const sourceCodePro = localFont({
+  src: "./fonts/SourceCodePro-variable.ttf",
+  display: "swap",
   variable: "--font-scp",
-  weight: ["400", "500", "600"],
+  weight: "400 600",
 });
 
 export const metadata: Metadata = {
