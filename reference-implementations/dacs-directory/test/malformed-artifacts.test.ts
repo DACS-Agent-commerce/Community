@@ -431,6 +431,22 @@ test("a bundle party role wrapped in an array is rejected by the party check", a
   assert.equal(await graphReason(deal, await resignedBundle(deal, withThirdParty(["orchestrator"]))), BUNDLE_PARTIES_REASON);
 });
 
+const withPhase = (phase: Obj) => (scope: Obj) => { scope.phaseSummary = [phase]; };
+
+test("a bundle phase outcome wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-phase-outcome", 420);
+  const phase = (outcome: unknown) => withPhase({ index: 0, kind: "work", outcome });
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, phase("ok"))), BUNDLE_SHAPE_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, phase(["ok"]))), BUNDLE_SHAPE_REASON);
+});
+
+test("a bundle phase errorClass wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-phase-error", 440);
+  const phase = (errorClass: unknown) => withPhase({ index: 0, kind: "work", outcome: "fail", errorClass });
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, phase("transient"))), BUNDLE_SHAPE_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, phase(["transient"]))), BUNDLE_SHAPE_REASON);
+});
+
 // A bundle whose one vet record is a signed Composite holding one signed VerifyResult over a stored attestation.
 async function vetRecordGraph(jobId: string, offset: number, overallDecision: unknown, decision: unknown) {
   const deal = await currentDeal(jobId, offset);
