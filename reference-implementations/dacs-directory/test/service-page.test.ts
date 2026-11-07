@@ -123,6 +123,8 @@ test("the service page keeps the contact button after a failed check and shows h
   const zero = fixedDem({ listingId: "zero", pricing: { kind: "fixed", priceHint: "0", currency: "DEM" } });
   const subUnit = fixedDem({ listingId: "sub-unit", pricing: { kind: "fixed", priceHint: "0.0000000001", currency: "DEM" } });
   const finest = fixedDem({ listingId: "finest", pricing: { kind: "fixed", priceHint: "0.000000001", currency: "DEM" } });
+  const trailingZeros = fixedDem({ listingId: "trailing-zeros", pricing: { kind: "fixed", priceHint: "1.5000000000", currency: "DEM" } });
+  const subUnitAfterZeros = fixedDem({ listingId: "sub-unit-after-zeros", pricing: { kind: "fixed", priceHint: "1.0000000001", currency: "DEM" } });
   const noNegotiation = withFlow("no-negotiation", ["commit-agreement"]);
   const noCommit = withFlow("no-commit", ["negotiate-fixed-price"]);
   const noFlow = withFlow("no-flow", []);
@@ -131,7 +133,7 @@ test("the service page keeps the contact button after a failed check and shows h
   const misordered = withFlow("misordered", ["commit-agreement", "negotiate-fixed-price"]);
   const otherNegotiation = withFlow("other-negotiation", ["negotiate-rfq", "commit-agreement"]);
   const unindexedFlow = noFlowKey("unindexed-flow");
-  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, aliasX402, legacyPayDem, x402Phase, mismatchedPhase, mixedPhases, otherRailPhase, noPhases, auction, usd, noAmount, zero, subUnit, finest, noNegotiation, noCommit, noFlow, twoNegotiations, twoCommits, misordered, otherNegotiation, unindexedFlow])] });
+  saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([online, offline, stale, fixture, x402, aliasX402, legacyPayDem, x402Phase, mismatchedPhase, mixedPhases, otherRailPhase, noPhases, auction, usd, noAmount, zero, subUnit, finest, trailingZeros, subUnitAfterZeros, noNegotiation, noCommit, noFlow, twoNegotiations, twoCommits, misordered, otherNegotiation, unindexedFlow])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
   }));
@@ -171,6 +173,8 @@ test("the service page keeps the contact button after a failed check and shows h
   assert.doesNotMatch(await render(zero), /Buy through your AI assistant/, "a zero amount is not an offer");
   assert.doesNotMatch(await render(subUnit), /Buy through your AI assistant/, "DEM has nine decimal places");
   assert.match(await render(finest), /Buy through your AI assistant/, "one base unit is payable");
+  assert.match(await render(trailingZeros), /Buy through your AI assistant/, "trailing zeros past the ninth decimal do not change the amount");
+  assert.doesNotMatch(await render(subUnitAfterZeros), /Buy through your AI assistant/, "a non-zero digit past the ninth decimal is still finer than a base unit");
   assert.doesNotMatch(await render(noNegotiation), /Buy through your AI assistant/, "a pipeline without a negotiation phase cannot be bought");
   assert.doesNotMatch(await render(noCommit), /Buy through your AI assistant/, "a pipeline without a commit phase cannot be bought");
   assert.doesNotMatch(await render(noFlow), /Buy through your AI assistant/, "a pipeline with neither phase cannot be bought");

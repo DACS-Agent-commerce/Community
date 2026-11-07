@@ -35,7 +35,8 @@ const pluginCanPay = (offering: { rails?: string[]; paymentPhases?: Array<{ kind
     : (offering.rails ?? []).some((rail) => pluginDemRail(rail, profile));
 // A published amount the plugin could offer: a plain positive decimal.
 // DEM settles in base units of 10^-9, so a finer amount is no offer the plugin could pay.
-const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d{1,9})?$/.test(amount ?? "") && Number(amount) > 0;
+// Zeros after the ninth decimal do not make an amount finer, so `1.5000000000` is the same offer as `1.5`.
+const hasPositiveAmount = (amount: string | undefined) => /^\d+(\.\d{1,9}0*)?$/.test(amount ?? "") && Number(amount) > 0;
 
 type Params = { seller: string; listingId: string; version: string };
 
