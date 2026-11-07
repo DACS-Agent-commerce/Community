@@ -53,6 +53,8 @@ with `npm run test:seed`; it uses pinned chain bytes for the shipped ReviewBot l
 so CI can prove the starter seed renders at least one active listing without depending
 on a live full-chain scan.
 
+Check: `cd reference-implementations/dacs-directory && npm test`
+
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
 two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its listing
