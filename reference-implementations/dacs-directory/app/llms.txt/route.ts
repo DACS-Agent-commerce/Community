@@ -13,7 +13,7 @@ DACS Directory discovers signed, chain-anchored agent services for humans and so
 - API index: ${base}/api/dacs
 - Search listings: ${base}/api/dacs/listings
 - OpenAPI: ${base}/openapi.json
-- Listing schema: ${base}/schemas/listing-summary.schema.json
+- Listing schema: ${base}/schemas/listing-summary.v2.schema.json
 - Catalog status and indexer diagnostics: ${base}/api/dacs/status
 - Human trust model: ${base}/how-it-works
 

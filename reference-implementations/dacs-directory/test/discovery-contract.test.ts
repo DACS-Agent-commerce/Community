@@ -46,7 +46,7 @@ test("directory manifest lets an agent discover every contract from the origin",
   assert.equal(manifest.bundleBindings, `${origin}/api/dacs/bundles/{jobId}`);
   assert.equal(manifest.inspectService, `${origin}/api/dacs/inspect-service/{listingId}/{version}?seller={primaryClaim}`);
   assert.equal(manifest.openapi, `${origin}/openapi.json`);
-  assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.schema.json`);
+  assert.equal(manifest.schemas.listingSummary, `${origin}/schemas/listing-summary.v2.schema.json`);
   assert.equal(manifest.substrates.demos.rpcUrl, rpc);
   assert.equal(
     manifest.substrates.demos.anchors["storage-program"].read.urlTemplate,
@@ -82,9 +82,9 @@ test("the TP-1 contract change carries version signals and the exact advertised 
   // The API index reports the same contract version as the manifest.
   const { GET: getIndex } = await import("../app/api/dacs/route.js");
   assert.equal((await (await getIndex(new NextRequest("https://directory.example/api/dacs"))).json()).version, "2");
-  // The schema URL is unversioned, so a changed schema must not be cached as immutable.
-  const { GET: getSchema } = await import("../app/schemas/listing-summary.schema.json/route.js");
-  const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.schema.json"));
+  // The versioned schema retains bounded caching and ETag revalidation.
+  const { GET: getSchema } = await import("../app/schemas/listing-summary.v2.schema.json/route.js");
+  const response = await getSchema(new NextRequest("https://directory.example/schemas/listing-summary.v2.schema.json"));
   const cacheControl = response.headers.get("cache-control") ?? "";
   assert.doesNotMatch(cacheControl, /immutable/);
   assert.match(cacheControl, /must-revalidate/);

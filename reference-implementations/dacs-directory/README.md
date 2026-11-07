@@ -242,8 +242,15 @@ contract. A client starting with only the directory origin can discover:
 - `/api/dacs` — linked API index
 - `/api/dacs/listings` — filterable, cursor-paginated active services
 - `/openapi.json` — OpenAPI 3.1 description
-- `/schemas/listing-summary.schema.json` — JSON Schema for catalog summaries
+- `/schemas/listing-summary.v2.schema.json` — JSON Schema for catalog summaries
 - `/llms.txt` — supplemental plain-text orientation
+
+The ListingSummary schema uses a versioned identity because its required fields and
+field names have changed. The former `/schemas/listing-summary.schema.json` URL
+returns a 308 redirect to `/schemas/listing-summary.v2.schema.json`. The manifest
+and OpenAPI component advertise the versioned identity. This is a Directory-local
+schema publication convention; [DACS-1 §6.3.6](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091/spec/DACS-1-IDENTIFY.md#636-catalog-api)
+defines ListingSummary and its discovery role, without prescribing this schema URL.
 
 Catalog responses include validators, cache policy, and typed `Link` headers. Human
 service and seller pages expose canonical URLs and JSON alternates, while the dynamic
