@@ -19,7 +19,7 @@ const store = await import("../src/catalog/store.js");
 const { scanChain } = await import("../src/catalog/scan.js");
 const { verifyListing } = await import("../src/catalog/listingVerification.js");
 const { logicalBundleAddress, verifyBundleBinding } = await import("../src/catalog/bundleBinding.js");
-const { artifactHash, buildCurrentEvidenceGraph } = await import("../src/catalog/evidenceGraph.js");
+const { agreementPrice, artifactHash, buildCurrentEvidenceGraph } = await import("../src/catalog/evidenceGraph.js");
 const { deriveIdentityTier } = await import("../src/catalog/identityVerification.js");
 const { indexRegistration } = await import("../src/catalog/indexer.js");
 const { reindexAll } = await import("../src/catalog/reindexCore.js");
@@ -36,7 +36,7 @@ const offline = async (): Promise<never> => { throw new Error("identity unavaila
 
 const PREFIXES: Record<string, string> = {
   listing: "dacs-listing:v1:", agreement: "dacs-agreement:v1:", evidence: "dacs-evidence:v1:",
-  bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:",
+  bundle: "dacs-bundle:v1:", "verify-result": "dacs-verifyresult:v1:", composite: "dacs-composite:v1:",
 };
 const signature = async (hash: string, prefix: string, signer: number, encoding: "hex" | "base64url" = "base64url") =>
   Buffer.from(await ed25519Sign(Buffer.from(prefix + hash), privateKeyFromSeed(seeds[signer]))).toString(encoding);
@@ -377,6 +377,104 @@ async function currentDeal(jobId: string, offset: number, paymentTxRefs: unknown
     ],
   };
 }
+
+type CurrentDeal = Awaited<ReturnType<typeof currentDeal>>;
+const BUNDLE_SHAPE_REASON = "invalid current DACS-5 bundle shape";
+const BUNDLE_PARTIES_REASON = "invalid or duplicate bundle parties";
+
+// Re-signs the deal's buyer copy after `change` edits its signed scope, so only the shape checks can reject it.
+async function resignedBundle(deal: CurrentDeal, change: (scope: Obj) => void, anchoredByRole: unknown = "buyer"): Promise<Obj> {
+  const scope = JSON.parse(deal.programs[deal.deal.buyerBundleRef].data) as Obj;
+  delete scope.signatures;
+  delete scope.anchoredByRole;
+  change(scope);
+  return { ...scope, signatures: [await signArtifact(scope, "bundle", 0, true), await signArtifact(scope, "bundle", 1, true)], anchoredByRole };
+}
+
+async function graphReason(deal: CurrentDeal, bundle: Obj, extra: Record<string, Obj> = {}): Promise<string | undefined> {
+  const bundleAt = locator(999);
+  const graph = await buildCurrentEvidenceGraph(bundleAt, {
+    read: async (target) => {
+      if (target === bundleAt) return bundle;
+      const stored = deal.programs[target]?.data;
+      return extra[target] ?? (stored === undefined ? null : JSON.parse(stored) as Obj);
+    },
+    resolveListing: async () => null,
+  });
+  return graph.reason;
+}
+
+test("a price amount is accepted only when it is a string", () => {
+  const priced = (amount: unknown) => ({ terms: { price: { amount, currency: "DEM" } } });
+  assert.deepEqual(agreementPrice(priced("5")), { amount: "5", currency: "DEM" });
+  assert.equal(agreementPrice(priced(["5"])), null);
+  assert.equal(agreementPrice(priced(5)), null);
+});
+
+test("a bundle outcome wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-outcome", 300);
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, () => {})), BUNDLE_SHAPE_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, (scope) => { scope.outcome = ["completed"]; })), BUNDLE_SHAPE_REASON);
+});
+
+test("a bundle anchoredByRole wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-anchor", 320);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, () => {}, ["buyer"])), BUNDLE_SHAPE_REASON);
+});
+
+test("a bundle party role wrapped in an array is rejected by the party check", async () => {
+  const deal = await currentDeal("job-shape-role", 340);
+  const withThirdParty = (role: unknown) => (scope: Obj) => {
+    (scope.parties as Obj[]).push({ role, bundleHash: "c".repeat(64), primaryClaim: outsider });
+  };
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, withThirdParty("orchestrator"))), BUNDLE_PARTIES_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, withThirdParty(["orchestrator"]))), BUNDLE_PARTIES_REASON);
+});
+
+const withPhase = (phase: Obj) => (scope: Obj) => { scope.phaseSummary = [phase]; };
+
+test("a bundle phase outcome wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-phase-outcome", 420);
+  const phase = (outcome: unknown) => withPhase({ index: 0, kind: "work", outcome });
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, phase("ok"))), BUNDLE_SHAPE_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, phase(["ok"]))), BUNDLE_SHAPE_REASON);
+});
+
+test("a bundle phase errorClass wrapped in an array is rejected by the shape check", async () => {
+  const deal = await currentDeal("job-shape-phase-error", 440);
+  const phase = (errorClass: unknown) => withPhase({ index: 0, kind: "work", outcome: "fail", errorClass });
+  assert.notEqual(await graphReason(deal, await resignedBundle(deal, phase("transient"))), BUNDLE_SHAPE_REASON);
+  assert.equal(await graphReason(deal, await resignedBundle(deal, phase(["transient"]))), BUNDLE_SHAPE_REASON);
+});
+
+// A bundle whose one vet record is a signed Composite holding one signed VerifyResult over a stored attestation.
+async function vetRecordGraph(jobId: string, offset: number, overallDecision: unknown, decision: unknown) {
+  const deal = await currentDeal(jobId, offset);
+  const at = (n: number) => locator(offset + n);
+  const attestation: Obj = { statement: "attestation body" };
+  const verifyScope: Obj = {
+    resultVersion: "1", scheme: "scheme", identifier: "identifier", verifiedAt: 1, decision,
+    attestation: { anchor: { kind: "storage-program", locator: at(21) }, contentHash: contentHash(attestation) },
+  };
+  const verifyResult = { ...verifyScope, signature: await signArtifact(verifyScope, "verify-result", 1) };
+  const compositeScope: Obj = {
+    recordVersion: "1", jobId, evaluatedParty: buyer, overallDecision, freshness: [],
+    dealSpecific: [ref(at(22), verifyResult, "verify-result")], supplementary: [],
+  };
+  const composite = { ...compositeScope, signature: await signArtifact(compositeScope, "composite", 1) };
+  const bundle = await resignedBundle(deal, (scope) => { scope.vetRecords = [ref(at(23), composite, "composite")]; });
+  return graphReason(deal, bundle, { [at(21)]: attestation, [at(22)]: verifyResult, [at(23)]: composite });
+}
+
+test("a composite overallDecision wrapped in an array is rejected by the shape check", async () => {
+  assert.notEqual(await vetRecordGraph("job-shape-overall", 360, "pass", "pass"), "composite reference failed");
+  assert.equal(await vetRecordGraph("job-shape-overall", 360, ["pass"], "pass"), "composite reference failed");
+});
+
+test("a verify-result decision wrapped in an array is rejected by the shape check", async () => {
+  assert.notEqual(await vetRecordGraph("job-shape-decision", 400, "pass", "pass"), "nested VerifyResult reference failed");
+  assert.equal(await vetRecordGraph("job-shape-decision", 400, "pass", ["pass"]), "nested VerifyResult reference failed");
+});
 
 test("malformed bundles and a deal that cannot be summarized stay unverified while a later deal verifies", async () => {
   // Signed evidence whose transaction id converts to no primitive: the graph verifies, the deal summary throws.
