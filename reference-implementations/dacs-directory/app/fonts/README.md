@@ -24,3 +24,5 @@ node --test test/offline-fonts.test.mjs
 ```
 
 This is a build dependency change and introduces no DACS protocol interpretation.
+
+Check: `cd reference-implementations/dacs-directory && node --test test/offline-fonts.test.mjs`
