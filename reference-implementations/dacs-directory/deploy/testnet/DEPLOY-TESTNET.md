@@ -88,8 +88,8 @@ install -d -m 0755 /etc/systemd/system/dacs-directory-index.service.d
 test ! -e '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
 install -m 0644 'deploy/testnet/index-bootstrap.conf' '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
 systemctl daemon-reload
-systemctl show dacs-directory-index.service -p TimeoutStartUSec
-# Expect TimeoutStartUSec=infinity. Resolve conflicting local overrides first.
+# Refuse to start if a conflicting local override leaves a finite timeout.
+test "$(systemctl show dacs-directory-index.service -p TimeoutStartUSec --value)" = infinity
 systemctl start --no-block dacs-directory-index.service
 journalctl -fu dacs-directory-index.service
 ```
@@ -108,8 +108,8 @@ After a successful pass, remove only the temporary drop-in and restore schedulin
 set -eu
 rm '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
 systemctl daemon-reload
-systemctl show dacs-directory-index.service -p TimeoutStartUSec
-# Expect TimeoutStartUSec=15min from the shipped unit; resolve other overrides.
+# Refuse to resume scheduling unless the shipped 15-minute limit is restored.
+test "$(systemctl show dacs-directory-index.service -p TimeoutStartUSec --value)" = 15min
 systemctl enable --now dacs-directory-index.timer
 ```
 
