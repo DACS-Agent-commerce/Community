@@ -28,7 +28,7 @@ import { isLegacyMvpAttestationBundle } from "@kynesyslabs/dacs/artifacts";
 // import) and breaks the production webpack build. Reach into the leaf
 // module directly to keep this file free of the substrate client.
 import { verifyBundleCore } from "../../vendor/dacs-sdk/dist/agent/verifyBundleCore.js";
-import { readAnchor, readAnchorRecord, readAnchorResult } from "./chain.js";
+import { readAnchor, readAnchorResult } from "./chain.js";
 import { gcrGetIdentities } from "./gcr.js";
 import {
   findValidListingRevocation,
@@ -212,16 +212,19 @@ export async function indexRegistration(
   const { verifiedRevocations } = scanState;
   const savedDeclarations = savedListingDeclarations(reg.primaryClaim);
   const normalizedHash = (hash: string) => hash.replace(/^sha256-/, "").toLowerCase();
+  const artifactKey = (listingId: string, version: number, hash: string) => `${listingId}\n${version}\n${hash}`;
+  // Prior summaries whose anchor could not be read this pass; they are kept as last observed (RB-6).
+  const unreadPriorListings: ListingSummary[] = [];
   for (const anchor of reg.listingAnchors) {
-    const anchored = await readAnchorRecord(anchor);
+    const read = await readAnchorResult(anchor);
+    const anchored = read.status === "present" ? read.record : null;
     const verification = anchored ? await verifyStoredListingResult(anchored.data, anchor) : null;
     const evidence: ListingAnchorEvidence = !anchored || !verification ? { kind: "unread" }
       : !verification.ok ? { kind: "invalid", code: verification.code }
       : { kind: "verified", contentHash: verification.value.contentHash,
           binding: listingBindingRejection(verification.value.sellerClaim, anchored.owner, reg.primaryClaim) };
     const unsigned = reg.listingContentHashes?.[anchor];
-    const decision = decideListingNotice({
-      evidence,
+    const noticeInput = {
       ownerSignedAnchor: ownerSigned?.anchors.includes(anchor) ?? false,
       declarations: {
         signed: savedDeclarations.sources.flatMap((hashes) => Object.hasOwn(hashes, anchor) ? [normalizedHash(hashes[anchor])] : []),
@@ -229,7 +232,8 @@ export async function indexRegistration(
         unsigned: unsigned ? normalizedHash(unsigned) : undefined,
       },
       heldCode: listingRejectionNoticeCode(anchor, reg.primaryClaim),
-    });
+    };
+    const decision = decideListingNotice({ evidence, ...noticeInput });
     if (decision.action === "record") {
       recordListingRejection(anchor, reg.primaryClaim, decision.code, decision.coordinates && verification?.ok
         ? listingDiagnosticCoordinates(verification.value.scope) : undefined, decision.publicNotice);
@@ -242,6 +246,17 @@ export async function indexRegistration(
         if (held.locator !== anchor) continue;
         noteVersion(held.listingId, held.version, held.contentHash);
         heldListingVersions.push(held);
+      }
+      // An outage says nothing about the anchor: the Listing stays as last observed, unless a held
+      // notice or a saved declaration of other bytes already shows it was replaced.
+      if (read.status === "unavailable" && !noticeInput.heldCode) {
+        for (const listing of prior?.listings ?? []) {
+          if (listing.anchor.locator !== anchor) continue;
+          const stillStands = decideListingNotice({
+            evidence: { kind: "verified", contentHash: listing.contentHash, binding: null }, ...noticeInput,
+          }).action === "clear";
+          if (stillStands) unreadPriorListings.push({ ...listing });
+        }
       }
     }
     if (decision.action !== "clear" || !anchored || !verification?.ok) continue;
@@ -256,7 +271,7 @@ export async function indexRegistration(
       ? rawVersion
       : 1;
     // The same signed bytes stored under a second anchor are one Listing: keep the first anchor's summary.
-    const listingKey = `${listingId}\n${version}\n${verified.contentHash}`;
+    const listingKey = artifactKey(listingId, version, verified.contentHash);
     if (listingArtifacts.has(listingKey)) continue;
     listingArtifacts.set(listingKey, { locator: anchor, raw: anchored.data });
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
@@ -379,6 +394,9 @@ export async function indexRegistration(
       transactionReadiness: DIRECTORY_TRANSACTION_READINESS,
     });
   }
+  // The same bytes read at another anchor this pass are the current copy of a Listing kept from an unread one.
+  listings.push(...unreadPriorListings.filter((listing) =>
+    !listingArtifacts.has(artifactKey(listing.listingId, listing.version, listing.contentHash))));
   pruneRegistrationListingRejections(reg.primaryClaim, reg.listingAnchors, ownerSigned?.anchors);
 
   // DACS-1 §6.3.4, Versioning: new versions supersede prior versions for

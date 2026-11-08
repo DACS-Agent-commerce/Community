@@ -23,6 +23,8 @@ A buyer relying on scan progress should refuse unknown or stale pass times, impl
 
 Listings carry no revocation-coverage flag; `revocationCoverage` and `lastVerifiedAt` saved by an earlier build are dropped when the catalog is read. Withdrawal handling is unchanged: verified and retained revocations use `status: revoked` with the revocation binding, and authenticated unresolved withdrawal sources still hold a listing.
 
+When a pass cannot read a listing's anchor (outage, timeout, refused or unreadable reply), the listing indexed on an earlier pass stays in the catalog as it was last observed: its `catalogObservedAt` remains the time of the pass that last read the anchor, so a value older than the seller's `lastIndexedAt` marks it as unread since then. A node's NOT_FOUND, bytes that no longer verify as the listing, a held notice or a saved declaration of other bytes still drop it.
+
 When no valid tip was observed in the scan, published `scanProgress.tip` and `scanProgress.lag` are both null, including on an empty page. Upstream operational diagnostics still seed `chainTip` from the scan start (`scan.ts`) and copy it to `lastChainTip` and run diagnostics (`reindexCore.ts`); those diagnostics are outside this extension's published progress surface and remain unchanged.
 
 Each ordinary completed pass saves scan state once, with the catalog and run completion in the existing chain-read-window transaction. Chain adoption/reset sanitation may additionally persist its upstream control migration before the pass. A failed pass rolls back provisional chain reads and cursor changes; a later successful pass records the advancement time for the cursor it actually publishes.

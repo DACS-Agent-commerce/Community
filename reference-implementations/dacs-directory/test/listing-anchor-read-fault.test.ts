@@ -1,0 +1,175 @@
+import assert from "node:assert/strict";
+import test, { type TestContext } from "node:test";
+// First: the store must open in a fresh directory, never the checkout's data/.
+import "./fixtures/isolated-data-dir.js";
+import { NextRequest } from "next/server";
+import { GET as listings } from "../app/api/dacs/listings/route.js";
+import { signedScope } from "../src/catalog/evidenceGraph.js";
+import { indexRegistration } from "../src/catalog/indexer.js";
+import { reindexAll } from "../src/catalog/reindexCore.js";
+import { loadCatalog, recordListingRejection, saveRegistrations } from "../src/catalog/store.js";
+import type { Registration, SellerRecord } from "../src/catalog/types.js";
+import { dids, maps, sign, vector } from "./fixtures/current-evidence.js";
+import { pinnedNodeAnswer } from "./fixtures/pinned-node.js";
+
+const seller = dids[1];
+const owner = `0x${seller.slice(-64)}`;
+const offline = async (): Promise<never> => { throw new Error("identity unavailable"); };
+const OBSERVED_AT = 1_000_000;
+const INDEXED_AGAIN_AT = OBSERVED_AT + 60_000;
+const OTHER_BYTES_HASH = "f".repeat(64);
+
+/** How storage answers a read of one anchor; an unlisted anchor is served from `maps`, or NOT_FOUND. */
+type StorageFault = "http-502" | "timeout" | "transport-failure" | "access-denied" | "unqualified-404" | "unconfirmed-read"
+  | "not-found" | "not-an-object" | "not-a-listing";
+const unavailableFaults: StorageFault[] = ["http-502", "timeout", "transport-failure", "access-denied", "unqualified-404", "unconfirmed-read"];
+const faults = new Map<string, StorageFault>();
+
+function storageAnswer(at: string): Response {
+  const fault = faults.get(at);
+  if (fault === "timeout") throw Object.assign(new Error("deadline passed"), { name: "TimeoutError" });
+  if (fault === "transport-failure") throw new TypeError("fetch failed");
+  if (fault === "http-502") return Response.json({ error: "storage unavailable" }, { status: 502 });
+  if (fault === "access-denied") return Response.json({ success: false, errorCode: "PERMISSION_DENIED" }, { status: 403 });
+  if (fault === "unqualified-404") return new Response(null, { status: 404 });
+  if (fault === "unconfirmed-read") return Response.json({ success: false });
+  if (fault === "not-an-object") return Response.json({ success: true, owner, data: [] });
+  const data = fault === "not-a-listing" ? { notAListing: true } : fault === "not-found" ? undefined : maps.get(at);
+  return data ? Response.json({ success: true, owner, data })
+    : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+}
+
+function serveStorage(t: TestContext): void {
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+    init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] })
+      : storageAnswer(String(input).split("/").pop() ?? ""));
+}
+
+/** A signed Listing of the seller under a test-unique ID, readable at its own anchor. */
+async function anchoredListing(listingId: string, offset: number, version = 1) {
+  const fixture = await vector(`${listingId}-v${version}-job`, offset);
+  const scope = signedScope(fixture.listing, "listing");
+  scope.listingId = listingId;
+  scope.listingVersion = version;
+  scope.acceptedRails = [{ railId: "demos-native:DEM" }];
+  scope.pipeline = [
+    { kind: "negotiate-fixed-price" }, { kind: "commit-agreement" },
+    { kind: "pay-dem", parameters: { rail: "demos-native:DEM" } }, { kind: "deliver-attested-payload" },
+  ];
+  const listing = { ...scope, signature: await sign(scope, "listing", 1) };
+  maps.set(fixture.locators.listing, listing);
+  return { anchor: fixture.locators.listing, listing };
+}
+
+const registrationFor = (listingAnchors: string[], listingContentHashes?: Record<string, string>): Registration =>
+  ({ primaryClaim: seller, displayName: "seller", listingAnchors, ...(listingContentHashes ? { listingContentHashes } : {}) });
+
+/** The seller as indexed at OBSERVED_AT with every read working. */
+async function indexedWhileReadable(t: TestContext, registration: Registration): Promise<SellerRecord> {
+  faults.clear();
+  serveStorage(t);
+  t.mock.method(Date, "now", () => OBSERVED_AT);
+  const record = await indexRegistration(registration, undefined, offline);
+  assert.equal(record.listings.length, 1, "the Listing is indexed while its anchor is readable");
+  t.mock.method(Date, "now", () => INDEXED_AGAIN_AT);
+  return record;
+}
+
+test("an unavailable anchor read keeps the prior Listing, by reply kind", async (t) => {
+  const { anchor } = await anchoredListing("kept-by-reply-kind", 7000);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  for (const fault of unavailableFaults) {
+    faults.set(anchor, fault);
+    const record = await indexRegistration(registration, prior, offline);
+    assert.deepEqual(record.listings.map(({ listingId, status }) => ({ listingId, status })),
+      [{ listingId: "kept-by-reply-kind", status: "active" }], fault);
+  }
+});
+
+test("a kept Listing keeps the time the catalog last read it", async (t) => {
+  const { anchor } = await anchoredListing("kept-observed-at", 7020);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  faults.set(anchor, "http-502");
+  const record = await indexRegistration(registration, prior, offline);
+  assert.equal(record.lastIndexedAt, INDEXED_AGAIN_AT);
+  assert.deepEqual(record.listings.map((listing) => listing.catalogObservedAt), [OBSERVED_AT]);
+});
+
+test("a gone or replaced anchor still drops the prior Listing", async (t) => {
+  const { anchor } = await anchoredListing("dropped-when-gone", 7040);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  for (const fault of ["not-found", "not-an-object", "not-a-listing"] as const) {
+    faults.set(anchor, fault);
+    assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, [], fault);
+  }
+});
+
+test("a failed read with no prior copy publishes nothing", async (t) => {
+  const { anchor } = await anchoredListing("never-indexed", 7060);
+  serveStorage(t);
+  for (const fault of unavailableFaults) {
+    faults.set(anchor, fault);
+    assert.deepEqual((await indexRegistration(registrationFor([anchor]), undefined, offline)).listings, [], fault);
+  }
+});
+
+test("a failed read of an anchor with no prior copy adds nothing beside the Listing kept for another anchor", async (t) => {
+  const kept = await anchoredListing("kept-beside-unindexed", 7070);
+  const prior = await indexedWhileReadable(t, registrationFor([kept.anchor]));
+  const unindexed = (await anchoredListing("kept-beside-unindexed-new", 7075)).anchor;
+  faults.set(kept.anchor, "http-502");
+  faults.set(unindexed, "http-502");
+  const record = await indexRegistration(registrationFor([kept.anchor, unindexed]), prior, offline);
+  assert.deepEqual(record.listings.map((listing) => listing.anchor.locator), [kept.anchor]);
+});
+
+test("a signed declaration of other bytes still drops the prior Listing on an unavailable read", async (t) => {
+  const { anchor } = await anchoredListing("dropped-when-declared-replaced", 7080);
+  const prior = await indexedWhileReadable(t, registrationFor([anchor]));
+  faults.set(anchor, "http-502");
+  const declared = await indexRegistration(registrationFor([anchor], { [anchor]: OTHER_BYTES_HASH }), prior, offline);
+  assert.deepEqual(declared.listings, [], "a declaration of other bytes for the anchor");
+  recordListingRejection(anchor, seller, "OWNER_CLAIM_BINDING", { listingId: "dropped-when-declared-replaced", listingVersion: 1 }, true);
+  assert.deepEqual((await indexRegistration(registrationFor([anchor]), prior, offline)).listings, [], "a public notice held for the anchor");
+});
+
+test("a kept Listing is superseded by a higher version read from another anchor", async (t) => {
+  const first = await anchoredListing("kept-then-superseded", 7100, 1);
+  const prior = await indexedWhileReadable(t, registrationFor([first.anchor]));
+  const second = await anchoredListing("kept-then-superseded", 7120, 2);
+  faults.set(first.anchor, "http-502");
+  const record = await indexRegistration(registrationFor([first.anchor, second.anchor]), prior, offline);
+  assert.deepEqual(record.listings.map(({ version, status }) => ({ version, status })).sort((a, b) => a.version - b.version),
+    [{ version: 1, status: "superseded" }, { version: 2, status: "active" }]);
+});
+
+test("identical bytes read at a second anchor are not listed twice with a kept copy", async (t) => {
+  const first = await anchoredListing("kept-with-twin-anchor", 7140);
+  const prior = await indexedWhileReadable(t, registrationFor([first.anchor]));
+  const twin = `stor-${"b".repeat(40)}`;
+  maps.set(twin, first.listing);
+  faults.set(first.anchor, "http-502");
+  const record = await indexRegistration(registrationFor([first.anchor, twin]), prior, offline);
+  assert.deepEqual(record.listings.map((listing) => listing.anchor.locator), [twin]);
+});
+
+test("reindexAll publishes the kept Listing after a storage outage", async (t) => {
+  const { anchor } = await anchoredListing("published-through-outage", 7160);
+  saveRegistrations([registrationFor([anchor])]);
+  faults.clear();
+  serveStorage(t);
+  const reindex = () => reindexAll({
+    log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [], errors: [] }),
+  });
+  const publishedTotal = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
+  await reindex();
+  assert.equal(await publishedTotal(), 1, "the Listing is published while its anchor is readable");
+  faults.set(anchor, "http-502");
+  await reindex();
+  assert.deepEqual(loadCatalog().sellers.find((record) => record.primaryClaim === seller)?.listings.map((listing) => listing.listingId),
+    ["published-through-outage"]);
+  assert.equal(await publishedTotal(), 1, "the outage does not empty the published catalog");
+});

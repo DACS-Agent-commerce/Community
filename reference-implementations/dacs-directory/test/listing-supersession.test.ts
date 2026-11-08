@@ -236,23 +236,25 @@ test("an unreadable successor anchor keeps superseding the versions it listed, a
     return data ? Response.json({ success: true, owner: `0x${dids[1].slice(-64)}`, data })
       : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
   });
-  const outages = [new Response("unavailable", { status: 503 }),
-    Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 })];
+  // An outage leaves the successor as last observed; a node's NOT_FOUND drops it but still holds its version.
+  const outages = [{ reply: new Response("unavailable", { status: 503 }), keepsListing: true },
+    { reply: Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }), keepsListing: false }];
   const pair = { ...registration, listingAnchors: anchors.slice(0, 2) };
   const first = await indexRegistration(pair, undefined, offline);
   assert.deepEqual(first.listings.map(l => [l.version, l.status]), [[5, "superseded"], [6, "active"]]);
   for (const outage of outages) {
-    down.set(anchors[1], outage);
+    down.set(anchors[1], outage.reply);
     let held = first;
     for (let pass = 0; pass < 2; pass++) {
       held = await indexRegistration(pair, held, offline);
-      assert.deepEqual(held.listings.map(l => [l.version, l.status]), [[5, "superseded"]]);
+      assert.deepEqual(held.listings.map(l => [l.version, l.status]),
+        outage.keepsListing ? [[5, "superseded"], [6, "active"]] : [[5, "superseded"]]);
     }
     down.clear();
     const restored = await indexRegistration(pair, held, offline);
     assert.deepEqual(restored.listings.map(l => [l.version, l.status]), [[5, "superseded"], [6, "active"]]);
   }
-  down.set(anchors[1], outages[0]);
+  down.set(anchors[1], outages[0].reply);
   assert.deepEqual((await indexRegistration(pair, undefined, offline)).listings.map(l => [l.version, l.status]), [[5, "active"]]);
   down.clear();
 
@@ -263,11 +265,11 @@ test("an unreadable successor anchor keeps superseding the versions it listed, a
   assert.ok(ambiguous.listings.length === 3 && ambiguous.listings.every(l => l.status === "superseded"));
   for (const at of anchors.slice(1)) {
     for (const outage of outages) {
-      down.set(at, outage);
+      down.set(at, outage.reply);
       let held = ambiguous;
       for (let pass = 0; pass < 2; pass++) {
         held = await indexRegistration(registration, held, offline);
-        assert.equal(held.listings.length, 2);
+        assert.equal(held.listings.length, outage.keepsListing ? 3 : 2);
         assert.ok(held.listings.every(l => l.status === "superseded"), JSON.stringify(held.listings.map(l => [l.version, l.status])));
       }
       down.clear();
@@ -296,6 +298,8 @@ test("a held version stays out of the public catalog projection but remains in t
   const projected = loadCatalog();
   assert.equal(projected.sellers.length, 1);
   assert.ok(!("heldListingVersions" in projected.sellers[0]));
-  assert.ok(!JSON.stringify(projected).includes(heldHash));
+  // The unread anchor's Listing is kept as last observed, so its hash is public; the held-version state is not.
+  assert.ok(!JSON.stringify(projected).includes("heldListingVersions"));
+  assert.deepEqual(projected.sellers[0].listings.filter((listing) => listing.contentHash === heldHash).map((listing) => listing.status), ["active"]);
   assert.equal(loadStoredCatalog().sellers[0].heldListingVersions?.[0]?.contentHash, heldHash);
 });
