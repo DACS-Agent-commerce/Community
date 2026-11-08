@@ -24,11 +24,16 @@ test('bootstrap removes the startup deadline without changing the execution or s
   const baseline = entries(service);
   const changes = entries(override);
   assert.deepEqual(changes.map(([section, key]) => [section, key]), [['[Service]', 'TimeoutStartSec']]);
-  const effective = new Map(baseline.map(([section, key, value]) => [`${section}/${key}`, value]));
-  for (const [section, key, value] of changes) effective.set(`${section}/${key}`, value);
-  assert.equal(effective.get('[Service]/TimeoutStartSec'), 'infinity');
+  const original = new Map();
   for (const [section, key, value] of baseline) {
-    if (key !== 'TimeoutStartSec') assert.equal(effective.get(`${section}/${key}`), value);
+    const name = `${section}/${key}`;
+    original.set(name, [...(original.get(name) ?? []), value]);
+  }
+  const effective = new Map(original);
+  for (const [section, key, value] of changes) effective.set(`${section}/${key}`, [value]);
+  assert.deepEqual(effective.get('[Service]/TimeoutStartSec'), ['infinity']);
+  for (const [key, values] of original) {
+    if (key !== '[Service]/TimeoutStartSec') assert.deepEqual(effective.get(key), values);
   }
   // Removing the drop-in recovers a finite default for routine scheduled passes.
   assert.equal(baseline.find(([section, key]) => section === '[Service]' && key === 'TimeoutStartSec')?.[2], '15min');
@@ -39,15 +44,15 @@ test('guide installs the supplied override only after stopping scheduling and re
   const commands = [...bootstrap.matchAll(/```sh\n([\s\S]*?)```/g)].map((match) => match[1]);
   assert.equal(commands.length, 2);
   const [start, restore] = commands;
-  for (const block of commands) assert.ok(block.startsWith('set -eu\n')); 
+  for (const block of commands) assert.ok(block.startsWith('set -eu\n'));
   const destination = '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf';
   assert.ok(start.indexOf('systemctl stop dacs-directory-index.timer') < start.indexOf('install -m 0644'));
   assert.ok(start.indexOf('systemctl stop dacs-directory-index.service') < start.indexOf('install -m 0644'));
-  assert.ok(start.includes(`test ! -e ${destination}`));
-  assert.ok(start.includes(`install -m 0644 deploy/testnet/index-bootstrap.conf ${destination}`));
+  assert.ok(start.includes(`test ! -e '${destination}'`));
+  assert.ok(start.includes(`install -m 0644 'deploy/testnet/index-bootstrap.conf' '${destination}'`));
   assert.ok(start.indexOf('systemctl daemon-reload') < start.indexOf('systemctl start --no-block'));
   assert.ok(!start.includes('enable --now'));
-  assert.ok(restore.indexOf(`rm ${destination}`) < restore.indexOf('systemctl daemon-reload'));
+  assert.ok(restore.indexOf(`rm '${destination}'`) < restore.indexOf('systemctl daemon-reload'));
   assert.ok(restore.indexOf('systemctl daemon-reload') < restore.indexOf('systemctl enable --now dacs-directory-index.timer'));
   assert.ok(bootstrap.includes('exit\nstatus 0 and `catalog written`'));
   assert.ok(bootstrap.includes('Do not restart scheduling after a failed or still-running pass.'));
