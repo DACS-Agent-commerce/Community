@@ -39,6 +39,7 @@ test('guide installs the supplied override only after stopping scheduling and re
   const commands = [...bootstrap.matchAll(/```sh\n([\s\S]*?)```/g)].map((match) => match[1]);
   assert.equal(commands.length, 2);
   const [start, restore] = commands;
+  for (const block of commands) assert.ok(block.startsWith('set -eu\n')); 
   const destination = '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf';
   assert.ok(start.indexOf('systemctl stop dacs-directory-index.timer') < start.indexOf('install -m 0644'));
   assert.ok(start.indexOf('systemctl stop dacs-directory-index.service') < start.indexOf('install -m 0644'));

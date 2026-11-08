@@ -79,6 +79,7 @@ scan), run the following as root from
 `/opt/dacs-directory/reference-implementations/dacs-directory`:
 
 ```sh
+set -eu
 # Stop scheduling first; stop any existing pass before changing its timeout.
 systemctl stop dacs-directory-index.timer
 systemctl stop dacs-directory-index.service
@@ -95,8 +96,7 @@ journalctl -fu dacs-directory-index.service
 
 The same unit still runs as `dacs-directory`, loads `directory.env`, and runs its
 runtime and testnet preflight checks. The timer stays stopped during bootstrap.
-Interrupting `journalctl` only stops watching logs. Inspect `systemctl status
- dacs-directory-index.service` and the journal for successful completion (exit
+Interrupting `journalctl` only stops watching logs. Inspect `systemctl status dacs-directory-index.service` and the journal for successful completion (exit
 status 0 and `catalog written`); check `/api/dacs/status` for scan progress.
 Do not restart scheduling after a failed or still-running pass. To abort a hung
 pass, use `systemctl stop dacs-directory-index.service`, inspect the failure and
@@ -105,6 +105,7 @@ retry with the timer stopped.
 After a successful pass, remove only the temporary drop-in and restore scheduling:
 
 ```sh
+set -eu
 rm /etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf
 systemctl daemon-reload
 systemctl show dacs-directory-index.service -p TimeoutStartUSec
