@@ -52,6 +52,9 @@ export interface AnchorRecord {
  * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * `nodeRefusal` marks an `unavailable` read the node or a proxy answered with a 4xx, which a
+ * repeat read will not clear on its own; timeouts, transport errors, 5xx and unreadable replies
+ * leave it unset, so a caller can tell a passing fault from a refused one.
  * DEMOS-MAPPING §A.2 gives an ordinary storage `not found` the CORE SR-2
  * disposition `indeterminate` too, so a caller whose verdict would rest on
  * absence treats `absent` from a well-formed locator as unavailable.
@@ -60,7 +63,7 @@ export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
   | { status: "invalid" }
-  | { status: "unavailable"; reason: string };
+  | { status: "unavailable"; reason: string; nodeRefusal?: true };
 
 function anchorReadFailure(error: unknown): { status: "unavailable"; reason: string } {
   const reason = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
@@ -90,12 +93,15 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
       return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" }
-        : { status: "unavailable", reason: "anchor read returned an unqualified HTTP 404" };
+        : { status: "unavailable", reason: "anchor read returned an unqualified HTTP 404", nodeRefusal: true };
     } catch (error) {
-      return anchorReadFailure(error);
+      // The 404 itself was a 4xx answer, whatever its body was.
+      return { ...anchorReadFailure(error), nodeRefusal: true };
     }
   }
-  if (!res.ok) return { status: "unavailable", reason: `anchor read refused HTTP ${res.status}` };
+  if (!res.ok) {
+    return { status: "unavailable", reason: `anchor read refused HTTP ${res.status}`, ...(res.status < 500 ? { nodeRefusal: true } : {}) };
+  }
   let json: {
     success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown;
     storageAddress?: string; metadata?: Record<string, unknown>;

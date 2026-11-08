@@ -102,12 +102,19 @@ import type {
   ListingSummary,
   Registration,
   RegisteredDeal,
+  RevocationBinding,
   RevocationCheck,
   SellerRecord,
 } from "./types.js";
 
 const verify = (b: Uint8Array, s: Uint8Array, p: Uint8Array): boolean =>
   ed25519Verify(b, s, publicKeyFromRaw(p));
+
+/**
+ * How long a Listing kept from an unread anchor stays published after the pass that last read
+ * that anchor; past it the Listing is dropped as it was before anchors were kept through outages.
+ */
+const KEPT_LISTING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Resolve the raw GCR identity payload for a bare-hex Demos address. */
 export type ResolveIdentities = (addressHex: string) => Promise<unknown>;
@@ -213,8 +220,33 @@ export async function indexRegistration(
   const savedDeclarations = savedListingDeclarations(reg.primaryClaim);
   const normalizedHash = (hash: string) => hash.replace(/^sha256-/, "").toLowerCase();
   const artifactKey = (listingId: string, version: number, hash: string) => `${listingId}\n${version}\n${hash}`;
+  // Raw chain hints have no withdrawal authority. Only an authenticated source
+  // can leave an unresolved hold; a verified marker is retained (RB-3).
+  // A storage `not found` is indeterminate too (DEMOS-MAPPING §A.2), so an unreadable
+  // marker verified on an earlier pass holds the Listing, and so does a marker the
+  // Listing's owner anchored, or its signing key carried in a confirmed CREATE, that no read
+  // has settled, even while it backs off.
+  // Anyone can anchor other candidates, so an outage on those cannot hold it.
+  const revocationCheckFor = (
+    hash: string, listingOwner: string | null, signer: string, binding: RevocationBinding | null, markerUnread: boolean,
+  ): RevocationCheck => binding ? "revoked"
+    : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, hash) || markerUnread ||
+      hasPendingOwnerRevocationCandidate(hash, listingOwner) ||
+      hasPendingCarriedRevocationCandidate(hash, signer)
+      ? "indeterminate" : "absent";
   // Prior summaries whose anchor could not be read this pass; they are kept as last observed (RB-6).
   const unreadPriorListings: ListingSummary[] = [];
+  const priorKeptFacts = prior?.keptListingFacts ?? {};
+  const keptListingFacts: NonNullable<SellerRecord["keptListingFacts"]> = {};
+  // The bytes are not at hand, so a kept copy stands only if the read is recent, its saved facts show
+  // it is not past its signed `notAfter`, and no withdrawal exists or is unsettled for its hash.
+  const keptListingStands = (listing: ListingSummary): boolean => {
+    const facts = priorKeptFacts[listing.contentHash];
+    if (!facts || now - listing.catalogObservedAt > KEPT_LISTING_MAX_AGE_MS) return false;
+    if (facts.notAfter !== null && facts.notAfter < now) return false;
+    return revocationCheckFor(listing.contentHash, reg.primaryClaim, facts.signer, retainedListingRevocation(listing.contentHash),
+      (verifiedRevocations[listing.contentHash] ?? []).length > 0) === "absent";
+  };
   for (const anchor of reg.listingAnchors) {
     const read = await readAnchorResult(anchor);
     const anchored = read.status === "present" ? read.record : null;
@@ -247,15 +279,18 @@ export async function indexRegistration(
         noteVersion(held.listingId, held.version, held.contentHash);
         heldListingVersions.push(held);
       }
-      // An outage says nothing about the anchor: the Listing stays as last observed, unless a held
-      // notice or a saved declaration of other bytes already shows it was replaced.
-      if (read.status === "unavailable" && !noticeInput.heldCode) {
+      // A passing fault says nothing about the anchor: the Listing stays as last observed, unless a held
+      // notice or a saved declaration of other bytes already shows it was replaced, or it no longer stands.
+      // A 4xx answer is not a passing fault and drops it.
+      if (read.status === "unavailable" && !read.nodeRefusal && !noticeInput.heldCode) {
         for (const listing of prior?.listings ?? []) {
           if (listing.anchor.locator !== anchor) continue;
           const stillStands = decideListingNotice({
             evidence: { kind: "verified", contentHash: listing.contentHash, binding: null }, ...noticeInput,
           }).action === "clear";
-          if (stillStands) unreadPriorListings.push({ ...listing });
+          if (!stillStands || !keptListingStands(listing)) continue;
+          unreadPriorListings.push({ ...listing });
+          keptListingFacts[listing.contentHash] = priorKeptFacts[listing.contentHash];
         }
       }
     }
@@ -333,19 +368,8 @@ export async function indexRegistration(
       retained.listingVersion === version ? retained : null;
     const revocationBinding = found ?? boundRetained ?? prior?.listings.find((listing) => listing.status === "revoked" &&
       listing.contentHash === verified.contentHash)?.revocation ?? null;
-    // Raw chain hints have no withdrawal authority. Only an authenticated source
-    // can leave an unresolved hold; a verified marker is retained above (RB-3).
-    // A storage `not found` is indeterminate too (DEMOS-MAPPING §A.2), so an unreadable
-    // marker verified on an earlier pass holds the Listing, and so does a marker the
-    // Listing's owner anchored, or its signing key carried in a confirmed CREATE, that no read
-    // has settled, even while it backs off.
-    // Anyone can anchor other candidates, so an outage on those cannot hold it.
-    const revocation: RevocationCheck = revocationBinding ? "revoked"
-      : hasIncompleteWellKnownWithdrawal(reg.primaryClaim, verified.contentHash) ||
-        knownMarkers.some((locator) => unavailableMarkers.has(locator)) ||
-        hasPendingOwnerRevocationCandidate(verified.contentHash, anchored.owner ?? null) ||
-        hasPendingCarriedRevocationCandidate(verified.contentHash, verified.signer)
-        ? "indeterminate" : "absent";
+    const revocation = revocationCheckFor(verified.contentHash, anchored.owner ?? null, verified.signer, revocationBinding,
+      knownMarkers.some((locator) => unavailableMarkers.has(locator)));
     const presentation = listingPresentation(scope);
     const signedSeller = scope.seller && typeof scope.seller === "object" && !Array.isArray(scope.seller)
       ? scope.seller as Record<string, unknown> : null;
@@ -361,6 +385,10 @@ export async function indexRegistration(
     const summaryClaim = verified.profile === "dacs-v0.1" ? verified.listing.seller.identity.presentedBy : reg.primaryClaim;
     // Only the summary is withheld; the verified artifact above stays deal evidence.
     if (summaryPublicationRefusal(summaryClaim)) continue;
+    keptListingFacts[verified.contentHash] = {
+      notAfter: typeof validity?.notAfter === "number" ? validity.notAfter : null,
+      signer: verified.signer,
+    };
     listings.push({
       listingId,
       version,
@@ -723,6 +751,7 @@ export async function indexRegistration(
     cci,
     listings: listingsWithHint,
     ...(heldListingVersions.length ? { heldListingVersions } : {}),
+    ...(Object.keys(keptListingFacts).length ? { keptListingFacts } : {}),
     deals,
     reputation,
     registeredAt: prior?.registeredAt ?? now,
