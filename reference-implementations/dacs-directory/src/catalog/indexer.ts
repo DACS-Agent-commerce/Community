@@ -156,6 +156,8 @@ export function listingBindingRejection(
  * `resolveIdentities` defaults to the narrow authenticated GCR call in gcr.ts;
  * tests may inject a deterministic resolver. `commitment` is a server-owned
  * authenticator for finalized commitments; omitting it withholds committed credit.
+ * `replayingHistory` is true while the scan state is rebuilt from genesis (after a chain reset or before
+ * a complete pass on this chain): the prior catalog is then not evidence, so no Listing is kept for an unread anchor.
  */
 export async function indexRegistration(
   reg: Registration,
@@ -166,6 +168,7 @@ export async function indexRegistration(
   verifyLegacyBundle: typeof verifyBundleCore = verifyBundleCore,
   commitment?: CommitmentVerifier,
   scanState: ReturnType<typeof loadScanState> = loadScanState(),
+  replayingHistory = false,
 ): Promise<SellerRecord> {
   const now = Date.now();
   // Owner evidence comes from what the owner signed, never from crawl data merged into `reg`.
@@ -239,8 +242,10 @@ export async function indexRegistration(
   const priorKeptFacts = prior?.keptListingFacts ?? {};
   const keptListingFacts: NonNullable<SellerRecord["keptListingFacts"]> = {};
   // The bytes are not at hand, so a kept copy stands only if the read is recent, its saved facts show
-  // it is not past its signed `notAfter`, and no withdrawal exists or is unsettled for its hash.
+  // it is not past its signed `notAfter`, and no withdrawal exists or is unsettled for its hash. A replay
+  // from genesis has cleared the evidence the prior summary rested on, so nothing is kept until a read publishes it again.
   const keptListingStands = (listing: ListingSummary): boolean => {
+    if (replayingHistory) return false;
     const facts = priorKeptFacts[listing.contentHash];
     if (!facts || now - listing.catalogObservedAt > KEPT_LISTING_MAX_AGE_MS) return false;
     if (facts.notAfter !== null && facts.notAfter < now) return false;

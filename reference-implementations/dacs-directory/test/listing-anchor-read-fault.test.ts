@@ -9,7 +9,9 @@ import { GET as listings } from "../app/api/dacs/listings/route.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
-import { admitRevocationCandidates, loadCatalog, recordListingRejection, saveRegistrations } from "../src/catalog/store.js";
+import {
+  admitRevocationCandidates, loadCatalog, loadScanState, recordListingRejection, saveRegistrations, saveScanState,
+} from "../src/catalog/store.js";
 import type { Registration, SellerRecord } from "../src/catalog/types.js";
 import { dids, locator, maps, seeds, sign, vector } from "./fixtures/current-evidence.js";
 import { pinnedNodeAnswer } from "./fixtures/pinned-node.js";
@@ -33,6 +35,8 @@ const transientFaults: StorageFault[] = ["http-502", "timeout", "transport-failu
 const refusalFaults: StorageFault[] = ["access-denied", "unauthenticated", "unqualified-404"];
 const unavailableFaults: StorageFault[] = [...transientFaults, ...refusalFaults];
 const faults = new Map<string, StorageFault>();
+/** The transactions the node returns for a history read; empty unless a test sets a chain tip. */
+let nodeTransactions: Array<{ id: number }> = [];
 
 function storageAnswer(at: string): Response {
   const fault = faults.get(at);
@@ -49,9 +53,14 @@ function storageAnswer(at: string): Response {
     : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
 }
 
+/** The newest page of history only: a read from any older cursor finds the history exhausted. */
+const historyPage = (body: string): Array<{ id: number }> =>
+  JSON.parse(body).params?.[0]?.data?.start === "latest" ? nodeTransactions : [];
+
 function serveStorage(t: TestContext): void {
+  nodeTransactions = [];
   t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
-    init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: [] })
+    init?.body ? pinnedNodeAnswer(init.body) ?? Response.json({ result: 200, response: historyPage(String(init.body)) })
       : storageAnswer(String(input).split("/").pop() ?? ""));
 }
 
@@ -259,4 +268,23 @@ test("reindexAll publishes the kept Listing after a storage outage", async (t) =
   assert.deepEqual(loadCatalog().sellers.find((record) => record.primaryClaim === seller)?.listings.map((listing) => listing.listingId),
     ["published-through-outage"]);
   assert.equal(await publishedTotal(), 1, "the outage does not empty the published catalog");
+});
+
+test("a same-chain tip reset replayed while the anchor read fails does not keep the prior Listing", async (t) => {
+  const { anchor } = await anchoredListing("dropped-in-reset-replay", 7170);
+  saveRegistrations([registrationFor([anchor])]);
+  faults.clear();
+  serveStorage(t);
+  const reindex = () => reindexAll({
+    log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [], errors: [] }),
+  });
+  const publishedIds = () => loadCatalog().sellers.find((record) => record.primaryClaim === seller)?.listings.map((listing) => listing.listingId);
+  await reindex();
+  assert.deepEqual(publishedIds(), ["dropped-in-reset-replay"]);
+  // The node's tip falls far behind the saved cursor, so the next pass clears chain evidence and replays from genesis.
+  nodeTransactions = [{ id: 5 }];
+  saveScanState({ ...loadScanState(), lastSeenTxId: 5000, lastChainTip: undefined });
+  faults.set(anchor, "http-502");
+  await reindex();
+  assert.deepEqual(publishedIds() ?? [], [], "a Listing the reset chain view no longer stands behind is not kept");
 });

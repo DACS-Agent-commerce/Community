@@ -29,6 +29,7 @@ When a pass cannot read a listing's anchor because of a passing fault (a 5xx rep
 - It is dropped once its signed `validity.notAfter` has passed. The value is saved with the seller record, which the API never serves; a record saved without it is dropped, since it cannot show the listing is still in force. A listing that signs no `notAfter` is saved as having none and is not dropped for that.
 - It is dropped when a verified or retained withdrawal, an unsettled withdrawal marker the owner or signing key anchored or carried, or an incomplete well-known withdrawal exists for its hash. It is never kept as `active` in that case.
 - It is dropped on any 4xx answer from storage, such as 401 or 403, as before.
+- It is never carried through a replay from genesis (after a chain replacement or a tip reset, or before a complete pass on the served chain): the earlier catalog is no longer evidence then, so a listing whose anchor cannot be read is dropped until a fresh verified read publishes it again.
 
 A node's NOT_FOUND, bytes that no longer verify as the listing, a held notice or a saved declaration of other bytes drop it too. Withdrawal handling is unchanged: a kept copy only stays while no withdrawal evidence exists for it.
 
