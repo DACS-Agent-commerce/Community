@@ -52,6 +52,10 @@ export interface AnchorRecord {
  * node confirms NOT_FOUND; `invalid` means the content cannot be an artifact
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
+ * `nodeRefusal` marks an `unavailable` read that is a definite answer, not a passing fault: a 4xx
+ * from the node or a proxy, or a 200 `success: true` reply whose stored value is refused. Most 4xx
+ * answers do not clear on a repeat read, though 408 and 429 can; timeouts, transport errors, 5xx and
+ * unreadable replies leave it unset, so a caller can tell a passing fault from a refused one.
  * DEMOS-MAPPING §A.2 gives an ordinary storage `not found` the CORE SR-2
  * disposition `indeterminate` too, so a caller whose verdict would rest on
  * absence treats `absent` from a well-formed locator as unavailable.
@@ -60,7 +64,7 @@ export type AnchorRead =
   | { status: "present"; record: AnchorRecord }
   | { status: "absent" }
   | { status: "invalid" }
-  | { status: "unavailable"; reason: string };
+  | { status: "unavailable"; reason: string; nodeRefusal?: true };
 
 function anchorReadFailure(error: unknown): { status: "unavailable"; reason: string } {
   const reason = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
@@ -90,19 +94,25 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
     try {
       const answer = await storageResponseJson(res) as { success?: unknown; errorCode?: unknown } | null;
       return answer && answer.success === false && answer.errorCode === "NOT_FOUND" ? { status: "absent" }
-        : { status: "unavailable", reason: "anchor read returned an unqualified HTTP 404" };
+        : { status: "unavailable", reason: "anchor read returned an unqualified HTTP 404", nodeRefusal: true };
     } catch (error) {
-      return anchorReadFailure(error);
+      // The 404 itself was a 4xx answer, whatever its body was.
+      return { ...anchorReadFailure(error), nodeRefusal: true };
     }
   }
-  if (!res.ok) return { status: "unavailable", reason: `anchor read refused HTTP ${res.status}` };
+  if (!res.ok) {
+    return { status: "unavailable", reason: `anchor read refused HTTP ${res.status}`, ...(res.status < 500 ? { nodeRefusal: true } : {}) };
+  }
   let json: {
     success?: boolean; data?: unknown; owner?: string; programName?: string; acl?: unknown;
     storageAddress?: string; metadata?: Record<string, unknown>;
   };
   try {
     const { reply, refusal } = await storageArtifactResponseJson(res);
-    if (refusal) return anchorReadFailure(refusal);
+    // A confirmed read that holds refused bytes is the node's definite answer about the anchor.
+    if (refusal) {
+      return { ...anchorReadFailure(refusal), ...((reply as { success?: unknown } | null)?.success === true ? { nodeRefusal: true } : {}) };
+    }
     json = reply as typeof json;
   } catch (error) {
     return anchorReadFailure(error);
@@ -110,7 +120,7 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
   if (!json || typeof json !== "object" || json.success !== true) return { status: "unavailable", reason: "anchor reply did not confirm a successful read" };
   const data = json.data;
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
-  if (boundedJson(data) === null) return { status: "unavailable", reason: "anchor payload exceeds the artifact limits" };
+  if (boundedJson(data) === null) return { status: "unavailable", reason: "anchor payload exceeds the artifact limits", nodeRefusal: true };
   return {
     status: "present",
     record: {
