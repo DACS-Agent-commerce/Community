@@ -26,8 +26,8 @@ test("a stored listing with no canonical form is left out of the hosted index in
     sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(1), listingRecord(2)] }] as never,
   });
   const stored: Record<string, string> = {
-    // 1e400 parses to Infinity, which the SDK refuses to canonicalize.
-    [locator(1)]: '{"listingId":"svc-1","future":1e400}',
+    // The read admits a fraction, but a Listing without dacsVersion hashes with the integer-only legacy profile.
+    [locator(1)]: '{"listingId":"svc-1","price":1.5}',
     [locator(2)]: '{"listingId":"svc-2"}',
   };
   const original = globalThis.fetch;
@@ -42,6 +42,53 @@ test("a stored listing with no canonical form is left out of the hosted index in
     const files = (await response.json()).files as Record<string, string>;
     const listed = JSON.parse(files["/.well-known/dacs/listings.json"]).listings;
     assert.deepEqual(listed.map((entry: { listingId: string }) => entry.listingId), ["svc-2"]);
+  } finally { globalThis.fetch = original; }
+});
+
+test("a node outage while reading a listing anchor answers 503 instead of an index with the listing missing", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(5), listingRecord(6)] }] as never,
+  });
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input) => new URL(String(input)).pathname.endsWith(locator(6))
+    ? new Response(null, { status: 503 })
+    : Response.json({ success: true, owner: `0x${hex}`, programName: "opaque", data: { listingId: "svc-5" } });
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.files, undefined);
+    assert.match(body.error, /svc-6/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("a node NOT_FOUND for an indexed listing anchor answers 503 instead of dropping the listing", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(7)] }] as never,
+  });
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).files, undefined);
+  } finally { globalThis.fetch = original; }
+});
+
+test("a node reply refused by raw JSON admission answers 503 with its cause instead of dropping the listing", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(8)] }] as never,
+  });
+  const original = globalThis.fetch;
+  // 1e400 is not a binary64 number, so the SDK's raw admission refuses the whole reply.
+  globalThis.fetch = async () => new Response(`{"success":true,"owner":"0x${hex}","programName":"opaque","data":{"listingId":"svc-8","future":1e400}}`);
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).reason, /raw JSON admission/);
   } finally { globalThis.fetch = original; }
 });
 
