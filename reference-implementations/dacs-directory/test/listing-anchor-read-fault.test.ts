@@ -6,6 +6,7 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { NextRequest } from "next/server";
 import { GET as listings } from "../app/api/dacs/listings/route.js";
+import { MAX_ARTIFACT_BYTES } from "../src/catalog/artifactLimits.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
@@ -28,7 +29,7 @@ let clockMs = OBSERVED_AT;
 
 /** How storage answers a read of one anchor; an unlisted anchor is served from `maps`, or NOT_FOUND. */
 type StorageFault = "http-502" | "timeout" | "transport-failure" | "access-denied" | "unauthenticated" | "unqualified-404"
-  | "unconfirmed-read" | "not-found" | "not-an-object" | "not-a-listing";
+  | "unconfirmed-read" | "not-found" | "not-an-object" | "not-a-listing" | "duplicate-member-value" | "over-limit-value";
 /** Faults that say nothing about the anchor and may pass on a later read. */
 const transientFaults: StorageFault[] = ["http-502", "timeout", "transport-failure", "unconfirmed-read"];
 /** The node or a proxy answered with a 4xx: the same read will not pass by itself. */
@@ -48,6 +49,10 @@ function storageAnswer(at: string): Response {
   if (fault === "unqualified-404") return new Response(null, { status: 404 });
   if (fault === "unconfirmed-read") return Response.json({ success: false });
   if (fault === "not-an-object") return Response.json({ success: true, owner, data: [] });
+  if (fault === "duplicate-member-value") {
+    return new Response(`{"success":true,"owner":"${owner}","data":{"listingId":"a","listingId":"b"}}`);
+  }
+  if (fault === "over-limit-value") return Response.json({ success: true, owner, data: { padding: "x".repeat(MAX_ARTIFACT_BYTES) } });
   const data = fault === "not-a-listing" ? { notAListing: true } : fault === "not-found" ? undefined : maps.get(at);
   return data ? Response.json({ success: true, owner, data })
     : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
@@ -138,6 +143,16 @@ test("a 4xx answer from storage drops the prior Listing, as before", async (t) =
   }
 });
 
+test("a 200 reply whose stored value is refused drops the prior Listing, by reason", async (t) => {
+  const { anchor } = await anchoredListing("dropped-when-value-refused", 7055);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  for (const fault of ["duplicate-member-value", "over-limit-value"] as const) {
+    faults.set(anchor, fault);
+    assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, [], fault);
+  }
+});
+
 test("a kept Listing is dropped once the catalog last read its anchor more than 24 hours ago", async (t) => {
   const { anchor } = await anchoredListing("dropped-when-stale", 7052);
   const registration = registrationFor([anchor]);
@@ -149,14 +164,14 @@ test("a kept Listing is dropped once the catalog last read its anchor more than 
   assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, [], "dropped after 24 hours");
 });
 
-/** A withdrawal of the Listing signed by the seller's key, readable at its own anchor, and queued as a candidate for it. */
-function anchoredWithdrawal(listing: Record<string, unknown>, listingId: string, offset: number): void {
+/** A withdrawal of the Listing signed by the seller's key, readable at its own anchor, and queued as a candidate for it, anchored by `anchoredBy`. */
+function anchoredWithdrawal(listing: Record<string, unknown>, listingId: string, offset: number, anchoredBy = owner): void {
   const listingContentHash = artifactHash(listing, "listing");
   const scope = { listingId, listingVersion: 1, listingContentHash, revokedAt: OBSERVED_AT + 1 };
   const value = Buffer.from(ed25519Sign(Buffer.from(`dacs-revocation:v1:${contentHash(scope)}`), privateKeyFromSeed(seeds[1]))).toString("base64url");
   const marker = locator(offset);
   maps.set(marker, { ...scope, signature: { algorithm: "ed25519", signer: seller, value } });
-  admitRevocationCandidates(listingContentHash, [{ locator: marker, owner }]);
+  admitRevocationCandidates(listingContentHash, [{ locator: marker, owner: anchoredBy }]);
 }
 
 test("a withdrawal the seller anchored during an outage is not published as an active kept Listing", async (t) => {
@@ -164,6 +179,15 @@ test("a withdrawal the seller anchored during an outage is not published as an a
   const registration = registrationFor([anchor]);
   const prior = await indexedWhileReadable(t, registration);
   anchoredWithdrawal(listing, "dropped-when-withdrawal-pending", 7210);
+  faults.set(anchor, "http-502");
+  assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, []);
+});
+
+test("a withdrawal a different account anchored during an outage is not published as an active kept Listing", async (t) => {
+  const { anchor, listing } = await anchoredListing("dropped-when-relayed-withdrawal-pending", 7240);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  anchoredWithdrawal(listing, "dropped-when-relayed-withdrawal-pending", 7250, `0x${"ab".repeat(32)}`);
   faults.set(anchor, "http-502");
   assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, []);
 });

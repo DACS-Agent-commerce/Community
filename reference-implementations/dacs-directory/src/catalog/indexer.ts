@@ -52,6 +52,7 @@ import {
   listingRejectionNoticeCode,
   pruneRegistrationListingRejections,
   hasPendingOwnerRevocationCandidate,
+  hasPendingRevocationCandidates,
   savedListingDeclarations,
   observedRevocationCandidate,
   retainedListingRevocation,
@@ -242,13 +243,15 @@ export async function indexRegistration(
   const priorKeptFacts = prior?.keptListingFacts ?? {};
   const keptListingFacts: NonNullable<SellerRecord["keptListingFacts"]> = {};
   // The bytes are not at hand, so a kept copy stands only if the read is recent, its saved facts show
-  // it is not past its signed `notAfter`, and no withdrawal exists or is unsettled for its hash. A replay
-  // from genesis has cleared the evidence the prior summary rested on, so nothing is kept until a read publishes it again.
+  // it is not past its signed `notAfter`, and no withdrawal exists or is unsettled for its hash, whoever
+  // anchored the candidate. A replay from genesis has cleared the evidence the prior summary rested on,
+  // so nothing is kept until a read publishes it again.
   const keptListingStands = (listing: ListingSummary): boolean => {
     if (replayingHistory) return false;
     const facts = priorKeptFacts[listing.contentHash];
     if (!facts || now - listing.catalogObservedAt > KEPT_LISTING_MAX_AGE_MS) return false;
     if (facts.notAfter !== null && facts.notAfter < now) return false;
+    if (hasPendingRevocationCandidates(listing.contentHash)) return false;
     return revocationCheckFor(listing.contentHash, reg.primaryClaim, facts.signer, retainedListingRevocation(listing.contentHash),
       (verifiedRevocations[listing.contentHash] ?? []).length > 0) === "absent";
   };
