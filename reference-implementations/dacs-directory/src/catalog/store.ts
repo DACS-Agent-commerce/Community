@@ -2,6 +2,7 @@
 import { boundedJson } from "./artifactLimits.js";
 import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
+import { DATA_DIR_MODE } from "./dataFolderMode.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,9 +35,6 @@ const LEGACY = {
 
 export type FixtureSeed = "counterparty-evidence";
 const FIXTURE_SEEDS = new Set<FixtureSeed>(["counterparty-evidence"]);
-
-// Owner and group only, matching StateDirectoryMode in the systemd units.
-const DATA_DIR_MODE = 0o750;
 
 let db: Database.Database;
 try {
