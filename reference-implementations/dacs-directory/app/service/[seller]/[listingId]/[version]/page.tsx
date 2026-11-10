@@ -93,7 +93,8 @@ export default async function ServicePage({ params }: { params: Promise<Params> 
     "@type": "Service",
     name: listing.offering.title,
     description: listing.offering.description,
-    identifier: `${listing.listingId}@${listing.version}`,
+    // Listing IDs are unique only per seller, so the seller claim makes the identifier global.
+    identifier: `${seller.primaryClaim}/${listing.listingId}@${listing.version}`,
     provider: { "@type": "Organization", name: seller.displayName },
     offers: executable && listing.pricing.priceHint ? {
       "@type": "Offer",
