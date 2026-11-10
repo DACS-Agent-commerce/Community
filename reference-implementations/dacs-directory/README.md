@@ -38,6 +38,20 @@ while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## Run it
 
+From the repository root, with dependencies installed and `npm run setup` complete:
+
+Check the reindex lease regressions directly (without the `tsx` CLI IPC socket):
+
+Check: `cd reference-implementations/dacs-directory && node --import tsx --test test/reindex-cli-lock.test.ts`
+
+Expected result: eight tests pass, with zero failures. This check requires a runner
+that can spawn Node children and capture their stdout and stderr, including local
+Unix-socket stdio operations. With Node 22.23.3, a sandbox denying `getsockname` on
+those descriptors produced empty child output even though the child executed and
+returned its exit status. Avoiding the `tsx` CLI socket alone does not resolve that
+restriction. Run the check in a development or CI sandbox that permits those local
+operations; external network access is not required for these eight tests.
+
 ```bash
 npm run setup    # one-time: vendors + builds dacs-sdk (not yet on npm), installs the app
 npm run index    # verify registrations against chain state → SQLite catalog

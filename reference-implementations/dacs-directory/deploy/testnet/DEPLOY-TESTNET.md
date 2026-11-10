@@ -65,3 +65,7 @@ these units or remove that `ExecStartPre` line and accept the unpinned runtime. 
 The catalog lives in `/var/lib/dacs-directory`. Do not copy `data/registrations.example.json`
 there: the testnet catalog starts empty and fills from registrations and the chain scan.
 A pass that is still running when the timer fires is not started twice; the next tick runs it.
+
+The admin `/api/dacs/index-now` and `/api/dacs/reindex` routes share the `reindex`
+data lease with the scheduled CLI. If that lease stays busy for the CLI's ten-second
+wait, the CLI logs a skipped pass and exits successfully; the next timer tick retries.
