@@ -35,9 +35,12 @@ const LEGACY = {
 export type FixtureSeed = "counterparty-evidence";
 const FIXTURE_SEEDS = new Set<FixtureSeed>(["counterparty-evidence"]);
 
+// Owner and group only, matching StateDirectoryMode in the systemd units.
+const DATA_DIR_MODE = 0o750;
+
 let db: Database.Database;
 try {
-  mkdirSync(DATA_DIR, { recursive: true });
+  mkdirSync(DATA_DIR, { recursive: true, mode: DATA_DIR_MODE });
   // The constructor timeout installs SQLite's busy handler before any PRAGMA
   // or schema work. Setting busy_timeout only after journal_mode is too late:
   // two fresh processes can otherwise race while the database enters WAL mode.
