@@ -2,9 +2,22 @@ export type PaginationResult =
   | { ok: true; limit: number; cursor: number }
   | { ok: false; error: string };
 
+const PLAIN_DECIMAL = /^[0-9]+$/;
+
+/** Reads an optional query value written as plain decimal digits; anything else, including an empty string, is NaN. */
+function plainDecimalOr(raw: string | null, absent: number): number {
+  if (raw === null) return absent;
+  return PLAIN_DECIMAL.test(raw) ? Number(raw) : Number.NaN;
+}
+
+/**
+ * Reads the `limit` (1 to 200, default 50) and `cursor` (non-negative offset, default 0) of the
+ * listings route. Both must be plain decimal digits: spellings such as `1e1`, `0x10`, ` 5`, `+5`
+ * or an empty string are refused. Returns `ok: false` with the 400 message for a bad value.
+ */
 export function parsePagination(limitRaw: string | null, cursorRaw: string | null): PaginationResult {
-  const limit = limitRaw === null ? 50 : Number(limitRaw);
-  const cursor = cursorRaw === null ? 0 : Number(cursorRaw);
+  const limit = plainDecimalOr(limitRaw, 50);
+  const cursor = plainDecimalOr(cursorRaw, 0);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     return { ok: false, error: "limit must be an integer from 1 to 200" };
   }

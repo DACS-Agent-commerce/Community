@@ -126,6 +126,30 @@ test("§6.3.6 read endpoints answer an anonymous caller", async () => {
   assert.equal((await bundles.json() as { bindings: Obj[] }).bindings.length, 1, "a valid stored binding is served");
 });
 
+const NON_DECIMAL_SPELLINGS = ["1e1", "0x10", " 5", "+5", ""];
+
+test("the listings route refuses limit spellings that are not plain decimal digits", async () => {
+  for (const spelling of NON_DECIMAL_SPELLINGS) {
+    const response = await listingsRoute.GET(anonymous(`/api/dacs/listings?limit=${encodeURIComponent(spelling)}`));
+    assert.equal(response.status, 400, JSON.stringify(spelling));
+  }
+});
+
+test("the listings route refuses cursor spellings that are not plain decimal digits", async () => {
+  for (const spelling of NON_DECIMAL_SPELLINGS) {
+    const response = await listingsRoute.GET(anonymous(`/api/dacs/listings?cursor=${encodeURIComponent(spelling)}`));
+    assert.equal(response.status, 400, JSON.stringify(spelling));
+  }
+});
+
+test("the bundles route refuses limit spellings that are not plain decimal digits", async () => {
+  for (const spelling of NON_DECIMAL_SPELLINGS) {
+    const response = await bundlesRoute.GET(anonymous(`/api/dacs/bundles/${JOB}?limit=${encodeURIComponent(spelling)}`),
+      { params: Promise.resolve({ jobId: JOB }) });
+    assert.equal(response.status, 400, JSON.stringify(spelling));
+  }
+});
+
 test("§6.3.6: the catalog serves every BB-4-valid binding, from both parties, past the per-signer work cap", async () => {
   const served: Obj[] = [];
   const cursors: Array<string | undefined> = [];
