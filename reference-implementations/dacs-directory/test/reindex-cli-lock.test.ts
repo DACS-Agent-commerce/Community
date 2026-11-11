@@ -23,7 +23,7 @@ class ChildTimeoutError extends Error {
 function runChild(source: string, directory: string, timeoutMs = 20_000): Promise<ChildResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
-      env: { ...process.env, DACS_DIRECTORY_DATA: directory },
+      env: { ...process.env, DACS_DIRECTORY_DATA: directory, NODE_NO_WARNINGS: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let code: number | null = null;
