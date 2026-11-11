@@ -75,6 +75,38 @@ test("the service page labels catalog authentication per profile and leaves tran
   assert.match(evidenceRow(fixtureHtml, "Transaction readiness"), /^Unassessed here/);
 });
 
+/** The structured data object the page embeds for search engines. */
+function structuredDataOf(html: string): { identifier: string } {
+  const script = html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s);
+  assert.ok(script, "the service page embeds JSON-LD");
+  return JSON.parse(script[1]);
+}
+
+test("the service page structured data identifier differs between sellers that publish the same listing ID and version", async (t) => {
+  const data = mkdtempSync(join(tmpdir(), "service-page-"));
+  t.after(() => rmSync(data, { recursive: true, force: true }));
+  process.env.DACS_DIRECTORY_DATA = data;
+  const { saveCatalog } = await import("../src/catalog/store.js");
+  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+  const otherClaim = `did:demos:agent:${"d".repeat(64)}`;
+  const first = listing();
+  const second = listing({ seller: { primaryClaim: otherClaim, displayName: "Other seller" } });
+  saveCatalog({
+    catalogVersion: "1",
+    generatedAt: 1,
+    sellers: [seller([first]), { ...seller([second]), primaryClaim: otherClaim, displayName: "Other seller" }],
+  });
+  const identifierFor = async (claim: string) => structuredDataOf(renderToStaticMarkup(await ServicePage({
+    params: Promise.resolve({ seller: encodeURIComponent(claim), listingId: first.listingId, version: String(first.version) }),
+  }))).identifier;
+
+  const firstIdentifier = await identifierFor(SELLER_CLAIM);
+  const secondIdentifier = await identifierFor(otherClaim);
+  assert.equal(firstIdentifier, `${SELLER_CLAIM}/service@1`);
+  assert.equal(secondIdentifier, `${otherClaim}/service@1`);
+  assert.notEqual(firstIdentifier, secondIdentifier);
+});
+
 test("the service page keeps the contact button after a failed check and shows how to buy", async (t) => {
   const data = mkdtempSync(join(tmpdir(), "service-page-"));
   t.after(() => rmSync(data, { recursive: true, force: true }));
