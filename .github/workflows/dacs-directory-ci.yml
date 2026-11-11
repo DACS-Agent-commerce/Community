@@ -1,7 +1,7 @@
 name: dacs-directory CI
 
 # Validates the DACS Directory reference implementation on every PR and on
-# pushes to main. Scoped by path so unrelated repo changes don't trigger it.
+# pushes to main. Only pushes are scoped by path.
 on:
   push:
     branches: [main]
