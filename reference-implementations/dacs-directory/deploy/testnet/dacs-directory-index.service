@@ -17,6 +17,7 @@ ExecStart=/usr/bin/env npm run --silent index
 TimeoutStartSec=15min
 StateDirectory=dacs-directory
 StateDirectoryMode=0750
+UMask=0027
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
