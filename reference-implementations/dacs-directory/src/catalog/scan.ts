@@ -250,11 +250,11 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
  * anchor as a revocation candidate under the sender, which holds only the sender's own Listing,
  * and the indexer publishes `revoked` only from a read of the anchored marker.
  */
-export function unreadRevocationCreate(value: unknown): { locator: string; listingHash: string; marker: Record<string, unknown> } | null {
+export function unreadRevocationCreate(value: unknown, parsedEnvelope?: Record<string, unknown> | null): { locator: string; listingHash: string; marker: Record<string, unknown> } | null {
   const tx = objectValue(value);
   if (!tx || tx.status !== "confirmed" || tx.type !== "storageProgram") return null;
   if (typeof tx.to !== "string" || !/^stor-[0-9a-f]{40}$/.test(tx.to)) return null;
-  const envelope = parsedObject(tx.content);
+  const envelope = parsedEnvelope === undefined ? parsedObject(tx.content) : parsedEnvelope;
   if (!envelope || envelope.type !== "storageProgram" || envelope.to !== tx.to) return null;
   // The node reports the nonce as a number or a decimal string.
   const nonce = typeof envelope.nonce === "string" && /^\d{1,15}$/.test(envelope.nonce) ? Number(envelope.nonce) : envelope.nonce;
@@ -325,13 +325,13 @@ export async function validAgreementForDiscovery(data: Record<string, unknown>, 
 }
 
 /** Exact target/content attribution for a whole-value StorageProgram write. */
-export function storageWriteCandidate(value: unknown): StorageWriteCandidate | null {
+export function storageWriteCandidate(value: unknown, parsedEnvelope?: Record<string, unknown> | null): StorageWriteCandidate | null {
   const tx = objectValue(value);
   if (!tx || tx.status !== "confirmed" || tx.type !== "storageProgram") return null;
   if (!Number.isSafeInteger(tx.blockNumber) || Number(tx.blockNumber) < 0) return null;
   if (typeof tx.hash !== "string" || !/^[0-9a-fA-F]{64}$/.test(tx.hash)) return null;
   if (typeof tx.to !== "string" || !/^stor-[0-9a-f]{40}$/.test(tx.to)) return null;
-  const envelope = parsedObject(tx.content);
+  const envelope = parsedEnvelope === undefined ? parsedObject(tx.content) : parsedEnvelope;
   if (!envelope || envelope.type !== "storageProgram" || envelope.to !== tx.to) return null;
   if (!Array.isArray(envelope.data) || envelope.data.length !== 2 || envelope.data[0] !== "storageProgram") return null;
   const write = objectValue(envelope.data[1]);
@@ -518,9 +518,11 @@ export async function scanChain(
     for (const tx of fresh) {
       const inTx = new Set<string>(); collectNativeStorageAddresses(tx, inTx);
       for (const address of inTx) addresses.add(address);
-      const candidate = storageWriteCandidate(tx);
+      const transaction = objectValue(tx);
+      const envelope = transaction?.status === "confirmed" && transaction.type === "storageProgram" ? parsedObject(transaction.content) : null;
+      const candidate = storageWriteCandidate(tx, envelope);
       if (candidate) writeCandidates.push(candidate);
-      const unread = unreadRevocationCreate(tx);
+      const unread = unreadRevocationCreate(tx, envelope);
       if (unread && !revocationCreates.has(unread.locator)) revocationCreates.set(unread.locator, unread);
     }
     if (ids.length === 0) break;

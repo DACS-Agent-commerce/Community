@@ -67,6 +67,28 @@ async function scanFixture(transactions: unknown[], storage: Record<string, stri
   }
 }
 
+for (const malformed of [false, true]) {
+  test(`scanner parses ${malformed ? "malformed" : "valid"} storage transaction content once`, async (t) => {
+    const address = locatorOf("9");
+    const content = malformed ? "{invalid JSON" : JSON.stringify({
+      type: "storageProgram", to: address,
+      data: ["storageProgram", { operation: "WRITE_STORAGE", storageAddress: address, data: marker }],
+    });
+    const parse = JSON.parse;
+    let parses = 0;
+    t.mock.method(JSON, "parse", (text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+      if (text === content) parses++;
+      return parse(text, reviver);
+    });
+    const result = await scanFixture([
+      { id: 1, status: "confirmed", type: "storageProgram", hash: "9".repeat(64), blockNumber: 1, to: address, content },
+    ], { [address]: JSON.stringify(marker) });
+    assert.equal(result.txsScanned, 1);
+    assert.equal(parses, 1);
+    assert.deepEqual(result.revocations.get(marker.listingContentHash), [address]);
+  });
+}
+
 test("a storage artifact with no canonical form is observed unclassified and never stops the scan", async () => {
   const malformedMarker = locatorOf("2");
   const malformedBinding = locatorOf("3");
