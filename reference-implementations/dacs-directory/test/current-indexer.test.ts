@@ -1020,6 +1020,36 @@ test("identity tier requires a fresh passing version-pinned VerifyResult and its
   assert.equal(await deriveIdentityTier(identity, async () => policy, 201, async (at) => maps.get(at) ?? null), "self-declared");
 });
 
+test("identity tier refuses a VerifyResult whose method is not a string, even one that converts to a listed method", async () => {
+  maps.clear(); const attested = { authority: "ok" }; maps.set(locator(8), attested);
+  const policies: Record<string, RecipePolicy> = {
+    lei: { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] },
+    domain: { scheme: "domain", recipeVersion: 2, methods: ["domain-tls-control"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] },
+  };
+  let next = 20;
+  // Each result is signed by the trusted signer and hash-bound by its reference, so only `method` differs from the controls.
+  const claim = async (scheme: string, identifier: string, method: unknown) => {
+    const resultScope: Obj = { resultVersion: "1", scheme, identifier, recipeVersion: 2, method, decision: "pass", reason: "found",
+      attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: contentHash(attested) }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
+    const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) };
+    const at = locator(next++); maps.set(at, result);
+    return { ref: `${scheme}:${identifier}`, verifiedBy: ref(at, result, "verify-result", { recipeVersion: 2 }) };
+  };
+  const tier = async (...claims: Obj[]) => deriveIdentityTier({ claims }, async (scheme) => policies[scheme] ?? null, 100, async (at) => maps.get(at) ?? null);
+
+  assert.equal(await tier(await claim("lei", "123", "consensus-backed-proxy")), "institutional", "control: string method");
+  assert.equal(await tier(await claim("domain", "example.com", "domain-tls-control")), "verified", "control: string method");
+  assert.equal(await tier(await claim("lei", "123", "verifiable-credential")), "self-declared", "string method the recipe does not list");
+  for (const method of [["consensus-backed-proxy"], [["consensus-backed-proxy"]], { method: "consensus-backed-proxy" }, true, null])
+    assert.equal(await tier(await claim("lei", "123", method)), "self-declared", JSON.stringify(method));
+  assert.equal(await tier(await claim("domain", "example.com", ["domain-tls-control"])), "self-declared", "array method, other scheme");
+  // Identity-tier derivation reads `methods` as configured, so a number converts to a listed name when one is numeric.
+  policies.key = { ...policies.domain, scheme: "key", methods: ["1"] };
+  assert.equal(await tier(await claim("key", "k1", 1)), "self-declared", "number method");
+  assert.equal(await tier(await claim("domain", "example.com", "domain-tls-control"), await claim("lei", "123", ["consensus-backed-proxy"])), "verified",
+    "an array-method claim does not lift a verified claim to institutional");
+});
+
 test("fixed-price negotiation of a negotiable band requires the exact decimal center and currency", async () => {
   for (const profile of ["legacy", "payee-bound"] as const) {
     for (const [amount, currency, accepted] of [

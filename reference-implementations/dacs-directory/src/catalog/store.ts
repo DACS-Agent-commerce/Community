@@ -2,6 +2,7 @@
 import { boundedJson } from "./artifactLimits.js";
 import { canonicalProgramOwner, normalizeScanState, SCAN_STATE_SCHEMA_VERSION } from "./scanState.js";
 import { deriveAnchorAddress } from "./chain.js";
+import { DATA_DIR_MODE } from "./dataFolderMode.js";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +38,7 @@ const FIXTURE_SEEDS = new Set<FixtureSeed>(["counterparty-evidence"]);
 
 let db: Database.Database;
 try {
-  mkdirSync(DATA_DIR, { recursive: true });
+  mkdirSync(DATA_DIR, { recursive: true, mode: DATA_DIR_MODE });
   // The constructor timeout installs SQLite's busy handler before any PRAGMA
   // or schema work. Setting busy_timeout only after journal_mode is too late:
   // two fresh processes can otherwise race while the database enters WAL mode.

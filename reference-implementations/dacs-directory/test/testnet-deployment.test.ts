@@ -167,6 +167,12 @@ test("the index timer fires every five minutes and both units run the startup ch
   assert.equal(scripts["check:testnet"], "tsx scripts/check-testnet-deployment.ts");
 });
 
+test("both units run with UMask=0027 so the database files are not readable by other users", () => {
+  for (const unit of ["dacs-directory.service", "dacs-directory-index.service"]) {
+    assert.match(deployFile(unit), /^UMask=0027$/m, unit);
+  }
+});
+
 test("the env example is the testnet profile, with example.org placeholders and no secret", () => {
   const env = envExample();
   assert.equal(testnetConfigRefusal(env), null);

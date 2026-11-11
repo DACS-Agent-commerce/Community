@@ -56,7 +56,7 @@ async function verifiedClaim(
   const verifiedSigner = await resolvePrimaryClaimKey(signature.signer, signature.algorithm, resolveKey);
   if (!verifiedSigner) return null;
   const recipe = await resolveRecipe(parts.scheme, Number(ref.recipeVersion));
-  if (!recipe || !recipe.methods.includes(String(raw.method)) || ["mocked", "disabled", "failed"].includes(recipe.availability)) return null;
+  if (!recipe || typeof raw.method !== "string" || !recipe.methods.includes(raw.method) || ["mocked", "disabled", "failed"].includes(recipe.availability)) return null;
   const trustedSigners = await Promise.all(recipe.trustedResultSigners.map((claim) =>
     resolvePrimaryClaimKey(claim, signature.algorithm, resolveKey)));
   if (!trustedSigners.some((claim) => claim && sameResolvedPrimaryClaim(claim, verifiedSigner))) return null;

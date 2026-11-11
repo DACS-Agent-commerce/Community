@@ -8,7 +8,7 @@ node scripts/check-node-runtime.mjs
 
 DATA_DIR="${DACS_DIRECTORY_DATA:-${RAILWAY_VOLUME_MOUNT_PATH:-$(pwd)/data}}"
 export DACS_DIRECTORY_DATA="$DATA_DIR"
-mkdir -p "$DATA_DIR"
+mkdir -p -m 0750 "$DATA_DIR"
 
 if [ ! -f "$DATA_DIR/registrations.json" ] && [ -f data/registrations.example.json ]; then
   cp data/registrations.example.json "$DATA_DIR/registrations.json"

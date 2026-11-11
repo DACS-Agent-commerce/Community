@@ -18,6 +18,7 @@ Restart=on-failure
 RestartSec=30
 StateDirectory=dacs-directory
 StateDirectoryMode=0750
+UMask=0027
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true

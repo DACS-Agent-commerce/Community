@@ -38,6 +38,12 @@ while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## Run it
 
+Check the optional testnet bootstrap timeout profile from the repository root:
+
+Check: `cd reference-implementations/dacs-directory && node --test test/index-bootstrap.test.mjs`
+
+The full suite is `npm test` from this directory after `npm run setup`.
+
 From the repository root, with dependencies installed and `npm run setup` complete:
 
 Check the reindex lease regressions directly (without the `tsx` CLI IPC socket):
