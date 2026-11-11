@@ -65,3 +65,55 @@ these units or remove that `ExecStartPre` line and accept the unpinned runtime. 
 The catalog lives in `/var/lib/dacs-directory`. Do not copy `data/registrations.example.json`
 there: the testnet catalog starts empty and fills from registrations and the chain scan.
 A pass that is still running when the timer fires is not started twice; the next tick runs it.
+
+## First full scan or long replay
+
+The scheduled index unit has a 15-minute startup timeout. The scan cursor is
+committed with the completed catalog, so killing a longer first scan or replay
+can make each attempt repeat the same work. For that case, use the supplied
+`index-bootstrap.conf` as a temporary drop-in for the same unit. It removes the
+startup timeout for this pass; a hung pass then needs an explicit stop.
+
+After install/build and before enabling the timer (or when recovering a timed-out
+scan), run the following as root from
+`/opt/dacs-directory/reference-implementations/dacs-directory`:
+
+```sh
+set -eu
+# Stop scheduling first; stop any existing pass before changing its timeout.
+systemctl stop dacs-directory-index.timer
+systemctl stop dacs-directory-index.service
+install -d -m 0755 /etc/systemd/system/dacs-directory-index.service.d
+# This filename must be unused; do not overwrite an existing local override.
+test ! -e '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
+install -m 0644 'deploy/testnet/index-bootstrap.conf' '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
+systemctl daemon-reload
+# Refuse to start if a conflicting local override leaves a finite timeout.
+test "$(systemctl show dacs-directory-index.service -p TimeoutStartUSec --value)" = infinity
+systemctl start --no-block dacs-directory-index.service
+journalctl -fu dacs-directory-index.service
+```
+
+The same unit still runs as `dacs-directory`, loads `directory.env`, and runs its
+runtime and testnet preflight checks. The timer stays stopped during bootstrap.
+Interrupting `journalctl` only stops watching logs. Inspect `systemctl status dacs-directory-index.service` and the journal for successful completion (exit
+status 0 and `catalog written`); check `/api/dacs/status` for scan progress.
+Do not restart scheduling after a failed or still-running pass. To abort a hung
+pass, use `systemctl stop dacs-directory-index.service`, inspect the failure and
+retry with the timer stopped.
+
+After a successful pass, remove only the temporary drop-in and restore scheduling:
+
+```sh
+set -eu
+rm '/etc/systemd/system/dacs-directory-index.service.d/90-bootstrap.conf'
+systemctl daemon-reload
+# Refuse to resume scheduling unless the shipped 15-minute limit is restored.
+test "$(systemctl show dacs-directory-index.service -p TimeoutStartUSec --value)" = 15min
+systemctl enable --now dacs-directory-index.timer
+```
+
+This changes the service time budget only. If the scan reports `DACS_SCAN_MAX_TXS`
+exhaustion or an RPC failure, resolve that separately; disabling the startup
+timeout cannot make an incomplete scan commit its cursor. For later long replays,
+repeat this temporary procedure.
