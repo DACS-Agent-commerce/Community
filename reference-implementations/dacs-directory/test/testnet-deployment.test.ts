@@ -107,9 +107,12 @@ test("startup checks the compiled RPC before contacting the configured node", as
       assert.equal(result.ok, false);
       assert.match(result.ok ? "" : result.reason, /built manifest RPC must match NEXT_PUBLIC_DEMOS_RPC/);
     }
-    const missing = await checkTestnetStartup(async () => { throw new Error("missing build"); });
-    assert.equal(missing.ok, false);
-    assert.match(missing.ok ? "" : missing.reason, /could not read the built manifest RPC/);
+    for (const error of [new Error("missing build"), "unreadable route"]) {
+      const missing = await checkTestnetStartup(async () => { throw error; });
+      assert.equal(missing.ok, false);
+      assert.equal(missing.ok ? "" : missing.reason,
+        `could not read the built manifest RPC; build with the testnet settings before starting: ${String(error instanceof Error ? error.message : error)}`);
+    }
     assert.deepEqual(contacted, []);
   } finally {
     globalThis.fetch = node.fetch;
