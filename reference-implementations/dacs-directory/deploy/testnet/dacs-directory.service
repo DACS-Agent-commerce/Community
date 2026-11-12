@@ -11,7 +11,9 @@ Group=dacs-directory
 WorkingDirectory=/opt/dacs-directory/reference-implementations/dacs-directory
 EnvironmentFile=/etc/dacs-directory/directory.env
 ExecStartPre=/usr/bin/env node scripts/check-node-runtime.mjs
-# Refuses any network but the testnet and any chain but the pinned chain.
+# Checks the testnet label, matching credential-free HTTPS RPCs without mainnet
+# host labels, the compiled manifest's RPC, and the node-reported pinned chain.
+# This does not authenticate the node or prove the pinned chain is the testnet.
 ExecStartPre=/usr/bin/env npm run --silent check:testnet -- --built
 ExecStart=/usr/bin/env node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port ${PORT}
 Restart=on-failure
