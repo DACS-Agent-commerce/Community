@@ -21,6 +21,7 @@ import {
   rawPublicKey,
 } from "@kynesyslabs/dacs/crypto";
 import { sha256Hex } from "./canonical.js";
+import { DATA_DIR_MODE } from "./dataFolderMode.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const SEED_PATH = join(process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "data"), ".indexer-seed");
@@ -28,7 +29,7 @@ const SEED_PATH = join(process.env.DACS_DIRECTORY_DATA ?? join(process.cwd(), "d
 function indexerSeed(): Uint8Array {
   if (existsSync(SEED_PATH)) return Uint8Array.from(Buffer.from(readFileSync(SEED_PATH, "utf8").trim(), "hex"));
   const seed = randomBytes(32);
-  mkdirSync(dirname(SEED_PATH), { recursive: true });
+  mkdirSync(dirname(SEED_PATH), { recursive: true, mode: DATA_DIR_MODE });
   writeFileSync(SEED_PATH, seed.toString("hex") + "\n", { mode: 0o600 });
   return Uint8Array.from(seed);
 }
