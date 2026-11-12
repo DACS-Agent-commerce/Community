@@ -65,6 +65,8 @@ After setup:
 
 Check: `cd reference-implementations/dacs-directory && npm test`
 
+Check: `cd reference-implementations/dacs-directory && node --import tsx --test test/listing-schema-version.test.ts test/discovery-contract.test.ts`
+
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
 two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its listing
