@@ -119,6 +119,7 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
   }
   if (!json || typeof json !== "object" || json.success !== true) return { status: "unavailable", reason: "anchor reply did not confirm a successful read" };
   const data = json.data;
+  if (data === undefined) return { status: "unavailable", reason: "anchor reply omitted the data member" };
   if (data == null || typeof data !== "object" || Array.isArray(data)) return { status: "invalid" };
   if (boundedJson(data) === null) return { status: "unavailable", reason: "anchor payload exceeds the artifact limits", nodeRefusal: true };
   return {
