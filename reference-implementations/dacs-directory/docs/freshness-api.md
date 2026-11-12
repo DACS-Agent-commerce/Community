@@ -23,7 +23,7 @@ A buyer relying on scan progress should refuse unknown or stale pass times, impl
 
 Listings carry no revocation-coverage flag; `revocationCoverage` and `lastVerifiedAt` saved by an earlier build are dropped when the catalog is read. Withdrawal handling is unchanged: verified and retained revocations use `status: revoked` with the revocation binding, and authenticated unresolved withdrawal sources still hold a listing.
 
-`status: active` means only that the Directory knows of no withdrawal it has read or authenticated; it does not mean that every storage write encountered by the scan could be read.
+`status: active` means only that no withdrawal had been applied as of the snapshot's publication. A withdrawal read and authenticated during a later refresh that failed to publish is not reflected until a refresh succeeds. It does not mean that every storage write encountered by the scan could be read.
 
 When a pass cannot read a listing's anchor because of a passing fault (a 5xx reply, timeout, refused connection or unreadable reply), the listing indexed on an earlier pass stays in the catalog as it was last observed: its `catalogObservedAt` remains the time of the pass that last read the anchor, so a value older than the seller's `lastIndexedAt` marks it as unread since then. The kept copy has limits:
 
