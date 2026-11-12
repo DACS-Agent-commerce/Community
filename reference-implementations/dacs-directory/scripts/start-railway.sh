@@ -8,7 +8,9 @@ node scripts/check-node-runtime.mjs
 
 DATA_DIR="${DACS_DIRECTORY_DATA:-${RAILWAY_VOLUME_MOUNT_PATH:-$(pwd)/data}}"
 export DACS_DIRECTORY_DATA="$DATA_DIR"
-mkdir -p -m 0750 "$DATA_DIR"
+# Match DATA_DIR_MODE for every newly created component, respecting the umask
+# and leaving existing directories unchanged (mkdir -p -m only modes the leaf).
+node -e 'require("node:fs").mkdirSync(process.argv[1], { recursive: true, mode: 0o750 })' "$DATA_DIR"
 
 if [ ! -f "$DATA_DIR/registrations.json" ] && [ -f data/registrations.example.json ]; then
   cp data/registrations.example.json "$DATA_DIR/registrations.json"
