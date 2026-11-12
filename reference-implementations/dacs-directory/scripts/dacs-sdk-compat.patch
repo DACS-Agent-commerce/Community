@@ -352,7 +352,7 @@ index 7743f4e9..41099dd9 100644
      isStr(v.listingContentHash) &&
      /^[0-9a-f]{64}$/.test(v.listingContentHash) &&
 -    isSafeUint(v.revokedAt) &&
-+    isNum(v.revokedAt) && Number.isSafeInteger(v.revokedAt) &&
++    isNum(v.revokedAt) && Math.abs(v.revokedAt) <= Number.MAX_SAFE_INTEGER &&
      isOptionalStr(v.reason) &&
      isComponentSignature(v.signature) &&
      isCanonicalBase64Url(v.signature.value)

@@ -87,8 +87,8 @@ export async function checkTestnetStartup(readBuiltRpc?: () => Promise<unknown>)
         normalizedRpc(builtRpc) !== normalizedRpc(process.env.NEXT_PUBLIC_DEMOS_RPC!)) {
         return { ok: false, reason: "built manifest RPC must match NEXT_PUBLIC_DEMOS_RPC; rebuild with the testnet settings" };
       }
-    } catch {
-      return { ok: false, reason: "could not read the built manifest RPC; build with the testnet settings before starting" };
+    } catch (error) {
+      return { ok: false, reason: `could not read the built manifest RPC; build with the testnet settings before starting: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
   try {

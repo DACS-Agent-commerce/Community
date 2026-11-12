@@ -38,6 +38,12 @@ while chain inclusion still depends on the disclosed proxy/RPC path.
 
 ## Run it
 
+Check the optional testnet bootstrap timeout profile from the repository root:
+
+Check: `cd reference-implementations/dacs-directory && node --test test/index-bootstrap.test.mjs`
+
+The full suite is `npm test` from this directory after `npm run setup`.
+
 ```bash
 npm run setup    # one-time: vendors + builds dacs-sdk (not yet on npm), installs the app
 npm run index    # verify registrations against chain state → SQLite catalog
@@ -54,6 +60,10 @@ so CI can prove the starter seed renders at least one active listing without dep
 on a live full-chain scan.
 
 Check: `cd reference-implementations/dacs-directory && npm run setup && npm test`
+
+After setup:
+
+Check: `cd reference-implementations/dacs-directory && npm test`
 
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
@@ -142,9 +152,10 @@ and evidence signatures and preserves the historical member-name hash profile
 only for explicit legacy references.
 The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
 profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
-integer. The patch also lets the SDK's `isRevocationMarker` accept a negative safe-integer
-`revokedAt`, as the Directory does (DACS-1 §6.3.4 types it as a number; CORE §B.2 bounds only
-its magnitude). A fractional `revokedAt` is still accepted by the Directory and refused by the SDK reader. Catalog admission alone does not promise SDK transaction readiness.
+integer. The patch also lets the SDK's `isRevocationMarker` accept finite integral and
+fractional `revokedAt` values within ±(2^53−1), as the Directory does (DACS-1 §6.3.4
+types it as a number; CORE §B.2 permits fractions and bounds their magnitude).
+Catalog admission alone does not promise SDK transaction readiness.
 Changing either the revision or patch requires rebuilding and updating `SDK_DIST_SHA256`.
 
 ### Configuration
@@ -376,7 +387,7 @@ current SDK seller runtime.
    plain request is cheaper than reading it in pages.
    The store holds only bindings that passed BB-4 when they were written, so the route does
    not re-verify them per request; envelopes stored by an older build are served as stored
-   until the next index pass rewrites them. The
+   until the next successful index pass rewrites them. The
    Directory's own BB-6 resolution works through at most eight per signer of each job and
    role; another signer's bindings never use that budget. Overflow is sticky and makes
    that signer's side `indeterminate`, never absent. There is no total across signers,
