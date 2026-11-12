@@ -17,6 +17,9 @@ test("the workflow token can only read repository contents", () => {
   const permissions = topLevelBlock("permissions");
   assert.match(permissions, /^ +contents: read$/m);
   assert.equal(permissions.trim().split("\n").length, 2, "permissions lists more than contents: read");
+  const verify = topLevelBlock("jobs").match(/^ {2}verify:\n(?:(?! {2}\S).*\n?)*/m);
+  assert.ok(verify, "the verify job is missing");
+  assert.doesNotMatch(verify[0], /^ {4}(?:permissions|"permissions"|'permissions')\s*:/m, "verify must inherit the workflow permissions");
 });
 
 test("the verify job stops after a bounded number of minutes", () => {
