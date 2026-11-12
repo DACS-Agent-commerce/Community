@@ -118,7 +118,21 @@ function agreementPartyShapeOk(value: unknown): boolean {
     attestationRefShapeOk(party.vetRecordRef));
 }
 
-const DELIVERABLE_REF_KEYS = new Set(["deliverableType", "hash", "schemaUrl"]);
+const AGREEMENT_PARTY_ROLES = new Set(["buyer", "seller", "bidder-non-winning"]);
+
+/**
+ * DACS-3 §8.5 party roster, as the pinned SDK validator accepts it: every role is a known agreement role, there is
+ * exactly one buyer and one seller and they are different identities. Losing bidders may be any number, including none.
+ * Losing bidders are not required signers; `signatureOk` only requires the buyer and the seller.
+ */
+function agreementPartyRolesOk(parties: unknown[]): boolean {
+  if (!parties.every((party) => inSet(rec(party)?.role, AGREEMENT_PARTY_ROLES))) return false;
+  const buyers = arr(parties).filter((party) => party.role === "buyer");
+  const sellers = arr(parties).filter((party) => party.role === "seller");
+  return buyers.length === 1 && sellers.length === 1 && !sameSigningIdentity(buyers[0].primaryClaim, sellers[0].primaryClaim);
+}
+
+const DELIVERABLE_REF_KEYS =new Set(["deliverableType", "hash", "schemaUrl"]);
 const DELIVERABLE_KINDS = new Set(["storage-program", "entitlement", "attested-payload", "external"]);
 
 /**
@@ -327,7 +341,7 @@ function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
     const terms = rec(raw.terms);
     return Boolean(profile && typeof raw.jobId === "string" && rec(raw.listingRef) !== null &&
       typeof raw.derivedFromPattern === "string" && AGREEMENT_PATTERNS.has(raw.derivedFromPattern) &&
-      unixMsOk(raw.generatedAt) && Array.isArray(raw.parties) && raw.parties.length >= 2 && raw.parties.every(agreementPartyShapeOk) &&
+      unixMsOk(raw.generatedAt) && Array.isArray(raw.parties) && agreementPartyRolesOk(raw.parties) && raw.parties.every(agreementPartyShapeOk) &&
       terms && deliverableRefShapeOk(terms.deliverable) && unixMsOk(terms.deadline) && priceTermOk(terms.price) && optional(terms.feeSchedule, (schedule) => feeScheduleShapeOk(schedule, terms.price)) &&
       (profile === "legacy"
         ? terms.payoutBindings === undefined
