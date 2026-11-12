@@ -118,8 +118,9 @@ d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20
 # pinned Node transformer after the SDK TypeScript build.
 # Directory compatibility retains zero retentionYears; §6.3.4 declares a number
 # without a positive-only rule, while the unpatched SDK requires a positive integer.
-# The patch also lets the SDK's isRevocationMarker accept a negative safe-integer
-# revokedAt, as the Directory does; a fractional revokedAt is still refused by the SDK.
+# The patch also lets the SDK's isRevocationMarker accept finite integral and
+# fractional revokedAt values within ±(2^53−1), as the Directory does:
+# DACS-1 §6.3.4 declares a number; CORE §B.2 permits bounded fractions.
 # conformance/vectors/security/signature-value-encoding-v0.1.json (at d45c0a2)
 # sha256 b98234f14d6931d85c6ed1fc83e80a4ad00ea4feb69abb6d5ee23db95ea2a0bf
 # conformance/fixtures/identity/demos-agent-claim-reference.json (at 725fa78)

@@ -59,6 +59,8 @@ with `npm run test:seed`; it uses pinned chain bytes for the shipped ReviewBot l
 so CI can prove the starter seed renders at least one active listing without depending
 on a live full-chain scan.
 
+Check: `cd reference-implementations/dacs-directory && npm test`
+
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
 two-rail deal history (pay-dem on Demos + pay-x402 USDC on Base Sepolia). Its listing
@@ -146,9 +148,10 @@ and evidence signatures and preserves the historical member-name hash profile
 only for explicit legacy references.
 The Directory retains nonnegative `retentionYears`, including zero, as a compatibility
 profile of DACS-1 §6.3.4 (`retentionYears?: number`); the unpatched SDK requires a positive
-integer. The patch also lets the SDK's `isRevocationMarker` accept a negative safe-integer
-`revokedAt`, as the Directory does (DACS-1 §6.3.4 types it as a number; CORE §B.2 bounds only
-its magnitude). A fractional `revokedAt` is still accepted by the Directory and refused by the SDK reader. Catalog admission alone does not promise SDK transaction readiness.
+integer. The patch also lets the SDK's `isRevocationMarker` accept finite integral and
+fractional `revokedAt` values within ±(2^53−1), as the Directory does (DACS-1 §6.3.4
+types it as a number; CORE §B.2 permits fractions and bounds their magnitude).
+Catalog admission alone does not promise SDK transaction readiness.
 Changing either the revision or patch requires rebuilding and updating `SDK_DIST_SHA256`.
 
 ### Configuration
