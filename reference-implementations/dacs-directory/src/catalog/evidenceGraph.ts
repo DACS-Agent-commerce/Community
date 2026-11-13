@@ -132,7 +132,7 @@ function agreementPartyRolesOk(parties: unknown[]): boolean {
   return buyers.length === 1 && sellers.length === 1 && !sameSigningIdentity(buyers[0].primaryClaim, sellers[0].primaryClaim);
 }
 
-const DELIVERABLE_REF_KEYS =new Set(["deliverableType", "hash", "schemaUrl"]);
+const DELIVERABLE_REF_KEYS = new Set(["deliverableType", "hash", "schemaUrl"]);
 const DELIVERABLE_KINDS = new Set(["storage-program", "entitlement", "attested-payload", "external"]);
 
 /**
