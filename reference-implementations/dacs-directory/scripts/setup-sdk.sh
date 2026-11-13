@@ -66,7 +66,8 @@ else
     mkdir -p vendor
     git_with_sdk_auth clone --filter=blob:none https://github.com/DACS-Agent-commerce/dacs-sdk.git vendor/dacs-sdk
   fi
-  (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --detach "$SDK_REV")
+  # Recover tracked patch leftovers if an earlier build was killed before its EXIT trap.
+  (cd vendor/dacs-sdk && git_with_sdk_auth fetch --depth 1 origin "$SDK_REV" && git_with_sdk_auth checkout --force --detach "$SDK_REV")
   if [ "$(git -C vendor/dacs-sdk rev-parse HEAD)" != "$SDK_REV" ] ||
     [ -n "$(git -C vendor/dacs-sdk status --porcelain --untracked-files=no)" ]; then
     echo "vendor/dacs-sdk is not a clean checkout of ${SDK_REV}" >&2
