@@ -35,6 +35,13 @@ export async function GET(req: NextRequest) {
 
   const entries = [];
   for (const l of seller.listings.filter(discoveryListing)) {
+    // A malformed locator is classified absent locally, without asking the node.
+    if (!/^stor-[0-9a-f]{40}$/.test(l.anchor.locator)) {
+      return NextResponse.json(
+        { error: `listing anchor for ${l.listingId} is not a storage-program address; the index cannot be generated from chain state` },
+        { status: 422 },
+      );
+    }
     const read = await readAnchorResult(l.anchor.locator);
     // An indexed anchor the node cannot answer for, or reports missing, is indeterminate (RB-6):
     // an index without it would look complete.
