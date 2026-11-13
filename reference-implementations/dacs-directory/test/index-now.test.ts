@@ -150,6 +150,8 @@ test("index-now changes listings validators without advancing scan progress", as
   assert.deepEqual(afterBody.scanProgress, beforeBody.scanProgress);
   assert.equal(beforeBody.total, 0);
   assert.equal(afterBody.total, 1);
+  assert.notEqual(after.headers.get("last-modified"), null);
+  assert.notEqual(after.headers.get("etag"), null);
   assert.notEqual(after.headers.get("last-modified"), before.headers.get("last-modified"));
   assert.notEqual(after.headers.get("etag"), etag);
 });
