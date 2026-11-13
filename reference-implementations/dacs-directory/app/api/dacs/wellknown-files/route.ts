@@ -6,6 +6,11 @@
  * All hashes computed from CHAIN STATE, so the files are correct-by-
  * construction — host them byte-exact, then register the domain here.
  * Answers 503 instead of a partial index when an indexed anchor cannot be read.
+ * Each anchor read receives the request signal, so a client disconnect aborts
+ * the in-flight read and stops the loop. The whole loop is also capped at
+ * WELLKNOWN_INDEX_DEADLINE_MS (30 s); reaching the cap returns 503 with an
+ * incomplete-index reason rather than a partial 200. The per-read 15 s
+ * timeout in chain.ts is unchanged.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { sha256Hex } from "@kynesyslabs/dacs/canonical";
@@ -33,9 +38,23 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const WELLKNOWN_INDEX_DEADLINE_MS = 30_000;
+  const deadline = Date.now() + WELLKNOWN_INDEX_DEADLINE_MS;
   const entries = [];
   for (const l of seller.listings.filter(discoveryListing)) {
-    const read = await readAnchorResult(l.anchor.locator);
+    if (req.signal.aborted || Date.now() >= deadline) {
+      return NextResponse.json(
+        { error: "listing index incomplete: the request was aborted or the 30 s total deadline was reached" },
+        { status: 503 },
+      );
+    }
+    const read = await readAnchorResult(l.anchor.locator, req.signal);
+    if (req.signal.aborted || Date.now() >= deadline) {
+      return NextResponse.json(
+        { error: "listing index incomplete: the request was aborted or the 30 s total deadline was reached" },
+        { status: 503 },
+      );
+    }
     // An indexed anchor the node cannot answer for, or reports missing, is indeterminate (RB-6):
     // an index without it would look complete.
     if (read.status === "unavailable" || read.status === "absent") {
