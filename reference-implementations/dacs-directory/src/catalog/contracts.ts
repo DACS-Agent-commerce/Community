@@ -33,7 +33,7 @@ export const TESTNET_RESTRICTIONS = ["TP-1"] as const;
 
 export const listingSummarySchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "/schemas/listing-summary.schema.json",
+  $id: "/schemas/listing-summary.v2.schema.json",
   title: "DACS Directory ListingSummary",
   description: "Discovery projection with unassessed transaction readiness. Pay-bearing Listings use concrete pay phases; pay-alternative and procurement Listings are outside this Directory profile.",
   type: "object",
@@ -307,7 +307,7 @@ export const directoryManifest = (origin: string, demosRpc = publicDemosRpcUrl()
   catalog: `${origin}/api/dacs/listings`,
   bundleBindings: `${origin}/api/dacs/bundles/{jobId}`,
   openapi: `${origin}/openapi.json`,
-  schemas: { listingSummary: `${origin}/schemas/listing-summary.schema.json` },
+  schemas: { listingSummary: `${origin}/schemas/listing-summary.v2.schema.json` },
   substrates: {
     demos: {
       network: "testnet",

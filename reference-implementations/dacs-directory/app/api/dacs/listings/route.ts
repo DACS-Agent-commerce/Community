@@ -93,7 +93,7 @@ export async function GET(req: NextRequest) {
   const self = new URL(`${req.nextUrl.pathname}${req.nextUrl.search}`, origin);
   const links = [
     { href: self.toString(), rel: "self", type: "application/json" },
-    { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+    { href: `${origin}/schemas/listing-summary.v2.schema.json`, rel: "describedby", type: "application/schema+json" },
   ];
   if (body.cursor) {
     const next = new URL(self);
