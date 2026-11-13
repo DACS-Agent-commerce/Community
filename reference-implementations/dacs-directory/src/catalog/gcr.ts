@@ -1,3 +1,4 @@
+import { storageResponseJson } from "./artifactLimits.js";
 /**
  * Narrow authenticated GCR identity resolution used by both routes and CLI.
  * It implements only the read-auth protocol needed by getIdentities, avoiding
@@ -53,7 +54,7 @@ export async function gcrAuthHeaders(): Promise<Record<string, string>> {
 
 /** Raw GCR identity payload for a Demos address (bare hex). */
 export async function gcrGetIdentities(addressHex: string): Promise<unknown> {
-  const res = await fetch(RPC + "/", {
+  const res = await fetch(RPC + "/", { redirect: "error",
     method: "POST",
     headers: await gcrAuthHeaders(),
     signal: AbortSignal.timeout(30_000),
@@ -62,7 +63,7 @@ export async function gcrGetIdentities(addressHex: string): Promise<unknown> {
       params: [{ method: "getIdentities", params: [addressHex.replace(/^0x/, "")] }],
     }),
   });
-  const json = (await res.json().catch(() => null)) as { result?: number; response?: unknown } | null;
+  const json = (await storageResponseJson(res)) as { result?: number; response?: unknown } | null;
   if (json?.result !== 200) throw new Error(`gcr_routine getIdentities → HTTP ${res.status} / result ${json?.result}`);
   return json;
 }
