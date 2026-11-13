@@ -169,3 +169,28 @@ test("the 30 s total deadline returns 503 instead of a partial index", async () 
     globalThis.fetch = original;
   }
 });
+
+
+test("the final anchor read cannot cross the total deadline and return files", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(31), listingRecord(32), listingRecord(33)] }] as never,
+  });
+  const originalNow = Date.now, originalFetch = globalThis.fetch;
+  let now = 1_000_000, reads = 0;
+  Date.now = () => now;
+  globalThis.fetch = async (input) => {
+    if (new URL(String(input)).pathname.includes("/storage-program/")) { now += 11_000; reads++; }
+    return Response.json({ success: true, owner: `0x${hex}`, programName: "opaque", data: { listingId: "ok" } });
+  };
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    console.log("FINAL_READ_STATUS", response.status, "ELAPSED_MS", now - 1_000_000, "READS", reads);
+    assert.equal(reads, 3);
+    assert.equal(now - 1_000_000, 33_000);
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.files, undefined);
+    assert.match(body.error, /30 s/);
+  } finally { Date.now = originalNow; globalThis.fetch = originalFetch; }
+});

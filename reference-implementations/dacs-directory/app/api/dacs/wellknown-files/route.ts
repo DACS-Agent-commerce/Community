@@ -49,6 +49,12 @@ export async function GET(req: NextRequest) {
       );
     }
     const read = await readAnchorResult(l.anchor.locator, req.signal);
+    if (req.signal.aborted || Date.now() >= deadline) {
+      return NextResponse.json(
+        { error: "listing index incomplete: the request was aborted or the 30 s total deadline was reached" },
+        { status: 503 },
+      );
+    }
     // An indexed anchor the node cannot answer for, or reports missing, is indeterminate (RB-6):
     // an index without it would look complete.
     if (read.status === "unavailable" || read.status === "absent") {
