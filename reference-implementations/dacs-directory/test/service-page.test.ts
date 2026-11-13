@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,12 @@ const data = mkdtempSync(join(tmpdir(), "service-page-"));
 process.env.DACS_DIRECTORY_DATA = data;
 const { saveCatalog } = await import("../src/catalog/store.js");
 const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
-test.after(() => rmSync(data, { recursive: true, force: true }));
+test.beforeEach(() => assert.ok(existsSync(data), "the shared data directory exists during each test"));
+test.after(() => {
+  assert.ok(existsSync(data), "the shared data directory survives until file teardown");
+  rmSync(data, { recursive: true, force: true });
+  assert.equal(existsSync(data), false, "file teardown removes the shared data directory");
+});
 
 const SELLER_CLAIM = `did:demos:agent:${"a".repeat(64)}`;
 
@@ -203,4 +208,9 @@ test("the service page keeps the contact button after a failed check and shows h
   assert.doesNotMatch(await render(misordered), /Buy through your AI assistant/, "the commit must follow the negotiation");
   assert.doesNotMatch(await render(otherNegotiation), /Buy through your AI assistant/, "the plugin negotiates only a fixed price");
   assert.doesNotMatch(await render(unindexedFlow), /Buy through your AI assistant/, "a current summary without flow phases shows no box until reindexed");
+});
+
+// This runs after the page cases, while the cached store must still be usable.
+test("the service-page data directory remains available through the last test", () => {
+  assert.ok(existsSync(process.env.DACS_DIRECTORY_DATA!), "the store directory still exists after the page cases");
 });
