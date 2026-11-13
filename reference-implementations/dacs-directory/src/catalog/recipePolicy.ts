@@ -51,6 +51,7 @@ function assertNoSelfSignedAuthorityScheme(recipes: readonly Partial<RecipePolic
 
 /**
  * Deployment policy is explicit and version-pinned; absent or unparsable policy fails closed (null).
+ * The recipes are operator-trusted configuration, unauthenticated until the Standard defines a steward key.
  * Throws SelfSignedAuthoritySchemeError when the recipe selected by (scheme, version) lists `self-signed` for an
  * authority-issued scheme; other entries in the list do not affect the lookup.
  */
