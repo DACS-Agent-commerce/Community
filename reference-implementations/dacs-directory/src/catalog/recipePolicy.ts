@@ -100,23 +100,40 @@ export async function validateRecipeResult(
 export interface RecipeSnapshot { registryVersion: number; recipes: RecipePolicy[] }
 export type ResolveRecipeSnapshot = (version: number) => Promise<RecipeSnapshot | null>;
 
-/** The DACS_RECIPE_SNAPSHOTS text whose summary line was last logged; the line is logged once per distinct value. */
-let loggedSnapshotConfig: string | undefined;
+/** Configured texts already logged in this process, including values revisited after another configuration. */
+const loggedSnapshotConfigs = new Set<string>();
 
 /** Logs the source, snapshot count and distinct trusted signer count of the configuration, never signer keys or contents. */
 function logSnapshotConfigOnce(configText: string, snapshots: readonly RecipeSnapshot[]): void {
-  if (configText === loggedSnapshotConfig) return;
-  loggedSnapshotConfig = configText;
+  if (loggedSnapshotConfigs.has(configText)) return;
+  loggedSnapshotConfigs.add(configText);
   const signers = new Set(snapshots.flatMap((snapshot) => Array.isArray(snapshot?.recipes) ? snapshot.recipes : [])
     .flatMap((recipe) => Array.isArray(recipe?.trustedResultSigners) ? recipe.trustedResultSigners : []));
   console.info(`DACS_RECIPE_SNAPSHOTS: ${snapshots.length} snapshots, ${signers.size} trusted signers`);
+}
+
+/** Invalid configuration gets a generic note, never its text or parser error. */
+function logSnapshotConfigNoteOnce(configText: string, note: "unparsable value" | "not a snapshot array"): void {
+  if (loggedSnapshotConfigs.has(configText)) return;
+  loggedSnapshotConfigs.add(configText);
+  console.info(`DACS_RECIPE_SNAPSHOTS: ${note}; no snapshots loaded`);
 }
 
 /** Throws SelfSignedAuthoritySchemeError when the selected snapshot lists `self-signed` for an authority-issued scheme. */
 export const resolveConfiguredRecipeSnapshot: ResolveRecipeSnapshot = async (version) => {
   try {
     const configText = process.env.DACS_RECIPE_SNAPSHOTS;
-    const snapshots: RecipeSnapshot[] = JSON.parse(configText ?? "[]");
+    let parsed: unknown;
+    try { parsed = JSON.parse(configText ?? "[]"); }
+    catch {
+      if (configText !== undefined) logSnapshotConfigNoteOnce(configText, "unparsable value");
+      return null;
+    }
+    if (!Array.isArray(parsed)) {
+      if (configText !== undefined) logSnapshotConfigNoteOnce(configText, "not a snapshot array");
+      return null;
+    }
+    const snapshots = parsed as RecipeSnapshot[];
     if (configText !== undefined) logSnapshotConfigOnce(configText, snapshots);
     const matches = snapshots.filter((snapshot) => snapshot.registryVersion === version);
     if (matches.length !== 1 || !Array.isArray(matches[0].recipes)) return null;
