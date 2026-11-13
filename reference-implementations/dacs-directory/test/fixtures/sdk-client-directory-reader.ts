@@ -1,16 +1,25 @@
 /**
- * The rules the SDK buyer client applies to this Directory's output, copied
- * from dacs-sdk main 9d820e0f0fea0d9d34c6c0a2b521c18badfb4fee and ported to
- * TypeScript for the Directory and chain subset:
+ * The rules the SDK buyer client applies to this Directory's output, ported
+ * to TypeScript for the Directory and chain subset.
+ *
+ * Copied from dacs-sdk 9d820e0f0fea0d9d34c6c0a2b521c18badfb4fee:
  * - packages/dacs-client/src/dacs/directory.mjs (blob c91e7f47): the
  *   patterns, normalizeCatalogObservedAt, projectSummary, search parameters
  *   and the cursor rule;
  * - packages/dacs-client/src/dacs/verification.mjs (blob de51f5bc):
  *   CATALOG_MAX_AGE_MS, checkCatalogObservation, and the Directory and chain
  *   checks of createListingVerifier.verify with its catalog revocation surface;
- * - packages/dacs-client/src/signatures.mjs (blob 6396455c): addressForClaim;
- * - src/agent/listingValidation.ts (blob bfbccc30) checkRevokedSurface: the
- *   catalog-surface steps before the marker read.
+ * - packages/dacs-client/src/signatures.mjs (blob 6396455c): addressForClaim.
+ * Those three paths are absent at the pinned revision
+ * 3904d704fb540e6e1d7dd502a0be29f20569c92d (scripts/setup-sdk.sh SDK_REV).
+ * The pin supplies the imported SDK utilities but does not contain
+ * packages/dacs-client; this fixture keeps the client rules from the
+ * copy-from revision above.
+ *
+ * src/agent/listingValidation.ts (blob bfbccc30) checkRevokedSurface: the
+ * catalog-surface steps before the marker read. That blob is unchanged at
+ * the pinned revision.
+ *
  * The SDK reader's own Listing checks and the client's purchaseSupport hold
  * are not Directory output and are not copied.
  */
