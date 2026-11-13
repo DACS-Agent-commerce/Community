@@ -19,6 +19,13 @@ const { renderToStaticMarkup } = createRequire(import.meta.url)("react-dom/serve
 // classic runtime, which calls the global React.
 Object.assign(globalThis, { React });
 
+// The cached store module keeps this directory for the lifetime of the file.
+const data = mkdtempSync(join(tmpdir(), "service-page-"));
+process.env.DACS_DIRECTORY_DATA = data;
+const { saveCatalog } = await import("../src/catalog/store.js");
+const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+test.after(() => rmSync(data, { recursive: true, force: true }));
+
 const SELLER_CLAIM = `did:demos:agent:${"a".repeat(64)}`;
 
 const listing = (overrides: Partial<ListingSummary> = {}): ListingSummary => ({
@@ -53,14 +60,9 @@ function evidenceRow(html: string, heading: string): string {
   return row[1];
 }
 
-test("the service page labels catalog authentication per profile and leaves transaction readiness unassessed", async (t) => {
-  const data = mkdtempSync(join(tmpdir(), "service-page-"));
-  t.after(() => rmSync(data, { recursive: true, force: true }));
-  process.env.DACS_DIRECTORY_DATA = data;
-  const { saveCatalog } = await import("../src/catalog/store.js");
-  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
-  const current = listing();
-  const fixture = listing({ listingId: "fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
+test("the service page labels catalog authentication per profile and leaves transaction readiness unassessed", async () => {
+  const current = listing({ listingId: "authentication-service" });
+  const fixture = listing({ listingId: "authentication-fixture", anchor: { kind: "fixture", locator: "fixture-listing" }, artifactProfile: undefined });
   saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [seller([current, fixture])] });
   const render = async (served: ListingSummary) => renderToStaticMarkup(await ServicePage({
     params: Promise.resolve({ seller: encodeURIComponent(SELLER_CLAIM), listingId: served.listingId, version: String(served.version) }),
@@ -82,15 +84,10 @@ function structuredDataOf(html: string): { identifier: string } {
   return JSON.parse(script[1]);
 }
 
-test("the service page structured data identifier differs between sellers that publish the same listing ID and version", async (t) => {
-  const data = mkdtempSync(join(tmpdir(), "service-page-"));
-  t.after(() => rmSync(data, { recursive: true, force: true }));
-  process.env.DACS_DIRECTORY_DATA = data;
-  const { saveCatalog } = await import("../src/catalog/store.js");
-  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+test("the service page structured data identifier differs between sellers that publish the same listing ID and version", async () => {
   const otherClaim = `did:demos:agent:${"d".repeat(64)}`;
-  const first = listing();
-  const second = listing({ seller: { primaryClaim: otherClaim, displayName: "Other seller" } });
+  const first = listing({ listingId: "identifier-service" });
+  const second = listing({ listingId: "identifier-service", seller: { primaryClaim: otherClaim, displayName: "Other seller" } });
   saveCatalog({
     catalogVersion: "1",
     generatedAt: 1,
@@ -102,17 +99,12 @@ test("the service page structured data identifier differs between sellers that p
 
   const firstIdentifier = await identifierFor(SELLER_CLAIM);
   const secondIdentifier = await identifierFor(otherClaim);
-  assert.equal(firstIdentifier, `${SELLER_CLAIM}/service@1`);
-  assert.equal(secondIdentifier, `${otherClaim}/service@1`);
+  assert.equal(firstIdentifier, `${SELLER_CLAIM}/identifier-service@1`);
+  assert.equal(secondIdentifier, `${otherClaim}/identifier-service@1`);
   assert.notEqual(firstIdentifier, secondIdentifier);
 });
 
-test("the service page keeps the contact button after a failed check and shows how to buy", async (t) => {
-  const data = mkdtempSync(join(tmpdir(), "service-page-"));
-  t.after(() => rmSync(data, { recursive: true, force: true }));
-  process.env.DACS_DIRECTORY_DATA = data;
-  const { saveCatalog } = await import("../src/catalog/store.js");
-  const { default: ServicePage } = await import("../app/service/[seller]/[listingId]/[version]/page.js");
+test("the service page keeps the contact button after a failed check and shows how to buy", async () => {
   const endpoint = "https://seller.example/agent";
   // What the plugin can buy: a fixed price paid in DEM through a signed pay-dem phase.
   const demPhase = [{ kind: "pay-dem", rail: "demos-native:DEM" }];
