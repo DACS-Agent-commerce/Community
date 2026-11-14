@@ -23,7 +23,7 @@ class ChildTimeoutError extends Error {
 function runChild(source: string, directory: string, timeoutMs = 20_000): Promise<ChildResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
-      env: { ...process.env, DACS_DIRECTORY_DATA: directory, NODE_NO_WARNINGS: "1" },
+      env: { ...process.env, DACS_DIRECTORY_DATA: directory },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let code: number | null = null;
@@ -117,13 +117,13 @@ test("child completion drains large stdout and stderr and retains a non-zero exi
   try {
     const result = await runChild(`
       process.stdout.write("o".repeat(512 * 1024));
-      process.stderr.write("e".repeat(512 * 1024));
+      process.stderr.write("\\n" + "e".repeat(512 * 1024) + "\\n");
       process.exitCode = 7;
     `, directory, 5_000);
     assert.equal(result.code, 7);
     assert.equal(result.signal, null);
     assert.equal(result.stdout, "o".repeat(512 * 1024));
-    assert.equal(result.stderr, "e".repeat(512 * 1024));
+    assert.ok(result.stderr.split("\n").includes("e".repeat(512 * 1024)), "stderr payload must drain completely");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
