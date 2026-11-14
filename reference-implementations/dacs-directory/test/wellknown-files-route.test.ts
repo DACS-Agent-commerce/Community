@@ -194,3 +194,105 @@ test("the final anchor read cannot cross the total deadline and return files", a
     assert.match(body.error, /30 s/);
   } finally { Date.now = originalNow; globalThis.fetch = originalFetch; }
 });
+
+// A reindex can remove an unread prior Listing from listings while retaining its version internally.
+for (const visible of [false, true]) {
+  for (const failure of ["denied", "missing", "outage"] as const) {
+    test(`a ${failure} held anchor with ${visible ? "another visible listing" : "no visible listings"} answers 503`, async () => {
+      store.saveCatalog({
+        catalogVersion: "1", generatedAt: 1,
+        sellers: [{ primaryClaim: claim, displayName: "seller", listings: visible ? [listingRecord(41)] : [],
+          heldListingVersions: [{ locator: locator(42), listingId: "svc-42", version: 1, contentHash: "42".repeat(32) }],
+        }] as never,
+      });
+      const original = globalThis.fetch;
+      globalThis.fetch = async (input) => {
+        if (String(input).endsWith(locator(42))) {
+          if (failure === "missing") return Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
+          return new Response(null, { status: failure === "denied" ? 403 : 503 });
+        }
+        return Response.json({ success: true, owner: `0x${hex}`, data: { listingId: "svc-41" } });
+      };
+      try {
+        const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+        assert.equal(response.status, 503);
+        const body = await response.json();
+        assert.equal(body.files, undefined);
+        assert.match(body.error, /svc-42/);
+      } finally { globalThis.fetch = original; }
+    });
+  }
+}
+
+for (const heldData of [null, { listingId: "rejected-content" }]) {
+  test(`readable held ${heldData === null ? "non-object" : "object"} content does not block the index or become advertised`, async () => {
+    store.saveCatalog({
+      catalogVersion: "1", generatedAt: 1,
+      sellers: [{ primaryClaim: claim, displayName: "seller", listings: [listingRecord(51)],
+        heldListingVersions: [{ locator: locator(52), listingId: "svc-52", version: 1, contentHash: "52".repeat(32) }],
+      }] as never,
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = async (input) => Response.json({ success: true, owner: `0x${hex}`,
+      data: String(input).endsWith(locator(52)) ? heldData : { listingId: "svc-51" } });
+    try {
+      const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      const index = JSON.parse(body.files["/.well-known/dacs/listings.json"]);
+      assert.deepEqual(index.listings.map((l: { listingId: string }) => l.listingId), ["svc-51"]);
+      assert.equal(JSON.stringify(body).includes("heldListingVersions"), false);
+      assert.equal(JSON.stringify(body).includes("svc-52"), false);
+    } finally { globalThis.fetch = original; }
+  });
+}
+
+for (const stop of ["abort", "deadline"] as const) {
+  test(`held reads obey the existing ${stop} boundary and stop before the next anchor`, async () => {
+    store.saveCatalog({
+      catalogVersion: "1", generatedAt: 1,
+      sellers: [{ primaryClaim: claim, displayName: "seller", listings: [],
+        heldListingVersions: [61, 62].map((n) => ({ locator: locator(n), listingId: `svc-${n}`, version: 1, contentHash: "61".repeat(32) })),
+      }] as never,
+    });
+    const originalFetch = globalThis.fetch, originalNow = Date.now;
+    const controller = new AbortController();
+    let now = 1_000_000;
+    const reads: string[] = [];
+    Date.now = () => now;
+    globalThis.fetch = async (input, init) => {
+      reads.push(String(input));
+      assert.ok(init?.signal, "held reads must receive a signal");
+      if (stop === "abort") { controller.abort(); assert.equal(init.signal.aborted, true); }
+      else now += 31_000;
+      return Response.json({ success: true, owner: `0x${hex}`, data: { listingId: "readable" } });
+    };
+    try {
+      const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`, { signal: controller.signal }));
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).files, undefined);
+      assert.equal(reads.length, 1);
+    } finally { globalThis.fetch = originalFetch; Date.now = originalNow; }
+  });
+}
+
+test("readable all-held versions remain unadvertised and use the empty-catalog response", async () => {
+  store.saveCatalog({
+    catalogVersion: "1", generatedAt: 1,
+    sellers: [{ primaryClaim: claim, displayName: "seller", listings: [],
+      heldListingVersions: [1, 2].map((version) => ({ locator: locator(71), listingId: "svc-71", version, contentHash: "71".repeat(32) })),
+    }] as never,
+  });
+  const original = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = async () => {
+    reads++;
+    return Response.json({ success: true, owner: `0x${hex}`, data: null });
+  };
+  try {
+    const response = await GET(new NextRequest(`http://localhost/api/dacs/wellknown-files?claim=${claim}`));
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).files, undefined);
+    assert.equal(reads, 1, "multiple held versions at one anchor share a read");
+  } finally { globalThis.fetch = original; }
+});
