@@ -81,7 +81,7 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
   if (!/^stor-[0-9a-f]{40}$/.test(address)) return { status: "absent" };
   let res: Response;
   try {
-    res = await fetch(`${RPC}/storage-program/${address}`, {
+    res = await fetch(`${RPC}/storage-program/${address}`, { redirect: "error",
       cache: "no-store",
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(STORAGE_READ_TIMEOUT_MS)]) : AbortSignal.timeout(STORAGE_READ_TIMEOUT_MS),
     });
@@ -173,7 +173,7 @@ type RpcCall =
 async function rpcCall(headers: Record<string, string>, payload: unknown): Promise<RpcCall> {
   let response: Response;
   try {
-    response = await fetch(RPC + "/", {
+    response = await fetch(RPC + "/", { redirect: "error",
       method: "POST",
       headers,
       cache: "no-store",
@@ -252,7 +252,7 @@ export async function resolveOwnedAnchorByName(
     }
     let read: Response;
     try {
-      read = await fetch(`${RPC}/storage-program/${candidate.storageAddress}`, {
+      read = await fetch(`${RPC}/storage-program/${candidate.storageAddress}`, { redirect: "error",
         cache: "no-store",
         signal: AbortSignal.timeout(15_000),
       });

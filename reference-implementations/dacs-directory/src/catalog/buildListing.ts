@@ -83,7 +83,7 @@ const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\
 async function accountNonce(addressHex: string): Promise<number> {
   let res: Response;
   try {
-    res = await fetch(RPC + "/", {
+    res = await fetch(RPC + "/", { redirect: "error",
       method: "POST",
       headers: { "content-type": "application/json" },
       cache: "no-store",
