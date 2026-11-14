@@ -117,3 +117,7 @@ This changes the service time budget only. If the scan reports `DACS_SCAN_MAX_TX
 exhaustion or an RPC failure, resolve that separately; disabling the startup
 timeout cannot make an incomplete scan commit its cursor. For later long replays,
 repeat this temporary procedure.
+
+The admin `/api/dacs/index-now` and `/api/dacs/reindex` routes share the `reindex`
+data lease with the scheduled CLI. If that lease stays busy for the CLI's ten-second
+wait, the CLI logs a skipped pass and exits successfully; the next timer tick retries.
