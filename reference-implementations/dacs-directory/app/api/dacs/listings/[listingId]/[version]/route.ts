@@ -1,6 +1,6 @@
 /** GET /api/dacs/listings/{listingId}/{version} — §6.3.6: the listing summary + anchor. */
 import { NextRequest, NextResponse } from "next/server";
-import { loadCatalog } from "@/src/catalog/store";
+import { findArchivedListingVersion, loadCatalog } from "@/src/catalog/store";
 import { readAnchorResult } from "@/src/catalog/chain";
 import {
   readCounterpartyEvidenceFixtureAnchor,
@@ -21,13 +21,14 @@ export async function GET(
   if ("refused" in sellerQuery) return sellerQuery.refused;
   const requestedSeller = sellerQuery.value;
   const origin = requestBaseUrl(req);
-  const hit = loadCatalog()
+  const current = loadCatalog()
     .sellers.flatMap((s) => s.listings)
     .find((l) => l.listingId === listingId && String(l.version) === version && (!requestedSeller || sellerIdentity(l.seller.primaryClaim) === sellerIdentity(requestedSeller)));
+  const hit = current ?? findArchivedListingVersion({ listingId, version, seller: requestedSeller ?? undefined });
   if (!hit) return NextResponse.json({ error: "listing not found" }, { status: 404 });
-  if (hit.anchor.kind === "fixture") {
+  if (current?.anchor.kind === "fixture") {
     const fixture = readCounterpartyEvidenceFixtureAnchor(hit.anchor.locator);
-    if (!fixture || !verifyCounterpartyEvidenceFixtureListing(fixture, hit)) {
+    if (!fixture || !verifyCounterpartyEvidenceFixtureListing(fixture, current)) {
       return NextResponse.json({ error: "fixture listing failed verification" }, { status: 502 });
     }
     return catalogJson(req, fixture, {

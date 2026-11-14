@@ -68,8 +68,9 @@ const limitations: DirectoryServiceProfile["limitations"] = [
 ];
 
 const encode = encodeURIComponent;
+type ListingAddress = Pick<ListingSummary, "listingId" | "version" | "seller">;
 
-export function servicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+export function servicePath(listing: ListingAddress, identity = sellerIdentity(listing.seller.primaryClaim)): string {
   return `/service/${encode(identity)}/${encode(listing.listingId)}/${listing.version}`;
 }
 
@@ -77,7 +78,7 @@ export function listingJsonPath(listing: ListingSummary, identity = sellerIdenti
   return `/api/dacs/listings/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 
-export function inspectServicePath(listing: ListingSummary, identity = sellerIdentity(listing.seller.primaryClaim)): string {
+export function inspectServicePath(listing: ListingAddress, identity = sellerIdentity(listing.seller.primaryClaim)): string {
   return `/api/dacs/inspect-service/${encode(listing.listingId)}/${listing.version}?seller=${encode(identity)}`;
 }
 

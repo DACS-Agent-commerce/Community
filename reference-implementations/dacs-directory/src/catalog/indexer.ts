@@ -49,6 +49,7 @@ import { ownerSignedRegistration } from "./registrationSig.js";
 import {
   artifactAnchorTime,
   clearListingRejection,
+  retainVerifiedListingVersion,
   listingRejectionNoticeCode,
   pruneRegistrationListingRejections,
   hasPendingOwnerRevocationCandidate,
@@ -320,6 +321,14 @@ export async function indexRegistration(
     const validity = scope.validity as { notBefore?: unknown; notAfter?: unknown } | undefined;
     if (typeof validity?.notBefore === "number" && validity.notBefore > now) continue;
     noteVersion(listingId, version, verified.contentHash);
+    const summaryClaim = verified.profile === "dacs-v0.1" ? verified.listing.seller.identity.presentedBy : reg.primaryClaim;
+    if (!summaryPublicationRefusal(summaryClaim)) {
+      retainVerifiedListingVersion({
+        listingId, version, contentHash: verified.contentHash,
+        anchor: { kind: "storage-program", locator: anchor },
+        seller: { primaryClaim: summaryClaim, displayName }, artifactProfile: verified.profile, catalogObservedAt: now,
+      });
+    }
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
@@ -390,7 +399,6 @@ export async function indexRegistration(
     if (revocation === "indeterminate") continue;
     // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and match the
     // revocation binding against, the exact signed `presentedBy`, CF-3 parameters included.
-    const summaryClaim = verified.profile === "dacs-v0.1" ? verified.listing.seller.identity.presentedBy : reg.primaryClaim;
     // Only the summary is withheld; the verified artifact above stays deal evidence.
     if (summaryPublicationRefusal(summaryClaim)) continue;
     keptListingFacts[verified.contentHash] = {

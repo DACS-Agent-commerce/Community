@@ -154,6 +154,10 @@ export interface DirectoryTransactionReadiness {
   reason: string;
 }
 
+/** Internal verified native pointer for history; never an offer or public summary. */
+export type ArchivedListingVersion = Pick<ListingSummary,
+  "listingId" | "version" | "contentHash" | "anchor" | "seller" | "catalogObservedAt" | "artifactProfile">;
+
 export interface ReachabilityHint {
   status: "reachable" | "unreachable" | "unknown";
   checkedAt: number;
