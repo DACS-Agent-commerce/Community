@@ -15,7 +15,7 @@ import { listingAddress } from "../../../../src/catalog/canonical.js";
 import { readAnchorRecord } from "@/src/catalog/chain";
 import { observeListingAnchorInclusion } from "@/src/catalog/listingFinality";
 import { verifyStoredListing } from "@/src/catalog/listingVerification";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
+import { rateLimit, readRequestJson } from "@/src/catalog/security";
 
 function canonicalOwner(value: string): string | null {
   const hex = value.match(/([0-9a-fA-F]{64})$/)?.[1];
@@ -23,9 +23,11 @@ function canonicalOwner(value: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "confirm-listing", 60, 10 * 60_000) ?? rejectOversizeRequest(req);
+  const blocked = rateLimit(req, "confirm-listing", 60, 10 * 60_000);
   if (blocked) return blocked;
-  const body = await req.json().catch(() => null) as {
+  const input = await readRequestJson(req);
+  if (!input.ok) return input.response;
+  const body = input.value as {
     anchorAddress?: unknown;
     programName?: unknown;
     contentHash?: unknown;

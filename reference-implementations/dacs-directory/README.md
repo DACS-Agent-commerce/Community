@@ -749,3 +749,9 @@ marker accepts a numeric `revokedAt` within ±(2^53−1), and its binding carrie
 (RB-2). `test/listing-verification.test.ts` and `test/revocation-vectors.test.ts` pin them.
 
 Directory API freshness fields: [scan progress](docs/freshness-api.md).
+
+### Incoming JSON bounds regression check
+
+After installing the directory package dependencies, run from the repository root:
+
+`cd reference-implementations/dacs-directory && node --import tsx --test test/request-body-limits.test.ts test/request-bom-compat.test.ts`
