@@ -1,0 +1,79 @@
+# Source mapping
+
+The public prompts derive from a DACS PR Review Executor automation used by `mj-deving` on 13 September 2026. The source automation is private configuration, so this repository contains the reusable contract rather than private paths, identity-bound authority, or restricted review state.
+
+The preservation rule for this extraction is strict: retain the source Goal, Success criteria, evidence model, stage model, concrete-repair contract, authority boundaries, stopping conditions, and output schema. Change a source rule only when public reuse or cross-runtime execution requires it, and record the reason here.
+
+## Preserved contract
+
+| Source section | Public result |
+|---|---|
+| Goal | Same progression through eligible review stages, exact-candidate evidence, ownership, disclosure, and reconstructible state |
+| Success criteria | Same per-change record, isolated mutation scope, public/restricted consistency, run-versus-objective distinction, plus the already-required concrete-repair rule made explicit |
+| Stage workflow | Same design-draft, design-review, design-approved, implementation, acceptance-review, ready-to-merge, and done distinctions in the DACS prompt |
+| Discovery and execution | Same lean gate, live refresh, trigger, exact revision, ownership, isolation, reconciliation, and named-oracle requirements |
+| Review findings | Same exact location, requirement, evidence, compatible repair, expected behavior, and executable acceptance check |
+| Stop rules | Same authority, drift, disclosure, ownership, parallel-join, merge, release, deployment, and automation boundaries |
+| Output | Same compact run and overall-status fields with the named human generalized to the current reviewer or owner |
+| Queue reconstruction | The source goal implied exhaustive progress, but its addressing, phase, and readiness predicates were not operationalized. The public prompts add a complete directed-change matrix with recorded classification evidence. |
+| Iteration | The source bounded a dispatch cohort without mechanically requiring another discovery pass after reconciliation. The public prompts add a fixed-point loop and forbid treating one lane or batch as overall completion. |
+| Lean gate | The source allowed a recent no-delta comparison. The public prompts still require a fresh identity, addressing, revision, and reconciliation classification before `NO ACTION`. |
+
+## Necessary deviations
+
+| Source behavior | Public form | Reason |
+|---|---|---|
+| Hard-coded `mj-deving` identity | Currently authenticated reviewer | Another contributor cannot inherit a person's identity or review scope. |
+| Private workspace and absolute local paths | Active authoritative checkout and runtime-local state | Local paths are private, machine-specific, and unusable by another reviewer. |
+| Personal standing authorization dated 2026-09-13 | Safe read-only and unset-reviewer defaults; another allowed effect records the current authenticated user's direct local binding to an exact provider login | Authorization cannot be transferred through a shared prompt or silently follow changed credentials. |
+| Mandatory access to all visible private vulnerability reports before any action | Restricted surfaces admitted per candidate; missing access holds that lane | Public reviewers may lack private-report access. Missing restricted access must not disclose content or create a false global pass. |
+| Beads and private ISA required by name | Project-declared task ledger and owning specification when present | These are local coordination implementations rather than universal review semantics. |
+| Fixed local lock path | Runtime-provided unique lock; serial fallback | Lock paths and concurrency primitives belong to the runtime adapter. |
+| Fixed three-lane worker and cohort-join machinery | Parallel lanes only with isolation and one reconciliation owner; serial fallback | Other runtimes expose different worker and state-isolation primitives. |
+| Named private review levels and installed tools | Current repository policy and strongest available required capability | A public prompt cannot claim another reviewer has locally installed skills or private policy. Missing required checks still produce `HOLD`. |
+| Codex-specific scheduler self-pause | Configured completion action with explicit current runtime authority, state readback, and report-only fallback | Scheduler mutation is runtime-specific and cannot be granted by copied configuration text. |
+| `Marius action` output field | Required human action or none | The reusable prompt must address its actual operator. |
+| Source shorthand `two maintainer approvals` | Two distinct assigned-contributor approvals on the same revision, followed by final steward approval | The live #398 governance text uses contributor-account approvals and records the steward decision separately. |
+| Scattered source checks plus live discussion #400 guidance | One explicit review-quality section | Consolidates exact-head, missing-oracle, concrete-repair, disclosure, duplicate-review, approval-rate, unsupported-finding, dirty-base, stacked-parent, and outcome-over-tool-trace rules. |
+| Repeated procedural explanation | A 50–80-line ideal-state contract with the same asserted gates | Keeps the pasteable automation readable without weakening authority, state, repair, reconciliation, or completion semantics. |
+| Queue, review, and publication collapsed into one result | DACS file identified as an optional full-queue adapter with a durable run Goal, a no-progress guard, and separated snapshot, findings, checks, disposition, publication, and usage records | Incorporates the proposed steward direction in discussion #400 without prematurely restructuring the prototype or running the deferred eval suite. |
+| Ambiguous completion with held lanes | Overall completion requires both `ACTIONABLE = 0` and `HOLD = 0` | An unresolved hold keeps the overall objective in progress and keeps the scheduler able to observe its trigger. |
+| Readiness mixed with prior disposition | Terminal classifications run before readiness | An existing exact-revision disposition is evidence of completed review scope, not a blocker. |
+| Repair detail attached only to `CHANGES_REQUESTED` | Full repair chain for every accepted finding that asks for a change | DACS uses actionable `COMMENT` findings for some integration and evidence conditions. |
+| Open oracle hold looked like a terminal disposition | A disposition with a named uncleared hold remains `HOLD` | A comment can record a valid review result while deliberately leaving one deciding condition open. |
+| Non-submit execution could re-enter the same lane | Read-only and draft results become a per-run `HOLD` after one pass | No provider-visible disposition exists to terminate the lane when the configured effect forbids submission. |
+| Configured write effect could survive an identity downgrade in loop logic | Derive `EFFECTIVE_EFFECT` after identity, provenance, and permission checks | Every action and stopping decision must use the safe runtime result rather than the configured value alone. |
+| Portable placeholders repeated in operational clauses | Placeholders occur only in the configuration block; the body names configured keys | Adopters can configure one block without leaving unresolved operational tokens. |
+| Candidate-only terminal disposition | Bind prior dispositions to the recorded integration-base revision as well as candidate and scope | A stable candidate can become stale when its required integration base advances. |
+| Unbounded portable effect value | Closed portable vocabulary with read-only and unset-reviewer defaults | Runtimes need interoperable write semantics and a fail-safe default rather than an arbitrary authority string. |
+| Open hold could disappear after its provider request cleared | Retain the reviewer's named uncleared hold in the directed inventory until evidence is evaluated or coordination explicitly withdraws it | Monitoring ownership must survive the provider-side request transition that the review itself can cause. |
+| Hold-only recheck could override integration-base drift | Give base drift priority and require a full assessment against the new exact base | Evidence that closes an old hold cannot validate behavior in a changed integration context. |
+| Empty directed inventory could self-pause while authors were repairing reviewed changes | Separate the executable directed inventory from an enrolled-queue completion view and require every enrolled entry to be globally terminal before self-pause | Reviewer idle is not queue completion; later revisions still need discovery when re-addressed. |
+| DACS monitoring scope could be unset in a standalone copy | Fix DACS completion monitoring to all current #398 entries; require a nonempty configured scope in the portable prompt | Global completion must not pass vacuously over an undefined enrollment set. |
+| Provider review could look terminal before required coordination/readback completed | Require reconciled external effects and use a reconciliation-only actionable lane | Partial or unknown writes need live readback and bounded completion, not duplicate review or blind retry. |
+| Reconciliation looked actionable even when the effective effect forbade its missing coordination write | Hold the lane with required authorization or human update as its trigger | A reviewer-only effect must not loop on an execution path it cannot lawfully complete. |
+| Read-only and draft deduplication lasted only one invocation | Persist an exact reviewer/candidate/scope/base/effect/contract-policy/clearing-evidence/addressed-condition hold key across scheduled runs | An unchanged candidate should not be repeatedly reassessed merely because a scheduler run began, while changed instructions, newly arrived named clearing evidence, or a newly addressed distinct condition must invalidate the old hold. |
+| Pre-submit drift check covered only the candidate | Re-read both candidate and integration-base pins immediately before submission | A stable candidate can still have an obsolete assessment when its required integration context advances. |
+| Pre-submit pins could remain stable while coordination changed | Re-read trigger, stage, scope, owner, candidate, and integration base immediately before submission | Withdrawal or admission drift must cancel a stale write even when both SHAs are unchanged. |
+| Duplicate-stop rule omitted a newly addressed distinct condition | Require no new addressed request before reusing an existing disposition | Same-head deduplication must not suppress an explicitly reopened review condition. |
+| Non-submit hold cache and discovery could ignore a newly addressed condition | Add addressed request/condition state to cache invalidation and use the same distinct-condition predicate during discovery | A read-only result or earlier disposition must not suppress a newly requested assessment on the same head and scope. |
+| Enumerated cache and pre-submit fields could omit another disposition input | Canonicalize every stable assessment input and add a separate admission fingerprint for pre-submit comparison | Any relevant evidence, authority, or admission change must invalidate stale work without another field-by-field patch. |
+| Reviewer mismatch could forbid the internal hold state required by safe read-only fallback | Permit only bounded runtime-local lock, cursor, and hold state when repository and reviewer identity remain reliable | A safe downgrade can deduplicate work without gaining any provider or project mutation authority. |
+| Submitted dispositions could bypass later assessment-input changes | Record the assessment fingerprint with every disposition and require exact current equality on every terminal or duplicate path | A newly failing check or other changed input must reopen an old submitted review even when candidate and base pins are stable. |
+| A disposition's own publication could invalidate its recorded fingerprint | Split stable assessment inputs from transient admission state and reconcile publication/readback outputs separately | Successful submission must not make an otherwise current disposition look stale and trigger duplicate review writes. |
+| Portable `DONE` referred to an undefined configured terminal state | Add a mandatory terminal-stage and required-live-evidence binding and derive `DONE` only from it | Adopters must not guess when global completion or self-pause is safe. |
+| Output schema omitted the assessment fingerprint required for later reuse | Persist the fingerprint in every disposition/provider record and include it in write readback | A later run needs durable live evidence for the equality check rather than an in-memory value. |
+| General task output could expose restricted review detail | Gate detailed records on a verified authorized destination and keep ordinary task/notification output disclosure-safe | Runtime notification configuration must not bypass the review venue's disclosure boundary. |
+| Current queue completion could self-pause an open-ended monitor | Require closed-enrollment evidence or a verified external wake-up before self-pause | Future queue entries must remain discoverable after today's entries become terminal. |
+| Candidate checks could inherit provider credentials | Run candidate-controlled commands in a credential-free, network-denied sandbox and reserve authenticated provider operations for a separate trusted step | Untrusted pull-request code must not bypass the review effect boundary through ambient credentials. |
+| Candidate instruction changes could govern their own review | Pin governing instructions and policy to the trusted integration-base revision | Candidate `AGENTS.md` or policy edits remain reviewable artifacts until integrated. |
+| One oracle could mutate the bytes seen by later checks | Run each deciding oracle from a fresh immutable exact-pin snapshot with read-only inputs and separate ephemeral outputs | Every accepted check must still prove the recorded candidate rather than a generated or malicious workspace mutation. |
+| A stage transition could reuse an old stage-specific disposition | Include the stable assessed stage in the assessment-input fingerprint | A new review stage must run its own required checks even when the candidate revision and addressed condition are unchanged. |
+| Candidate and refresh limits could stop with executable directed reviews remaining | Remove review-count, refresh-cycle, and elapsed-time work budgets; bind a durable Goal to the current executable frontier and retain only a repeated-identical-state livelock guard plus the spend boundary | Queue volume is work to complete, not a reason to stop; the guard addresses non-progress without allocating a review budget, while the Goal stays smaller than the open-ended global queue. |
+
+## Deliberately deferred
+
+- Public evaluation fixtures and a runner remain follow-up work in [DACS-Standard discussion #400](https://github.com/DACS-Agent-commerce/DACS-Standard/discussions/400).
+- Repeated `pass^k` trials and the proposed 16-run calibration remain evaluation methodology rather than runtime executor behavior.
+- Additional runtime adapters require evidence from the same public fixtures before support is claimed.
+- This prototype does not alter DACS normative text, issue #398 policy, repository permissions, or any scheduler.
