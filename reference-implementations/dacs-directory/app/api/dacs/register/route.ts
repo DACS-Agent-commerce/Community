@@ -7,7 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyOwnerSignature } from "@/src/catalog/registrationSig";
 import { parseRegistration } from "@/src/catalog/registration";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
+import { rateLimit, readRequestJson } from "@/src/catalog/security";
 import { loadRegistrations, saveRegistrations, withDataLock } from "@/src/catalog/store";
 import { verifyBundleBinding } from "@/src/catalog/bundleBinding";
 
@@ -21,9 +21,11 @@ const MAX_REGISTRATIONS = 2000;
 const MAX_UNSIGNED_CANDIDATES = 200;
 
 export async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "register", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
+  const blocked = rateLimit(req, "register", 10, 10 * 60_000);
   if (blocked) return blocked;
-  const parsed = parseRegistration(await req.json().catch(() => null));
+  const input = await readRequestJson(req);
+  if (!input.ok) return input.response;
+  const parsed = parseRegistration(input.value);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const body = parsed.value;
 

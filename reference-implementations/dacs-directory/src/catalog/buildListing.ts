@@ -35,7 +35,7 @@ import {
   resolveOwnedAnchorByName,
 } from "@/src/catalog/chain";
 import { StorageResponseTooLarge, storageResponseJson } from "@/src/catalog/artifactLimits";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
+import { rateLimit, readRequestJson } from "@/src/catalog/security";
 import {
   listingVersionFloor,
   loadCatalog,
@@ -132,9 +132,11 @@ export function createBuildListingPost(
   resolveVersion?: ResolveListingVersion,
 ) {
 return async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "build-listing", 10, 10 * 60_000) ?? rejectOversizeRequest(req);
+  const blocked = rateLimit(req, "build-listing", 10, 10 * 60_000);
   if (blocked) return blocked;
-  const body = (await req.json().catch(() => null)) as {
+  const input = await readRequestJson(req);
+  if (!input.ok) return input.response;
+  const body = input.value as {
     claim?: string; serviceId?: string; name?: string; description?: string;
     rails?: string[]; delivery?: string[]; category?: string; tags?: string[];
     publicEndpoint?: string; identityPresentedAt?: number; identitySignature?: string;
