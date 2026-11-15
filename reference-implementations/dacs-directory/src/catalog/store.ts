@@ -678,6 +678,14 @@ export const recordRevocationProgress = db.transaction(
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Acquisition contention only; failures inside the protected operation keep their original type. */
+export class DataLeaseTimeoutError extends Error {
+  constructor(public readonly leaseName: string) {
+    super(`timed out waiting for ${leaseName} data lease`);
+    this.name = "DataLeaseTimeoutError";
+  }
+}
+
 /** Cross-process/instance lease. SQLite serializes acquisition; expired leases recover automatically. */
 export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
   const token = randomUUID();
@@ -690,7 +698,7 @@ export async function withDataLock<T>(name: string, fn: () => Promise<T> | T): P
         .run(name, token, now + 2 * 60_000).changes === 1;
     })();
     if (acquired) break;
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${name} data lease`);
+    if (Date.now() >= deadline) throw new DataLeaseTimeoutError(name);
     await wait(25);
   }
   const renewal = setInterval(() => {
