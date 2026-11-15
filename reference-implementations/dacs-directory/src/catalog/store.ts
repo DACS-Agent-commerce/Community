@@ -762,28 +762,47 @@ export function retainVerifiedListingVersion(listing: ArchivedListingVersion): v
     { evidenceChain: chain.evidenceChain, listing: pointer } satisfies StoredListingVersion);
 }
 
-/** Committed history only; ordinary replacement of the discovery catalog cannot erase it. */
-export function findArchivedListingVersion(query: {
+export type ArchivedListingLookup =
+  | { kind: "unique"; listing: ArchivedListingVersion }
+  | { kind: "ambiguous"; contentHashes: string[] };
+
+/**
+ * Committed history only; ordinary replacement of the discovery catalog cannot erase it.
+ * Distinct signed Listings at one address are ambiguous; the same bytes at two anchors are not.
+ */
+export function lookupArchivedListingVersion(query: {
   listingId: string; version: string; seller?: string;
-}): ArchivedListingVersion | null {
+}): ArchivedListingLookup | null {
   const chain = loadCatalogChain();
   if (!chain) return null;
-  // A JSON tuple prefix keeps arbitrary Listing ids out of the key grammar.
+  // A JSON tuple prefix keeps arbitrary Listing ids out of the key grammar. It ends in ",", so the
+  // keys that start with it are exactly those from it up to the same text ending in "-": a range
+  // the key index can search, where SQLite's case-insensitive LIKE scans the table.
   const prefix = LISTING_VERSION_PREFIX +
     JSON.stringify([chain.evidenceChain, query.listingId, query.version]).slice(0, -1) + ",";
-  const pattern = prefix.replace(/[\\%_]/g, "\\$&") + "%";
-  const rows = db.prepare("SELECT value_json FROM kv_state WHERE key LIKE ? ESCAPE '\\' ORDER BY updated_at DESC, key")
-    .all(pattern) as Array<{ value_json: string }>;
+  const rows = db.prepare("SELECT value_json FROM kv_state WHERE key >= ? AND key < ? ORDER BY updated_at DESC, key")
+    .all(prefix, prefix.slice(0, -1) + "-") as Array<{ value_json: string }>;
+  const matches: ArchivedListingVersion[] = [];
   for (const row of rows) {
     const entry = JSON.parse(row.value_json) as StoredListingVersion;
     const listing = entry.listing;
     if (entry.evidenceChain === chain.evidenceChain && listing.listingId === query.listingId &&
         String(listing.version) === query.version &&
         (!query.seller || sellerIdentity(listing.seller.primaryClaim) === sellerIdentity(query.seller))) {
-      return listing;
+      matches.push(listing);
     }
   }
-  return null;
+  if (matches.length === 0) return null;
+  const contentHashes = [...new Set(matches.map((listing) => listing.contentHash))].sort();
+  return contentHashes.length > 1 ? { kind: "ambiguous", contentHashes } : { kind: "unique", listing: matches[0] };
+}
+
+/** The one archived Listing at this address, or null when there is none or the address is ambiguous. */
+export function findArchivedListingVersion(query: {
+  listingId: string; version: string; seller?: string;
+}): ArchivedListingVersion | null {
+  const found = lookupArchivedListingVersion(query);
+  return found?.kind === "unique" ? found.listing : null;
 }
 
 /** Called only inside the same transaction that saves the confirmed catalog. */

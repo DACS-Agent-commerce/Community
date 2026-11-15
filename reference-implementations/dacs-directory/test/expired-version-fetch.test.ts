@@ -2,11 +2,14 @@
 import { isolatedDataDir } from "./fixtures/isolated-data-dir.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import Database from "better-sqlite3";
 import test, { beforeEach, type TestContext } from "node:test";
 import { NextRequest } from "next/server";
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { GET as exact } from "../app/api/dacs/listings/[listingId]/[version]/route.js";
 import { GET as search } from "../app/api/dacs/listings/route.js";
+import { GET as inspect } from "../app/api/dacs/inspect-service/[listingId]/[version]/route.js";
+import { GET as sellerView } from "../app/api/dacs/sellers/[primaryClaimRef]/route.js";
 import { activeCatalogListings } from "../src/catalog/discovery.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import { PINNED_DEMOS_CHAIN_IDENTITY } from "../src/catalog/nodeDeployment.js";
@@ -28,8 +31,8 @@ beforeEach(() => {
   store.resetCatalogChain(PINNED_DEMOS_CHAIN_IDENTITY, true, 0);
 });
 
-function listing(owner = seller, version = 1, expiry = notAfter): Artifact {
-  const original = kitListing(owner, { listingId: "expiry-service", listingVersion: version, notBefore: 2_000 });
+function listing(owner = seller, version = 1, expiry = notAfter, title?: string): Artifact {
+  const original = kitListing(owner, { listingId: "expiry-service", listingVersion: version, notBefore: 2_000, title });
   const { signature: _signature, ...scope } = original;
   scope.validity = { notBefore: 2_000, notAfter: expiry };
   return { ...scope, signature: { algorithm: "ed25519", signer: owner.claim,
@@ -296,4 +299,114 @@ test("a full reindex publishes history only when its final chain fence passes", 
   await reindexAll({ log: () => {}, resolveIdentities: offline, nodeDeployment: onPinnedChain });
   assert.equal(store.loadCatalog().sellers[0].listings.length, 0);
   assert.equal((await get()).status, 200);
+});
+
+function linkTargets(res: Response): Record<string, string> {
+  const targets: Record<string, string> = {};
+  for (const part of (res.headers.get("link") ?? "").split(/,\s*(?=<)/)) {
+    const link = /^<([^>]+)>;\s*rel="([^"]+)"/.exec(part);
+    if (link) targets[link[2]] = link[1];
+  }
+  return targets;
+}
+
+async function followLink(href: string): Promise<number> {
+  const url = new URL(href);
+  const inspection = /^\/api\/dacs\/inspect-service\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (inspection) {
+    return (await inspect(new NextRequest(href), {
+      params: Promise.resolve({ listingId: decodeURIComponent(inspection[1]), version: decodeURIComponent(inspection[2]) }),
+    })).status;
+  }
+  const sellerPath = /^\/api\/dacs\/sellers\/([^/]+)$/.exec(url.pathname);
+  assert.ok(sellerPath, `no resolver for ${href}`);
+  return (await sellerView(new NextRequest(href), {
+    params: Promise.resolve({ primaryClaimRef: decodeURIComponent(sellerPath[1]) }),
+  })).status;
+}
+
+test("an archive hit advertises only link targets that resolve", async (t) => {
+  let now = notAfter - 1;
+  t.mock.method(Date, "now", () => now);
+  fixture(t);
+  const record = await publish();
+  const current = linkTargets(await get());
+  assert.deepEqual(Object.keys(current).sort(), ["alternate", "describedby", "seller", "service-inspection"]);
+  assert.equal(await followLink(current["service-inspection"]), 200);
+  now = notAfter + 1;
+  await publish(registration(), record);
+  const expired = await get();
+  assert.equal(expired.status, 200);
+  const history = linkTargets(expired);
+  assert.deepEqual(Object.keys(history).sort(), ["describedby", "seller"],
+    "no service page or inspection envelope exists for a version outside the current catalog");
+  assert.equal(await followLink(history.seller), 200);
+  store.saveCatalog(emptyCatalog());
+  const orphan = await get();
+  assert.equal(orphan.status, 200);
+  assert.deepEqual(Object.keys(linkTargets(orphan)), ["describedby"], "a seller that left the catalog is not advertised");
+});
+
+test("distinct signed Listings at one seller, id and version are refused as ambiguous after expiry", async (t) => {
+  const second = locator(15_303);
+  for (const anchors of [[at, second], [second, at]]) {
+    store.revertChainReadWindow();
+    store.resetCatalogChain(PINNED_DEMOS_CHAIN_IDENTITY, true, 0);
+    let now = notAfter - 1;
+    const clock = t.mock.method(Date, "now", () => now);
+    const node = new FixtureNode();
+    node.anchor(at, seller.owner, listing(seller, 1, notAfter, "Alpha report"));
+    node.anchor(second, seller.owner, listing(seller, 1, notAfter, "Beta report"));
+    const network = t.mock.method(globalThis, "fetch", node.fetch);
+    const record = await publish(registration(seller, anchors));
+    assert.deepEqual(record.listings.map((entry) => entry.status), ["superseded", "superseded"]);
+    assert.equal((await get()).status, 200, "the current-catalog path is unchanged");
+    now = notAfter + 1;
+    await publish(registration(seller, anchors), record);
+    const refused = await get();
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json() as { error: string }).error, /^ambiguous listing version/);
+    assert.equal(store.findArchivedListingVersion(query), null);
+    clock.mock.restore();
+    network.mock.restore();
+  }
+});
+
+test("the same signed bytes at two anchors stay one readable artifact after expiry", async (t) => {
+  t.mock.method(Date, "now", () => notAfter + 1);
+  const raw = listing();
+  const node = fixture(t, raw);
+  const second = locator(15_304);
+  node.anchor(second, seller.owner, raw);
+  await publish(registration(seller, [at, second]));
+  await publish(registration(seller, [second, at]));
+  const res = await get();
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), raw);
+});
+
+test("the archive lookup searches the key index", (t) => {
+  const seen: Array<{ sql: string; params: unknown[] }> = [];
+  const prepare = Database.prototype.prepare;
+  t.mock.method(Database.prototype, "prepare", function (this: Database.Database, sql: string) {
+    const statement = prepare.call(this, sql);
+    if (/^SELECT value_json FROM kv_state WHERE /.test(sql)) {
+      const all = statement.all;
+      statement.all = (...params: unknown[]) => {
+        seen.push({ sql, params });
+        return Reflect.apply(all, statement, params) as unknown[];
+      };
+    }
+    return statement;
+  });
+  store.findArchivedListingVersion({ listingId: "missing", version: "1", seller: seller.claim });
+  assert.equal(seen.length, 1, "the lookup ran one archive query");
+  const db = new Database(store.DATA_DIR + "/directory.sqlite", { readonly: true });
+  try {
+    const plan = (db.prepare("EXPLAIN QUERY PLAN " + seen[0].sql).all(...seen[0].params) as Array<{ detail: string }>)
+      .map((row) => row.detail);
+    assert.ok(plan.some((detail) => /^SEARCH kv_state USING .*INDEX/.test(detail)), `plan: ${plan.join(" | ")}`);
+  } finally {
+    db.close();
+  }
 });
