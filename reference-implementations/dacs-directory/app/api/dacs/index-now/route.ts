@@ -7,13 +7,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { scanStateCurrent, servedCatalogChain, servedChainUnchanged } from "@/src/catalog/chainGate";
 import { indexRegistration } from "@/src/catalog/indexer";
-import { requireAdmin } from "@/src/catalog/security";
+import { requireAdmin, readRequestJson } from "@/src/catalog/security";
 import { openChainReadWindow, commitChainReadWindow, revertChainReadWindow, loadStoredCatalog, loadRegistrations, loadScanState, loadCatalogChain, invalidateCatalogChain, publishCatalogChain, withDataLock } from "@/src/catalog/store";
 
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
   if (denied) return denied;
-  const body = (await req.json().catch(() => null)) as { claim?: string } | null;
+  const input = await readRequestJson(req);
+  if (!input.ok) return input.response;
+  const body = input.value as { claim?: string } | null;
   const claim = body?.claim?.trim();
   if (!claim) return NextResponse.json({ error: "need { claim }" }, { status: 400 });
   const reg = loadRegistrations().find((r) => r.primaryClaim === claim);

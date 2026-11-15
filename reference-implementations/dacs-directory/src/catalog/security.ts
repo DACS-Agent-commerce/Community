@@ -103,3 +103,51 @@ export function rejectOversizeRequest(
   }
   return null;
 }
+
+/** Bound received bytes and total read time even when Content-Length is absent or false. */
+export async function readRequestJson(
+  req: NextRequest,
+  maxBytes = 64 * 1024,
+  timeoutMs = 15_000,
+): Promise<{ ok: true; value: unknown } | { ok: false; response: NextResponse }> {
+  const oversized = rejectOversizeRequest(req, maxBytes);
+  if (oversized) {
+    void req.body?.cancel().catch(() => {});
+    return { ok: false, response: oversized };
+  }
+  const reader = req.body?.getReader();
+  if (!reader) return { ok: true, value: null };
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { timedOut = true; reject(new Error("request body timed out")); }, timeoutMs);
+  });
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  try {
+    for (;;) {
+      const chunk = await Promise.race([reader.read(), deadline]);
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > maxBytes) {
+        cancel();
+        return { ok: false, response: NextResponse.json({ error: "request body too large" }, { status: 413 }) };
+      }
+      chunks.push(chunk.value);
+    }
+    // Decode the bounded bytes with the native Body JSON algorithm, just as
+    // Request.json() did (including this runtime's UTF-8 and BOM handling).
+    try { return { ok: true, value: await new Response(Buffer.concat(chunks, bytes)).json() }; }
+    catch { return { ok: true, value: null }; }
+  } catch {
+    cancel();
+    return { ok: false, response: NextResponse.json(
+      { error: timedOut ? "request body timed out" : "request body read failed" },
+      { status: timedOut ? 408 : 400 },
+    ) };
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
