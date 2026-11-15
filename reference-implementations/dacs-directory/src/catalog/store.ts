@@ -546,21 +546,29 @@ const pendingCandidates = db.prepare(`SELECT locator FROM revocation_candidates
     SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
       AND r.locator = revocation_candidates.locator AND r.retry_after > ?
   ) ORDER BY seq LIMIT ?`);
-const pendingOwnerCandidates = db.prepare(`SELECT locator FROM revocation_candidates
+const pendingOwnerCandidates = db.prepare(`SELECT locator, seq FROM revocation_candidates
   WHERE listing_hash = ? AND owner = ? AND state = 'pending' AND NOT EXISTS (
     SELECT 1 FROM revocation_candidate_retries r WHERE r.listing_hash = revocation_candidates.listing_hash
       AND r.locator = revocation_candidates.locator AND r.retry_after > ?
   ) ORDER BY seq LIMIT ?`);
 /**
  * The next `limit` candidates to verify for a listing: those anchored by the
- * listing's owner first, then the rest in arrival order. Two indexed queries
- * of at most `limit` rows each, whatever the queue length.
+ * listing's owner or signing key first, together in arrival order, then the
+ * rest in arrival order. At most three indexed queries of at most `limit`
+ * rows each, whatever the queue length. Nulls are skipped and equivalent
+ * keys are de-duplicated before querying.
  */
-export function nextRevocationCandidates(listingHash: string, listingOwner: string | null, limit: number): string[] {
+export function nextRevocationCandidates(
+  listingHash: string, listingOwner: string | null, limit: number, listingSigner: string | null = null,
+): string[] {
   const rows = (statement: Database.Statement, ...params: unknown[]) =>
     (statement.all(...params) as Array<{ locator: string }>).map((row) => row.locator);
   const now = Date.now();
-  const owned = listingOwner ? rows(pendingOwnerCandidates, listingHash, canonicalProgramOwner(listingOwner), now, limit) : [];
+  const owners = [...new Set([listingOwner, listingSigner]
+    .filter((owner): owner is string => owner !== null).map(canonicalProgramOwner))];
+  const owned = owners.flatMap((owner) =>
+    pendingOwnerCandidates.all(listingHash, owner, now, limit) as Array<{ locator: string; seq: number }>)
+    .sort((a, b) => a.seq - b.seq).slice(0, limit).map((row) => row.locator);
   return [...new Set([...owned, ...rows(pendingCandidates, listingHash, now, limit)])].slice(0, limit);
 }
 const anyPendingCandidate = db.prepare(`SELECT 1 FROM revocation_candidates
