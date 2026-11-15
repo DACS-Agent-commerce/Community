@@ -24,7 +24,7 @@ const UNOCCUPIED = `stor-${"0".repeat(40)}`;
 
 async function post(rpc: string, headers: Record<string, string>, payload: unknown): Promise<unknown> {
   try {
-    const response = await fetch(`${rpc}/`, { method: "POST", headers, cache: "no-store", signal: AbortSignal.timeout(15_000), body: JSON.stringify(payload) });
+    const response = await fetch(`${rpc}/`, { redirect: "error", method: "POST", headers, cache: "no-store", signal: AbortSignal.timeout(15_000), body: JSON.stringify(payload) });
     return response.ok ? await storageResponseJson(response) : null;
   } catch {
     return null;
@@ -48,7 +48,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
   const base = rpc.replace(/\/$/, "");
   let storageNotFound = false;
   try {
-    const response = await fetch(`${base}/storage-program/${UNOCCUPIED}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${base}/storage-program/${UNOCCUPIED}`, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15_000) });
     const body = await storageResponseJson(response) as { success?: unknown; errorCode?: unknown } | null;
     storageNotFound = response.status === 404 && body?.success === false && body.errorCode === "NOT_FOUND";
   } catch { /* storageNotFound stays false */ }
@@ -70,7 +70,7 @@ export async function probeNodeContract(rpc: string, programName: string): Promi
   let knownProgramReadable = false;
   if (candidate) {
     try {
-      const response = await fetch(`${base}/storage-program/${candidate}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+      const response = await fetch(`${base}/storage-program/${candidate}`, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15_000) });
       const body = await storageResponseJson(response) as { success?: unknown; programName?: unknown; owner?: unknown; data?: unknown } | null;
       knownProgramReadable = response.ok && body?.success === true && body.programName === programName &&
         typeof body.owner === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(body.owner) &&
