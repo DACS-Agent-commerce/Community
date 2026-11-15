@@ -19,7 +19,7 @@ import { readAnchorResult } from "@/src/catalog/chain";
 import { storedListingHash } from "@/src/catalog/listingVerification";
 import { gcrGetIdentities } from "@/src/catalog/gcr";
 import { discoveryListing } from "@/src/catalog/discovery";
-import { loadCatalog } from "@/src/catalog/store";
+import { loadStoredCatalog } from "@/src/catalog/store";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
@@ -30,8 +30,8 @@ export async function GET(req: NextRequest) {
   const hex = claim?.match(/([0-9a-fA-F]{64})$/)?.[1];
   if (!claim || !hex) return NextResponse.json({ error: "need ?claim=" }, { status: 400 });
 
-  const seller = loadCatalog().sellers.find((s) => s.primaryClaim === claim);
-  if (!seller || seller.listings.length === 0) {
+  const seller = loadStoredCatalog().sellers.find((s) => s.primaryClaim === claim);
+  if (!seller) {
     return NextResponse.json(
       { error: "no indexed listings for that claim — publish/index first" },
       { status: 404 },
@@ -41,14 +41,25 @@ export async function GET(req: NextRequest) {
   const WELLKNOWN_INDEX_DEADLINE_MS = 30_000;
   const deadline = Date.now() + WELLKNOWN_INDEX_DEADLINE_MS;
   const entries = [];
-  for (const l of seller.listings.filter(discoveryListing)) {
+  // The public catalog intentionally strips held versions. Read stored evidence here,
+  // but publish only the existing discovery summaries, never the held records.
+  const listings = seller.listings.filter(discoveryListing);
+  const visibleAnchors = new Set(listings.map((l) => l.anchor.locator));
+  const anchors = [
+    ...listings.map((l) => ({ locator: l.anchor.locator, listingId: l.listingId, listing: l })),
+    ...[...new Map((seller.heldListingVersions ?? [])
+      .filter((held) => !visibleAnchors.has(held.locator))
+      .map((held) => [held.locator, held])).values()]
+      .map((held) => ({ locator: held.locator, listingId: held.listingId, listing: undefined })),
+  ];
+  for (const candidate of anchors) {
     if (req.signal.aborted || Date.now() >= deadline) {
       return NextResponse.json(
         { error: "listing index incomplete: the request was aborted or the 30 s total deadline was reached" },
         { status: 503 },
       );
     }
-    const read = await readAnchorResult(l.anchor.locator, req.signal);
+    const read = await readAnchorResult(candidate.locator, req.signal);
     if (req.signal.aborted || Date.now() >= deadline) {
       return NextResponse.json(
         { error: "listing index incomplete: the request was aborted or the 30 s total deadline was reached" },
@@ -60,10 +71,14 @@ export async function GET(req: NextRequest) {
     if (read.status === "unavailable" || read.status === "absent") {
       const reason = read.status === "unavailable" ? read.reason : "the node reports no storage program at the anchor";
       return NextResponse.json(
-        { error: `listing anchor unavailable for ${l.listingId}: the index would be incomplete`, reason },
+        { error: `listing anchor unavailable for ${candidate.listingId}: the index would be incomplete`, reason },
         { status: 503 },
       );
     }
+    // A readable hold can reflect rejected content or declarations, rather than
+    // an indeterminate read. It stays unadvertised until the indexer admits it.
+    const l = candidate.listing;
+    if (!l) continue;
     // Stored programs are mutable; one whose content is not an object has no canonical form either.
     if (read.status === "invalid") continue;
     const raw = read.record.data;
@@ -84,6 +99,14 @@ export async function GET(req: NextRequest) {
       status: l.status,
       ...(l.revocation ? { revocation: l.revocation } : {}),
     });
+  }
+
+  // Check held anchors before calling an all-held seller an empty catalog.
+  if (seller.listings.length === 0) {
+    return NextResponse.json(
+      { error: "no indexed listings for that claim — publish/index first" },
+      { status: 404 },
+    );
   }
 
   const listingsJson = JSON.stringify(
