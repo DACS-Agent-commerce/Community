@@ -35,7 +35,7 @@ export async function GET(
       links: [
         { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
         { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
-        { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+        { href: `${origin}/schemas/listing-summary.v2.schema.json`, rel: "describedby", type: "application/schema+json" },
       ],
     });
   }
@@ -61,7 +61,7 @@ export async function GET(
       { href: `${origin}${servicePath(hit)}`, rel: "alternate", type: "text/html" },
       { href: `${origin}/api/dacs/sellers/${encodeURIComponent(sellerIdentity(hit.seller.primaryClaim))}`, rel: "seller", type: "application/json" },
       { href: `${origin}${inspectServicePath(hit)}`, rel: "service-inspection", type: "application/json" },
-      { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+      { href: `${origin}/schemas/listing-summary.v2.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],
   });
 }

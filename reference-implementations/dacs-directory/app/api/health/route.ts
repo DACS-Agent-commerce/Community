@@ -13,7 +13,8 @@ export async function GET() {
     const { loadCatalog } = await import("@/src/catalog/store");
     const catalog = loadCatalog();
     return NextResponse.json({ ok: true, catalogGeneratedAt: catalog.generatedAt });
-  } catch {
+  } catch (error) {
+    console.error("Health route failed:", error);
     return NextResponse.json({ ok: false, error: "catalog data directory is unavailable" }, { status: 503 });
   }
 }

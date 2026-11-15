@@ -1,11 +1,16 @@
 /**
  * Seller-kit Listings and an in-memory Demos node for contract tests.
  *
- * The Listing has the shape dacs-sdk main 9d820e0f0fea0d9d34c6c0a2b521c18badfb4fee
+ * The Listing has the shape dacs-sdk 9d820e0f0fea0d9d34c6c0a2b521c18badfb4fee
  * builds in packages/dacs-client/src/dacs/listing.mjs (blob 12412563)
  * buildUnsignedIdentityBundle / buildListingDraft, signed as
  * attachIdentityPresentation / attachListingSignature sign it (raw Ed25519,
- * Base64URL). No real network, chain or key is involved.
+ * Base64URL). That path is absent at the pinned revision
+ * 3904d704fb540e6e1d7dd502a0be29f20569c92d (scripts/setup-sdk.sh SDK_REV).
+ * The pin supplies the imported canonicalization and crypto utilities but
+ * does not contain packages/dacs-client; this fixture keeps the Listing
+ * shape from the copy-from revision above.
+ * No real network, chain or key is involved.
  */
 import { canonicalize, contentHash, sha256Hex } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";

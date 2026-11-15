@@ -140,7 +140,7 @@ test('OpenAPI requires scanProgress and defines the listing schema identity once
  assert.ok(page.required.includes('scanProgress'));
  assert.equal(page.properties.listings.items.$ref,'#/components/schemas/ListingSummary');
  const ids:string[]=[];function walk(v:any){if(!v||typeof v!=='object')return;if(typeof v.$id==='string')ids.push(v.$id);Object.values(v).forEach(walk);}walk(spec);
- assert.equal(ids.filter(id=>id==='/schemas/listing-summary.schema.json').length,1);
+ assert.equal(ids.filter(id=>id==='/schemas/listing-summary.v2.schema.json').length,1);
 });
 
 test('retained revoked binding survives an unrelated unresolved storage read',async()=>{

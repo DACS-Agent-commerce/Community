@@ -53,9 +53,10 @@ export interface AnchorRecord {
  * object. Denied access, transport errors and node failures are `unavailable`,
  * which callers must treat as indeterminate rather than absent (DACS-1 RB-6).
  * `nodeRefusal` marks an `unavailable` read that is a definite answer, not a passing fault: a 4xx
- * from the node or a proxy, or a 200 `success: true` reply whose stored value is refused. Most 4xx
+ * from the node or a proxy, a 2xx reply over the response byte ceiling, or a 200 `success: true`
+ * reply whose stored value is refused. Most 4xx
  * answers do not clear on a repeat read, though 408 and 429 can; timeouts, transport errors, 5xx and
- * unreadable replies leave it unset, so a caller can tell a passing fault from a refused one.
+ * unreadable replies within the byte ceiling leave it unset, so a caller can tell a passing fault from a refused one.
  * DEMOS-MAPPING §A.2 gives an ordinary storage `not found` the CORE SR-2
  * disposition `indeterminate` too, so a caller whose verdict would rest on
  * absence treats `absent` from a well-formed locator as unavailable.
@@ -115,7 +116,8 @@ export async function readAnchorResult(address: string, signal?: AbortSignal): P
     }
     json = reply as typeof json;
   } catch (error) {
-    return anchorReadFailure(error);
+    const failure = anchorReadFailure(error);
+    return error instanceof StorageResponseTooLarge ? { ...failure, nodeRefusal: true } : failure;
   }
   if (!json || typeof json !== "object" || json.success !== true) return { status: "unavailable", reason: "anchor reply did not confirm a successful read" };
   const data = json.data;

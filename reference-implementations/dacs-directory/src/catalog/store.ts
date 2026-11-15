@@ -44,10 +44,13 @@ try {
   // two fresh processes can otherwise race while the database enters WAL mode.
   db = new Database(DB_PATH, { timeout: 10_000 });
 } catch (error) {
-  throw new Error(
-    `DACS directory storage could not be opened at ${DB_PATH}; configure DACS_DIRECTORY_DATA to a writable persistent volume`,
-    { cause: error },
-  );
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: string }).code) : "";
+  const isPathOrPermissionError = ["EACCES", "EROFS", "ENOENT", "ENOTDIR", "EEXIST"].includes(code);
+  const detail = error instanceof Error ? error.message : String(error);
+  const advice = isPathOrPermissionError
+    ? `; configure DACS_DIRECTORY_DATA to a writable persistent volume: ${detail}`
+    : `: ${detail}`;
+  throw new Error(`DACS directory storage could not be opened at ${DB_PATH}${advice}`, { cause: error });
 }
 db.pragma("busy_timeout = 10000");
 // SQLite can return SQLITE_BUSY immediately while changing journal mode even

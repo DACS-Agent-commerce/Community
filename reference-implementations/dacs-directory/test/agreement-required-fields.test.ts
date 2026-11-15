@@ -3,6 +3,7 @@ import test from "node:test";
 // First: the store must open in a fresh directory, never the checkout's data/.
 import "./fixtures/isolated-data-dir.js";
 import { signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
+import { agreementParty } from "./fixtures/agreement-fields.js";
 import { type Obj, dids, locator, vector, payeeBoundVector, installAgreement, graphAt } from "./fixtures/current-evidence.js";
 
 // DACS-3 §8.5: AgreementDocument and PayeeBoundAgreementDocument require terms.deadline, generatedAt,
@@ -40,6 +41,46 @@ async function assertRejected(profile: string, name: string, make: typeof vector
   assert.equal(graph.ok, false, `${profile}: ${name}`);
   assert.equal(graph.reason, AGREEMENT_REFERENCE_FAILURE, `${profile}: ${name}`);
   assert.equal(await verifiedDiscoveryAgreement(agreement), false, `${profile}: ${name}: discovery`);
+}
+
+const withParties = (...parties: Obj[]): Mutation[1] => (scope) => { scope.parties = parties; };
+const buyerParty = () => agreementParty("buyer", dids[0]);
+const sellerParty = () => agreementParty("seller", dids[1]);
+const losingBidder = (claim: string) => agreementParty("bidder-non-winning", claim);
+const LOSING_BIDDER_DIDS = [dids[2], `did:demos:agent:${"0".repeat(64)}`];
+
+test("one buyer and one seller are accepted for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertAccepted(profile, "buyer and seller", make, withParties(buyerParty(), sellerParty()));
+  }
+});
+
+test("one buyer and one seller with one or two losing bidders are accepted for each profile", async () => {
+  for (const [profile, make] of PROFILES) {
+    await assertAccepted(profile, "one losing bidder", make,
+      withParties(buyerParty(), sellerParty(), losingBidder(LOSING_BIDDER_DIDS[0])));
+    await assertAccepted(profile, "two losing bidders", make,
+      withParties(buyerParty(), sellerParty(), losingBidder(LOSING_BIDDER_DIDS[0]), losingBidder(LOSING_BIDDER_DIDS[1])));
+  }
+});
+
+const invalidPartyRosters: Array<[name: string, mutate: Mutation[1]]> = [
+  ["two buyers", withParties(buyerParty(), agreementParty("buyer", dids[1]))],
+  ["two sellers", withParties(agreementParty("seller", dids[0]), sellerParty())],
+  ["no buyer", withParties(sellerParty(), losingBidder(LOSING_BIDDER_DIDS[0]))],
+  ["no seller", withParties(buyerParty(), losingBidder(LOSING_BIDDER_DIDS[0]))],
+  ["buyer and seller with the same identity", withParties(buyerParty(), agreementParty("seller", dids[0]))],
+  ["unknown role orchestrator", withParties(buyerParty(), sellerParty(), { ...losingBidder(dids[2]), role: "orchestrator" })],
+  ["role absent", (scope) => {
+    const unnamed: Obj = losingBidder(dids[2]); delete unnamed.role;
+    scope.parties = [buyerParty(), sellerParty(), unnamed];
+  }],
+];
+
+for (const [name, mutate] of invalidPartyRosters) {
+  test(`an agreement with ${name} is rejected for each profile`, async () => {
+    for (const [profile, make] of PROFILES) await assertRejected(profile, name, make, mutate);
+  });
 }
 
 const badTimes = [ABSENT, "80", null, true, {}, [], -1, 1.5];

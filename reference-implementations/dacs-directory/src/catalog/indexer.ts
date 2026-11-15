@@ -594,8 +594,9 @@ export async function indexRegistration(
       dealCandidates.push({
         ...resolvedDeal, signatureVerified: Boolean(authoritative?.signaturesVerified), refsVerified,
         rail: agreementRail(authoritative?.agreement) ?? "unknown",
-        outcome: String(authoritative?.bundle.outcome ?? "") || undefined, sellerOutcome,
-        anchoredByRole: authoritative?.bundle.anchoredByRole as DealRecord["anchoredByRole"],
+        outcome: typeof authoritative?.bundle.outcome === "string" ? authoritative.bundle.outcome : undefined, sellerOutcome,
+        anchoredByRole: authoritative?.bundle.anchoredByRole === "buyer" || authoritative?.bundle.anchoredByRole === "seller" || authoritative?.bundle.anchoredByRole === "orchestrator"
+          ? authoritative.bundle.anchoredByRole : undefined,
         bundleContentHash: authoritative?.bundleContentHash,
         reputationEligible: refsVerified,
         cancellationNeutral,

@@ -29,7 +29,11 @@ function stubBin(root) {
 echo "git $*" >> "$STUB_LOG"
 case " $* " in
   *" rev-parse "*) printf '%s\\n' "$STUB_HEAD" ;;
-  *" status "*) printf '%s' "\${STUB_STATUS:-}" ;;
+  *" checkout "*)
+    case " $* " in *" --force "*) rm -f "$STUB_PREVIOUS_PATCH" ;; esac ;;
+  *" status "*)
+    if [ -f "$STUB_PREVIOUS_PATCH" ]; then printf ' M src/canonical/hash.ts\\n'; fi
+    printf '%s' "\${STUB_STATUS:-}" ;;
 esac
 `);
   writeFileSync(join(bin, "npm"), `#!/usr/bin/env bash
@@ -47,7 +51,7 @@ exit "\${STUB_NPM_EXIT:-0}"
 
 /** Run setup in a scratch app root; never installs or fetches anything. */
 function setup({ source = false, marker, standardRevision = standardRev, dist = { "index.js": builtIndex }, head = sdkRev, status = "",
-  buildFail = false, buildOutput = builtIndex, link, stale, appInstall = false, npmExit = 0 }) {
+  buildFail = false, buildOutput = builtIndex, link, stale, appInstall = false, npmExit = 0, previousPatch = false }) {
   const root = mkdtempSync(join(tmpdir(), "dacs-setup-sdk-"));
   try {
     mkdirSync(join(root, "scripts"));
@@ -64,6 +68,9 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
       writeFileSync(join(sdk, "dist", stale), "export const removedSource = 1;\n");
     }
     writeFileSync(join(sdk, "package.json"), JSON.stringify({ dacs: { standardRevision } }));
+    const previousPatchState = join(root, "previous-patch");
+    if (previousPatch) writeFileSync(previousPatchState, "interrupted compatibility patch\n");
+    writeFileSync(join(sdk, "operator-notes.txt"), "untracked notes\n");
     if (marker !== undefined) writeFileSync(join(sdk, ".dacs-sdk-revision"), marker);
     const log = join(root, "calls.log");
     writeFileSync(log, "");
@@ -72,11 +79,13 @@ function setup({ source = false, marker, standardRevision = standardRev, dist = 
         ...process.env, DACS_SKIP_APP_INSTALL: appInstall ? "0" : "1", PATH: `${stubBin(root)}:${process.env.PATH}`, STUB_LOG: log,
         STUB_HEAD: head, STUB_STATUS: status, STUB_BUILD_FAIL: buildFail ? "1" : "0", STUB_BUILD_OUTPUT: buildOutput,
         STUB_NPM_EXIT: String(npmExit),
+        STUB_PREVIOUS_PATCH: previousPatchState,
       },
       encoding: "utf8",
     });
     const read = (path) => existsSync(join(sdk, path)) ? readFileSync(join(sdk, path), "utf8") : undefined;
-    return { ...result, calls: readFileSync(log, "utf8"), marker: read(".dacs-sdk-revision"), manifest: read(".dacs-sdk-manifest") };
+    return { ...result, calls: readFileSync(log, "utf8"), marker: read(".dacs-sdk-revision"), manifest: read(".dacs-sdk-manifest"),
+      trackedDirty: existsSync(previousPatchState), untracked: read("operator-notes.txt") };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -92,6 +101,15 @@ test("setup pins the SDK commit, its Standard revision and the digest of its bui
   assert.match(sdkRev ?? "", /^[0-9a-f]{40}$/);
   assert.equal(standardRev, "d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20");
   assert.match(distSha ?? "", /^[0-9a-f]{64}$/);
+});
+
+test("setup recovers tracked patch leftovers from an interrupted source build", () => {
+  const recovered = setup({ source: true, previousPatch: true });
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.match(recovered.calls, /npm run build/);
+  assert.equal(recovered.marker, sdkRev);
+  assert.equal(recovered.trackedDirty, false);
+  assert.equal(recovered.untracked, "untracked notes\n");
 });
 
 test("the pinned digest is the build of the vendored SDK", { skip: !existsSync(new URL("../vendor/dacs-sdk/dist", import.meta.url)) && "no vendored SDK build" }, () => {

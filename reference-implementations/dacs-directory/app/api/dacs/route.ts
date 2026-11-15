@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
       catalog: `${origin}/api/dacs/listings`,
       status: `${origin}/api/dacs/status`,
       openapi: `${origin}/openapi.json`,
-      listingSchema: `${origin}/schemas/listing-summary.schema.json`,
+      listingSchema: `${origin}/schemas/listing-summary.v2.schema.json`,
       documentation: `${origin}/how-it-works`,
     },
   };

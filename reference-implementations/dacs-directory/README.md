@@ -59,7 +59,13 @@ with `npm run test:seed`; it uses pinned chain bytes for the shipped ReviewBot l
 so CI can prove the starter seed renders at least one active listing without depending
 on a live full-chain scan.
 
+Check: `cd reference-implementations/dacs-directory && npm run setup && npm test`
+
+After setup:
+
 Check: `cd reference-implementations/dacs-directory && npm test`
+
+Check: `cd reference-implementations/dacs-directory && node --import tsx --test test/listing-schema-version.test.ts test/discovery-contract.test.ts`
 
 Seed registrations live in `data/registrations.json`. The shipped seed is **ReviewBot**,
 the reference PR-review-for-hire agent, with its real testnet listing and its real
@@ -76,10 +82,13 @@ five minutes) — the catalog is a cache and re-verifies everything against chai
 
 [`deploy/testnet/`](./deploy/testnet/DEPLOY-TESTNET.md) holds systemd units for the web
 server and a five-minute index timer, an example settings file and a Caddy site. Both
-units first run `npm run check:testnet`, which refuses to start unless
-`DACS_DIRECTORY_NETWORK=testnet`, both RPC settings are credential-free HTTPS URLs whose
-hosts do not name mainnet, any `DEMOS_CHAIN_IDENTITY` is one of the accepted chain identities (today only the
-pinned chain in `src/catalog/nodeDeployment.ts`), and the configured node serves that chain.
+units first run `npm run check:testnet -- --built`, which refuses to start unless
+`DACS_DIRECTORY_NETWORK=testnet`, both RPC settings name the same credential-free
+HTTPS endpoint with no host label containing `mainnet`, the compiled manifest's
+RPC matches those settings, any `DEMOS_CHAIN_IDENTITY` is one of the
+accepted chain identities (today only the pinned chain in `src/catalog/nodeDeployment.ts`),
+and the configured node serves that chain. The node reports its own chain; this
+check does not authenticate the node or prove the pinned chain is the testnet.
 
 ### Fixture agent: Counterparty Evidence Desk
 
@@ -173,8 +182,8 @@ Changing either the revision or patch requires rebuilding and updating `SDK_DIST
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |
 | `DACS_REACHABILITY_MAX_PROBES` | No | Maximum due listing surfaces probed per reindex; defaults to `20` (bounded to `1..100`) |
 | `DACS_REACHABILITY_CONCURRENCY` | No | Concurrent pinned HTTPS reachability probes; defaults to `5` (bounded to `1..10`) |
-| `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers; a recipe that lists `self-signed` for an authority-issued scheme (`lei`, `finra-crd`, `sam-uei`, `fedramp`, `cmmc`, `naics`; DACS-2 §7.3.9) is refused when the lookup selects that recipe (by scheme and version): the error names the scheme but is not logged or shown to the operator, claims that need that recipe stay unverified until the entry is fixed, and other entries in the list are not affected; session admission does not use this policy |
-| `DACS_RECIPE_SNAPSHOTS` | Helper only | JSON array of historical `{registryVersion, recipes}` snapshots for the standalone resolver; a selected snapshot that lists `self-signed` for an authority-issued scheme is refused with an error naming the scheme (the helper has no production caller, so nothing logs the refusal; the first resolution of a value logs one line with the snapshot and trusted-signer counts). Production session admission does not consult this variable. The snapshots are operator-trusted configuration, unauthenticated until the Standard defines a steward key; graph integration is pending. |
+| `DACS_RECIPE_POLICIES` | For identity tier policy | JSON array of version-pinned DACS-2 recipe policies (`scheme`, `recipeVersion`, `methods`, `defaultMaxAgeSec`, `availability`, `trustedResultSigners`); absent/invalid policy leaves claims unverified for tiers; a recipe that lists `self-signed` for an authority-issued scheme (`lei`, `finra-crd`, `sam-uei`, `fedramp`, `cmmc`, `naics`; DACS-2 §7.3.9) is refused when the lookup selects that recipe (by scheme and version): the error names the scheme but is not logged or shown to the operator, claims that need that recipe stay unverified until the entry is fixed, and other entries in the list are not affected; session admission does not use this policy. The recipes are operator-trusted configuration, unauthenticated until the Standard defines a steward key. |
+| `DACS_RECIPE_SNAPSHOTS` | Helper only | JSON array of historical `{registryVersion, recipes}` snapshots for the standalone resolver; a selected snapshot that lists `self-signed` for an authority-issued scheme is refused with an error naming the scheme. The helper has no production caller and does not log that refusal. Per process, each distinct configured text logs at most once: snapshot-array and distinct trusted-signer counts for a JSON array, or a generic note for unparsable JSON or a non-array value. Configuration contents are never logged; absent configuration stays silent. Production session admission does not consult this variable. The snapshots are operator-trusted configuration, unauthenticated until the Standard defines a steward key; graph integration is pending. |
 | `DACS_TRUST_PROXY` | No | Set to `1` only behind a trusted proxy that overwrites client-IP headers; otherwise the in-process rate limiter is disabled and the deployment must enforce its edge limit |
 | `NEXT_PUBLIC_DIRECTORY_URL` | Production | Public origin used by canonical URLs, sitemap, `llms.txt`, and machine-discovery documents; defaults to `http://localhost:3400`, which silently poisons production canonical URLs and the sitemap — the server logs a warning when unset in production |
 
@@ -251,8 +260,15 @@ contract. A client starting with only the directory origin can discover:
 - `/api/dacs` — linked API index
 - `/api/dacs/listings` — filterable, cursor-paginated active services
 - `/openapi.json` — OpenAPI 3.1 description
-- `/schemas/listing-summary.schema.json` — JSON Schema for catalog summaries
+- `/schemas/listing-summary.v2.schema.json` — JSON Schema for catalog summaries
 - `/llms.txt` — supplemental plain-text orientation
+
+The ListingSummary schema uses a versioned identity because its required fields and
+field names have changed. The former `/schemas/listing-summary.schema.json` URL
+returns a 308 redirect to `/schemas/listing-summary.v2.schema.json`. The manifest
+and OpenAPI component advertise the versioned identity. This is a Directory-local
+schema publication convention; [DACS-1 §6.3.6](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/4bb9e48a1095ab32c06c25b7c0b52018d3ce4091/spec/DACS-1-IDENTIFY.md#636-catalog-api)
+defines ListingSummary and its discovery role, without prescribing this schema URL.
 
 Catalog responses include validators, cache policy, and typed `Link` headers. Human
 service and seller pages expose canonical URLs and JSON alternates, while the dynamic

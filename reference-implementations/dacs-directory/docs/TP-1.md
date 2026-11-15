@@ -46,8 +46,9 @@ the source revision named by the retained SPEC_PIN.
 
 TP-1 removed two DACS-1 §6.3.6 parameters, so the manifest reports
 `dacsDirectoryVersion: "2"` and the OpenAPI document `info.version: "2.0.0"`.
-The ListingSummary schema URL is unversioned and is served with a short,
-revalidated cache lifetime.
+The ListingSummary schema URL is `/schemas/listing-summary.v2.schema.json` and
+is served with a short, revalidated cache lifetime. The former
+`/schemas/listing-summary.schema.json` URL returns a 308 redirect to that versioned URL.
 
 ## Declared deviations
 

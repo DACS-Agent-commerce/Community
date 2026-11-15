@@ -6,7 +6,7 @@ import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { ed25519Sign, privateKeyFromSeed } from "@kynesyslabs/dacs/crypto";
 import { NextRequest } from "next/server";
 import { GET as listings } from "../app/api/dacs/listings/route.js";
-import { MAX_ARTIFACT_BYTES } from "../src/catalog/artifactLimits.js";
+import { MAX_ARTIFACT_BYTES, MAX_STORAGE_RESPONSE_BYTES } from "../src/catalog/artifactLimits.js";
 import { artifactHash, signedScope } from "../src/catalog/evidenceGraph.js";
 import { indexRegistration } from "../src/catalog/indexer.js";
 import { reindexAll } from "../src/catalog/reindexCore.js";
@@ -29,7 +29,7 @@ let clockMs = OBSERVED_AT;
 
 /** How storage answers a read of one anchor; an unlisted anchor is served from `maps`, or NOT_FOUND. */
 type StorageFault = "http-502" | "timeout" | "transport-failure" | "access-denied" | "unauthenticated" | "unqualified-404"
-  | "unconfirmed-read" | "not-found" | "not-an-object" | "not-a-listing" | "duplicate-member-value" | "over-limit-value";
+  | "unconfirmed-read" | "not-found" | "not-an-object" | "not-a-listing" | "duplicate-member-value" | "over-limit-value" | "over-size-reply" | "over-size-cancel-failure";
 /** Faults that say nothing about the anchor and may pass on a later read. */
 const transientFaults: StorageFault[] = ["http-502", "timeout", "transport-failure", "unconfirmed-read"];
 /** The node or a proxy answered with a 4xx: the same read will not pass by itself. */
@@ -53,6 +53,14 @@ function storageAnswer(at: string): Response {
     return new Response(`{"success":true,"owner":"${owner}","data":{"listingId":"a","listingId":"b"}}`);
   }
   if (fault === "over-limit-value") return Response.json({ success: true, owner, data: { padding: "x".repeat(MAX_ARTIFACT_BYTES) } });
+  if (fault === "over-size-reply") return Response.json({ success: true, owner, data: maps.get(at), padding: "x".repeat(MAX_STORAGE_RESPONSE_BYTES) });
+  if (fault === "over-size-cancel-failure") {
+    const bytes = new TextEncoder().encode(JSON.stringify({ success: true, owner, data: maps.get(at), padding: "x".repeat(MAX_STORAGE_RESPONSE_BYTES) }));
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(bytes); },
+      cancel() { throw new Error("injected cancellation failure"); },
+    }));
+  }
   const data = fault === "not-a-listing" ? { notAListing: true } : fault === "not-found" ? undefined : maps.get(at);
   return data ? Response.json({ success: true, owner, data })
     : Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 });
@@ -150,6 +158,19 @@ test("a 200 reply whose stored value is refused drops the prior Listing, by reas
   for (const fault of ["duplicate-member-value", "over-limit-value"] as const) {
     faults.set(anchor, fault);
     assert.deepEqual((await indexRegistration(registration, prior, offline)).listings, [], fault);
+  }
+});
+
+test("an over-size 2xx reply immediately drops a previously indexed unexpired Listing", async (t) => {
+  const { anchor } = await anchoredListing("dropped-when-reply-too-large", 7056, 1, OBSERVED_AT + 2 * DAY_MS);
+  const registration = registrationFor([anchor]);
+  const prior = await indexedWhileReadable(t, registration);
+  assert.ok(INDEXED_AGAIN_AT - OBSERVED_AT < DAY_MS, "the kept-copy age has not expired");
+  for (const fault of ["over-size-reply", "over-size-cancel-failure"] as const) {
+    faults.set(anchor, fault);
+    const record = await indexRegistration(registration, prior, offline);
+    assert.deepEqual(record.listings, [], `${fault}: the refused response must not keep yesterday's verified bytes`);
+    assert.equal(record.lastIndexedAt, INDEXED_AGAIN_AT);
   }
 });
 
@@ -292,6 +313,30 @@ test("reindexAll publishes the kept Listing after a storage outage", async (t) =
   assert.deepEqual(loadCatalog().sellers.find((record) => record.primaryClaim === seller)?.listings.map((listing) => listing.listingId),
     ["published-through-outage"]);
   assert.equal(await publishedTotal(), 1, "the outage does not empty the published catalog");
+});
+
+test("reindexAll removes the prior Listing from the published API after an over-size reply", async (t) => {
+  const { anchor } = await anchoredListing("unpublished-after-large-reply", 7165, 1, OBSERVED_AT + 2 * DAY_MS);
+  saveRegistrations([registrationFor([anchor])]);
+  faults.clear();
+  serveStorage(t);
+  clockMs = OBSERVED_AT;
+  t.mock.method(Date, "now", () => clockMs);
+  const reindex = () => reindexAll({
+    log: () => {}, resolveIdentities: offline, crawlWellKnown: async () => ({ agents: [], errors: [] }),
+  });
+  const publishedTotal = async () => (await (await listings(new NextRequest("https://directory.example/api/dacs/listings"))).json()).total;
+  for (const fault of ["over-size-reply", "over-size-cancel-failure"] as const) {
+    clockMs = OBSERVED_AT;
+    faults.clear();
+    await reindex();
+    assert.equal(await publishedTotal(), 1, "the prior verified Listing is initially published");
+    clockMs = INDEXED_AGAIN_AT;
+    faults.set(anchor, fault);
+    await reindex();
+    assert.deepEqual(loadCatalog().sellers.find((record) => record.primaryClaim === seller)?.listings, []);
+    assert.equal(await publishedTotal(), 0, `${fault}: the response refusal takes effect on this completed pass`);
+  }
 });
 
 test("a same-chain tip reset replayed while the anchor read fails does not keep the prior Listing", async (t) => {

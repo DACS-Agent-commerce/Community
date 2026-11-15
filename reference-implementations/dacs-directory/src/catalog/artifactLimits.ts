@@ -118,7 +118,8 @@ async function storageResponseBytes(response: Response): Promise<Buffer> {
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > MAX_STORAGE_RESPONSE_BYTES) {
-        await reader.cancel();
+        // The byte refusal is already known; a failed cancellation cannot turn it into a passing read fault.
+        try { await reader.cancel(); } catch { /* best effort: preserve the size refusal below */ }
         throw new StorageResponseTooLarge("storage response exceeds byte ceiling");
       }
       chunks.push(chunk.value);

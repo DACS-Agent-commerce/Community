@@ -44,7 +44,7 @@ export async function GET(
     lastModified: seller.lastIndexedAt,
     links: [
       { href: `${origin}/seller/${encodeURIComponent(seller.primaryClaim)}`, rel: "alternate", type: "text/html" },
-      { href: `${origin}/schemas/listing-summary.schema.json`, rel: "describedby", type: "application/schema+json" },
+      { href: `${origin}/schemas/listing-summary.v2.schema.json`, rel: "describedby", type: "application/schema+json" },
     ],
   });
 }

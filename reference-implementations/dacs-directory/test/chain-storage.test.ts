@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { MAX_STORAGE_RESPONSE_BYTES, StorageResponseTooLarge } from "../src/catalog/artifactLimits.js";
 
 import {
   deriveAnchorAddress,
@@ -13,6 +14,72 @@ import {
 
 const owner = `0x${"12".repeat(32)}`;
 const programName = "dacs1-ZGFjczE";
+
+for (const status of [200, 201, 206]) {
+  for (const extra of [-1, 0, 1]) {
+    test(`anchor response byte boundary: HTTP ${status}, ceiling ${extra >= 0 ? "+" : ""}${extra}`, async (t) => {
+      assert.equal(MAX_STORAGE_RESPONSE_BYTES, 1024 * 1024, "the response ceiling remains 1 MiB");
+      const envelope = { success: true, owner, programName, data: { marker: 1 }, padding: "" };
+      const length = MAX_STORAGE_RESPONSE_BYTES + extra;
+      const paddingBytes = length - Buffer.byteLength(JSON.stringify(envelope));
+      envelope.padding = "é".repeat(Math.floor(paddingBytes / 2)) + "x".repeat(paddingBytes % 2);
+      const text = JSON.stringify(envelope);
+      const bytes = new TextEncoder().encode(text);
+      assert.equal(bytes.byteLength, length, "measure received UTF-8 bytes, not string length");
+      const split = Buffer.byteLength(text.slice(0, text.indexOf('"padding":"') + '"padding":"'.length)) + 1;
+      const chunks = [bytes.subarray(0, split), bytes.subarray(split)];
+      let reads = 0;
+      let cancellations = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (reads < chunks.length) controller.enqueue(chunks[reads++]);
+          else { reads++; controller.close(); }
+        },
+        cancel() { cancellations++; },
+      }, { highWaterMark: 0 });
+      // A misleading Content-Length cannot substitute for counting the received chunks.
+      t.mock.method(globalThis, "fetch", async () => new Response(stream, { status, headers: { "content-length": "2" } }));
+      const result = await readAnchorResult(`stor-${"7".repeat(40)}`);
+      if (extra > 0) {
+        assert.deepEqual(result, { status: "unavailable", reason: "anchor reply exceeds the byte limit", nodeRefusal: true });
+        assert.equal(cancellations, 1, "stop reading once the response ceiling is crossed");
+        assert.equal(reads, 2, "do not read past the chunk crossing the limit");
+      } else {
+        assert.equal(result.status, "present", "a bounded envelope with a small payload is still admitted");
+        if (result.status === "present") assert.deepEqual(result.record.data, { marker: 1 });
+        assert.equal(cancellations, 0);
+      }
+    });
+  }
+}
+
+test("oversized 5xx replies and read failures remain passing faults", async (t) => {
+  const at = `stor-${"8".repeat(40)}`;
+  await t.test("a 5xx body does not turn a node failure into a definite refusal", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("x".repeat(MAX_STORAGE_RESPONSE_BYTES + 1), { status: 503 }));
+    assert.deepEqual(await readAnchorResult(at), { status: "unavailable", reason: "anchor read refused HTTP 503" });
+  });
+  await t.test("a failed fetch remains a passing fault", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => { throw new StorageResponseTooLarge("fetch did not produce an HTTP answer"); });
+    assert.deepEqual(await readAnchorResult(at), { status: "unavailable", reason: "anchor reply exceeds the byte limit" });
+  });
+  await t.test("small malformed JSON remains unreadable, not a node refusal", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{"));
+    assert.deepEqual(await readAnchorResult(at), { status: "unavailable", reason: "anchor reply is invalid JSON" });
+  });
+});
+
+test("a failed stream cancellation cannot hide a known over-size 2xx reply", async (t) => {
+  const bytes = new TextEncoder().encode(JSON.stringify({ success: true, data: { marker: 1 }, padding: "x".repeat(MAX_STORAGE_RESPONSE_BYTES) }));
+  let cancellations = 0;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(bytes); },
+    cancel() { cancellations++; throw new Error("injected cancellation failure"); },
+  })));
+  assert.deepEqual(await readAnchorResult(`stor-${"9".repeat(40)}`),
+    { status: "unavailable", reason: "anchor reply exceeds the byte limit", nodeRefusal: true });
+  assert.equal(cancellations, 1);
+});
 
 test("live StorageProgram derivation matches SDK #70 and preserves legacy fallback", () => {
   assert.equal(
