@@ -332,7 +332,7 @@ export async function indexRegistration(
     if (typeof validity?.notAfter === "number" && validity.notAfter < now) continue;
     // Verification work is bounded per pass: markers already verified come first (even when
     // an older snapshot omitted them from the queue), then the next pending candidates,
-    // those anchored by the listing's own owner first. Only one batch is ever selected.
+    // those anchored by the listing's owner or signing key first. Only one batch is ever selected.
     const limit = REVOCATION_VERIFICATIONS_PER_PASS;
     // Resolve authenticated carriage against this very same verified listing
     // read. An earlier discovery pre-read failure cannot discard a withdrawal,
@@ -347,7 +347,7 @@ export async function indexRegistration(
     const found = await findValidListingRevocation(
       [
         ...knownMarkers,
-        ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit),
+        ...nextRevocationCandidates(verified.contentHash, anchored.owner ?? null, limit, verified.signer),
       ],
       verified,
       version,
