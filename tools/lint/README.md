@@ -26,4 +26,4 @@ Don't add entries to it to get a pass. Fix the new issue, or use an `eslint-disa
 
 ## What's left out
 
-- Type-aware checks cover TypeScript in the directory app, except `app/.well-known/`, which TypeScript's project settings skip. JavaScript files have no types to read, so a missed `await` isn't caught there.
+- Type-aware checks cover TypeScript in the directory app, including `app/.well-known/`, which the app's `tsconfig.json` includes explicitly. JavaScript files have no types to read, so a missed `await` isn't caught there.
