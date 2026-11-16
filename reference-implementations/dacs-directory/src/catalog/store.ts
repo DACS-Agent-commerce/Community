@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { Catalog, CatalogChain, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
+import type { ArchivedListingVersion, Catalog, CatalogChain, ListingSummary, Registration, RevocationBinding, ScanState } from "./types.js";
 import { bindsListingTuple, normalizeSubmittedDomain, revocationBindingKey, type WithdrawalProvenance } from "./wellknown.js";
 import { sellerIdentity } from "./discovery.js";
 import { deriveSellerReputation } from "./reputation.js";
@@ -744,6 +744,90 @@ export const loadCatalog = (): Catalog => {
   // A caller may mutate its snapshot without corrupting the shared cache.
   return JSON.parse(publicCatalogCache.publicJson) as Catalog;
 };
+const LISTING_VERSION_PREFIX = "listing-version:";
+const PENDING_LISTING_VERSION_PREFIX = "listing-version-pending:";
+interface StoredListingVersion { evidenceChain: string; listing: ArchivedListingVersion }
+const listingVersionKey = (chain: string, listing: ArchivedListingVersion): string => JSON.stringify([
+  chain, listing.listingId, String(listing.version), sellerIdentity(listing.seller.primaryClaim),
+  listing.contentHash, listing.anchor.kind, listing.anchor.locator,
+]);
+
+/**
+ * Stage only an admitted node read. Direct indexer calls outside a gated writer
+ * do not publish archive evidence. Pending entries are journaled for crash
+ * recovery and stay invisible until the window's atomic catalog publication.
+ */
+export function retainVerifiedListingVersion(listing: ArchivedListingVersion): void {
+  if (!chainReadWindowOpen()) return;
+  const chain = loadCatalogChain();
+  if (!chain) return;
+  const pointer: ArchivedListingVersion = {
+    listingId: listing.listingId, version: listing.version, contentHash: listing.contentHash,
+    anchor: { ...listing.anchor }, seller: { ...listing.seller }, catalogObservedAt: listing.catalogObservedAt,
+    ...(listing.artifactProfile ? { artifactProfile: listing.artifactProfile } : {}),
+  };
+  setJson(PENDING_LISTING_VERSION_PREFIX + listingVersionKey(chain.evidenceChain, pointer),
+    { evidenceChain: chain.evidenceChain, listing: pointer } satisfies StoredListingVersion);
+}
+
+export type ArchivedListingLookup =
+  | { kind: "unique"; listing: ArchivedListingVersion }
+  | { kind: "ambiguous"; contentHashes: string[] };
+
+/**
+ * Committed history only; ordinary replacement of the discovery catalog cannot erase it.
+ * Distinct signed Listings at one address are ambiguous; the same bytes at two anchors are not.
+ */
+export function lookupArchivedListingVersion(query: {
+  listingId: string; version: string; seller?: string;
+}): ArchivedListingLookup | null {
+  const chain = loadCatalogChain();
+  if (!chain) return null;
+  // A JSON tuple prefix keeps arbitrary Listing ids out of the key grammar. It ends in ",", so the
+  // keys that start with it are exactly those from it up to the same text ending in "-": a range
+  // the key index can search, where SQLite's case-insensitive LIKE scans the table.
+  const prefix = LISTING_VERSION_PREFIX +
+    JSON.stringify([chain.evidenceChain, query.listingId, query.version]).slice(0, -1) + ",";
+  const rows = db.prepare("SELECT value_json FROM kv_state WHERE key >= ? AND key < ? ORDER BY updated_at DESC, key")
+    .all(prefix, prefix.slice(0, -1) + "-") as Array<{ value_json: string }>;
+  const matches: ArchivedListingVersion[] = [];
+  for (const row of rows) {
+    const entry = JSON.parse(row.value_json) as StoredListingVersion;
+    const listing = entry.listing;
+    if (entry.evidenceChain === chain.evidenceChain && listing.listingId === query.listingId &&
+        String(listing.version) === query.version &&
+        (!query.seller || sellerIdentity(listing.seller.primaryClaim) === sellerIdentity(query.seller))) {
+      matches.push(listing);
+    }
+  }
+  if (matches.length === 0) return null;
+  const contentHashes = [...new Set(matches.map((listing) => listing.contentHash))].sort();
+  return contentHashes.length > 1 ? { kind: "ambiguous", contentHashes } : { kind: "unique", listing: matches[0] };
+}
+
+/** The one archived Listing at this address, or null when there is none or the address is ambiguous. */
+export function findArchivedListingVersion(query: {
+  listingId: string; version: string; seller?: string;
+}): ArchivedListingVersion | null {
+  const found = lookupArchivedListingVersion(query);
+  return found?.kind === "unique" ? found.listing : null;
+}
+
+/** Called only inside the same transaction that saves the confirmed catalog. */
+function publishArchivedListingVersions(): void {
+  if (!chainReadWindowOpen()) return;
+  const chain = loadCatalogChain();
+  const rows = db.prepare("SELECT key, value_json FROM kv_state WHERE key LIKE 'listing-version-pending:%'")
+    .all() as Array<{ key: string; value_json: string }>;
+  for (const row of rows) {
+    const entry = JSON.parse(row.value_json) as StoredListingVersion;
+    if (entry.evidenceChain === chain?.evidenceChain) {
+      setJson(LISTING_VERSION_PREFIX + listingVersionKey(entry.evidenceChain, entry.listing), entry);
+    }
+    db.prepare("DELETE FROM kv_state WHERE key = ?").run(row.key);
+  }
+}
+
 export const saveCatalog = (catalog: Catalog): void => setJson("catalog", catalog);
 export const loadRegistrations = (): Registration[] => getJson("registrations", []);
 export const saveRegistrations = (regs: Registration[]): void => setJson("registrations", regs);
@@ -760,6 +844,7 @@ export const saveScanState = db.transaction((state: ScanState): void => {
  * not rewrite an old failure's origin time as the rebuild time.
  */
 export const clearChainDerivedArtifacts = db.transaction((): void => {
+  db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-version:%' OR key LIKE 'listing-version-pending:%'").run();
   db.prepare("DELETE FROM kv_state WHERE key LIKE 'listing-revocation:%'").run();
   db.prepare("DELETE FROM listing_rejections").run();
   db.prepare("DELETE FROM dead_letters").run();
@@ -866,6 +951,7 @@ const stageWithdrawalBindingRelease = (keys: ReadonlySet<string>): void => {
  */
 export const commitChainReadWindow = db.transaction((lastSaves: () => void): void => {
   lastSaves();
+  publishArchivedListingVersions();
   const revision = wellKnownWithdrawalRevision();
   const released = new Set(stagedBindingReleases().filter((release) => release.revision === revision).map((release) => release.binding_key));
   if (released.size > 0) releaseWithdrawalBindings(released);
