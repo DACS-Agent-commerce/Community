@@ -193,16 +193,21 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     }
     // Registrations are untrusted carriage (BB-3). Re-verify on every ingest so
     // hand-edited or legacy persisted JSON cannot bypass the BB-4 gate.
+    const registrationBindings = new Map<string, BundleBinding[]>();
     for (const reg of regs) {
-      const verified = reg.bundleBindings ?? [];
-      for (const binding of verified) {
-        const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, binding.jobId), binding]);
-        state.bundleBindings[binding.jobId] = bounded.bindings;
-        state.bundleBindingOverflow = [...new Set([
-          ...state.bundleBindingOverflow,
-          ...bounded.overflowKeys,
-        ])].sort();
+      for (const binding of reg.bundleBindings ?? []) {
+        const bindings = registrationBindings.get(binding.jobId) ?? [];
+        bindings.push(binding);
+        registrationBindings.set(binding.jobId, bindings);
       }
+    }
+    for (const [jobId, bindings] of registrationBindings) {
+      const bounded = catalogBundleBindings([...ownArray(state.bundleBindings, jobId), ...bindings]);
+      state.bundleBindings[jobId] = bounded.bindings;
+      state.bundleBindingOverflow = [...new Set([
+        ...state.bundleBindingOverflow,
+        ...bounded.overflowKeys,
+      ])].sort();
     }
     for (const seller of prior.sellers) for (const listing of seller.listings) {
       const locator = listing.revocation?.markerAnchor.locator;
