@@ -30,7 +30,7 @@ export default [
   },
   {
     // vendor holds the pinned SDK copy that the setup script fetches.
-    ignores: ["**/node_modules/**", "**/.next/**", "reference-implementations/dacs-directory/vendor/**", "**/test-results/**", "**/playwright-report/**"],
+    ignores: ["**/node_modules/**", "**/.next/**", "reference-implementations/dacs-directory/vendor/**", "**/test-results/**", "**/playwright-report/**", "**/playwright-report-hash/**"],
   },
   {
     files: ["**/*.{js,mjs,cjs}"],
