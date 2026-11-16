@@ -20,7 +20,7 @@ const parsedRecord = (value: unknown): Record<string, unknown> | null => {
 };
 
 async function nodeCall(message: string, data: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch(`${RPC}/`, {
+  const response = await fetch(`${RPC}/`, { redirect: "error",
     method: "POST",
     headers: { "content-type": "application/json" },
     cache: "no-store",

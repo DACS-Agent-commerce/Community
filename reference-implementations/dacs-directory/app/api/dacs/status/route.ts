@@ -1,3 +1,4 @@
+import { storageResponseJson } from "@/src/catalog/artifactLimits";
 /**
  * GET /api/dacs/status — catalog freshness vs the chain.
  * The catalog is a cache (§6.3.6); this reports how stale it is: the scan
@@ -28,7 +29,7 @@ export async function GET(req: NextRequest) {
 
   let chainLatestTx: number | null = null;
   try {
-    const res = await fetch(RPC + "/", {
+    const res = await fetch(RPC + "/", { redirect: "error",
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: AbortSignal.timeout(10_000),
@@ -42,7 +43,7 @@ export async function GET(req: NextRequest) {
         }],
       }),
     });
-    const json = (await res.json()) as { result?: number; response?: Array<{ id?: number }> };
+    const json = (await storageResponseJson(res)) as { result?: number; response?: Array<{ id?: number }> };
     const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
     if (typeof id === "number") chainLatestTx = id;
   } catch {

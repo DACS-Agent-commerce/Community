@@ -108,7 +108,7 @@ export async function readStorage(address: string, attempts = 3): Promise<Storag
   for (let attempt = 1; attempt <= boundedAttempts; attempt++) {
     let res: Response;
     try {
-      res = await fetch(`${RPC}/storage-program/${address}`, {
+      res = await fetch(`${RPC}/storage-program/${address}`, { redirect: "error",
         signal: AbortSignal.timeout(15_000),
       });
     } catch {
@@ -228,7 +228,7 @@ export function isListingRevocationCandidate(value: unknown): boolean {
 
 /** Unauthenticated nodeCall (plain fetch — no demosdk in the scan path). */
 async function nodeCall(message: string, data: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
-  const res = await fetch(RPC + "/", {
+  const res = await fetch(RPC + "/", { redirect: "error",
     method: "POST",
     headers: { "content-type": "application/json" },
     signal: AbortSignal.timeout(timeoutMs),
@@ -237,7 +237,7 @@ async function nodeCall(message: string, data: Record<string, unknown>, timeoutM
       params: [{ type: "nodeCall", message, sender: null, receiver: null, timestamp: null, data, extra: "" }],
     }),
   });
-  const json = parseWireJson(await res.text()) as { result?: number; response?: unknown } | null;
+  const json = await storageResponseJson(res) as { result?: number; response?: unknown } | null;
   if (json?.result !== 200) throw new Error(`nodeCall ${message} → ${json?.result}`);
   return json.response;
 }

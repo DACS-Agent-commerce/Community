@@ -7,12 +7,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseRegistration } from "@/src/catalog/registration";
 import { registrationMessage } from "@/src/catalog/registrationSig";
-import { rateLimit, rejectOversizeRequest } from "@/src/catalog/security";
+import { rateLimit, readRequestJson } from "@/src/catalog/security";
 
 export async function POST(req: NextRequest) {
-  const blocked = rateLimit(req, "prepare-registration", 20, 10 * 60_000) ?? rejectOversizeRequest(req);
+  const blocked = rateLimit(req, "prepare-registration", 20, 10 * 60_000);
   if (blocked) return blocked;
-  const raw = await req.json().catch(() => null) as Record<string, unknown> | null;
+  const input = await readRequestJson(req);
+  if (!input.ok) return input.response;
+  const raw = input.value as Record<string, unknown> | null;
   if (raw?.ownerSignature !== undefined) {
     return NextResponse.json({ error: "prepare-registration expects an unsigned registration" }, { status: 400 });
   }
