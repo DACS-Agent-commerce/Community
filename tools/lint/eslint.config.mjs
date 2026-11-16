@@ -65,9 +65,7 @@ export default [
   {
     // Checks that need type information: a missed `await` is the mistake we
     // most want caught.
-    // TypeScript's project settings skip folders starting with a dot.
     files: [`${app}/**/*.{ts,tsx}`],
-    ignores: [`${app}/app/.well-known/**`],
     plugins: { "@typescript-eslint": tseslint.plugin },
     languageOptions: {
       parserOptions: {
