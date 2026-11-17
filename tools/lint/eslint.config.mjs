@@ -30,7 +30,7 @@ export default [
   },
   {
     // vendor holds the pinned SDK copy that the setup script fetches.
-    ignores: ["**/node_modules/**", "**/.next/**", "reference-implementations/dacs-directory/vendor/**", "**/test-results/**", "**/playwright-report/**"],
+    ignores: ["**/node_modules/**", "**/.next/**", "reference-implementations/dacs-directory/vendor/**", "**/test-results/**", "**/playwright-report/**", "**/playwright-report-hash/**"],
   },
   {
     files: ["**/*.{js,mjs,cjs}"],
@@ -65,9 +65,7 @@ export default [
   {
     // Checks that need type information: a missed `await` is the mistake we
     // most want caught.
-    // TypeScript's project settings skip folders starting with a dot.
     files: [`${app}/**/*.{ts,tsx}`],
-    ignores: [`${app}/app/.well-known/**`],
     plugins: { "@typescript-eslint": tseslint.plugin },
     languageOptions: {
       parserOptions: {

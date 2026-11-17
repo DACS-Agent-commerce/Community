@@ -25,6 +25,7 @@ const { reindexAll } = await import("../src/catalog/reindexCore.js");
 const { SCAN_STATE_SCHEMA_VERSION } = await import("../src/catalog/scanState.js");
 const { PINNED_DEMOS_CHAIN_IDENTITY, PINNED_DEMOS_NODE_BUILDS } = await import("../src/catalog/nodeDeployment.js");
 const { POST } = await import("../app/api/dacs/index-now/route.js");
+const { GET: listingsPage } = await import("../app/api/dacs/listings/route.js");
 test.after(() => rmSync(dataDirectory, { recursive: true, force: true }));
 
 const seed = Uint8Array.from(Buffer.alloc(32, 22));
@@ -124,6 +125,35 @@ test("index-now treats build drift as a warning on the pinned chain", async () =
     assert.equal(Boolean(body.nodeBuildWarning), nodeVersion !== cleanBuild);
     assert.equal(store.loadCatalog().sellers[0].listings[0].status, "active");
   }
+});
+
+test("index-now changes listings validators without advancing scan progress", async () => {
+  node = { nodeVersion: cleanBuild, chain: PINNED_DEMOS_CHAIN_IDENTITY };
+  store.saveRegistrations([{ primaryClaim: seller, displayName: "Seller", listingAnchors: [anchor] }]);
+  seedScanState(currentState());
+  const scanProgress = { cursor: 1, tip: 3, lag: 2, cursorAdvancedAt: 1,
+    lastSuccessfulFullScanAt: 1, fromTx: 0 };
+  store.saveCatalog({ ...unchangedCatalog, scanProgress });
+  const url = "https://directory.example/api/dacs/listings?limit=1";
+  const before = await listingsPage(new NextRequest(url));
+  assert.equal(before.status, 200);
+  const beforeBody = await before.json();
+  const etag = before.headers.get("etag");
+  assert.ok(etag);
+  assert.equal(before.headers.get("last-modified"), new Date(unchangedCatalog.generatedAt).toUTCString());
+
+  assert.equal((await indexNow()).status, 200);
+  const after = await listingsPage(new NextRequest(url, { headers: { "if-none-match": etag } }));
+  assert.equal(after.status, 200, "the old page ETag does not produce a stale 304");
+  const afterBody = await after.json();
+  assert.deepEqual(beforeBody.scanProgress, scanProgress);
+  assert.deepEqual(afterBody.scanProgress, beforeBody.scanProgress);
+  assert.equal(beforeBody.total, 0);
+  assert.equal(afterBody.total, 1);
+  assert.notEqual(after.headers.get("last-modified"), null);
+  assert.notEqual(after.headers.get("etag"), null);
+  assert.notEqual(after.headers.get("last-modified"), before.headers.get("last-modified"));
+  assert.notEqual(after.headers.get("etag"), etag);
 });
 
 test("index-now answers 409 until a complete pass on this chain is recorded, then indexes", async () => {
