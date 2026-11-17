@@ -14,7 +14,7 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
-import { finalityRule, MAX_FINALITY_WINDOW, settledTip } from "@/src/catalog/scanFinality";
+import { finalityRule, finalityWindow, settledTip } from "@/src/catalog/scanFinality";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
   const scan = loadScanState();
 
   const rule = finalityRule();
-  const windowSize = Math.min(Math.max(rule.depth, 1), MAX_FINALITY_WINDOW);
+  const windowSize = finalityWindow(rule);
   let chainLatestTx: number | null = null;
   let newest: Array<{ id?: number; timestamp?: unknown }> = [];
   try {
@@ -49,7 +49,8 @@ export async function GET(req: NextRequest) {
     });
     const json = (await storageResponseJson(res)) as { result?: number; response?: typeof newest };
     const rows = json?.result === 200 && Array.isArray(json.response) ? json.response.slice(0, windowSize) : [];
-    const id = rows[0]?.id;
+    const wellFormed = rows.every((row) => typeof row === "object" && row !== null);
+    const id = wellFormed ? rows[0]?.id : undefined;
     if (typeof id === "number") {
       chainLatestTx = id;
       newest = rows;

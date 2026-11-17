@@ -117,15 +117,74 @@ test("an old transaction above a recent one does not move the cursor past the re
 });
 
 test("a transaction is final at exactly the age limit and not a millisecond before", async () => {
-  const atLimit = await scanAt([transfer(1270, NOW - 300 * SECOND), transfer(1269, NOW - 400 * SECOND)], 1268);
+  const below = transfer(1268, NOW - 500 * SECOND);
+  const atLimit = await scanAt([transfer(1270, NOW - 300 * SECOND), transfer(1269, NOW - 400 * SECOND), below], 1268);
   assert.equal(atLimit.highestTxId, 1270);
-  const justYounger = await scanAt([transfer(1270, NOW - 300 * SECOND + 1), transfer(1269, NOW - 400 * SECOND)], 1268);
+  const justYounger = await scanAt([transfer(1270, NOW - 300 * SECOND + 1), transfer(1269, NOW - 400 * SECOND), below], 1268);
   assert.equal(justYounger.highestTxId, 1269);
 });
 
 test("a timestamp in the future never makes a transaction final", async () => {
-  const result = await scanAt([transfer(1270, NOW + HOUR), transfer(1269, NOW + HOUR)], 1268);
+  const result = await scanAt([transfer(1270, NOW + HOUR), transfer(1269, NOW + HOUR), transfer(1268, NOW + HOUR)], 1268);
   assert.equal(result.highestTxId, 1268);
+});
+
+test("a transaction signed long before it reached the chain waits for the depth rule", async () => {
+  const staleSigned = [
+    transfer(1270, NOW - 2 * HOUR),
+    transfer(1269, NOW - 2 * HOUR),
+    transfer(1268, NOW - 5 * SECOND),
+  ];
+  const held = await scanAt(staleSigned, 1267);
+  assert.equal(held.highestTxId, 1268);
+  assert.equal(held.txsScanned, 1);
+  assert.equal(settledTip(staleSigned, 1270, { depth: 2, seconds: 300, now: NOW }), 1268);
+  const deeper = [
+    { id: 1271, timestamp: NOW - 2 * HOUR },
+    { id: 1270, timestamp: NOW - 2 * HOUR },
+    { id: 1269, timestamp: NOW - 5 * SECOND },
+    { id: 1268, timestamp: NOW - 6 * SECOND },
+  ];
+  assert.equal(settledTip(deeper, 1271, { depth: 2, seconds: 300, now: NOW }), 1269);
+});
+
+test("the age rule needs the transaction below to be readable", () => {
+  const rule = { depth: 2, seconds: 300, now: NOW };
+  assert.equal(settledTip([{ id: 1270, timestamp: NOW - HOUR }, { id: 1269, timestamp: NOW - HOUR }], 1270, rule), 1268);
+  assert.equal(settledTip([
+    { id: 1270, timestamp: NOW - HOUR }, { id: 1269, timestamp: NOW - HOUR }, { id: 1268 },
+  ], 1270, rule), 1268);
+});
+
+test("a missing id among the newest transactions is not final", async () => {
+  const hour = NOW - HOUR;
+  assert.equal(settledTip([
+    { id: 1271, timestamp: hour }, { id: 1269, timestamp: hour }, { id: 1268, timestamp: hour },
+  ], 1271, { depth: 3, seconds: 300, now: NOW }), 1269);
+  const result = await scanAt([
+    transfer(1271, hour), transfer(1269, hour), transfer(1268, hour),
+  ], 1267, { depth: "3" });
+  assert.equal(result.highestTxId, 1269);
+});
+
+test("a missing id at the depth boundary stops the cursor at it", () => {
+  const hour = NOW - HOUR;
+  assert.equal(settledTip([
+    { id: 1271, timestamp: hour }, { id: 1270, timestamp: hour }, { id: 1268, timestamp: hour },
+  ], 1271, { depth: 2, seconds: 300, now: NOW }), 1269);
+});
+
+test("a negative newest id never gives a negative settled tip", () => {
+  const rule = { depth: 2, seconds: 300, now: NOW };
+  assert.equal(settledTip([{ id: -5, timestamp: NOW - HOUR }], -5, rule), 0);
+  assert.equal(settledTip([], -5, rule), 0);
+  assert.equal(settledTip([{ id: -5 }], -5, { ...rule, depth: 0 }), 0);
+});
+
+test("a null or non-object row does not make the rule throw", () => {
+  const rule = { depth: 2, seconds: 300, now: NOW };
+  const rows = [{ id: 1270, timestamp: NOW - HOUR }, null, "x", 7] as unknown as Array<{ id?: unknown }>;
+  assert.equal(settledTip(rows, 1270, rule), 1268);
 });
 
 test("a depth larger than the window read from the node is decided by depth alone", () => {
@@ -137,13 +196,13 @@ test("a depth larger than the window read from the node is decided by depth alon
 });
 
 test("DACS_SCAN_FINALITY_SECONDS sets the age limit and falls back to 300 when unset or invalid", async () => {
-  const twoMinutesOld = [transfer(1270, NOW - 120 * SECOND), transfer(1269, NOW - 120 * SECOND)];
+  const twoMinutesOld = [transfer(1270, NOW - 120 * SECOND), transfer(1269, NOW - 120 * SECOND), transfer(1268, NOW - 120 * SECOND)];
   assert.equal((await scanAt(twoMinutesOld, 1268, { seconds: "60" })).highestTxId, 1270);
   assert.equal((await scanAt(twoMinutesOld, 1268, { seconds: "600" })).highestTxId, 1268);
   for (const seconds of [undefined, "", "0", "-1", "1.5", "soon"]) {
     assert.equal((await scanAt(twoMinutesOld, 1268, { seconds })).highestTxId, 1268, `seconds ${seconds}`);
   }
-  const tenMinutesOld = [transfer(1270, NOW - 600 * SECOND), transfer(1269, NOW - 600 * SECOND)];
+  const tenMinutesOld = [transfer(1270, NOW - 600 * SECOND), transfer(1269, NOW - 600 * SECOND), transfer(1268, NOW - 600 * SECOND)];
   for (const seconds of [undefined, "", "0", "-1", "1.5", "soon"]) {
     assert.equal((await scanAt(tenMinutesOld, 1268, { seconds })).highestTxId, 1270, `seconds ${seconds}`);
   }
