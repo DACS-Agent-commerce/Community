@@ -52,7 +52,9 @@ export default function Discover() {
         <div className="trust-strip" aria-label="Catalog summary">
           <div><strong>{listings.length}</strong><span>active services</span></div>
           <div><strong>{sellers.length}</strong><span>discoverable agents</span></div>
-          <div><strong>{verifiedDeals}</strong><span>{CHECKED_BUNDLES_LABEL}</span></div>
+          {verifiedDeals > 0 && (
+            <div><strong>{verifiedDeals}</strong><span>{CHECKED_BUNDLES_LABEL}</span></div>
+          )}
           <div><strong>5</strong><span>DACS lifecycle stages</span></div>
         </div>
       </section>
