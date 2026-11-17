@@ -69,6 +69,7 @@ import {
   loadScanState,
   recordListingRejection,
   recordRevocationProgress,
+  recoverMissingWithdrawalMarkerRead,
   type ListingRejectionCode,
   throwIfInfrastructureError,
 } from "./store.js";
@@ -131,7 +132,10 @@ async function readRevocationCandidate(
   unavailable: Set<string>,
 ): Promise<Record<string, unknown> | null> {
   const read = await readAnchorResult(locator);
-  if (read.status === "present") return read.record.data;
+  if (read.status === "present") {
+    if (isListingRevocationCandidate(read.record.data)) recoverMissingWithdrawalMarkerRead(locator);
+    return read.record.data;
+  }
   unavailable.add(locator);
   return null;
 }
