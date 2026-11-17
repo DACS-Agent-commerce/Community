@@ -14,7 +14,7 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
-import { finalityRule, finalityWindow, settledTip } from "@/src/catalog/scanFinality";
+import { finalityRule, observeTip, settledFromTip } from "@/src/catalog/scanFinality";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -29,9 +29,7 @@ export async function GET(req: NextRequest) {
   const scan = loadScanState();
 
   const rule = finalityRule();
-  const windowSize = finalityWindow(rule);
   let chainLatestTx: number | null = null;
-  let newest: Array<{ id?: number; timestamp?: unknown }> = [];
   try {
     const res = await fetch(RPC + "/", { redirect: "error",
       method: "POST",
@@ -43,25 +41,21 @@ export async function GET(req: NextRequest) {
         params: [{
           type: "nodeCall", message: "getTransactions",
           sender: null, receiver: null, timestamp: null,
-          data: { start: "latest", limit: windowSize }, extra: "",
+          data: { start: "latest", limit: 1 }, extra: "",
         }],
       }),
     });
-    const json = (await storageResponseJson(res)) as { result?: number; response?: typeof newest };
-    const rows = json?.result === 200 && Array.isArray(json.response) ? json.response.slice(0, windowSize) : [];
-    const wellFormed = rows.every((row) => typeof row === "object" && row !== null);
-    const id = wellFormed ? rows[0]?.id : undefined;
-    if (typeof id === "number") {
-      chainLatestTx = id;
-      newest = rows;
-    }
+    const json = (await storageResponseJson(res)) as { result?: number; response?: Array<{ id?: number } | null> };
+    const row = json?.result === 200 && Array.isArray(json.response) ? json.response[0] : undefined;
+    const id = typeof row === "object" && row !== null ? row.id : undefined;
+    if (typeof id === "number") chainLatestTx = id;
   } catch {
     /* node unreachable — report lag as unknown */
   }
 
   const resetThreshold = chainResetThreshold();
   const aheadBy = chainLatestTx !== null ? cursorAheadBy(scan, chainLatestTx) : null;
-  const settled = chainLatestTx !== null ? settledTip(newest, chainLatestTx, rule) : null;
+  const settled = chainLatestTx !== null ? settledFromTip(chainLatestTx, rule, observeTip(chainLatestTx)) : null;
   const cursorProgress = cursorProgressDiagnostics(scan, settled);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,

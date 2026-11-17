@@ -2,11 +2,11 @@
  * Finality rule shared by the chain scanner and the status report.
  *
  * A transaction is final when it is `depth` transactions behind the newest one,
- * or when its own timestamp is at least `seconds` old and is not itself far
- * older than the transaction below it. The depth rule protects a busy chain;
- * the age rule lets the newest transactions of a quiet chain be indexed without
- * waiting for new traffic. After a quiet chain gets a new transaction, the
- * status report can show a stalled cursor until the next indexing pass.
+ * or when the newest transaction id has stayed the same for at least `seconds`
+ * of this process's own time. The depth rule protects a busy chain, where the
+ * newest id keeps changing; the observation rule lets the newest transactions
+ * of a quiet chain be indexed without waiting for new traffic. Transaction
+ * timestamps are set by the sender and play no part in either rule.
  */
 
 export const DEFAULT_FINALITY_DEPTH = 2;
@@ -16,22 +16,19 @@ export const DEFAULT_FINALITY_DEPTH = 2;
  * catalog within one or two indexing passes.
  */
 export const DEFAULT_FINALITY_SECONDS = 300;
-/** Newest transactions that must be read to apply the rule; deeper ones are final by depth alone. */
+/** Newest transactions that are read to apply the rule; a depth this large is decided by depth alone. */
 export const MAX_FINALITY_WINDOW = 100;
 
 export interface FinalityRule {
-  /** Transactions behind the newest one that are final regardless of age. */
+  /** Transactions behind the newest one that are final regardless of observation time. */
   depth: number;
-  /** Age in seconds at which a transaction with a valid timestamp is final. */
+  /** Seconds the newest transaction id must have been observed unchanged before it is final. */
   seconds: number;
-  /** Current time in milliseconds. */
-  now: number;
 }
 
 /** A transaction row as far as the rule reads it. */
 export interface FinalityTransaction {
   id?: unknown;
-  timestamp?: unknown;
 }
 
 const integerAtLeast = (raw: string | undefined, minimum: number, fallback: number): number => {
@@ -44,64 +41,68 @@ const integerAtLeast = (raw: string | undefined, minimum: number, fallback: numb
  * and `DACS_SCAN_FINALITY_SECONDS` (a positive integer, default 300). Unset or
  * invalid values use the default.
  */
-export function finalityRule(now: number = Date.now()): FinalityRule {
+export function finalityRule(): FinalityRule {
   return {
     depth: integerAtLeast(process.env.DACS_SCAN_FINALITY_DEPTH, 0, DEFAULT_FINALITY_DEPTH),
     seconds: integerAtLeast(process.env.DACS_SCAN_FINALITY_SECONDS, 1, DEFAULT_FINALITY_SECONDS),
-    now,
   };
 }
 
-/** The transaction's timestamp in milliseconds, or null when it has no valid one. */
-function timestampMs(tx: FinalityTransaction): number | null {
-  const raw = tx.timestamp;
-  const value = typeof raw === "string" && /^\d{1,16}$/.test(raw) ? Number(raw) : raw;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+/** The newest transaction id this process has seen and the local time it first saw that id. */
+let observedTip: { id: number; since: number } | null = null;
+
+/**
+ * Record that `tip` is the newest transaction id at local time `now` and return
+ * how many milliseconds this process has seen that same id as the newest. A
+ * different id, or a clock that moved backwards, restarts the count. The record
+ * is kept in memory only, so a restart begins the count again and can only delay
+ * finality.
+ */
+export function observeTip(tip: number, now: number = Date.now()): number {
+  if (observedTip === null || observedTip.id !== tip || now < observedTip.since) observedTip = { id: tip, since: now };
+  return now - observedTip.since;
 }
 
-/** Number of newest transactions to read so that the one below the depth boundary is included. */
-export function finalityWindow(rule: FinalityRule): number {
-  return Math.min(rule.depth + 1, MAX_FINALITY_WINDOW);
+/** Forget the recorded newest id. */
+export function resetTipObservation(): void {
+  observedTip = null;
+}
+
+/**
+ * Highest id that is final, given only the newest id `tip` and how long it has
+ * been observed unchanged. The tip itself is final once `tipUnchangedMs`
+ * reaches the rule's seconds; otherwise only ids `depth` behind it are.
+ */
+export function settledFromTip(tip: number, rule: FinalityRule, tipUnchangedMs: number): number {
+  const depthTip = Math.max(0, tip - rule.depth);
+  return tipUnchangedMs >= rule.seconds * 1_000 ? Math.max(0, tip) : depthTip;
 }
 
 /**
  * Highest transaction id such that it and every lower id is final, given the
- * newest transactions in `newest` and the id of the newest one, `tip`.
+ * newest transactions in `newest`, the id of the newest one, `tip`, and how long
+ * that id has been observed unchanged.
  *
- * A held-back transaction stops the result just below it, so an old transaction
- * above a recent one never moves the cursor past the recent one. A transaction
- * without a valid timestamp is held back unless the depth rule makes it final,
- * and so is an id that is missing from the newest transactions.
- *
- * The sender sets a transaction's timestamp, so a stale one could pass for old.
- * The age rule therefore applies only to a transaction whose timestamp is not
- * more than `seconds` older than that of the transaction just below it; a
- * transaction signed long before it reached the chain waits for the depth rule.
- * When `newest` does not reach back to the depth boundary the age rule cannot
- * be applied to the ids it skips, and the depth rule alone decides.
+ * Going past the depth boundary needs every id from the boundary up to the
+ * final one to be present among `newest`, so an id missing from the rows read
+ * stops the result just below it. When `depth` reaches the rows that can be read
+ * the depth rule alone decides.
  */
-export function settledTip(newest: readonly FinalityTransaction[], tip: number, rule: FinalityRule): number {
+export function settledTip(
+  newest: readonly FinalityTransaction[],
+  tip: number,
+  rule: FinalityRule,
+  tipUnchangedMs: number,
+): number {
   const depthTip = Math.max(0, tip - rule.depth);
-  const byId = new Map<number, FinalityTransaction>();
+  const upper = settledFromTip(tip, rule, tipUnchangedMs);
+  if (upper <= depthTip || tip - depthTip >= MAX_FINALITY_WINDOW) return depthTip;
+  const ids = new Set<number>();
   for (const tx of newest) {
-    if (typeof tx !== "object" || tx === null) continue;
-    if (typeof tx.id === "number" && Number.isSafeInteger(tx.id)) byId.set(tx.id, tx);
+    if (typeof tx === "object" && tx !== null && typeof tx.id === "number" && Number.isSafeInteger(tx.id)) ids.add(tx.id);
   }
-  const lowestOnPage = byId.size ? Math.min(...byId.keys()) : Infinity;
-  if (lowestOnPage > depthTip + 1 || tip - depthTip >= MAX_FINALITY_WINDOW) return Math.max(0, Math.min(depthTip, tip));
-  const limit = rule.seconds * 1_000;
-  let lowestHeldBack = Infinity;
-  for (let id = depthTip + 1; id <= tip; id++) {
-    const tx = byId.get(id);
-    const timestamp = tx ? timestampMs(tx) : null;
-    const below = byId.get(id - 1);
-    const belowTimestamp = below ? timestampMs(below) : null;
-    const old = timestamp !== null && rule.now - timestamp >= limit;
-    const signedOnTime = timestamp !== null && belowTimestamp !== null && belowTimestamp - timestamp <= limit;
-    if (!(old && signedOnTime)) {
-      lowestHeldBack = id;
-      break;
-    }
+  for (let id = depthTip + 1; id <= upper; id++) {
+    if (!ids.has(id) || !ids.has(id - 1)) return id - 1;
   }
-  return Math.max(0, Math.min(tip, lowestHeldBack - 1));
+  return upper;
 }

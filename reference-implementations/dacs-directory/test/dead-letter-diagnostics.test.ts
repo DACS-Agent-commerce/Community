@@ -8,6 +8,7 @@ import { NextRequest } from "next/server";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import { catalogStatusSchema } from "../src/catalog/contracts.js";
+import { resetTipObservation } from "../src/catalog/scanFinality.js";
 import {
   cursorProgressDiagnostics,
   cursorStallThresholdSeconds,
@@ -197,13 +198,17 @@ const STATUS_NOW = 1_800_000_000_000;
 const SEVEN_HOURS_MS = 7 * 3_600_000;
 
 /**
- * Status for a scan cursor at `cursor`, advanced seven hours ago, against a node whose newest
- * transactions are `chain`. The caller fixes the clock at STATUS_NOW.
+ * Status for a scan cursor at `cursor`, advanced seven hours ago, against a node that answers
+ * with the newest `limit` of `chain`. The caller fixes the clock. `limits` collects the limits asked for.
  */
-async function statusWith(cursor: number, chain: unknown[]) {
+async function statusWith(cursor: number, chain: unknown[], limits: unknown[] = []) {
   store.saveScanState({ lastSeenTxId: cursor, cursorAdvancedAt: STATUS_NOW - SEVEN_HOURS_MS, listings: {}, deals: {} });
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ result: 200, response: chain });
+  globalThis.fetch = async (_input, init) => {
+    const limit = JSON.parse(String(init?.body)).params?.[0]?.data?.limit;
+    limits.push(limit);
+    return Response.json({ result: 200, response: chain.slice(0, limit) });
+  };
   try {
     const response = await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"));
     return await response.json() as Record<string, unknown>;
@@ -215,38 +220,59 @@ async function statusWith(cursor: number, chain: unknown[]) {
 
 test("status reports no stall when the only unindexed transactions are not yet settled", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  const recent = await statusWith(1268, [
-    { id: 1270, timestamp: STATUS_NOW - 10_000 },
-    { id: 1269, timestamp: STATUS_NOW - 20_000 },
-    { id: 1268, timestamp: STATUS_NOW - 30_000 },
-  ]);
+  resetTipObservation();
+  const recent = await statusWith(1268, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
   assert.equal(recent.chainLatestTx, 1270);
   assert.equal(recent.settledTip, 1268);
   assert.equal(recent.cursorStalled, false);
-
-  const noTimestamps = await statusWith(1268, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
-  assert.equal(noTimestamps.settledTip, 1268);
-  assert.equal(noTimestamps.cursorStalled, false);
 });
 
-test("status still reports a stall when the cursor is behind the settled tip", async (t) => {
+test("a quiet chain shows no stall once its tip has been seen for the limit and is indexed", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  const old = await statusWith(1268, [
-    { id: 1270, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
-    { id: 1269, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
-    { id: 1268, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
-  ]);
-  assert.equal(old.settledTip, 1270);
-  assert.equal(old.secondsSinceCursorAdvanced, 25_200);
-  assert.equal(old.cursorStalled, true);
+  resetTipObservation();
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const first = await statusWith(1270, chain);
+  assert.equal(first.settledTip, 1268);
+  assert.equal(first.cursorStalled, false);
+  t.mock.timers.tick(299_000);
+  assert.equal((await statusWith(1270, chain)).settledTip, 1268);
+  t.mock.timers.tick(1_000);
+  const settled = await statusWith(1270, chain);
+  assert.equal(settled.settledTip, 1270);
+  assert.equal(settled.cursorStalled, false);
+});
 
-  const deep = await statusWith(1000, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
+test("status reports a stall when the cursor is behind a tip seen for the limit", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  resetTipObservation();
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  assert.equal((await statusWith(1268, chain)).cursorStalled, false);
+  t.mock.timers.tick(300_000);
+  const stalled = await statusWith(1268, chain);
+  assert.equal(stalled.settledTip, 1270);
+  assert.equal(stalled.secondsSinceCursorAdvanced, 25_500);
+  assert.equal(stalled.cursorStalled, true);
+
+  resetTipObservation();
+  const deep = await statusWith(1000, chain);
   assert.equal(deep.settledTip, 1268);
   assert.equal(deep.cursorStalled, true);
 });
 
-test("status holds the settled tip below a transaction signed long before it reached the chain", async (t) => {
+test("a change of the tip restarts the status clock", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  resetTipObservation();
+  await statusWith(1268, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
+  t.mock.timers.tick(250_000);
+  const changed = await statusWith(1268, [{ id: 1271 }, { id: 1270 }, { id: 1269 }]);
+  assert.equal(changed.settledTip, 1269);
+  t.mock.timers.tick(100_000);
+  assert.equal((await statusWith(1268, [{ id: 1271 }, { id: 1270 }, { id: 1269 }])).settledTip, 1269);
+});
+
+test("status does not use transaction timestamps for the settled tip", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  resetTipObservation();
   const body = await statusWith(1267, [
     { id: 1270, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
     { id: 1269, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
@@ -255,17 +281,22 @@ test("status holds the settled tip below a transaction signed long before it rea
   assert.equal(body.settledTip, 1268);
 });
 
-test("status does not settle past a missing id among the newest transactions", async (t) => {
+test("large transaction rows do not hide the chain tip", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  const old = STATUS_NOW - SEVEN_HOURS_MS;
-  const body = await statusWith(1268, [{ id: 1271, timestamp: old }, { id: 1270, timestamp: old }, { id: 1268, timestamp: old }]);
-  assert.equal(body.chainLatestTx, 1271);
-  assert.equal(body.settledTip, 1269);
+  resetTipObservation();
+  const large = (id: number) => ({ id, content: "x".repeat(450_000) });
+  const limits: unknown[] = [];
+  const body = await statusWith(1268, [large(1270), large(1269), large(1268)], limits);
+  assert.deepEqual(limits, [1]);
+  assert.equal(body.chainLatestTx, 1270);
+  assert.equal(body.settledTip, 1268);
+  assert.equal(body.cursorStalled, false);
 });
 
 test("status reports an unknown tip for a malformed node reply instead of failing", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  for (const chain of [[{ id: 1270 }, null], [null], [{ id: 1270 }, "x", 7]]) {
+  for (const chain of [[null], ["x"], [7], [{ id: "1270" }], []]) {
+    resetTipObservation();
     const body = await statusWith(1268, chain);
     assert.equal(body.chainLatestTx, null, JSON.stringify(chain));
     assert.equal(body.settledTip, null, JSON.stringify(chain));
@@ -275,7 +306,8 @@ test("status reports an unknown tip for a malformed node reply instead of failin
 
 test("status never reports a negative settled tip", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  const body = await statusWith(0, [{ id: -5, timestamp: STATUS_NOW - SEVEN_HOURS_MS }]);
+  resetTipObservation();
+  const body = await statusWith(0, [{ id: -5 }]);
   assert.equal(body.settledTip, 0);
 });
 
