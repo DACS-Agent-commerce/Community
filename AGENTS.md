@@ -70,7 +70,8 @@ Spec MCP server (from `tools/dacs-spec-mcp`, Python 3.10 or newer):
 
 ```bash
 ./setup_spec.sh
-python3.12 -m venv venv
+PY=$(command -v python3.12 || command -v python3.11 || command -v python3.10)
+"$PY" -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python smoke_test.py
 ```
