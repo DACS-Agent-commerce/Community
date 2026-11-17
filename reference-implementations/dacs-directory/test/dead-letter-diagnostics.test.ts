@@ -193,6 +193,74 @@ test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cu
   ).cursorStalled, null);
 });
 
+const STATUS_NOW = 1_800_000_000_000;
+const SEVEN_HOURS_MS = 7 * 3_600_000;
+
+/**
+ * Status for a scan cursor at `cursor`, advanced seven hours ago, against a node whose newest
+ * transactions are `chain`. The caller fixes the clock at STATUS_NOW.
+ */
+async function statusWith(cursor: number, chain: Array<{ id: number; timestamp?: number }>) {
+  store.saveScanState({ lastSeenTxId: cursor, cursorAdvancedAt: STATUS_NOW - SEVEN_HOURS_MS, listings: {}, deals: {} });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ result: 200, response: chain });
+  try {
+    const response = await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"));
+    return await response.json() as Record<string, unknown>;
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveScanState({ lastSeenTxId: 0, listings: {}, deals: {} });
+  }
+}
+
+test("status reports no stall when the only unindexed transactions are not yet settled", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const recent = await statusWith(1268, [
+    { id: 1270, timestamp: STATUS_NOW - 10_000 },
+    { id: 1269, timestamp: STATUS_NOW - 20_000 },
+    { id: 1268, timestamp: STATUS_NOW - 30_000 },
+  ]);
+  assert.equal(recent.chainLatestTx, 1270);
+  assert.equal(recent.settledTip, 1268);
+  assert.equal(recent.cursorStalled, false);
+
+  const noTimestamps = await statusWith(1268, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
+  assert.equal(noTimestamps.settledTip, 1268);
+  assert.equal(noTimestamps.cursorStalled, false);
+});
+
+test("status still reports a stall when the cursor is behind the settled tip", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const old = await statusWith(1268, [
+    { id: 1270, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
+    { id: 1269, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
+    { id: 1268, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
+  ]);
+  assert.equal(old.settledTip, 1270);
+  assert.equal(old.secondsSinceCursorAdvanced, 25_200);
+  assert.equal(old.cursorStalled, true);
+
+  const deep = await statusWith(1000, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
+  assert.equal(deep.settledTip, 1268);
+  assert.equal(deep.cursorStalled, true);
+});
+
+test("status leaves the settled tip unknown when the node cannot be read", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  store.saveScanState({ lastSeenTxId: 1268, cursorAdvancedAt: STATUS_NOW - SEVEN_HOURS_MS, listings: {}, deals: {} });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("node unreachable"); };
+  try {
+    const body = await (await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"))).json() as Record<string, unknown>;
+    assert.equal(body.chainLatestTx, null);
+    assert.equal(body.settledTip, null);
+    assert.equal(body.cursorStalled, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveScanState({ lastSeenTxId: 0, listings: {}, deals: {} });
+  }
+});
+
 test("status route rejects unsafe queries and exposes a safe exact-locator result", async () => {
   const invalid = await statusRoute.GET(new NextRequest(
     "https://directory.example/api/dacs/status?deadLetterLimit=101",
@@ -217,6 +285,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
       "status response contains every property required by its published schema",
     );
     assert.equal(body.chainLatestTx, 123);
+    assert.equal(body.settledTip, 121);
     assert.equal(body.cursorAheadBy, 0);
     assert.equal(body.chainResetSuspected, false);
     assert.equal(body.cursorAdvancedAt, null);

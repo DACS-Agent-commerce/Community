@@ -220,7 +220,7 @@ export const indexerScanRunSchema = {
 export const catalogStatusSchema = {
   type: "object",
   required: [
-    "generatedAt", "legacyVetUnsupportedDeals", "syncedToTx", "chainLatestTx", "txsBehind", "cursorAheadBy",
+    "generatedAt", "legacyVetUnsupportedDeals", "syncedToTx", "chainLatestTx", "settledTip", "txsBehind", "cursorAheadBy",
     "chainResetSuspected", "cursorAdvancedAt", "secondsSinceCursorAdvanced",
     "cursorStallThresholdSeconds", "cursorStalled", "indexer", "scanProgress",
   ],
@@ -230,6 +230,7 @@ export const catalogStatusSchema = {
     legacyVetUnsupportedDeals: { type: "integer", minimum: 0 },
     syncedToTx: { type: "integer" },
     chainLatestTx: { type: ["integer", "null"] },
+    settledTip: { type: ["integer", "null"], minimum: 0 },
     txsBehind: { type: ["integer", "null"] },
     cursorAheadBy: { type: ["integer", "null"], minimum: 0 },
     chainResetSuspected: { type: ["boolean", "null"] },

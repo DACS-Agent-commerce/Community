@@ -45,9 +45,16 @@ export function cursorStallThresholdSeconds(
     : scheduleAwareDefault;
 }
 
+/**
+ * Cursor progress against the settled tip, the newest id the scanner is allowed
+ * to index (see `settledTip`). The cursor is stalled only when it is behind the
+ * settled tip for at least the threshold; transactions still waiting to become
+ * final are not a stall. `cursorStalled` is null when the settled tip or the
+ * time of the last advance is unknown.
+ */
 export function cursorProgressDiagnostics(
   scan: { lastSeenTxId: number; cursorAdvancedAt?: number },
-  chainLatestTx: number | null,
+  settledTip: number | null,
   now = Date.now(),
   stallThresholdSeconds = cursorStallThresholdSeconds(),
 ): {
@@ -62,9 +69,9 @@ export function cursorProgressDiagnostics(
   const secondsSinceCursorAdvanced = cursorAdvancedAt === null
     ? null
     : Math.max(0, Math.floor((now - cursorAdvancedAt) / 1_000));
-  const cursorStalled = chainLatestTx === null
+  const cursorStalled = settledTip === null
     ? null
-    : chainLatestTx <= scan.lastSeenTxId
+    : settledTip <= scan.lastSeenTxId
       ? false
       : secondsSinceCursorAdvanced === null
         ? null
