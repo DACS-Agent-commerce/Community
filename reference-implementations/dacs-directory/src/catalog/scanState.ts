@@ -1,5 +1,6 @@
 import type { ScanState } from "./types.js";
 import { boundedJson } from "./artifactLimits.js";
+import { readTipObservation } from "./scanFinality.js";
 
 export function ownArray<T>(value: Record<string, T[]> | undefined, key: string): T[] {
   return value && Object.hasOwn(value, key) && Array.isArray(value[key]) ? value[key] : [];
@@ -48,8 +49,12 @@ export function normalizeScanState(state: ScanState): NormalizedScanState {
       typeof deal.buyerBundleRef === "string" && !!deal.owners &&
       typeof deal.owners.buyer === "string" && typeof deal.owners.seller === "string" && boundedJson(v) !== null;
   });
+  // Additive optional field, like `cursorAdvancedAt`: older rows have none and a malformed one is dropped, so no version bump or replay is needed.
+  const { tipObservation: storedObservation, ...rest } = state;
+  const tipObservation = readTipObservation(storedObservation);
   return {
-    ...state,
+    ...rest,
+    ...(tipObservation === null ? {} : { tipObservation }),
     listings: dictionary(state.listings, string),
     // Entries are rekeyed from their own buyer and jobId, which also migrates jobId-keyed state in place.
     deals: dictionary(Object.fromEntries(Object.values(deals)

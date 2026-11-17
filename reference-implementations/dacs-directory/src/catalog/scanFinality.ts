@@ -3,7 +3,8 @@
  *
  * A transaction is final when it is `depth` transactions behind the newest one,
  * or when the newest transaction id has stayed the same for at least `seconds`
- * of this process's own time. The depth rule protects a busy chain, where the
+ * of local time, counted from a first sighting that is stored with the scan
+ * state. The depth rule protects a busy chain, where the
  * newest id keeps changing; the observation rule lets the newest transactions
  * of a quiet chain be indexed without waiting for new traffic. Transaction
  * timestamps are set by the sender and play no part in either rule.
@@ -48,24 +49,50 @@ export function finalityRule(): FinalityRule {
   };
 }
 
-/** The newest transaction id this process has seen and the local time it first saw that id. */
-let observedTip: { id: number; since: number } | null = null;
-
 /**
- * Record that `tip` is the newest transaction id at local time `now` and return
- * how many milliseconds this process has seen that same id as the newest. A
- * different id, or a clock that moved backwards, restarts the count. The record
- * is kept in memory only, so a restart begins the count again and can only delay
- * finality.
+ * The newest transaction id the indexer has seen and the local time (ms) it
+ * first saw that id. It is persisted with the scan state so that every indexing
+ * pass, in whatever process it runs, counts from the same first sighting.
  */
-export function observeTip(tip: number, now: number = Date.now()): number {
-  if (observedTip === null || observedTip.id !== tip || now < observedTip.since) observedTip = { id: tip, since: now };
-  return now - observedTip.since;
+export interface TipObservation {
+  id: number;
+  since: number;
 }
 
-/** Forget the recorded newest id. */
-export function resetTipObservation(): void {
-  observedTip = null;
+/** The stored observation if it is well formed, otherwise null. */
+export function readTipObservation(value: unknown): TipObservation | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, since } = value as { id?: unknown; since?: unknown };
+  return typeof id === "number" && Number.isSafeInteger(id) && id >= 0 &&
+    typeof since === "number" && Number.isSafeInteger(since) && since >= 0
+    ? { id, since }
+    : null;
+}
+
+/**
+ * Apply a sighting of `tip` at local time `now` to the stored observation. The
+ * first sighting of an id, a different id, a corrupt record, or a stored time in
+ * the future starts the count at `now`; otherwise the stored first-seen time is
+ * kept. Returns the observation to store and how many milliseconds the id has
+ * been the newest.
+ */
+export function observeTip(
+  stored: unknown,
+  tip: number,
+  now: number = Date.now(),
+): { observation: TipObservation; unchangedMs: number } {
+  const prior = readTipObservation(stored);
+  const observation = prior !== null && prior.id === tip && prior.since <= now ? prior : { id: tip, since: now };
+  return { observation, unchangedMs: now - observation.since };
+}
+
+/**
+ * How long the stored observation has seen `tip` as the newest id, for readers
+ * that must not write it. An absent, corrupt, different or future record is zero.
+ */
+export function tipUnchangedMs(stored: unknown, tip: number, now: number = Date.now()): number {
+  const prior = readTipObservation(stored);
+  return prior !== null && prior.id === tip && prior.since <= now ? now - prior.since : 0;
 }
 
 /**
@@ -102,7 +129,7 @@ export function settledTip(
     if (typeof tx === "object" && tx !== null && typeof tx.id === "number" && Number.isSafeInteger(tx.id)) ids.add(tx.id);
   }
   for (let id = depthTip + 1; id <= upper; id++) {
-    if (!ids.has(id) || !ids.has(id - 1)) return id - 1;
+    if (!ids.has(id) || (id > 1 && !ids.has(id - 1))) return id - 1;
   }
   return upper;
 }

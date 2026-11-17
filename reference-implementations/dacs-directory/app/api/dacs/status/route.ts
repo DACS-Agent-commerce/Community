@@ -14,7 +14,7 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
-import { finalityRule, observeTip, settledFromTip } from "@/src/catalog/scanFinality";
+import { finalityRule, settledFromTip, tipUnchangedMs } from "@/src/catalog/scanFinality";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
 
   const resetThreshold = chainResetThreshold();
   const aheadBy = chainLatestTx !== null ? cursorAheadBy(scan, chainLatestTx) : null;
-  const settled = chainLatestTx !== null ? settledFromTip(chainLatestTx, rule, observeTip(chainLatestTx)) : null;
+  const settled = chainLatestTx !== null ? settledFromTip(chainLatestTx, rule, tipUnchangedMs(scan.tipObservation, chainLatestTx)) : null;
   const cursorProgress = cursorProgressDiagnostics(scan, settled);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,

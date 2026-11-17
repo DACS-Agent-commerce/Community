@@ -31,7 +31,7 @@ import {
 import type { BundleBinding, RegisteredDeal } from "./types.js";
 import { contentHash } from "./canonical.js";
 import { deriveStorageAddress } from "./chain.js";
-import { finalityRule, observeTip, settledTip } from "./scanFinality.js";
+import { finalityRule, observeTip, settledTip, type TipObservation } from "./scanFinality.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -62,6 +62,8 @@ export interface ScannedArtifacts {
   chainTip: number;
   /** Null unless the scan actually observed a valid tip. */
   observedTip: number | null;
+  /** First sighting of the newest id to store with the scan state; null when no valid tip was read. */
+  tipObservation: TipObservation | null;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
@@ -474,6 +476,8 @@ export async function scanChain(
     sinceTxId?: number;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
+    /** The stored first sighting of the newest transaction id (`ScanState.tipObservation`). */
+    tipObservation?: unknown;
     /** Local time in milliseconds at which the newest transaction id is observed; defaults to the clock. */
     now?: number;
   } = {},
@@ -493,6 +497,7 @@ export async function scanChain(
   let observedTip: number | null = null;
   let scanError: string | undefined;
   const rule = finalityRule();
+  let tipObservation: TipObservation | null = null;
   let settled = Math.max(0, chainTip - rule.depth);
 
   let cursor: number | "latest" = "latest";
@@ -513,7 +518,13 @@ export async function scanChain(
     if (cursor === "latest" && ids.length) {
       chainTip = Math.max(...ids);
       if (Number.isSafeInteger(chainTip) && chainTip >= 0) observedTip = chainTip;
-      settled = settledTip(page, chainTip, rule, observeTip(chainTip, opts.now));
+      let unchangedMs = 0;
+      if (observedTip !== null) {
+        const seen = observeTip(opts.tipObservation, observedTip, opts.now);
+        tipObservation = seen.observation;
+        unchangedMs = seen.unchangedMs;
+      }
+      settled = settledTip(page, chainTip, rule, unchangedMs);
     }
     // Only final txs beyond the cursor are new work.
     const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= settled));
@@ -698,5 +709,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     unreadRevocationMarkers, bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, tipObservation, observations, failures, scanError };
 }
