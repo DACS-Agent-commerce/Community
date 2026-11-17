@@ -37,6 +37,16 @@ function renderDiscovery(query = "") {
   return renderWithRouter(React.createElement(DirectoryExplorer, { sellers: catalog.sellers, indexed: true }), query);
 }
 
+function catalogSummary(html: string): string[][] {
+  const strip = html.match(/<div class="trust-strip" aria-label="Catalog summary">(.*?)<\/div><\/div>/);
+  assert.ok(strip, "Discover renders its catalog summary strip");
+  const content = `${strip[1]}</div>`;
+  const tiles = [...content.matchAll(/<div><strong>([^<]*)<\/strong><span>([^<]*)<\/span><\/div>/g)];
+  // A bare `{count && ...}` guard would leave a stray "0" between tiles.
+  assert.equal(tiles.map(([tile]) => tile).join(""), content, "the catalog summary holds only value/label tiles");
+  return tiles.map(([, value, label]) => [value, label]);
+}
+
 function assertNoRates(html: string) {
   assert.match(html, /Completion verification unavailable/);
   assert.match(html, /Observed outcomes: 6, not verified/);
@@ -54,6 +64,37 @@ test("rendered discovery keeps observations and inspection links without rate co
   assert.match(html, /Explore service/);
   assert.match(html, /\/api\/dacs\/listings\/observed-history\/1/);
   assert.doesNotMatch(html, /badge ok[^>]*>\s*Observed outcomes/);
+});
+
+test("Discover's catalog summary omits the bundle tile when no bundles are checked", () => {
+  const catalog = noRateCatalog();
+  for (const seller of catalog.sellers) {
+    for (const deal of seller.deals) deal.refsVerified = false;
+  }
+  saveCatalog(catalog);
+
+  assert.deepEqual(catalogSummary(renderWithRouter(React.createElement(DiscoverPage))), [
+    ["1", "active services"],
+    ["1", "discoverable agents"],
+    ["5", "DACS lifecycle stages"],
+  ]);
+});
+
+test("Discover's catalog summary shows the checked count and existing bundle label when positive", () => {
+  for (const checked of [[1], [1, 4]]) {
+    const catalog = noRateCatalog();
+    for (const seller of catalog.sellers) {
+      seller.deals.forEach((deal, index) => { deal.refsVerified = checked.includes(index); });
+    }
+    saveCatalog(catalog);
+
+    assert.deepEqual(catalogSummary(renderWithRouter(React.createElement(DiscoverPage))), [
+      ["1", "active services"],
+      ["1", "discoverable agents"],
+      [String(checked.length), "signature-checked bundles; not counted as outcomes"],
+      ["5", "DACS lifecycle stages"],
+    ], `${checked.length} checked`);
+  }
 });
 
 test("rendered seller and service pages preserve aborted evidence and labelled counts without ratios", async () => {
